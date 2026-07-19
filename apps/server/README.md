@@ -8,23 +8,29 @@ via drizzle-orm/better-sqlite3, domain contract imported from
 
 ```
 src/
-  main.ts                 bootstrap: CORS, global prefix, Swagger
+  main.ts                 bootstrap: cookie-parser, CORS (credentials), global prefix, Swagger
   app.module.ts            wires DbModule + all domain modules + global guards/pipe
   db/
     schema.ts               drizzle table defs mirroring @campfire/schema entities
     bootstrap.sql.ts         CREATE TABLE IF NOT EXISTS DDL, run on boot
     db.module.ts             opens better-sqlite3 (WAL), runs bootstrap SQL, exports DB token
   common/
-    user.types.ts            RequestUser, role hierarchy (dm > player > viewer)
-    guards/dev-auth.guard.ts DevAuthGuard — reads x-dev-role/x-dev-user headers
-    guards/roles.guard.ts    RolesGuard — enforces @Roles(minRole)
-    decorators/              @Roles(), @CurrentUser(), @Public()
+    user.types.ts            RequestUser (session- or dev-header-resolved), role rank helpers
+    crypto.ts                scrypt password hashing, session token generation/hashing
+    guards/session-auth.guard.ts  SessionAuthGuard — cookie session, else DEV_AUTH headers, else 401
+    guards/server-roles.guard.ts  ServerRolesGuard — enforces @ServerRoles('admin')
+    decorators/              @ServerRoles(), @CurrentUser(), @Public() (@Roles() kept but unused — see below)
     redact.ts                strips dmSecret for non-dm
     json.ts                  TEXT<->JSON (de)serialization for stats/conditions
     time.ts                  nowIso()
   modules/
     health/                  GET /healthz (no prefix, no auth)
-    campaigns/                campaigns CRUD + GET :id/summary (aggregate)
+    auth/                    AuthService (setup/login/logout/session resolution) + /auth/*, /me, /me/password
+    users/                   admin user CRUD (/users) + /users/lookup (any authenticated user)
+    settings/                server settings (/settings, admin) — allowLocalLogin, JSON key/value store
+    membership/              RoleResolver + CampaignAccessService (effective-role resolution),
+                              MembersService/-Controller (/campaigns/:id/members)
+    campaigns/                campaigns CRUD (user-scoped list) + GET :id/summary (aggregate)
     characters/                campaign-scoped + /characters/:id, hp, conditions
     quests/                    campaign-scoped + /quests/:id, status, objectives
     npcs/                      campaign-scoped + /npcs/:id
@@ -34,45 +40,118 @@ src/
     audit/                     AuditService.log() + GET /campaigns/:id/audit (dm)
 ```
 
-Each domain module (except health) follows the same shape: a
-`<domain>.dto.ts` (Zod DTOs via `createZodDto`), `<domain>.service.ts`
+Each domain module (except health/auth/users/settings) follows the same
+shape: a `<domain>.dto.ts` (Zod DTOs via `createZodDto`), `<domain>.service.ts`
 (drizzle queries + domain mapping + audit logging), and one or two
 controllers — one mounted at `campaigns/:campaignId/<domain>` for
 list/create, one at `/<domain>` for id-scoped routes — per the spec's URL
 shape.
 
-## Dev auth (no OIDC yet)
+## Authentication & authorization
 
-`DevAuthGuard` is a global guard (`APP_GUARD`) that reads two headers on
-every request:
+Real local auth replaced the old header-only dev auth. Three layers:
 
-- `x-dev-role`: one of `dm | player | viewer`, defaults to `dm` if absent or
-  invalid.
-- `x-dev-user`: any string, defaults to `dev-user`.
+### 1. Users & sessions
 
-It attaches `req.user = { id, name, role }` (`name` mirrors `id` in dev mode
-— there's no identity provider yet to source a display name from). A second
-global guard, `RolesGuard`, reads `@Roles(minRole)` metadata set on
-controllers/handlers and enforces the hierarchy `dm > player > viewer` (see
-`common/user.types.ts::roleAtLeast`). Routes with no `@Roles()` are open to
-any authenticated (i.e. any) request. `@Public()` exempts a route from both
-guards entirely (used for `/healthz`).
+New tables (`db/bootstrap.sql.ts`): `users` (username UNIQUE COLLATE NOCASE,
+`passwordHash`, `serverRole` admin|user, `disabled`), `user_sessions` (id ->
+`tokenHash`, `userId`, `expiresAt`, `lastSeenAt`), `settings` (key/value JSON
+store), `campaign_members` (campaignId, userId, role dm|player|viewer,
+`characterId`, UNIQUE(campaignId, userId)).
 
-This is intentionally swappable: once real auth (OIDC) lands, `DevAuthGuard`
-is replaced by a guard that verifies a token and populates the same
-`RequestUser` shape; `RolesGuard` and every `@Roles()` annotation are
-unchanged.
+Passwords: `node:crypto` `scryptSync` (N=16384, r=8, p=1, random 16-byte
+salt), stored as `scrypt:N:r:p:saltHex:hashHex`; compared with
+`timingSafeEqual`. No new native dependency. Sessions: 32 random bytes hex as
+the bearer token, cookie `campfire_session` (httpOnly, `sameSite=lax`,
+`path=/`, 30-day maxAge, `secure` only when `NODE_ENV=production`); the DB
+stores only `sha256(token)`. `lastSeenAt` slides forward at most once/hour on
+use (`AuthService.resolveSessionUser`).
 
-Beyond role-gating, two authorization rules are enforced in the **service**
-layer (not guards), because they depend on entity state, not just role:
+### 2. SessionAuthGuard (replaces DevAuthGuard)
 
-- Characters: `PATCH /characters/:id`, `POST /characters/:id/hp`,
-  `POST /characters/:id/conditions` require `role === 'dm'` OR
-  `req.user.id === character.ownerUserId` (`CharactersService.assertCanWrite`).
-- Notes: visibility filtering (`private` / `dm_shared` / `party_shared`) and
-  the "author-only edit, even DM can't edit others' notes" rule live in
-  `NotesService` (`canSee` helper). `GET /notes/:id` on a note the caller
-  can't see returns 404, not 403, so visibility is not leaked by status code.
+Global guard (`APP_GUARD`) that resolves `req.user` in order:
+
+1. `campfire_session` cookie -> `AuthService.resolveSessionUser()` -> real
+   `RequestUser { id: String(users.id), name, serverRole }`.
+2. Else, if env `DEV_AUTH=1`: legacy `x-dev-role`/`x-dev-user` headers ->
+   synthetic `RequestUser { id: 'dev:<name>', name, serverRole: 'admin',
+   devRole }`. This keeps every pre-auth e2e suite working unchanged —
+   `test/test-app.ts`'s `createTestApp()` sets `DEV_AUTH=1` before boot.
+3. Else 401, unless the route is `@Public()` (e.g. `/healthz`,
+   `/auth/status`, `/auth/setup`, `/auth/login`).
+
+`ServerRolesGuard` (also `APP_GUARD`) separately enforces `@ServerRoles('admin')`
+on the users-admin and settings controllers — this is the one case where
+"role" really is request-global (server role), not campaign-scoped.
+
+`common/decorators/roles.decorator.ts` (`@Roles()`) is kept only for
+reference/back-compat; no controller uses it anymore, because campaign role
+is no longer resolvable from headers alone (see below).
+
+### 3. Effective roles & membership (the refactor)
+
+Campaign role (`dm | player | viewer`) is no longer part of `RequestUser` —
+it depends on *which* campaign is being accessed. `RoleResolver` (leaf
+module `membership/role-access.module.ts`, no dependency on any domain
+module — this avoids DI cycles) resolves it per request:
+
+1. `user.devRole` (DEV_AUTH header path) short-circuits everything.
+2. `user.serverRole === 'admin'` -> always `'dm'` (admins have full DM rights
+   in every campaign).
+3. `campaign_members` lookup by numeric `userId` (dev:\* users never reach
+   this branch — their id isn't numeric).
+4. `null` — not a member.
+
+`CampaignAccessService` (same module) wraps this with `requireMember()` (403
+`Not a member of this campaign` if null) and `requireRole(min)` (403 if below
+`min` on the `dm > player > viewer` rank). Every campaign-scoped controller
+resolves `campaignId` (from the route param directly, or by fetching the
+entity first for id-scoped routes like `PATCH /quests/:id`) and calls one of
+these before delegating to the service — the service methods that used to
+take an implicit `user.role` now take an explicit `role: Role` parameter
+resolved this way. The existing `redactSecret`/`canSee` helpers are
+unchanged; they're just fed the effective role instead of a header-derived
+one.
+
+`GET /campaigns` is scoped: admins (and DEV_AUTH header users) see every
+campaign; everyone else sees only campaigns they have a `campaign_members`
+row in. `POST /campaigns` is open to any authenticated user; the creator is
+auto-inserted as that campaign's `dm` (skipped for `dev:*` users, who have no
+numeric id to store).
+
+### Invariants enforced server-side (409 on violation)
+
+- Cannot demote (`serverRole` away from `admin`), disable, or delete the
+  **last enabled admin** (`UsersService`).
+- Cannot demote or remove the **last `dm` of a campaign**
+  (`MembersService`).
+
+Deleting a user cascades to their `user_sessions` and `campaign_members`
+rows; their notes/characters are left as-is (`Character.ownerUserId` is a
+free-text string, not a FK).
+
+### Auth endpoints
+
+- `GET /auth/status` (public) — `{setupRequired, localLoginEnabled,
+  oidcEnabled: false, version}`.
+- `POST /auth/setup` (public, only while zero users exist, else 409) —
+  creates the first user as `serverRole: 'admin'`, starts a session.
+- `POST /auth/login` (public) — 401 generic on bad credentials, 403 if
+  disabled, 403 if `serverRole !== 'admin'` and `settings.allowLocalLogin ===
+  false` (admins can **always** log in locally — lockout prevention).
+- `POST /auth/logout` — deletes the session row, clears the cookie, 204.
+- `GET /me` — `{user, memberships}`; `passwordHash` never included; 401 if
+  unauthenticated. `dev:*` header users get a synthesized `id: 0` shape with
+  no memberships (there's no DB row to read).
+- `POST /me/password` — `currentPassword` is **required** here (unlike the
+  admin reset endpoint); rehashes, kills every *other* session for that user.
+- `GET /users`, `POST /users`, `PATCH /users/:id`, `DELETE /users/:id`,
+  `POST /users/:id/password` — admin only.
+- `GET /users/lookup?query=` — any authenticated user, 2+ chars, max 10
+  results — member-picker autocomplete.
+- `GET /settings`, `PATCH /settings` — admin only.
+- `GET/POST/PATCH/DELETE /campaigns/:id/members[/:memberId]` — dm for
+  writes, any member for read.
 
 ## Validation approach
 
@@ -106,19 +185,23 @@ Swagger doc) is identical to any other `createZodDto` DTO.
   + index statements directly via `better-sqlite3`'s `.exec()`. No
   drizzle-kit migrations for this milestone (per spec) — `db/schema.ts`'s
   drizzle table defs are hand-kept in sync with the bootstrap DDL.
-- JSON-shaped domain fields (`Character.stats`, `Character.conditions`) are
-  stored as `TEXT` columns and (de)serialized in the service layer via
-  `common/json.ts` (`toJsonText` / `fromJsonText`).
+- JSON-shaped domain fields (`Character.stats`, `Character.conditions`,
+  `settings.value`) are stored as `TEXT` columns and (de)serialized in the
+  service layer via `common/json.ts` (`toJsonText` / `fromJsonText`) or
+  `JSON.parse`/`stringify` directly (`SettingsService`).
 - `dmSecret` (quests/npcs/locations) is stored as plain `TEXT` — redaction is
   a response-shaping concern (`common/redact.ts`), not a storage concern.
+- The domain `sessions` table (game sessions, `@campfire/schema`'s `Session`)
+  predates auth; the new auth-session table is named `user_sessions` in SQL
+  (`userSessions` in drizzle) to avoid a name collision.
 
 ## OpenAPI
 
 `SwaggerModule` mounts the UI at `/api/docs` and raw JSON at
 `/api/openapi.json` (both excluded from the global `api/v1` prefix, along
-with `/healthz`). `x-dev-role` / `x-dev-user` are documented as API-key-style
-header parameters (`addApiKey`) on the `DocumentBuilder` config so they show
-up in the "Authorize" dialog in Swagger UI.
+with `/healthz`). Session-cookie auth is documented via `addCookieAuth`
+(`campfire_session`); `x-dev-role`/`x-dev-user` are still documented as
+API-key-style header parameters (`addApiKey`), noted as DEV_AUTH-only.
 
 ## Tests
 
@@ -126,8 +209,16 @@ up in the "Authorize" dialog in Swagger UI.
 via `Test.createTestingModule` with `DATA_DIR` pointed at a fresh
 `fs.mkdtemp()` directory per suite (set before `.compile()` so the `DbModule`
 provider factory picks it up), and clean the directory up in `afterAll`.
-`test/test-app.ts` holds the shared setup/teardown and — importantly — also
-calls `app.setGlobalPrefix('api/v1', {...})`, mirroring `main.ts`, since
+`test/test-app.ts` holds two bootstraps:
+
+- `createTestApp()` — sets `DEV_AUTH=1` before boot, so all the pre-auth
+  suites (campaigns/characters/quests/npcs/locations/notes/healthz) keep
+  using `x-dev-role`/`x-dev-user` headers unchanged.
+- `createTestAppNoDevAuth()` — unsets `DEV_AUTH`, for the new auth-flow
+  suites (`auth.e2e-spec.ts`, `membership.e2e-spec.ts`), which use a real
+  `supertest.agent()` to persist the session cookie across requests.
+
+Both also register `cookie-parser` middleware, mirroring `main.ts`, since
 `Test.createTestingModule` doesn't run `main.ts`'s bootstrap code.
 
 Run with `npm run test -w apps/server` (repo root) or `npm test` from this
@@ -148,11 +239,37 @@ SQLite file — safe to parallelize later if it becomes a bottleneck.
   via the shared `DB` token instead of injecting `CampaignsService` — same
   DB, no new module edge, no cycle. `CampaignsService` no longer exposes
   `setCurrentLocation`/`bumpSessionCount`.
-- **`name` in `RequestUser` mirrors `x-dev-user`.** The spec doesn't define a
-  display-name source for dev auth, so `req.user.name === req.user.id`. Real
-  auth will source a proper display name from the identity provider.
+- **`RoleResolver`/`CampaignAccessService` live in a dependency-free leaf
+  module (`membership/role-access.module.ts`), separate from
+  `MembershipModule` (which adds `MembersService`/`MembersController` and
+  needs `AuditModule`).** Every domain module — including `AuditModule`
+  itself, which gates `GET /campaigns/:id/audit` on effective dm role — needs
+  `CampaignAccessService`. If `AuditModule` depended on the full
+  `MembershipModule` (which itself imports `AuditModule` for member-change
+  audit logging), that's a cycle; splitting the leaf module out avoids it
+  without `forwardRef()`.
+- **`name` in `RequestUser` mirrors `x-dev-user`** for the DEV_AUTH path (no
+  identity provider to source a display name from there); real sessions use
+  `displayName || username`.
+- **`dev:*` header users can't hold `campaign_members` rows** (their `id` is
+  a non-numeric `dev:<name>` string, not a `users.id`). `RoleResolver` treats
+  `devRole` as an unconditional short-circuit, and `CampaignsService.create`
+  skips the auto-dm-membership insert for them. This matches the existing
+  e2e suites, which never expect dev-header users to persist membership rows
+  — they're treated as omniscient admins for test convenience.
+- **`POST /campaigns` is no longer dm-gated** — the old
+  `campaigns.e2e-spec.ts` test asserting `player` role got 403 was replaced
+  with a test asserting any authenticated user gets 201 (see spec item 5:
+  "any authenticated user; creator auto-inserted... as 'dm'"). This is a
+  deliberate behavior change, not a regression.
 - **Note `mine=true` and `entityId` query params are plain strings on the
   wire**, parsed manually in `notes.controller.ts` rather than through a Zod
   query DTO — the spec's `Note` schemas don't define a query-param shape, and
   a handful of ad hoc optional filters didn't seem worth a new schema in
   `@campfire/schema` (which this task is scoped to leave alone).
+- **`tsconfig.tsbuildinfo` caching quirk (pre-existing, unrelated to this
+  change):** with `incremental: true` + `nest build`'s `deleteOutDir: true`,
+  a stale `.tsbuildinfo` from a previous run can cause `nest build` to delete
+  `dist/` and then emit nothing (tsc believes there's nothing to do). It's
+  gitignored and never committed, but if a local build produces an empty/
+  missing `dist/`, `rm apps/server/tsconfig.tsbuildinfo` and rebuild.

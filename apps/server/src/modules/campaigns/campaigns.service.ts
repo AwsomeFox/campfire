@@ -2,7 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CampaignCreate, CampaignUpdate } from '@campfire/schema';
-import type { Campaign, CampaignSummary } from '@campfire/schema';
+import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaigns, notes } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -12,6 +12,8 @@ import { NpcsService } from '../npcs/npcs.service';
 import { LocationsService } from '../locations/locations.service';
 import { CharactersService } from '../characters/characters.service';
 import { SessionsService } from '../sessions/sessions.service';
+import { RoleResolver } from '../membership/role-resolver.service';
+import { MembersService } from '../membership/members.service';
 import type { RequestUser } from '../../common/user.types';
 
 type CampaignCreateInput = z.infer<typeof CampaignCreate>;
@@ -41,11 +43,17 @@ export class CampaignsService {
     private readonly locations: LocationsService,
     private readonly characters: CharactersService,
     private readonly sessions: SessionsService,
+    private readonly roleResolver: RoleResolver,
+    private readonly members: MembersService,
   ) {}
 
-  async list(): Promise<Campaign[]> {
+  /** Admins (incl. dev:* users) see all campaigns; everyone else only campaigns they're a member of. */
+  async listForUser(user: RequestUser): Promise<Campaign[]> {
+    const accessible = await this.roleResolver.accessibleCampaignIds(user);
     const rows = await this.db.select().from(campaigns);
-    return rows.map(toDomain);
+    if (accessible === 'all') return rows.map(toDomain);
+    const allowed = new Set(accessible);
+    return rows.filter((r) => allowed.has(r.id)).map(toDomain);
   }
 
   async getOrThrow(id: number): Promise<Campaign> {
@@ -54,6 +62,7 @@ export class CampaignsService {
     return toDomain(row);
   }
 
+  /** Any authenticated user may create a campaign; creator is auto-inserted as 'dm' (skipped for dev:* users). */
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
     const ts = nowIso();
     const [row] = await this.db
@@ -69,9 +78,17 @@ export class CampaignsService {
         updatedAt: ts,
       })
       .returning();
+
+    if (!user.devRole) {
+      const numericId = Number(user.id);
+      if (Number.isInteger(numericId)) {
+        await this.members.addCreatorAsDm(row.id, numericId);
+      }
+    }
+
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: 'dm',
       action: 'campaign.create',
       entityType: 'campaign',
       entityId: row.id,
@@ -89,7 +106,7 @@ export class CampaignsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: 'dm',
       action: 'campaign.update',
       entityType: 'campaign',
       entityId: id,
@@ -103,7 +120,7 @@ export class CampaignsService {
     await this.db.delete(campaigns).where(eq(campaigns.id, id));
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: 'dm',
       action: 'campaign.delete',
       entityType: 'campaign',
       entityId: id,
@@ -111,13 +128,13 @@ export class CampaignsService {
     });
   }
 
-  async summary(id: number, user: RequestUser): Promise<CampaignSummary> {
+  async summary(id: number, role: Role): Promise<CampaignSummary> {
     const campaign = await this.getOrThrow(id);
 
     const [questList, npcList, locationList, characterList, sessionList] = await Promise.all([
-      this.quests.listForCampaignWithObjectives(id, user.role),
-      this.npcs.listForCampaign(id, user.role),
-      this.locations.listForCampaign(id, user.role),
+      this.quests.listForCampaignWithObjectives(id, role),
+      this.npcs.listForCampaign(id, role),
+      this.locations.listForCampaign(id, role),
       this.characters.listForCampaign(id),
       this.sessions.listForCampaign(id),
     ]);

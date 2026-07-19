@@ -22,7 +22,8 @@ describe('characters (e2e)', () => {
       .send({ name: 'Owlbear Bait', hpMax: 20, hpCurrent: 20 });
     expect(charRes.status).toBe(201);
     characterId = charRes.body.id;
-    expect(charRes.body.ownerUserId).toBe('owner-1');
+    // dev-auth (DEV_AUTH=1 header path) synthesizes user id `dev:<name>` — see SessionAuthGuard.
+    expect(charRes.body.ownerUserId).toBe('dev:owner-1');
   });
 
   afterAll(async () => {

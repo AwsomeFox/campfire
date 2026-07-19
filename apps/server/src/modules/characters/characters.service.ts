@@ -2,7 +2,7 @@ import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nest
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch } from '@campfire/schema';
-import type { Character } from '@campfire/schema';
+import type { Character, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -62,16 +62,16 @@ export class CharactersService {
   }
 
   /** dm or owner may write; others 403 */
-  assertCanWrite(row: { ownerUserId: string | null }, user: RequestUser): void {
-    if (user.role === 'dm') return;
+  assertCanWrite(row: { ownerUserId: string | null }, user: RequestUser, role: Role): void {
+    if (role === 'dm') return;
     if (row.ownerUserId && row.ownerUserId === user.id) return;
     throw new ForbiddenException('Only dm or the owning player may modify this character');
   }
 
-  async create(campaignId: number, input: CharacterCreateInput, user: RequestUser): Promise<Character> {
+  async create(campaignId: number, input: CharacterCreateInput, user: RequestUser, role: Role): Promise<Character> {
     const ts = nowIso();
     // player creates own -> ownerUserId=user.id; dm may set ownerUserId explicitly
-    const ownerUserId = user.role === 'dm' ? (input.ownerUserId ?? null) : user.id;
+    const ownerUserId = role === 'dm' ? (input.ownerUserId ?? null) : user.id;
 
     const [row] = await this.db
       .insert(characters)
@@ -98,7 +98,7 @@ export class CharactersService {
 
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'character.create',
       entityType: 'character',
       entityId: row.id,
@@ -107,9 +107,9 @@ export class CharactersService {
     return toDomain(row);
   }
 
-  async update(id: number, input: CharacterUpdateInput, user: RequestUser): Promise<Character> {
+  async update(id: number, input: CharacterUpdateInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
-    this.assertCanWrite(existing, user);
+    this.assertCanWrite(existing, user, role);
 
     const update: Partial<typeof characters.$inferInsert> = { updatedAt: nowIso() };
     if (input.name !== undefined) update.name = input.name;
@@ -126,13 +126,13 @@ export class CharactersService {
     if (input.ddbId !== undefined) update.ddbId = input.ddbId;
     if (input.notes !== undefined) update.notes = input.notes;
     // Only dm may reassign ownership
-    if (input.ownerUserId !== undefined && user.role === 'dm') update.ownerUserId = input.ownerUserId;
+    if (input.ownerUserId !== undefined && role === 'dm') update.ownerUserId = input.ownerUserId;
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'character.update',
       entityType: 'character',
       entityId: id,
@@ -141,13 +141,13 @@ export class CharactersService {
     return toDomain(row);
   }
 
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    // Deletion is a canon write -> dm only, enforced at controller via @Roles('dm')
+    // Deletion is a canon write -> dm only, enforced at controller
     await this.db.delete(characters).where(eq(characters.id, id));
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'character.delete',
       entityType: 'character',
       entityId: id,
@@ -155,9 +155,9 @@ export class CharactersService {
     });
   }
 
-  async patchHp(id: number, patch: HpPatchInput, user: RequestUser): Promise<Character> {
+  async patchHp(id: number, patch: HpPatchInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
-    this.assertCanWrite(existing, user);
+    this.assertCanWrite(existing, user, role);
 
     const hpMax = existing.hpMax;
     let hpCurrent: number;
@@ -176,7 +176,7 @@ export class CharactersService {
 
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'character.hp',
       entityType: 'character',
       entityId: id,
@@ -186,9 +186,9 @@ export class CharactersService {
     return toDomain(row);
   }
 
-  async patchConditions(id: number, patch: ConditionsPatchInput, user: RequestUser): Promise<Character> {
+  async patchConditions(id: number, patch: ConditionsPatchInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
-    this.assertCanWrite(existing, user);
+    this.assertCanWrite(existing, user, role);
 
     const current = new Set(fromJsonText<string[]>(existing.conditions, []));
     for (const c of patch.remove ?? []) current.delete(c);
@@ -202,7 +202,7 @@ export class CharactersService {
 
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'character.conditions',
       entityType: 'character',
       entityId: id,

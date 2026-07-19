@@ -1,17 +1,14 @@
 import { Injectable, type CanActivate, type ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
-import type { Role } from '@campfire/schema';
+import type { ServerRole } from '@campfire/schema';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
-import { ROLES_KEY } from '../decorators/roles.decorator';
-import { roleAtLeast, type RequestUser } from '../user.types';
+import { SERVER_ROLES_KEY } from '../decorators/server-roles.decorator';
+import type { RequestUser } from '../user.types';
 
-/**
- * Enforces @Roles(minRole) on handlers/controllers.
- * Requires DevAuthGuard to have run first (req.user set).
- */
+/** Enforces @ServerRoles(...) — server-wide admin gating (users admin, settings). */
 @Injectable()
-export class RolesGuard implements CanActivate {
+export class ServerRolesGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
@@ -21,7 +18,7 @@ export class RolesGuard implements CanActivate {
     ]);
     if (isPublic) return true;
 
-    const required = this.reflector.getAllAndOverride<Role[] | undefined>(ROLES_KEY, [
+    const required = this.reflector.getAllAndOverride<ServerRole[] | undefined>(SERVER_ROLES_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
@@ -31,9 +28,10 @@ export class RolesGuard implements CanActivate {
     const user = req.user;
     if (!user) throw new ForbiddenException('No user context');
 
-    const ok = required.every((min) => roleAtLeast(user.role, min));
+    // Only 'admin' is ever required in practice; dev:* header users always carry serverRole 'admin'.
+    const ok = required.every((r) => (r === 'admin' ? user.serverRole === 'admin' : true));
     if (!ok) {
-      throw new ForbiddenException(`Requires role: ${required.join(', ')}`);
+      throw new ForbiddenException(`Requires server role: ${required.join(', ')}`);
     }
     return true;
   }

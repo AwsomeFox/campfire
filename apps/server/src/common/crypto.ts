@@ -1,0 +1,41 @@
+import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
+
+/**
+ * Password hashing: node:crypto scrypt, no native deps.
+ * Format: `scrypt:N:r:p:saltHex:hashHex`
+ */
+const SCRYPT_N = 16384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 64;
+
+export function hashPassword(password: string): string {
+  const salt = randomBytes(16);
+  const hash = scryptSync(password, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
+  return `scrypt:${SCRYPT_N}:${SCRYPT_R}:${SCRYPT_P}:${salt.toString('hex')}:${hash.toString('hex')}`;
+}
+
+export function verifyPassword(password: string, stored: string): boolean {
+  const parts = stored.split(':');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+  const [, nStr, rStr, pStr, saltHex, hashHex] = parts;
+  const N = Number(nStr);
+  const r = Number(rStr);
+  const p = Number(pStr);
+  if (!Number.isFinite(N) || !Number.isFinite(r) || !Number.isFinite(p)) return false;
+
+  const salt = Buffer.from(saltHex, 'hex');
+  const expected = Buffer.from(hashHex, 'hex');
+  const actual = scryptSync(password, salt, expected.length, { N, r, p });
+  if (actual.length !== expected.length) return false;
+  return timingSafeEqual(actual, expected);
+}
+
+/** Session token: 32 random bytes hex. DB stores sha256(token), never the raw token. */
+export function generateSessionToken(): string {
+  return randomBytes(32).toString('hex');
+}
+
+export function hashSessionToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}

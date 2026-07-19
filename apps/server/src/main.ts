@@ -2,15 +2,20 @@ import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { patchNestJsSwagger } from 'nestjs-zod';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
+import { SESSION_COOKIE_NAME } from './modules/auth/auth.constants';
 
 patchNestJsSwagger();
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  app.use(cookieParser());
+
   app.enableCors({
     origin: 'http://localhost:5173',
+    credentials: true,
   });
 
   app.setGlobalPrefix('api/v1', {
@@ -20,10 +25,16 @@ async function bootstrap() {
   const config = new DocumentBuilder()
     .setTitle('Campfire API')
     .setDescription(
-      'Self-hosted D&D campaign tracker API. Dev auth: pass x-dev-role (dm|player|viewer, default dm) ' +
-        'and x-dev-user (default dev-user) headers — no OIDC yet.',
+      'Self-hosted D&D campaign tracker API. Real local auth via httpOnly session cookie ' +
+        `(${SESSION_COOKIE_NAME}) — see /api/v1/auth/status, /auth/setup, /auth/login. ` +
+        'Dev auth (opt-in, DEV_AUTH=1 env): pass x-dev-role (dm|player|viewer, default dm) and ' +
+        'x-dev-user (default dev-user) headers when no session cookie is present — used by e2e tests only.',
     )
     .setVersion('0.1.0')
+    .addTag('auth')
+    .addTag('users')
+    .addTag('settings')
+    .addTag('members')
     .addTag('campaigns')
     .addTag('characters')
     .addTag('quests')
@@ -33,8 +44,9 @@ async function bootstrap() {
     .addTag('notes')
     .addTag('audit')
     .addTag('health')
-    .addApiKey({ type: 'apiKey', name: 'x-dev-role', in: 'header', description: 'dm | player | viewer (default dm)' }, 'x-dev-role')
-    .addApiKey({ type: 'apiKey', name: 'x-dev-user', in: 'header', description: 'dev user id (default dev-user)' }, 'x-dev-user')
+    .addCookieAuth(SESSION_COOKIE_NAME, { type: 'apiKey', in: 'cookie', name: SESSION_COOKIE_NAME })
+    .addApiKey({ type: 'apiKey', name: 'x-dev-role', in: 'header', description: 'dev-auth only (DEV_AUTH=1): dm | player | viewer (default dm)' }, 'x-dev-role')
+    .addApiKey({ type: 'apiKey', name: 'x-dev-user', in: 'header', description: 'dev-auth only (DEV_AUTH=1): dev user id (default dev-user)' }, 'x-dev-user')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

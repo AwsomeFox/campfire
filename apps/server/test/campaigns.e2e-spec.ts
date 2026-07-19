@@ -65,13 +65,17 @@ describe('campaigns (e2e)', () => {
     expect(summaryRes.body.openInboxCount).toBe(0);
   });
 
-  it('POST /campaigns requires dm role', async () => {
+  it('POST /campaigns is open to any authenticated user (dev-auth headers count), not just dm', async () => {
+    // Under the membership model, campaign creation itself is unrestricted for any
+    // authenticated caller — the creator is auto-inserted as that campaign's 'dm'.
+    // The old "dm role required" behavior is superseded by per-campaign membership.
     const server = ctx.app.getHttpServer();
     const res = await request(server)
       .post('/api/v1/campaigns')
       .set({ 'x-dev-role': 'player', 'x-dev-user': 'p1' })
-      .send({ name: 'Nope' });
-    expect(res.status).toBe(403);
+      .send({ name: 'Player-created campaign' });
+    expect(res.status).toBe(201);
+    expect(res.body.name).toBe('Player-created campaign');
   });
 
   it('POST /campaigns 400s on invalid body (zod validation)', async () => {

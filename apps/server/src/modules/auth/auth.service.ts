@@ -1,0 +1,147 @@
+import {
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { eq, lt } from 'drizzle-orm';
+import type { z } from 'zod';
+import { SetupRequest, LoginRequest } from '@campfire/schema';
+import type { Me } from '@campfire/schema';
+import { DB, type DrizzleDb } from '../../db/db.module';
+import { users, userSessions, campaignMembers } from '../../db/schema';
+import { nowIso } from '../../common/time';
+import { hashPassword, verifyPassword, generateSessionToken, hashSessionToken } from '../../common/crypto';
+import type { RequestUser } from '../../common/user.types';
+import { UsersService } from '../users/users.service';
+import { SettingsService } from '../settings/settings.service';
+import { SESSION_MAX_AGE_MS, SESSION_SLIDING_UPDATE_INTERVAL_MS } from './auth.constants';
+
+type SetupInput = z.infer<typeof SetupRequest>;
+type LoginInput = z.infer<typeof LoginRequest>;
+
+export interface SessionIssueResult {
+  token: string;
+  me: Me;
+}
+
+@Injectable()
+export class AuthService {
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    private readonly usersService: UsersService,
+    private readonly settingsService: SettingsService,
+  ) {}
+
+  async setupRequired(): Promise<boolean> {
+    return (await this.usersService.count()) === 0;
+  }
+
+  async setup(input: SetupInput): Promise<SessionIssueResult> {
+    if (!(await this.setupRequired())) {
+      throw new ConflictException('Setup already completed');
+    }
+    const user = await this.usersService.create({
+      username: input.username,
+      password: input.password,
+      displayName: input.displayName,
+      serverRole: 'admin',
+    });
+    return this.issueSession(user.id);
+  }
+
+  async login(input: LoginInput): Promise<SessionIssueResult> {
+    const row = await this.usersService.getRowByUsername(input.username);
+    if (!row || !verifyPassword(input.password, row.passwordHash)) {
+      throw new UnauthorizedException('Invalid username or password');
+    }
+    if (row.disabled) {
+      throw new ForbiddenException('This account is disabled');
+    }
+    if (row.serverRole !== 'admin') {
+      const allowLocalLogin = await this.settingsService.getAllowLocalLogin();
+      if (!allowLocalLogin) {
+        throw new ForbiddenException('Local login is currently disabled');
+      }
+    }
+    return this.issueSession(row.id);
+  }
+
+  private async issueSession(userId: number): Promise<SessionIssueResult> {
+    const token = generateSessionToken();
+    const ts = nowIso();
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS).toISOString();
+    await this.db.insert(userSessions).values({
+      tokenHash: hashSessionToken(token),
+      userId,
+      createdAt: ts,
+      expiresAt,
+      lastSeenAt: ts,
+    });
+    const me = await this.buildMe(userId);
+    return { token, me };
+  }
+
+  async logout(token: string): Promise<void> {
+    await this.db.delete(userSessions).where(eq(userSessions.tokenHash, hashSessionToken(token)));
+  }
+
+  /** Resolves a session cookie token to a RequestUser, applying sliding lastSeenAt (at most once/hour). */
+  async resolveSessionUser(token: string): Promise<RequestUser | null> {
+    const tokenHash = hashSessionToken(token);
+    const [session] = await this.db.select().from(userSessions).where(eq(userSessions.tokenHash, tokenHash)).limit(1);
+    if (!session) return null;
+
+    if (new Date(session.expiresAt).getTime() < Date.now()) {
+      await this.db.delete(userSessions).where(eq(userSessions.id, session.id));
+      return null;
+    }
+
+    const [user] = await this.db.select().from(users).where(eq(users.id, session.userId)).limit(1);
+    if (!user || user.disabled) return null;
+
+    const now = Date.now();
+    if (now - new Date(session.lastSeenAt).getTime() > SESSION_SLIDING_UPDATE_INTERVAL_MS) {
+      await this.db.update(userSessions).set({ lastSeenAt: new Date(now).toISOString() }).where(eq(userSessions.id, session.id));
+    }
+
+    return {
+      id: String(user.id),
+      name: user.displayName || user.username,
+      serverRole: user.serverRole as RequestUser['serverRole'],
+    };
+  }
+
+  async buildMe(userId: number): Promise<Me> {
+    const user = await this.usersService.getOrThrow(userId);
+    const memberships = await this.db.select().from(campaignMembers).where(eq(campaignMembers.userId, userId));
+    return {
+      user,
+      memberships: memberships.map((m) => ({
+        campaignId: m.campaignId,
+        role: m.role as Me['memberships'][number]['role'],
+        characterId: m.characterId,
+      })),
+    };
+  }
+
+  /** Self-service password change: verifies currentPassword, rehashes, kills OTHER sessions. */
+  async changeOwnPassword(userId: number, currentPassword: string | undefined, newPassword: string, currentTokenHash: string): Promise<void> {
+    const row = await this.usersService.getRowOrThrow(userId);
+    if (!currentPassword || !verifyPassword(currentPassword, row.passwordHash)) {
+      throw new ForbiddenException('Current password is incorrect');
+    }
+    await this.db.update(users).set({ passwordHash: hashPassword(newPassword), updatedAt: nowIso() }).where(eq(users.id, userId));
+    await this.usersService.killOtherSessions(userId, currentTokenHash);
+  }
+
+  /** Housekeeping: purge expired sessions (not scheduled anywhere yet, but handy for tests/manual use). */
+  async purgeExpiredSessions(): Promise<void> {
+    await this.db.delete(userSessions).where(lt(userSessions.expiresAt, nowIso()));
+  }
+
+  async tokenHashFor(token: string): Promise<string> {
+    return hashSessionToken(token);
+  }
+}

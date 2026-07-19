@@ -128,3 +128,38 @@ export const auditLog = sqliteTable('audit_log', {
   detail: text('detail').notNull().default(''),
   createdAt: text('created_at').notNull(),
 });
+
+export const users = sqliteTable('users', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  username: text('username').notNull().unique(),
+  displayName: text('display_name').notNull().default(''),
+  passwordHash: text('password_hash').notNull(),
+  serverRole: text('server_role').notNull().default('user'),
+  disabled: integer('disabled', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const userSessions = sqliteTable('user_sessions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  tokenHash: text('token_hash').notNull().unique(),
+  userId: integer('user_id').notNull(),
+  createdAt: text('created_at').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  lastSeenAt: text('last_seen_at').notNull(),
+});
+
+export const settings = sqliteTable('settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+});
+
+export const campaignMembers = sqliteTable('campaign_members', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  userId: integer('user_id').notNull(),
+  role: text('role').notNull(),
+  characterId: integer('character_id'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
