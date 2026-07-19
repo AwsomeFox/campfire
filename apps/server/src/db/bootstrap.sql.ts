@@ -129,9 +129,10 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
   display_name TEXT NOT NULL DEFAULT '',
-  password_hash TEXT NOT NULL,
+  password_hash TEXT,
   server_role TEXT NOT NULL DEFAULT 'user',
   disabled INTEGER NOT NULL DEFAULT 0,
+  oidc_sub TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -189,6 +190,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   updated_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quest_objectives_quest ON quest_objectives(quest_id);

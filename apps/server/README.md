@@ -25,7 +25,8 @@ src/
     time.ts                  nowIso()
   modules/
     health/                  GET /healthz (no prefix, no auth)
-    auth/                    AuthService (setup/login/logout/session resolution) + /auth/*, /me, /me/password
+    auth/                    AuthService (setup/login/logout/session resolution) + /auth/*, /me, /me/password;
+                              OidcService/OidcController (env-gated OIDC/SSO login) — see "OIDC / SSO login"
     users/                   admin user CRUD (/users) + /users/lookup (any authenticated user)
     settings/                server settings (/settings, admin) — allowLocalLogin, JSON key/value store
     membership/              RoleResolver + CampaignAccessService (effective-role resolution),
@@ -59,9 +60,11 @@ Real local auth replaced the old header-only dev auth. Three layers:
 ### 1. Users & sessions
 
 New tables (`db/bootstrap.sql.ts`): `users` (username UNIQUE COLLATE NOCASE,
-`passwordHash`, `serverRole` admin|user, `disabled`), `user_sessions` (id ->
-`tokenHash`, `userId`, `expiresAt`, `lastSeenAt`), `settings` (key/value JSON
-store), `campaign_members` (campaignId, userId, role dm|player|viewer,
+`passwordHash` — nullable, NULL for OIDC-provisioned users, see "OIDC / SSO
+login" — `serverRole` admin|user, `disabled`, `oidcSub` — nullable, unique
+per issuer, indexed), `user_sessions` (id -> `tokenHash`, `userId`,
+`expiresAt`, `lastSeenAt`), `settings` (key/value JSON store),
+`campaign_members` (campaignId, userId, role dm|player|viewer,
 `characterId`, UNIQUE(campaignId, userId)).
 
 Passwords: `node:crypto` `scryptSync` (N=16384, r=8, p=1, random 16-byte
@@ -157,25 +160,134 @@ free-text string, not a FK).
 ### Auth endpoints
 
 - `GET /auth/status` (public) — `{setupRequired, localLoginEnabled,
-  oidcEnabled: false, version}`.
+  oidcEnabled, version}`. `oidcEnabled` is true only when `OIDC_ISSUER`,
+  `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are all set (see "OIDC / SSO
+  login" below).
 - `POST /auth/setup` (public, only while zero users exist, else 409) —
   creates the first user as `serverRole: 'admin'`, starts a session.
 - `POST /auth/login` (public) — 401 generic on bad credentials, 403 if
-  disabled, 403 if `serverRole !== 'admin'` and `settings.allowLocalLogin ===
-  false` (admins can **always** log in locally — lockout prevention).
+  disabled, 403 `'This account uses SSO'` if the user has no local password
+  (OIDC-provisioned), 403 if `serverRole !== 'admin'` and
+  `settings.allowLocalLogin === false` (admins can **always** log in locally
+  — lockout prevention).
 - `POST /auth/logout` — deletes the session row, clears the cookie, 204.
+- `GET /auth/oidc/login` (public) — 302 to the identity provider's
+  authorization endpoint, or 503 if OIDC isn't configured or discovery
+  currently fails. See below.
+- `GET /auth/oidc/callback` (public) — completes the code exchange,
+  provisions/updates the user, sets the session cookie, 302 to `/`.
 - `GET /me` — `{user, memberships}`; `passwordHash` never included; 401 if
   unauthenticated. `dev:*` header users get a synthesized `id: 0` shape with
   no memberships (there's no DB row to read).
 - `POST /me/password` — `currentPassword` is **required** here (unlike the
   admin reset endpoint); rehashes, kills every *other* session for that user.
+  403 `'This account uses SSO'` for passwordless (OIDC) users.
 - `GET /users`, `POST /users`, `PATCH /users/:id`, `DELETE /users/:id`,
-  `POST /users/:id/password` — admin only.
+  `POST /users/:id/password` — admin only. `POST /users/:id/password` also
+  works on an SSO-provisioned user — it sets a local password, which lets
+  that user subsequently log in locally too (an admin-initiated escape
+  hatch; OIDC login keeps working either way).
 - `GET /users/lookup?query=` — any authenticated user, 2+ chars, max 10
   results — member-picker autocomplete.
 - `GET /settings`, `PATCH /settings` — admin only.
 - `GET/POST/PATCH/DELETE /campaigns/:id/members[/:memberId]` — dm for
   writes, any member for read.
+
+### OIDC / SSO login
+
+Generic OIDC (tested against [Authentik](https://goauthentik.io/), works with
+any standards-compliant provider), gated entirely by env vars — nothing to
+configure in the DB or admin UI. Implemented with `openid-client` v6
+(`modules/auth/oidc.service.ts`, `oidc.controller.ts`, `oidc.config.ts`).
+
+**Env vars:**
+
+| Var | Required | Default | Notes |
+|---|---|---|---|
+| `OIDC_ISSUER` | yes* | — | Discovery base URL, e.g. `https://authentik.example.com/application/o/campfire/`. `oidcEnabled` requires this + client id + secret all set. |
+| `OIDC_CLIENT_ID` | yes* | — | |
+| `OIDC_CLIENT_SECRET` | yes* | — | |
+| `OIDC_REDIRECT_URI` | no | `${APP_URL or http://localhost:8080}/api/v1/auth/oidc/callback` | Must exactly match the redirect URI registered on the provider. |
+| `OIDC_SCOPE` | no | `openid profile email` | Add `groups` (or your provider's scope name) here too if group membership isn't included by default. |
+| `OIDC_GROUPS_CLAIM` | no | `groups` | Name of the ID-token claim holding the user's group list. |
+| `OIDC_ADMIN_GROUP` | no | — (admin sync disabled) | Group name that grants `serverRole: 'admin'`. Applied on **every** login, both directions — added to the group -> promoted, removed -> demoted — except the last enabled admin is never demoted (a warn is logged and the role left as-is). |
+| `APP_URL` | no | `http://localhost:8080` | Only used to build the default `OIDC_REDIRECT_URI`. |
+
+\* All three of `OIDC_ISSUER`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` must be
+set together; a partial set behaves as OIDC disabled (`oidcEnabled: false`,
+the `/auth/oidc/*` routes 503).
+
+**Authentik setup:**
+
+1. Create an OAuth2/OIDC **Provider**: Authorization flow of your choice,
+   Client type `Confidential`, redirect URI = your `OIDC_REDIRECT_URI` (e.g.
+   `https://campfire.example.com/api/v1/auth/oidc/callback`), scopes
+   `openid`, `email`, `profile`. Add the `groups` scope mapping too (Authentik
+   ships a built-in "Groups" scope mapping — enable it under "Advanced
+   protocol settings") so the `groups` claim shows up in the ID token.
+2. Create an **Application** bound to that provider, note the generated
+   Client ID / Client Secret -> `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`.
+3. `OIDC_ISSUER` is the provider's issuer URL, shown on the provider's
+   detail page (usually
+   `https://<authentik-host>/application/o/<application-slug>/`).
+4. To grant admin: create an Authentik group, e.g. `campfire-admins`, add
+   the relevant users, and set `OIDC_ADMIN_GROUP=campfire-admins`. Removing
+   a user from that group demotes them on their next login.
+5. Restart Campfire with the env vars set — `GET /auth/status` should now
+   report `oidcEnabled: true`, and a "Sign in with SSO" affordance (web-side)
+   can point at `GET /auth/oidc/login`.
+
+**How it works server-side:**
+
+- **Discovery** (`OidcService.getClientConfig()`) is lazy — the first call to
+  `/auth/oidc/login` or `/callback` triggers it, not server boot — and
+  cached in-memory after success. If the IdP is unreachable, discovery fails,
+  the failure is logged (`console.warn`) and **not** cached, and the route
+  returns 503; the *next* request retries discovery from scratch. The server
+  never crashes or refuses to boot because the IdP is down.
+- **Login** (`GET /auth/oidc/login`) generates PKCE (`code_verifier` +
+  S256 `code_challenge`) and a random `state`, stores `state:codeVerifier` in
+  a short-lived (5 min) httpOnly cookie scoped to `/api/v1/auth/oidc`, then
+  302s to the provider's authorization endpoint.
+- **Callback** (`GET /auth/oidc/callback`) reads that cookie, validates
+  `state`, exchanges the code (PKCE) for tokens, and validates the ID
+  token's signature against the provider's published JWKS (`openid-client`
+  handles this — a real RS256/ES256 JWT is required; `alg: none` is
+  rejected).
+- **Claim mapping / provisioning** (`OidcService.provisionOrUpdateUser`):
+  `sub` is the stable identity key (stored as `users.oidc_sub`, indexed).
+  First login for a `sub` auto-provisions a user: username from
+  `preferred_username` (falling back to the local part of `email`, then
+  `sub`), slugified to satisfy `User.username`'s
+  `/^[a-z0-9_.-]+$/i` regex (`OidcService.slugifyUsername`) — on a
+  collision with an existing username, `-2`, `-3`, ... is appended until
+  unique. `displayName` comes from the `name` claim (falling back to
+  `preferred_username`, then the resolved username). The provisioned user
+  has `passwordHash: NULL` — see below. Every subsequent login (same `sub`)
+  reuses that row and re-syncs `serverRole` from the `OIDC_ADMIN_GROUP`
+  check (see table above).
+- **Session**: on success, the callback issues the exact same session cookie
+  (`campfire_session`, same `AuthService.issueSession`) local login uses, so
+  the rest of the app (SessionAuthGuard, `/me`, etc.) doesn't distinguish
+  OIDC-issued sessions from local ones at all — then 302s to `/`.
+- **Local login is forbidden for SSO users**: `POST /auth/login` and
+  `POST /me/password` both 403 `'This account uses SSO'` when
+  `users.password_hash IS NULL`. An admin can still reset a password for
+  that user via `POST /users/:id/password`, which gives them a local
+  password *in addition to* OIDC (both keep working).
+
+**`users.password_hash` nullability.** The column was originally
+`NOT NULL`. Since SQLite has no `ALTER TABLE ... DROP NOT NULL`, existing
+DBs are migrated in place on boot (`db/db.module.ts`'s
+`migrateUsersTableForOidc`): if `PRAGMA table_info(users)` shows the old
+`NOT NULL` constraint, the table is rebuilt (create `users_new` with the
+relaxed schema + the new `oidc_sub` column, copy rows, drop, rename) inside
+a transaction. Fresh DBs never hit this path — `bootstrap.sql.ts` already
+declares `password_hash TEXT` (nullable) and `oidc_sub TEXT`. This was
+simpler and safer than introducing a migration-runner for what's still a
+single hand-maintained bootstrap file, and avoids a NULL-vs-empty-string
+sentinel (which would've made `passwordHash === ''` an ambiguous "no
+password" check scattered across call sites).
 
 ## API tokens, proposals & export
 

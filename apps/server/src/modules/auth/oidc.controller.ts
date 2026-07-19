@@ -1,0 +1,82 @@
+import { Controller, Get, Query, Req, Res, ServiceUnavailableException } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
+import type { Request, Response } from 'express';
+import { Public } from '../../common/decorators/public.decorator';
+import { OidcService } from './oidc.service';
+import { AuthService } from './auth.service';
+import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, OIDC_FLOW_COOKIE_NAME, OIDC_FLOW_COOKIE_MAX_AGE_MS } from './auth.constants';
+
+function sessionCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: 'lax' as const,
+    path: '/',
+    maxAge: SESSION_MAX_AGE_MS,
+    secure: process.env.NODE_ENV === 'production',
+  };
+}
+
+function flowCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: 'lax' as const,
+    path: '/api/v1/auth/oidc',
+    maxAge: OIDC_FLOW_COOKIE_MAX_AGE_MS,
+    secure: process.env.NODE_ENV === 'production',
+  };
+}
+
+/** Reconstructs the externally-visible URL for this request (honors reverse-proxy headers if present, else falls back to configured redirect URI's origin). */
+function currentUrlFromRequest(req: Request, redirectUri: string): URL {
+  const base = new URL(redirectUri);
+  const url = new URL(base.pathname, base.origin);
+  for (const [key, value] of Object.entries(req.query)) {
+    if (typeof value === 'string') url.searchParams.set(key, value);
+  }
+  return url;
+}
+
+@ApiTags('auth')
+@Controller('auth/oidc')
+export class OidcController {
+  constructor(
+    private readonly oidc: OidcService,
+    private readonly auth: AuthService,
+  ) {}
+
+  @Public()
+  @Get('login')
+  async login(@Res() res: Response): Promise<void> {
+    if (!this.oidc.isEnabled()) {
+      throw new ServiceUnavailableException('OIDC is not configured');
+    }
+    const { url, state, codeVerifier } = await this.oidc.buildAuthorizationRequest();
+    res.cookie(OIDC_FLOW_COOKIE_NAME, `${state}:${codeVerifier}`, flowCookieOptions());
+    res.redirect(url.toString());
+  }
+
+  @Public()
+  @Get('callback')
+  async callback(@Req() req: Request, @Query() _query: Record<string, string>, @Res() res: Response): Promise<void> {
+    if (!this.oidc.isEnabled()) {
+      throw new ServiceUnavailableException('OIDC is not configured');
+    }
+    const env = this.oidc.getEnvConfig();
+    if (!env) throw new ServiceUnavailableException('OIDC is not configured');
+
+    const flowCookie = req.cookies?.[OIDC_FLOW_COOKIE_NAME] as string | undefined;
+    res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+    if (!flowCookie || !flowCookie.includes(':')) {
+      throw new ServiceUnavailableException('OIDC login flow expired or was not started here');
+    }
+    const [state, codeVerifier] = flowCookie.split(':');
+
+    const currentUrl = currentUrlFromRequest(req, env.redirectUri);
+    const claims = await this.oidc.handleCallback(currentUrl, state, codeVerifier);
+    const user = await this.oidc.provisionOrUpdateUser(claims);
+    const { token } = await this.auth.issueSessionFor(user.id);
+
+    res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
+    res.redirect('/');
+  }
+}

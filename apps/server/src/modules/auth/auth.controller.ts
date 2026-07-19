@@ -6,6 +6,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { AuthService } from './auth.service';
+import { OidcService } from './oidc.service';
 import { SettingsService } from '../settings/settings.service';
 import { SetupRequestDto, LoginRequestDto, PasswordChangeDto } from './auth.dto';
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, VERSION } from './auth.constants';
@@ -26,6 +27,7 @@ export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly settings: SettingsService,
+    private readonly oidc: OidcService,
   ) {}
 
   @Public()
@@ -38,7 +40,7 @@ export class AuthController {
     return {
       setupRequired,
       localLoginEnabled: allowLocalLogin,
-      oidcEnabled: false,
+      oidcEnabled: this.oidc.isEnabled(),
       version: VERSION,
     };
   }
