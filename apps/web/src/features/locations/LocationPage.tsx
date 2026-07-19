@@ -8,13 +8,14 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { Location, Npc, Quest } from '@campfire/schema';
+import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { attachmentFileUrl } from '../../components/ImageUpload';
 
 const statusLabel: Record<Location['status'], string> = {
   unexplored: 'Unexplored',
@@ -44,6 +45,7 @@ export default function LocationPage() {
   const isDm = role === 'dm';
 
   const [location, setLocation] = useState<Location | null>(null);
+  const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [npcs, setNpcs] = useState<Npc[]>([]);
   const [quests, setQuests] = useState<Quest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -67,14 +69,16 @@ export default function LocationPage() {
     setLoading(true);
     setError(null);
     try {
-      const [locData, npcsData, questsData] = await Promise.all([
+      const [locData, npcsData, questsData, campaignData] = await Promise.all([
         api.get<Location>(`${API}/locations/${id}`),
         api.get<Npc[]>(`${API}/campaigns/${cid}/npcs`),
         api.get<Quest[]>(`${API}/campaigns/${cid}/quests`),
+        api.get<Campaign>(`${API}/campaigns/${cid}`),
       ]);
       setLocation(locData);
       setNpcs(npcsData);
       setQuests(questsData);
+      setCampaign(campaignData);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load this location.");
     } finally {
@@ -260,7 +264,15 @@ export default function LocationPage() {
               <Card className="space-y-4">
                 {/* Mini pin map */}
                 <div className="relative cf-inset overflow-hidden h-36">
-                  <div className="absolute inset-0 bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:16px_16px] opacity-35" />
+                  {campaign?.mapAttachmentId ? (
+                    <img
+                      src={attachmentFileUrl(campaign.mapAttachmentId)}
+                      alt="Campaign map"
+                      className="absolute inset-0 w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="absolute inset-0 bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:16px_16px] opacity-35" />
+                  )}
                   <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
                     <g transform={`translate(${px},${py})`}>
                       <circle r="4.4" fill="#f59e0b" fillOpacity=".25" vectorEffect="non-scaling-stroke" />

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   danger_level TEXT NOT NULL DEFAULT 'low',
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
+  map_attachment_id INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -216,6 +217,18 @@ CREATE TABLE IF NOT EXISTS proposals (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  uploader_user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
@@ -234,6 +247,7 @@ CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_pack ON rule_entries(pack_id);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_type ON rule_entries(type);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_slug ON rule_entries(slug);
+CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
 `;
 
 /**

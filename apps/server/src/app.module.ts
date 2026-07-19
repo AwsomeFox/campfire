@@ -22,6 +22,7 @@ import { ProposalsModule } from './modules/proposals/proposals.module';
 import { ExportModule } from './modules/export/export.module';
 import { RulesModule } from './modules/rules/rules.module';
 import { McpModule } from './modules/mcp/mcp.module';
+import { AttachmentsModule } from './modules/attachments/attachments.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { McpModule } from './modules/mcp/mcp.module';
     ExportModule,
     RulesModule,
     McpModule,
+    AttachmentsModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },

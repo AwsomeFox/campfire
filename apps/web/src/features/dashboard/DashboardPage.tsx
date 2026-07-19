@@ -99,7 +99,7 @@ export default function DashboardPage() {
           See Campfire.dc.html ~L435-536 (dashCols). Single column below lg per design's mobile spec. */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-          <RegionMap campaignId={id} locations={summary.locations} />
+          <RegionMap campaignId={id} campaign={summary.campaign} locations={summary.locations} role={role} onChange={load} />
           <QuestsCard campaignId={id} quests={summary.quests} role={role} onChange={load} />
           <SessionLog campaignId={id} sessions={summary.sessions} />
         </div>
