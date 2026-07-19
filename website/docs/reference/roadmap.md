@@ -64,14 +64,40 @@ Honest rough edges that exist but aren't finished:
 
 ## Planned ⬜
 
-TTRPG features a weekly table wants that Campfire doesn't have yet:
+See the [operator's reality check](operator-audit.md) for these in the context of
+who hits them. Grouped by theme:
 
-- ⬜ **XP & levelling** — XP tracking and a level-up flow _(today `level` is a plain editable number)_
-- ⬜ **Inventory & loot** — party treasury and per-character items _(today loot lives in prose)_
+**Account lifecycle & self-service**
+
+- ⬜ **DM invites / join codes** and ⬜ **optional self-service signup** (see [Admin vs DM](../administration/access-model.md))
+- ⬜ **Forgot-password / self-service reset** — today only an admin can reset a local user's password
+
+**Between-session engagement**
+
+- ⬜ **Notifications** — new recap, a reply to your note, being added to a campaign, next session _(the app is currently silent when you're not looking at it)_
+- ⬜ **Read-only recap share links** — let an absent player catch up without an account
 - ⬜ **Session scheduling** — a "next session" date / availability, with an ICS feed
-- ⬜ **Read-only share links** — let an absent player catch up on a recap without an account
-- ⬜ **D&D Beyond import** — pull a public character sheet _(the `ddbId` field exists; import does not)_
-- ⬜ **Multi-system rule packs** — Pathfinder 2e and others via bundled/uploaded open-licensed datasets, since only Open5e (D&D 5e SRD) is wired today
+
+**Table depth**
+
+- ⬜ **XP & levelling** — _(today `level` is a plain editable number)_
+- ⬜ **Inventory & loot** — party treasury and per-character items _(today loot lives in prose)_
+- ⬜ **Campaign archive** — a real read-only "completed" state _(today `status` is stored but cosmetic; completed campaigns stay fully editable in the hub)_
+- ⬜ **Campaign templates / cloning** — reuse prep instead of rebuilding from scratch
+- ⬜ **D&D Beyond import** — _(the `ddbId` field exists; import does not)_
+- ⬜ **Multi-system rule packs** — Pathfinder 2e and others via uploaded open-licensed datasets, since only Open5e (D&D 5e SRD) is wired today
+- ⬜ **DM-installable content** — let a DM add rule packs without the server admin; make install a non-blocking background job with per-section progress
+
+**Operator confidence**
+
+- ⬜ **Backup & restore** — in-app backup, scheduling, and a whole-server restore/import _(today: manual `/data` copy + per-campaign export only)_
+- ⬜ **Admin observability** — user/campaign counts, storage usage, version, update-available
+- ⬜ **Server-wide audit** — a log of admin actions (account creation, settings, pack installs); today audit is per-campaign only
+- ⬜ **Storage management** — upload size visibility, quotas, orphan cleanup
+- ⬜ **In-app OIDC config & test** — instead of env-only with no "connection OK" feedback
+
+**AI depth**
+
 - ⬜ **MCP resources & prompts** — expose read surfaces as resources and add prep/recap prompts, beyond tools
 - ⬜ **AI co-DM** — generated NPCs, encounters, maps, and story beats, always routed through the approval queue
 
