@@ -1,7 +1,13 @@
 /**
- * Session log — mirrors design/07-sessions.html.
+ * Session log — mirrors design/claude-design/Campfire.dc.html "Session log" (~867-942) and
+ * "Session detail" (~1059-1073).
  * Route: /c/:campaignId/sessions ; optional ?session=:id selects the detail pane.
- * Two-pane desktop layout; mobile shows list OR detail (tap in, back out).
+ * Two-pane desktop layout; mobile shows list OR detail (tap in, back out). The timeline
+ * uses the design's left-rule + dot marker per entry.
+ *
+ * Design shows "Encounters" and "Rolls" tabs alongside the log — the design itself marks
+ * Encounters "Proposed · post-v1" and there is no dice/roll or encounter API on the server,
+ * so only the Log tab (the MVP scope) is implemented here. See report for details.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
@@ -51,7 +57,7 @@ export default function SessionsPage() {
   }, [cid, load]);
 
   const selected = useMemo(
-    () => (selectedId ? sessions.find((s) => String(s.id) === selectedId) : sessions[0]),
+    () => (selectedId ? sessions.find((s) => String(s.id) === selectedId) : undefined),
     [sessions, selectedId],
   );
 
@@ -95,12 +101,9 @@ export default function SessionsPage() {
 
   if (loading && sessions.length === 0) {
     return (
-      <div className="max-w-5xl mx-auto px-4 mt-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4">
         <Card>
           <Skeleton lines={4} />
-        </Card>
-        <Card className="lg:col-span-2">
-          <Skeleton lines={6} />
         </Card>
       </div>
     );
@@ -117,87 +120,109 @@ export default function SessionsPage() {
   const showDetailOnMobile = Boolean(selected);
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 grid grid-cols-1 lg:grid-cols-3 gap-5 pb-20 lg:pb-10">
-      {error && (
-        <div className="lg:col-span-3">
-          <ErrorNote message={error} onRetry={load} />
-        </div>
-      )}
+    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+      {error && <ErrorNote message={error} onRetry={load} />}
 
-      {/* Timeline list */}
-      <aside className={`space-y-3 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
-        <div className="flex items-center justify-between">
-          <h1 className="font-bold text-white">Session log</h1>
-          {isDm && (
-            <Btn
-              className="!min-h-0 !py-1.5 text-xs"
-              onClick={() => {
-                setShowAddForm(true);
-                if (selected) selectSession(selected.id);
-              }}
-            >
-              + Add recap
-            </Btn>
-          )}
-        </div>
-
-        {sessions.length === 0 && (
-          <EmptyState title="No sessions yet — add your first recap" />
-        )}
-
-        {sessions.map((s) => {
-          const isActive = selected?.id === s.id;
-          return (
-            <button
-              key={s.id}
-              onClick={() => selectSession(s.id)}
-              className={`cf-card block w-full text-left p-4 space-y-1 ${
-                isActive ? 'border-amber-500/50' : 'hover:border-slate-500'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <p className={`font-bold text-sm ${isActive ? 'text-white' : 'text-slate-300'}`}>
-                  Session {s.number}
-                </p>
-                <span className="text-[10px] text-slate-500">{formatDate(s.playedAt)}</span>
-              </div>
-              <p className={`text-xs font-semibold ${isActive ? 'text-amber-400' : 'text-slate-400'}`}>
-                {s.title || 'Untitled session'}
-              </p>
-            </button>
-          );
-        })}
-      </aside>
-
-      {/* Recap detail */}
-      <main className={`lg:col-span-2 space-y-5 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
-        {selected ? (
-          <SessionDetail
-            campaignId={cid}
-            session={selected}
-            isDm={isDm}
-            onBack={backToList}
-            onChange={load}
-          />
-        ) : (
-          <Card>
-            <EmptyState title="No sessions yet — add your first recap" hint="Pick a session on the left, or add one below." />
-          </Card>
-        )}
-
-        {isDm && (showAddForm || sessions.length === 0) && (
-          <AddRecapForm
-            campaignId={cid}
-            nextNumber={nextNumber()}
-            onCreated={(created) => {
-              setShowAddForm(false);
-              selectSession(created.id);
-              void load();
+      <div className="flex items-center gap-2.5">
+        <h1 className="text-2xl font-extrabold text-white">Sessions</h1>
+        <div className="flex-1" />
+        {isDm && (
+          <Btn
+            className="!min-h-0 !py-1.5 text-xs"
+            onClick={() => {
+              setShowAddForm(true);
+              if (selected) backToList();
             }}
-            onCancel={sessions.length > 0 ? () => setShowAddForm(false) : undefined}
-          />
+          >
+            + Add recap
+          </Btn>
         )}
-      </main>
+      </div>
+
+      <div className="seg self-start inline-flex">
+        <button style={{ padding: '8px 16px', fontSize: 13, border: 0, background: 'transparent', color: 'var(--color-accent)', boxShadow: 'inset 0 0 0 1px var(--color-accent)', minHeight: 40 }}>
+          Log
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        {/* Timeline list */}
+        <aside className={showDetailOnMobile ? 'hidden lg:block' : ''}>
+          {sessions.length === 0 && !showAddForm ? (
+            <Card>
+              <EmptyState title="No sessions yet — add your first recap" />
+            </Card>
+          ) : (
+            <div className="flex flex-col">
+              {sessions.map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => selectSession(s.id)}
+                  className="text-left"
+                  style={{
+                    display: 'flex',
+                    gap: 14,
+                    border: 0,
+                    background: 'transparent',
+                    font: 'inherit',
+                    color: 'var(--color-text)',
+                    cursor: 'pointer',
+                    padding: '14px 0 14px 16px',
+                    borderLeft: `2px solid ${selected?.id === s.id ? 'var(--color-accent)' : 'var(--color-accent-800)'}`,
+                    position: 'relative',
+                  }}
+                >
+                  <span
+                    style={{
+                      position: 'absolute',
+                      left: -5,
+                      top: 20,
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: selected?.id === s.id ? 'var(--color-accent)' : 'var(--color-accent-800)',
+                    }}
+                  />
+                  <span className="flex-1 min-w-0">
+                    <span className="flex gap-2.5 items-baseline flex-wrap">
+                      <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
+                        Session {s.number}
+                      </span>
+                      <span className="font-heading text-[16px]">{s.title || 'Untitled session'}</span>
+                      <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
+                    </span>
+                    <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recap || 'No recap written yet.'}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </aside>
+
+        {/* Recap detail */}
+        <main className={`lg:col-span-2 space-y-4 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
+          {selected ? (
+            <SessionDetail session={selected} isDm={isDm} onBack={backToList} onChange={load} />
+          ) : (
+            <Card>
+              <EmptyState title="No sessions yet — add your first recap" hint="Pick a session on the left, or add one below." />
+            </Card>
+          )}
+
+          {isDm && (showAddForm || sessions.length === 0) && (
+            <AddRecapForm
+              campaignId={cid}
+              nextNumber={nextNumber()}
+              onCreated={(created) => {
+                setShowAddForm(false);
+                selectSession(created.id);
+                void load();
+              }}
+              onCancel={sessions.length > 0 ? () => setShowAddForm(false) : undefined}
+            />
+          )}
+        </main>
+      </div>
     </div>
   );
 }
@@ -205,13 +230,11 @@ export default function SessionsPage() {
 // ---------------------------------------------------------------------------
 
 function SessionDetail({
-  campaignId,
   session,
   isDm,
   onBack,
   onChange,
 }: {
-  campaignId: number;
   session: Session;
   isDm: boolean;
   onBack: () => void;
@@ -265,32 +288,21 @@ function SessionDetail({
   }
 
   return (
-    <Card className="space-y-5">
+    <div className="space-y-3" style={{ maxWidth: 720 }}>
+      <div>
+        <button onClick={onBack} className="text-xs text-slate-500 hover:text-slate-300 lg:hidden mb-1 block">
+          ← Back to sessions
+        </button>
+      </div>
       {error && <ErrorNote message={error} />}
-      <div className="flex items-start justify-between gap-3 border-b border-slate-700 pb-4">
-        <div className="space-y-1">
-          <button onClick={onBack} className="text-xs text-slate-500 hover:text-slate-300 lg:hidden mb-1 block">
-            ← Back to sessions
-          </button>
-          <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
-            Session {session.number} · {formatDate(session.playedAt)}
-          </p>
-          <h2 className="text-2xl font-extrabold text-white">{session.title || 'Untitled session'}</h2>
-        </div>
-        {isDm && (
-          <div className="flex gap-2 shrink-0">
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing((v) => !v)}>
-              ✎ Edit
-            </Btn>
-            <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={remove} disabled={deleting}>
-              {deleting ? 'Deleting…' : 'Delete'}
-            </Btn>
-          </div>
-        )}
+      <div className="flex items-baseline gap-2.5 flex-wrap">
+        <span className="tag tag-accent">Session {session.number}</span>
+        <h2 className="text-xl font-extrabold text-white m-0">{session.title || 'Untitled session'}</h2>
+        <span className="text-muted text-xs">{formatDate(session.playedAt)}</span>
       </div>
 
       {editing ? (
-        <div className="space-y-3">
+        <Card className="space-y-3">
           <div className="space-y-1">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Title</label>
             <TextInput value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} placeholder="Session title…" />
@@ -316,17 +328,28 @@ function SessionDetail({
               {saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>
-        </div>
+        </Card>
       ) : (
-        <div className="space-y-4">
+        <Card>
           {session.recap ? (
             <Markdown>{session.recap}</Markdown>
           ) : (
             <p className="text-sm text-slate-600">No recap written yet.</p>
           )}
+        </Card>
+      )}
+
+      {isDm && !editing && (
+        <div className="flex gap-2">
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
+            Edit recap
+          </Btn>
+          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={remove} disabled={deleting}>
+            {deleting ? 'Deleting…' : 'Delete'}
+          </Btn>
         </div>
       )}
-    </Card>
+    </div>
   );
 }
 

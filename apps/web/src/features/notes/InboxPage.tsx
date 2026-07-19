@@ -1,6 +1,8 @@
 /**
- * Scribe inbox — mirrors design/09-scribe-inbox.html.
+ * Scribe inbox — mirrors design/claude-design/Campfire.dc.html "Scribe inbox" (~1105-1124).
  * Route: /c/:campaignId/inbox (DM only; non-dm gets a friendly notice).
+ * Design: avatar + text + "from X", a "Resolve →" action per pending item. We keep the
+ * existing expand-to-add-a-resolution-note flow (extra functionality) behind that action.
  *
  * Note: the server only exposes open (unresolved) inbox items
  * (GET /api/v1/campaigns/:cid/inbox). There's no endpoint for resolved items,
@@ -11,7 +13,7 @@ import { useParams } from 'react-router-dom';
 import type { Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { Card, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 
 export default function InboxPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -86,18 +88,11 @@ export default function InboxPage() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h1 className="text-xl font-extrabold text-white flex items-center gap-2 flex-wrap">
-            ✉️ Scribe inbox
-            <Chip variant="active">{items.length} open</Chip>
-          </h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Raw notes from the table. Resolve each into canon.
-          </p>
-        </div>
-      </div>
+    <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
+      <h1 className="text-xl font-extrabold text-white m-0">Scribe inbox</h1>
+      <p className="text-muted text-xs m-0">
+        Raw notes from the table. Resolve each one into the entity it belongs to — or let Claude sweep them for you.
+      </p>
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
@@ -160,43 +155,45 @@ function InboxItem({
   }
 
   return (
-    <Card className={`!p-4 space-y-3 ${expanded ? 'border-amber-500/40' : ''}`}>
-      <button className="w-full text-left" onClick={onToggle}>
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs font-bold text-slate-300">
-            {item.authorName || 'Someone'} <span className="text-slate-600 font-normal">· {timeAgo(item.createdAt)}</span>
-          </p>
-          <Chip variant="active">Open</Chip>
+    <Card className={`!p-4 space-y-2.5 ${expanded ? 'border-amber-500/40' : ''}`}>
+      <div className="flex gap-2.5 items-start">
+        <span className="h-[30px] w-[30px] shrink-0 rounded-full bg-[var(--color-neutral-900)] flex items-center justify-center text-[11px] text-[var(--color-neutral-400)]">
+          {(item.authorName || '?').slice(0, 1).toUpperCase()}
+        </span>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm m-0">{item.body}</p>
+          <p className="text-muted text-[11px] mt-0.5 mb-0">from {item.authorName || 'Someone'}</p>
         </div>
-      </button>
+      </div>
 
-      {expanded ? (
-        <>
-          <p className="text-sm text-slate-200 cf-inset p-3">&quot;{item.body}&quot;</p>
-          <div className="cf-inset p-3 space-y-2.5 border-amber-500/30">
-            <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Resolve into…</p>
-            <TextArea
-              style={{ minHeight: 70 }}
-              value={resolutionNote}
-              onChange={(e) => setResolutionNote(e.target.value)}
-              placeholder="Resolution note — what this became…"
-            />
-            <div className="flex items-center justify-between pt-1 gap-2 flex-wrap">
-              <p className="text-[11px] text-slate-500">Marks this item resolved with your note attached.</p>
-              <div className="flex gap-2 shrink-0">
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={handleDismiss} disabled={busy}>
-                  Dismiss
-                </Btn>
-                <Btn className="!min-h-0 !py-1.5 text-xs" onClick={handleResolve} disabled={busy}>
-                  Resolve
-                </Btn>
-              </div>
+      {expanded && (
+        <div className="cf-inset p-3 space-y-2.5 border-amber-500/30">
+          <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Resolve into…</p>
+          <TextArea
+            style={{ minHeight: 70 }}
+            value={resolutionNote}
+            onChange={(e) => setResolutionNote(e.target.value)}
+            placeholder="Resolution note — what this became…"
+          />
+          <div className="flex items-center justify-between pt-1 gap-2 flex-wrap">
+            <p className="text-[11px] text-slate-500">Marks this item resolved with your note attached.</p>
+            <div className="flex gap-2 shrink-0">
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={handleDismiss} disabled={busy}>
+                Dismiss
+              </Btn>
+              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={handleResolve} disabled={busy}>
+                Resolve
+              </Btn>
             </div>
           </div>
-        </>
-      ) : (
-        <p className="text-sm text-slate-300">&quot;{item.body}&quot;</p>
+        </div>
       )}
+
+      <div className="flex justify-end">
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onToggle}>
+          {expanded ? 'Collapse' : 'Resolve →'}
+        </Btn>
+      </div>
     </Card>
   );
 }

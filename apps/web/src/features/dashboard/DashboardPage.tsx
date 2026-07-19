@@ -9,6 +9,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { StatusHeader } from './StatusHeader';
+import { InstallHintBanner } from './InstallHintBanner';
 import { RegionMap } from './RegionMap';
 import { QuestsCard } from './QuestsCard';
 import { NpcGrid } from './NpcGrid';
@@ -87,23 +88,25 @@ export default function DashboardPage() {
   if (!summary) return null;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
+    <div className="max-w-7xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <StatusHeader campaignId={id} summary={summary} role={role} onChange={load} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* LEFT: map, quests, npcs */}
-        <div className="lg:col-span-7 space-y-5">
+      <InstallHintBanner />
+
+      {/* Design: two-column grid (~7/5 split), left = map/quests/sessions, right = party/npcs/notes.
+          See Campfire.dc.html ~L435-536 (dashCols). Single column below lg per design's mobile spec. */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <RegionMap campaignId={id} locations={summary.locations} />
           <QuestsCard campaignId={id} quests={summary.quests} role={role} onChange={load} />
-          <NpcGrid campaignId={id} npcs={summary.npcs} />
+          <SessionLog campaignId={id} sessions={summary.sessions} />
         </div>
 
-        {/* RIGHT: party, sessions, my notes */}
-        <div className="lg:col-span-5 space-y-5">
+        <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <PartyCard campaignId={id} characters={summary.characters} />
-          <SessionLog campaignId={id} sessions={summary.sessions} />
+          <NpcGrid campaignId={id} npcs={summary.npcs} />
           <NotesQuickRail campaignId={id} openInboxCount={summary.openInboxCount} role={role} />
         </div>
       </div>

@@ -1,7 +1,16 @@
 /**
  * Campaign members & roles — /c/:campaignId/members.
- * Mirrors design/10-admin.html "Members & roles" section, adapted: no Authentik
- * groups yet (local accounts), audit log added per this round's scope.
+ * Mirrors design/claude-design/Campfire.dc.html "Players" (~1508-1559): an invite-link
+ * card, pending invites, and a members table (role select + character link + remove).
+ *
+ * Design gap: the invite-link card (generate/copy/regenerate a join link, "joins as"
+ * role picker) and the pending-invites list have NO backing API — there is no invite/join
+ * -token mechanism anywhere in apps/server (members are added today by looking up an
+ * existing user's account and adding them directly, which IS wired below). The invite
+ * card is rendered disabled with a "soon" tag rather than inventing an endpoint; pending
+ * invites are omitted entirely since there's no way to have any. See report for details.
+ *
+ * Audit log kept (existing functionality, not in this design block).
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
@@ -99,7 +108,7 @@ export default function MembersPage() {
   if (!isDm) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-        <h1 className="text-xl font-extrabold text-white">🛡 Members</h1>
+        <h1 className="text-xl font-extrabold text-white">Players</h1>
         {error && <ErrorNote message={error} onRetry={load} />}
         <Card className="space-y-3">
           <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Party</h2>
@@ -110,9 +119,11 @@ export default function MembersPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <h1 className="text-xl font-extrabold text-white">🛡 Campaign members</h1>
+    <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
+      <h1 className="text-xl font-extrabold text-white m-0">Players</h1>
       {error && <ErrorNote message={error} onRetry={load} />}
+
+      <InviteCard />
 
       <MembersCard campaignId={id} members={members ?? []} characters={characters} onChange={load} />
 
@@ -121,6 +132,42 @@ export default function MembersPage() {
         <AuditList entries={audit ?? []} />
       </Card>
     </div>
+  );
+}
+
+/**
+ * Invite-link generation ("+ Invite to <campaign>") — no backing API. There is no
+ * join-token/invite mechanism anywhere in apps/server/src; members are added today via
+ * direct username/display-name lookup (see MembersCard/AddMemberForm below, which IS wired).
+ * Rendered disabled with a "soon" tag rather than inventing an endpoint.
+ */
+function InviteCard() {
+  return (
+    <Card className="space-y-2.5">
+      <div className="flex items-center gap-2">
+        <p className="card-kicker mb-0">Invite</p>
+        <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
+      </div>
+      <div className="flex gap-2 flex-wrap items-end opacity-50 pointer-events-none">
+        <div className="field" style={{ flex: 1, minWidth: 190 }}>
+          <label>Invite link</label>
+          <input className="input" disabled value="Invite links aren't available yet" />
+        </div>
+        <div className="field" style={{ minWidth: 110 }}>
+          <label>Joins as</label>
+          <select className="input" disabled>
+            <option>player</option>
+            <option>viewer</option>
+          </select>
+        </div>
+        <button className="btn btn-primary" disabled style={{ minHeight: 36 }}>
+          Copy link
+        </button>
+      </div>
+      <p className="text-muted text-[11.5px] m-0">
+        Add players below by looking up their existing account — invite links are on the roadmap.
+      </p>
+    </Card>
   );
 }
 
@@ -167,10 +214,10 @@ function MembersCard({
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <Card className="space-y-3">
-      <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-        <h2 className="font-bold text-white text-sm">Members &amp; roles</h2>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setShowAdd((v) => !v)}>
+    <Card className="space-y-2.5">
+      <div className="flex items-center gap-2">
+        <p className="card-kicker mb-0">Members</p>
+        <Btn className="!min-h-0 !py-1.5 text-xs ml-auto" onClick={() => setShowAdd((v) => !v)}>
           {showAdd ? 'Cancel' : '+ Add member'}
         </Btn>
       </div>
@@ -193,33 +240,15 @@ function MembersCard({
       {members.length === 0 ? (
         <EmptyState icon="🛡" title="No members yet" hint="Add one above." />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-[10px] uppercase text-slate-500 text-left">
-                <th className="py-2 pr-4 font-bold">User</th>
-                <th className="pr-4 font-bold">Role</th>
-                <th className="pr-4 font-bold">Character</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800">
-              {members.map((m) => (
-                <MemberRow
-                  key={m.id}
-                  campaignId={campaignId}
-                  member={m}
-                  characters={characters}
-                  onChange={onChange}
-                  onError={setError}
-                />
-              ))}
-            </tbody>
-          </table>
+        <div className="flex flex-col">
+          {members.map((m) => (
+            <MemberRow key={m.id} campaignId={campaignId} member={m} characters={characters} onChange={onChange} onError={setError} />
+          ))}
         </div>
       )}
       <p className="text-[11px] text-slate-500">
-        Players need an account first — a server admin creates one in Admin → Users.
+        Removing someone keeps their character and notes — the seat just closes. New players need an account first —
+        a server admin creates one in Admin → Users.
       </p>
     </Card>
   );
@@ -278,48 +307,49 @@ function MemberRow({
     }
   }
 
+  const character = characters.find((c) => c.id === member.characterId);
+
   return (
-    <tr>
-      <td className="py-2.5 pr-4">
-        <span className="font-semibold text-white">{member.displayName || member.username}</span>{' '}
-        <span className="text-slate-600">{member.username}</span>
-      </td>
-      <td className="pr-4">
-        <div className="flex items-center gap-2">
-          <span className={`cf-chip ${ROLE_CHIP[member.role]}`}>{ROLE_LABEL[member.role]}</span>
-          <select
-            className="cf-select !min-h-0 !py-1 text-xs w-auto"
-            value={member.role}
-            disabled={savingRole}
-            onChange={(e) => changeRole(e.target.value as Role)}
-          >
-            <option value="dm">DM</option>
-            <option value="player">Player</option>
-            <option value="viewer">Viewer</option>
-          </select>
-        </div>
-      </td>
-      <td className="pr-4">
-        <select
-          className="cf-select !min-h-0 !py-1 text-xs w-auto"
-          value={member.characterId ?? ''}
-          disabled={savingChar}
-          onChange={(e) => changeCharacter(e.target.value ? Number(e.target.value) : null)}
-        >
-          <option value="">— unlinked —</option>
-          {characters.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-      </td>
-      <td className="text-right">
-        <button type="button" className="text-[11px] text-rose-500/80 hover:text-rose-400" onClick={remove}>
-          remove
-        </button>
-      </td>
-    </tr>
+    <div className="flex items-center gap-2.5 py-2.5 flex-wrap" style={{ borderTop: '1px solid var(--color-divider)' }}>
+      <span className="h-8 w-8 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[12px] text-[var(--color-neutral-300)]">
+        {(member.displayName || member.username || '?').slice(0, 1).toUpperCase()}
+      </span>
+      <div className="min-w-0">
+        <p className="text-[13.5px] m-0 flex items-center gap-1.5">
+          {member.displayName || member.username}
+        </p>
+        <p className="text-muted text-[11px] m-0">{character?.name || 'no character linked'}</p>
+      </div>
+      <div className="flex-1" />
+      <select
+        className="cf-select !min-h-0 !py-1 text-xs"
+        style={{ width: 96 }}
+        value={member.role}
+        disabled={savingRole}
+        onChange={(e) => changeRole(e.target.value as Role)}
+      >
+        <option value="dm">dm</option>
+        <option value="player">player</option>
+        <option value="viewer">viewer</option>
+      </select>
+      <select
+        className="cf-select !min-h-0 !py-1 text-xs"
+        style={{ width: 130 }}
+        value={member.characterId ?? ''}
+        disabled={savingChar}
+        onChange={(e) => changeCharacter(e.target.value ? Number(e.target.value) : null)}
+      >
+        <option value="">— unlinked —</option>
+        {characters.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.name}
+          </option>
+        ))}
+      </select>
+      <button type="button" className="text-[12px] text-slate-500 hover:text-rose-400" onClick={remove}>
+        Remove
+      </button>
+    </div>
   );
 }
 

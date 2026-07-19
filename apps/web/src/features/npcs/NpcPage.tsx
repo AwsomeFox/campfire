@@ -1,7 +1,9 @@
 /**
- * NPC detail — mirrors design/04-npc-detail.html.
+ * NPC detail — mirrors design/claude-design/Campfire.dc.html "NPC detail" (~632-667).
+ * Layout: back link, avatar + name/role + disposition badge header, then a two-column
+ * body — body copy (+ DM-secret panel) on the left, Facts + Notes cards on the right.
  * DM: edit (name/role/disposition/location/body), dmSecret panel, delete.
- * Everyone: header, meta grid, markdown body, connected quests, notes rail.
+ * Everyone: header, facts card, markdown body, connected quests, notes.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -155,38 +157,77 @@ export default function NpcPage() {
   if (!npc) return null;
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 grid grid-cols-1 lg:grid-cols-3 gap-5 pb-20 md:pb-10">
-      <main className="lg:col-span-2 space-y-5">
-        <Card className="md:p-6 space-y-5">
-          {error && <ErrorNote message={error} onRetry={load} />}
+    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+      <div>
+        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/npcs`)}>
+          ← Back
+        </Btn>
+      </div>
 
-          {!editing && (
-            <>
-              <div className="flex items-start gap-4">
-                <div className="h-16 w-16 rounded-xl bg-amber-500/15 border border-amber-500/60 flex items-center justify-center text-xl font-bold text-amber-400 shrink-0">
-                  {initials(npc.name)}
-                </div>
-                <div className="flex-1 space-y-1.5 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h1 className="text-2xl font-extrabold text-white">{npc.name}</h1>
-                    <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
+      {error && <ErrorNote message={error} onRetry={load} />}
+
+      {!editing && (
+        <>
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="h-13 w-13 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0" style={{ height: 52, width: 52 }}>
+              {initials(npc.name)}
+            </div>
+            <div>
+              <h1 className="text-2xl font-extrabold text-white leading-tight">{npc.name}</h1>
+              {npc.role && <p className="text-sm text-slate-400">{npc.role}</p>}
+            </div>
+            <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
+            {isDm && (
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs ml-auto" onClick={startEdit}>
+                ✎ Edit
+              </Btn>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-4 items-start">
+            <div className="space-y-4 min-w-0">
+              <Card>
+                {npc.body ? <Markdown>{npc.body}</Markdown> : <p className="text-sm text-slate-500 italic">No description yet.</p>}
+              </Card>
+
+              {isDm && npc.dmSecret && <DmPanel>{npc.dmSecret}</DmPanel>}
+
+              <Card className="space-y-3">
+                <h2 className="font-bold text-white text-sm">Connected</h2>
+                {connectedQuests.length === 0 ? (
+                  <EmptyState icon="📜" title="No connected quests" />
+                ) : (
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    {connectedQuests.map((q) => (
+                      <a
+                        key={q.id}
+                        href={`/c/${cid}/quests/${q.id}`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          navigate(`/c/${cid}/quests/${q.id}`);
+                        }}
+                        className="cf-inset p-3 hover:border-amber-500/50"
+                      >
+                        <p className="text-sm font-bold text-amber-400">📜 {q.title}</p>
+                        <Chip variant={statusVariant(q.status)} className="mt-1">
+                          {q.status}
+                        </Chip>
+                      </a>
+                    ))}
                   </div>
-                  {npc.role && <p className="text-sm text-slate-400">{npc.role}</p>}
-                </div>
-                {isDm && (
-                  <Btn ghost className="!min-h-0 !py-1.5 text-xs shrink-0" onClick={startEdit}>
-                    ✎ Edit
-                  </Btn>
                 )}
-              </div>
+              </Card>
+            </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3 border-y border-slate-700 py-4">
-                <div>
-                  <p className="text-[10px] text-slate-500 font-bold uppercase">Disposition</p>
-                  <p className="text-sm font-semibold text-amber-400">{npc.disposition || 'Neutral'}</p>
+            <div className="space-y-4 min-w-0">
+              <Card className="space-y-2">
+                <p className="card-kicker">Facts</p>
+                <div className="flex justify-between gap-2 text-[13px]">
+                  <span className="text-muted">Disposition</span>
+                  <span>{npc.disposition || 'Neutral'}</span>
                 </div>
-                <div>
-                  <p className="text-[10px] text-slate-500 font-bold uppercase">Location</p>
+                <div className="flex justify-between gap-2 text-[13px]">
+                  <span className="text-muted">Last seen</span>
                   {locationName ? (
                     <a
                       href={`/c/${cid}/locations/${npc.locationId}`}
@@ -194,113 +235,78 @@ export default function NpcPage() {
                         e.preventDefault();
                         navigate(`/c/${cid}/locations/${npc.locationId}`);
                       }}
-                      className="text-sm font-semibold text-sky-400 hover:underline"
+                      className="text-[13px]"
+                      style={{ color: 'var(--color-accent)' }}
                     >
                       {locationName}
                     </a>
                   ) : (
-                    <p className="text-sm font-semibold text-slate-500">Unknown</p>
+                    <span className="text-muted">Unknown</span>
                   )}
                 </div>
-                <div>
-                  <p className="text-[10px] text-slate-500 font-bold uppercase">Role</p>
-                  <p className="text-sm font-semibold text-slate-300">{npc.role || '—'}</p>
-                </div>
-              </div>
+              </Card>
 
-              {npc.body ? <Markdown>{npc.body}</Markdown> : <p className="text-sm text-slate-500 italic">No description yet.</p>}
-
-              {isDm && npc.dmSecret && <DmPanel>{npc.dmSecret}</DmPanel>}
-            </>
-          )}
-
-          {editing && (
-            <div className="space-y-3">
-              {saveError && <ErrorNote message={saveError} />}
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-[10px] text-slate-500 font-bold uppercase">Name</label>
-                  <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] text-slate-500 font-bold uppercase">Role</label>
-                  <TextInput value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] text-slate-500 font-bold uppercase">Disposition</label>
-                  <TextInput value={form.disposition} onChange={(e) => setForm({ ...form, disposition: e.target.value })} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] text-slate-500 font-bold uppercase">Location</label>
-                  <select
-                    className="cf-select"
-                    value={form.locationId}
-                    onChange={(e) => setForm({ ...form, locationId: e.target.value })}
-                  >
-                    <option value="">Unknown / none</option>
-                    {locations.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
-                <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
-                <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={remove}>
-                  {deleting ? 'Deleting…' : 'Delete NPC'}
-                </Btn>
-                <div className="flex gap-2">
-                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
-                    Cancel
-                  </Btn>
-                  <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
-                    {saving ? 'Saving…' : 'Save'}
-                  </Btn>
-                </div>
-              </div>
+              <NotesRail campaignId={cid} entityType="npc" entityId={id} />
             </div>
-          )}
-        </Card>
+          </div>
+        </>
+      )}
 
+      {editing && (
         <Card className="space-y-3">
-          <h2 className="font-bold text-white text-sm">Connected</h2>
-          {connectedQuests.length === 0 ? (
-            <EmptyState icon="📜" title="No connected quests" />
-          ) : (
-            <div className="grid sm:grid-cols-2 gap-3">
-              {connectedQuests.map((q) => (
-                <a
-                  key={q.id}
-                  href={`/c/${cid}/quests/${q.id}`}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    navigate(`/c/${cid}/quests/${q.id}`);
-                  }}
-                  className="cf-inset p-3 hover:border-amber-500/50"
-                >
-                  <p className="text-sm font-bold text-amber-400">📜 {q.title}</p>
-                  <Chip variant={statusVariant(q.status)} className="mt-1">
-                    {q.status}
-                  </Chip>
-                </a>
-              ))}
+          {saveError && <ErrorNote message={saveError} />}
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-[10px] text-slate-500 font-bold uppercase">Name</label>
+              <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </div>
-          )}
+            <div className="space-y-1">
+              <label className="text-[10px] text-slate-500 font-bold uppercase">Role</label>
+              <TextInput value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] text-slate-500 font-bold uppercase">Disposition</label>
+              <TextInput value={form.disposition} onChange={(e) => setForm({ ...form, disposition: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] text-slate-500 font-bold uppercase">Location</label>
+              <select
+                className="cf-select"
+                value={form.locationId}
+                onChange={(e) => setForm({ ...form, locationId: e.target.value })}
+              >
+                <option value="">Unknown / none</option>
+                {locations.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
+            <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
+            <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={remove}>
+              {deleting ? 'Deleting…' : 'Delete NPC'}
+            </Btn>
+            <div className="flex gap-2">
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
+                Cancel
+              </Btn>
+              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
+                {saving ? 'Saving…' : 'Save'}
+              </Btn>
+            </div>
+          </div>
         </Card>
-      </main>
-
-      <aside className="space-y-5">
-        <NotesRail campaignId={cid} entityType="npc" entityId={id} />
-      </aside>
+      )}
     </div>
   );
 }

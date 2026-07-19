@@ -1,7 +1,9 @@
 /**
- * My notes — mirrors design/08-my-notes.html.
+ * My notes — mirrors design/claude-design/Campfire.dc.html "My notes" (~1076-1101).
  * Route: /c/:campaignId/notes
  * Shows the caller's own notes (server visibility-filters to mine + shared-with-me).
+ * Design: header + "+ New note", each note's visibility badge is tap-to-cycle
+ * (private -> shared with DM -> shared with party -> private).
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -16,6 +18,13 @@ const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string; sh
   private: { chip: 'private', label: '🔒 Private', short: '🔒 Private' },
   dm_shared: { chip: 'dm', label: '🎩 Shared with DM', short: '🎩 DM' },
   party_shared: { chip: 'party', label: '👥 Shared with party', short: '👥 Party' },
+};
+
+/** Design's tap-to-cycle order on a note's own visibility badge. */
+const VIS_CYCLE: Record<Note['visibility'], Note['visibility']> = {
+  private: 'dm_shared',
+  dm_shared: 'party_shared',
+  party_shared: 'private',
 };
 
 const entityRoute: Record<EntityTypeValue, string | null> = {
@@ -147,38 +156,51 @@ export default function MyNotesPage() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h1 className="text-xl font-extrabold text-white">My notes</h1>
-        <div className="flex gap-1.5 flex-wrap">
-          <FilterChip active={filter === 'all'} onClick={() => setFilter('all')}>
-            All
-          </FilterChip>
-          <FilterChip active={filter === 'private'} variant="private" onClick={() => setFilter('private')}>
-            🔒 Private
-          </FilterChip>
-          <FilterChip active={filter === 'dm_shared'} variant="dm" onClick={() => setFilter('dm_shared')}>
-            🎩 → DM
-          </FilterChip>
-          <FilterChip active={filter === 'party_shared'} variant="party" onClick={() => setFilter('party_shared')}>
-            👥 → Party
-          </FilterChip>
-        </div>
+    <div className="max-w-3xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+      <div className="flex items-center gap-2.5">
+        <h1 className="text-xl font-extrabold text-white m-0">My notes</h1>
+        <div className="flex-1" />
+        <Btn
+          className="!min-h-0 !py-1.5 text-xs"
+          onClick={() => document.getElementById('note-quick-capture')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+        >
+          + New note
+        </Btn>
+      </div>
+      <p className="text-muted text-xs m-0">
+        Private by default. Share a note with the DM or the whole party — tap the badge to change who sees it.
+      </p>
+
+      <div className="flex gap-1.5 flex-wrap">
+        <FilterChip active={filter === 'all'} onClick={() => setFilter('all')}>
+          All
+        </FilterChip>
+        <FilterChip active={filter === 'private'} variant="private" onClick={() => setFilter('private')}>
+          🔒 Private
+        </FilterChip>
+        <FilterChip active={filter === 'dm_shared'} variant="dm" onClick={() => setFilter('dm_shared')}>
+          🎩 → DM
+        </FilterChip>
+        <FilterChip active={filter === 'party_shared'} variant="party" onClick={() => setFilter('party_shared')}>
+          👥 → Party
+        </FilterChip>
       </div>
 
       {/* Quick capture */}
-      <Card className="!p-4">
-        <form className="flex gap-2" onSubmit={quickCapture}>
-          <TextInput
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Jot something down… saves as private"
-          />
-          <Btn type="submit" className="shrink-0" disabled={saving || !draft.trim()}>
-            Save
-          </Btn>
-        </form>
-      </Card>
+      <div id="note-quick-capture">
+        <Card className="!p-4">
+          <form className="flex gap-2" onSubmit={quickCapture}>
+            <TextInput
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="Jot something down… saves as private"
+            />
+            <Btn type="submit" className="shrink-0" disabled={saving || !draft.trim()}>
+              Save
+            </Btn>
+          </form>
+        </Card>
+      </div>
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
@@ -198,7 +220,7 @@ export default function MyNotesPage() {
                 campaignId={cid}
                 note={note}
                 editable
-                onSetVisibility={(v) => setVisibility(note, v)}
+                onCycleVisibility={() => setVisibility(note, VIS_CYCLE[note.visibility])}
                 onDelete={() => deleteNote(note)}
               />
             ))}
@@ -216,8 +238,8 @@ export default function MyNotesPage() {
           {filtered.length === 0 && (
             <EmptyState
               icon="🕯️"
-              title="Empty state"
-              hint="Your notes live here — private until you share them. Jot your first thought above."
+              title="Viewers don't have a notebook"
+              hint="But you can still leave a note for the DM above."
             />
           )}
         </div>
@@ -253,13 +275,13 @@ function NoteCard({
   campaignId,
   note,
   editable,
-  onSetVisibility,
+  onCycleVisibility,
   onDelete,
 }: {
   campaignId: number;
   note: Note;
   editable: boolean;
-  onSetVisibility?: (v: Note['visibility']) => void;
+  onCycleVisibility?: () => void;
   onDelete?: () => void;
 }) {
   const meta = visMeta[note.visibility];
@@ -272,40 +294,32 @@ function NoteCard({
 
   return (
     <div className="cf-card p-4 space-y-2">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2 flex-wrap">
-          <Chip variant={meta.chip}>{meta.label}</Chip>
+      <p className="text-sm text-slate-100 whitespace-pre-wrap m-0">{note.body}</p>
+      <div className="flex items-center gap-2 flex-wrap">
+        {editable ? (
+          <button onClick={onCycleVisibility} className="cf-chip" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
+            <Chip variant={meta.chip}>{meta.label} · tap to change</Chip>
+          </button>
+        ) : (
+          <>
+            <Chip variant={meta.chip}>{meta.label}</Chip>
+            <span className="text-[11px] text-slate-500">from {note.authorName || note.authorUserId}</span>
+          </>
+        )}
+        <div className="ml-auto flex items-center gap-2">
           {note.entityType && anchorHref && (
             <Link to={anchorHref} className="text-[11px] text-amber-400 hover:underline">
               {entityIcon[note.entityType]} {entityLabel(note)}
             </Link>
           )}
-          {!note.entityType && <span className="text-[11px] text-slate-500">no anchor</span>}
+          <span className="text-[11px] text-slate-600">{timeAgo(note.createdAt)}</span>
+          {editable && (
+            <button onClick={onDelete} className="text-[11px] text-slate-500 hover:text-rose-400">
+              delete
+            </button>
+          )}
         </div>
-        <span className="text-[10px] text-slate-600">{timeAgo(note.createdAt)}</span>
       </div>
-      <p className="text-sm text-slate-300 whitespace-pre-wrap">{note.body}</p>
-      {editable && (
-        <div className="flex items-center gap-3 pt-1 border-t border-slate-700/60">
-          <span className="text-[10px] font-bold text-slate-500 uppercase">Visibility</span>
-          <div className="flex rounded-lg overflow-hidden border border-slate-700 text-[11px] font-semibold">
-            {(Object.keys(visMeta) as Note['visibility'][]).map((v) => (
-              <button
-                key={v}
-                onClick={() => onSetVisibility?.(v)}
-                className={`px-2.5 py-1 ${
-                  note.visibility === v ? 'bg-slate-700 text-white' : 'text-slate-400 hover:bg-slate-800'
-                }`}
-              >
-                {visMeta[v].short}
-              </button>
-            ))}
-          </div>
-          <button onClick={onDelete} className="ml-auto text-[11px] text-slate-500 hover:text-rose-400">
-            delete
-          </button>
-        </div>
-      )}
     </div>
   );
 }

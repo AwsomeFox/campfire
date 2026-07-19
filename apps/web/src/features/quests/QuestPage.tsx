@@ -1,5 +1,6 @@
 /**
- * Quest detail page — mirrors design/03-quest-detail.html.
+ * Quest detail page — fidelity-synced to design/claude-design/Campfire.dc.html
+ * "Quest detail" screen (~L571-629).
  * Route: /c/:campaignId/quests/:questId (questId === 'new' renders the dm create form).
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -10,11 +11,9 @@ import { useAuth } from '../../app/auth';
 import {
   Card,
   Chip,
-  Inset,
   Btn,
   TextInput,
   TextArea,
-  DmPanel,
   EmptyState,
   Skeleton,
   ErrorNote,
@@ -47,6 +46,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const role = roleIn(campaignId);
   const isDm = role === 'dm';
   const canToggleObjectives = role === 'dm' || role === 'player';
+  const navigate = useNavigate();
 
   const [quest, setQuest] = useState<QuestWithObjectives | null>(null);
   const [siblingQuests, setSiblingQuests] = useState<Quest[]>([]);
@@ -70,6 +70,9 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [editingDmSecret, setEditingDmSecret] = useState(false);
   const [dmSecretDraft, setDmSecretDraft] = useState('');
   const [savingDmSecret, setSavingDmSecret] = useState(false);
+
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -205,6 +208,25 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     }
   }
 
+  // NOTE ON DELETE BEHAVIOR: the design treats "promote subquests" as the expected
+  // outcome of deleting a parent quest, but QuestsService.remove() (apps/server/src/
+  // modules/quests/quests.service.ts) does NOT reparent or cascade-delete subquests —
+  // it deletes the quest + its own objectives row only, leaving any subquests with a
+  // parentId pointing at a now-missing quest. The confirm copy below reflects that
+  // reality instead of the design's assumption; see report deviations.
+  async function deleteQuest() {
+    if (!quest) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.delete(`${API}/quests/${quest.id}`);
+      navigate(`/c/${campaignId}/quests`);
+    } catch {
+      setError("Couldn't delete this quest.");
+      setDeleting(false);
+    }
+  }
+
   if (forbidden) {
     return (
       <PageShell campaignId={campaignId}>
@@ -237,114 +259,117 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
   if (!quest) return null;
 
+  const hasSubs = subquests.length > 0;
+  const showSecret = isDm && (quest.dmSecret || editingDmSecret);
+
   return (
-    <PageShell campaignId={campaignId}>
-      <main className="lg:col-span-2 space-y-5">
-        <Card className="space-y-5">
-          {error && <ErrorNote message={error} onRetry={load} />}
-          <div className="flex items-start justify-between gap-4 flex-wrap">
-            <div className="space-y-1.5">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-2xl font-extrabold text-white">{quest.title}</h1>
-                <Chip variant={statusVariant(quest.status)}>{capitalize(quest.status)}</Chip>
-              </div>
-              <p className="text-sm text-slate-400">
-                {giver && (
-                  <>
-                    Given by{' '}
-                    <Link to={`/c/${campaignId}/npcs/${giver.id}`} className="text-amber-400 hover:underline">
-                      {giver.name}
-                    </Link>
-                  </>
-                )}
-                {quest.reward && (
-                  <>
-                    {giver ? ' · ' : ''}
-                    Reward <span className="text-amber-400 font-bold">{quest.reward}</span>
-                  </>
-                )}
-              </p>
+    <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {error && <ErrorNote message={error} onRetry={load} />}
+
+      <div>
+        <Link to={`/c/${campaignId}/quests`} className="btn btn-ghost" style={{ fontSize: 13 }}>
+          ← Back
+        </Link>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <h3 style={{ margin: 0 }}>{quest.title}</h3>
+        <Chip variant={statusVariant(quest.status)}>{capitalize(quest.status)}</Chip>
+        {isDm && (
+          <>
+            <div style={{ flex: 1 }} />
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={() => {
+                setBodyDraft(quest.body);
+                setEditingBody((v) => !v);
+              }}
+            >
+              ✎ Edit quest
+            </Btn>
+            <div className="relative">
+              <Btn
+                ghost
+                className="!min-h-0 !py-1.5 text-xs"
+                onClick={() => setStatusMenuOpen((v) => !v)}
+                disabled={savingStatus}
+              >
+                Status ▾
+              </Btn>
+              {statusMenuOpen && (
+                <div className="absolute right-0 mt-1 z-10 cf-card p-1 space-y-0.5 min-w-[140px]">
+                  {STATUS_OPTIONS.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => saveStatus(s)}
+                      className={`w-full text-left text-xs rounded px-2 py-1.5 hover:bg-slate-700 ${
+                        s === quest.status ? 'text-white font-semibold' : 'text-slate-300'
+                      }`}
+                    >
+                      {capitalize(s)}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-            {isDm && (
-              <div className="flex gap-2 shrink-0">
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
-                  onClick={() => {
-                    setBodyDraft(quest.body);
-                    setEditingBody((v) => !v);
-                  }}
-                >
-                  ✎ Edit
-                </Btn>
-                <div className="relative">
-                  <Btn
-                    ghost
-                    className="!min-h-0 !py-1.5 text-xs"
-                    onClick={() => setStatusMenuOpen((v) => !v)}
-                    disabled={savingStatus}
-                  >
-                    Status ▾
+            <Btn danger className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)}>
+              Delete
+            </Btn>
+          </>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+          <div className="card elev-sm">
+            {editingBody ? (
+              <div className="space-y-2">
+                <TextArea
+                  style={{ minHeight: 140 }}
+                  value={bodyDraft}
+                  onChange={(e) => setBodyDraft(e.target.value)}
+                  placeholder="Quest body (markdown)…"
+                />
+                <div className="flex gap-2 justify-end">
+                  <Btn ghost onClick={() => setEditingBody(false)} className="!min-h-0 !py-1.5 text-xs">
+                    Cancel
                   </Btn>
-                  {statusMenuOpen && (
-                    <div className="absolute right-0 mt-1 z-10 cf-card p-1 space-y-0.5 min-w-[140px]">
-                      {STATUS_OPTIONS.map((s) => (
-                        <button
-                          key={s}
-                          onClick={() => saveStatus(s)}
-                          className={`w-full text-left text-xs rounded px-2 py-1.5 hover:bg-slate-700 ${
-                            s === quest.status ? 'text-white font-semibold' : 'text-slate-300'
-                          }`}
-                        >
-                          {capitalize(s)}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <Btn onClick={saveBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
+                    {savingBody ? 'Saving…' : 'Save'}
+                  </Btn>
                 </div>
               </div>
-            )}
-          </div>
-
-          {editingBody ? (
-            <div className="space-y-2 border-t border-slate-700 pt-4">
-              <TextArea
-                style={{ minHeight: 140 }}
-                value={bodyDraft}
-                onChange={(e) => setBodyDraft(e.target.value)}
-                placeholder="Quest body (markdown)…"
-              />
-              <div className="flex gap-2 justify-end">
-                <Btn ghost onClick={() => setEditingBody(false)} className="!min-h-0 !py-1.5 text-xs">
-                  Cancel
-                </Btn>
-                <Btn onClick={saveBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
-                  {savingBody ? 'Saving…' : 'Save'}
-                </Btn>
-              </div>
-            </div>
-          ) : (
-            <div className="border-t border-slate-700 pt-4">
+            ) : (
               <Markdown>{quest.body}</Markdown>
-            </div>
-          )}
-
-          <div className="space-y-2">
-            <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">
-              Objectives <span className="font-normal normal-case">(players can tick)</span>
-            </p>
-            {quest.objectives.length === 0 && (
-              <p className="text-xs text-slate-600">No objectives yet.</p>
             )}
+
+            <div className="hr" style={{ margin: '6px 0' }} />
+
+            <span className="card-kicker">Objectives</span>
+            {quest.objectives.length === 0 && <p className="text-xs text-slate-600">No objectives yet.</p>}
             {quest.objectives.map((o) => (
-              <div key={o.id} className="cf-inset flex items-center gap-3 p-3">
-                <input
-                  type="checkbox"
-                  checked={o.done}
-                  disabled={!canToggleObjectives}
-                  onChange={() => toggleObjective(o)}
-                  className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-amber-500 shrink-0"
-                />
+              <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 34 }}>
+                <span
+                  onClick={() => canToggleObjectives && toggleObjective(o)}
+                  role={canToggleObjectives ? 'button' : undefined}
+                  style={{
+                    width: 17,
+                    height: 17,
+                    flex: 'none',
+                    borderRadius: 4,
+                    border: '1.5px solid var(--color-neutral-600)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    fontSize: 11,
+                    color: 'var(--color-accent-100)',
+                    cursor: canToggleObjectives ? 'pointer' : 'default',
+                    background: o.done ? 'var(--color-accent)' : 'transparent',
+                    borderColor: o.done ? 'var(--color-accent)' : 'var(--color-neutral-600)',
+                  }}
+                >
+                  {o.done ? '✓' : ''}
+                </span>
                 {editingObjectiveId === o.id ? (
                   <div className="flex-1 flex items-center gap-2">
                     <TextInput
@@ -353,10 +378,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                       className="!py-1 text-sm"
                       autoFocus
                     />
-                    <button
-                      onClick={() => saveObjectiveText(o)}
-                      className="text-xs text-amber-400 hover:underline shrink-0"
-                    >
+                    <button onClick={() => saveObjectiveText(o)} className="text-xs text-[var(--color-accent)] hover:underline shrink-0">
                       Save
                     </button>
                     <button
@@ -368,16 +390,18 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   </div>
                 ) : (
                   <>
-                    {o.done ? (
-                      <s className="text-sm text-slate-400 flex-1">{o.text}</s>
-                    ) : (
-                      <span className="text-sm text-slate-200 flex-1">{o.text}</span>
-                    )}
+                    <span
+                      style={{
+                        fontSize: 14,
+                        flex: 1,
+                        textDecorationLine: o.done ? 'line-through' : 'none',
+                        opacity: o.done ? 0.6 : 1,
+                      }}
+                    >
+                      {o.text}
+                    </span>
                     {isDm && (
-                      <button
-                        onClick={() => startEditObjective(o)}
-                        className="text-xs text-slate-500 hover:text-slate-300 shrink-0"
-                      >
+                      <button onClick={() => startEditObjective(o)} className="text-xs text-slate-500 hover:text-slate-300 shrink-0">
                         ✎
                       </button>
                     )}
@@ -401,54 +425,55 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   disabled={addingObjective || !newObjective.trim()}
                   className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-50"
                 >
-                  + objective (DM)
+                  + objective
                 </button>
               </div>
             )}
-          </div>
 
-          <div className="space-y-2">
-            <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">Sub-quests</p>
-            {subquests.length === 0 && <p className="text-xs text-slate-600">No sub-quests.</p>}
-            {subquests.map((sq) => (
-              <Link
-                key={sq.id}
-                to={`/c/${campaignId}/quests/${sq.id}`}
-                className="cf-inset block p-3.5 space-y-1 hover:border-rose-500/50"
-              >
-                <div className="flex items-center justify-between">
-                  <p className="font-bold text-rose-400 text-sm">{sq.title}</p>
-                  <Chip variant={statusVariant(sq.status)}>{capitalize(sq.status)}</Chip>
-                </div>
-                {sq.reward && (
-                  <p className="text-xs text-slate-400">
-                    Reward: <span className="text-emerald-400 font-semibold">{sq.reward}</span>
-                  </p>
-                )}
-              </Link>
-            ))}
+            {hasSubs && (
+              <>
+                <span className="card-kicker" style={{ marginTop: 6 }}>
+                  Subquests
+                </span>
+                {subquests.map((sq) => (
+                  <div key={sq.id} style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 30 }}>
+                    <span className="text-muted">↳</span>
+                    <Link
+                      to={`/c/${campaignId}/quests/${sq.id}`}
+                      style={{ color: 'var(--color-neutral-200)', fontSize: 14, textDecoration: 'none' }}
+                    >
+                      {sq.title}
+                    </Link>
+                    <span className="tag tag-neutral" style={{ fontSize: 10 }}>
+                      {capitalize(sq.status)}
+                    </span>
+                  </div>
+                ))}
+              </>
+            )}
             {isDm && (
               <Link
                 to={`/c/${campaignId}/quests/new?parent=${questId}`}
                 className="text-xs text-slate-500 hover:text-slate-300 pl-1 inline-block"
+                style={{ marginTop: hasSubs ? 0 : 6 }}
               >
                 + sub-quest
               </Link>
             )}
           </div>
 
-          {isDm && (quest.dmSecret || editingDmSecret) && (
-            <div className="space-y-1.5">
+          {showSecret && (
+            <div
+              className="card"
+              style={{
+                border: '1px solid var(--color-accent-700)',
+                background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
+              }}
+            >
+              <span className="card-kicker">DM only — hidden from players</span>
               {editingDmSecret ? (
-                <div className="cf-dm-panel p-4 space-y-2">
-                  <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
-                    🔒 DM only — stripped from API for players/viewers
-                  </p>
-                  <TextArea
-                    style={{ minHeight: 100 }}
-                    value={dmSecretDraft}
-                    onChange={(e) => setDmSecretDraft(e.target.value)}
-                  />
+                <div className="space-y-2">
+                  <TextArea style={{ minHeight: 100 }} value={dmSecretDraft} onChange={(e) => setDmSecretDraft(e.target.value)} />
                   <div className="flex gap-2 justify-end">
                     <Btn ghost onClick={() => setEditingDmSecret(false)} className="!min-h-0 !py-1.5 text-xs">
                       Cancel
@@ -459,20 +484,18 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   </div>
                 </div>
               ) : (
-                <DmPanel>
-                  <div className="flex items-start justify-between gap-3">
-                    <p className="whitespace-pre-wrap flex-1">{quest.dmSecret}</p>
-                    <button
-                      onClick={() => {
-                        setDmSecretDraft(quest.dmSecret);
-                        setEditingDmSecret(true);
-                      }}
-                      className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
-                    >
-                      ✎ edit
-                    </button>
-                  </div>
-                </DmPanel>
+                <div className="flex items-start justify-between gap-3">
+                  <p style={{ margin: 0, fontSize: 13.5, color: 'var(--color-accent-200)', whiteSpace: 'pre-wrap' }}>{quest.dmSecret}</p>
+                  <button
+                    onClick={() => {
+                      setDmSecretDraft(quest.dmSecret);
+                      setEditingDmSecret(true);
+                    }}
+                    className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+                  >
+                    ✎ edit
+                  </button>
+                </div>
               )}
             </div>
           )}
@@ -487,30 +510,58 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               + DM notes
             </button>
           )}
-        </Card>
+        </div>
 
-        <Card className="space-y-3">
-          <h2 className="font-bold text-white text-sm">Connected</h2>
-          <div className="flex flex-wrap gap-2">
-            {giver && (
-              <Link to={`/c/${campaignId}/npcs/${giver.id}`} className="cf-chip cf-chip-active">
-                🤝 {giver.name}
-              </Link>
-            )}
-            {subquests.map((sq) => (
-              <Link key={sq.id} to={`/c/${campaignId}/quests/${sq.id}`} className="cf-chip cf-chip-available">
-                📜 {sq.title}
-              </Link>
-            ))}
-            {!giver && subquests.length === 0 && <p className="text-xs text-slate-600">Nothing linked yet.</p>}
+        <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+          <div className="card elev-sm">
+            <span className="card-kicker">Facts</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span className="text-muted">Reward</span>
+                <span>{quest.reward || '—'}</span>
+              </div>
+              {giver && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span className="text-muted">Given by</span>
+                  <Link to={`/c/${campaignId}/npcs/${giver.id}`} style={{ color: 'var(--color-accent)', fontSize: 13, textDecoration: 'none' }}>
+                    {giver.name}
+                  </Link>
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span className="text-muted">Status</span>
+                <span>{capitalize(quest.status)}</span>
+              </div>
+            </div>
           </div>
-        </Card>
-      </main>
 
-      <aside className="space-y-5">
-        <NotesRail campaignId={campaignId} entityType="quest" entityId={questId} />
-      </aside>
-    </PageShell>
+          <NotesRail campaignId={campaignId} entityType="quest" entityId={questId} />
+        </div>
+      </div>
+
+      {confirmingDelete && (
+        <div className="dialog-backdrop" onClick={() => !deleting && setConfirmingDelete(false)}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <p className="dialog-title">Delete &quot;{quest.title}&quot;?</p>
+            <p className="dialog-body">
+              This permanently deletes the quest and its objectives.
+              {hasSubs
+                ? ` It will NOT promote its ${subquests.length} sub-quest${subquests.length === 1 ? '' : 's'} — they will be orphaned (kept, but pointing at a deleted parent) until you reassign them.`
+                : ''}{' '}
+              This can&apos;t be undone.
+            </p>
+            <div className="dialog-actions">
+              <Btn ghost onClick={() => setConfirmingDelete(false)} disabled={deleting}>
+                Cancel
+              </Btn>
+              <Btn danger onClick={deleteQuest} disabled={deleting}>
+                {deleting ? 'Deleting…' : 'Delete quest'}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
