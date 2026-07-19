@@ -36,10 +36,11 @@ export const Campaign = z.object({
   dangerLevel: DangerLevel.default('low'),
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
+  mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // ---------- character ----------
@@ -350,6 +351,21 @@ export const Proposal = z.object({
 export type Proposal = z.infer<typeof Proposal>;
 export const ProposalResolve = z.object({ note: z.string().max(1000).optional() });
 
+// ---------- attachments (uploaded images: character portraits, campaign maps) ----------
+export const AttachmentKind = z.enum(['portrait', 'map', 'image']);
+
+export const Attachment = z.object({
+  id: Id,
+  campaignId: Id,
+  uploaderUserId: z.string().max(120), // OIDC sub or dev user; audit/ownership (delete-by-uploader)
+  kind: AttachmentKind,
+  filename: z.string().max(255), // original client filename, display only
+  mime: z.string().max(80),
+  size: z.number().int().nonnegative(), // bytes
+  ...timestamps,
+});
+export type Attachment = z.infer<typeof Attachment>;
+
 // ---------- audit ----------
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
 export type DangerLevel = z.infer<typeof DangerLevel>;
@@ -362,6 +378,7 @@ export type TokenScope = z.infer<typeof TokenScope>;
 export type ProposalAction = z.infer<typeof ProposalAction>;
 export type ProposalStatus = z.infer<typeof ProposalStatus>;
 export type ApiTokenCreated = z.infer<typeof ApiTokenCreated>;
+export type AttachmentKind = z.infer<typeof AttachmentKind>;
 
 export const AuditEntry = z.object({
   id: Id,

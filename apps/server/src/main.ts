@@ -42,6 +42,7 @@ async function bootstrap() {
     .addTag('locations')
     .addTag('sessions')
     .addTag('notes')
+    .addTag('attachments')
     .addTag('audit')
     .addTag('tokens')
     .addTag('proposals')

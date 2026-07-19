@@ -2,27 +2,27 @@
  * Character sheet — mirrors design/claude-design/Campfire.dc.html "Character sheet" (~720-864).
  * Layout: back link, avatar + name/class/level/owner header, HP card w/ editor, then a
  * two-column body — ability scores / HP / background / conditions on the left, a
- * portrait placeholder + player info panel on the right.
+ * portrait upload + player info panel on the right.
  *
- * Owner or DM can edit everything (HP, conditions, stats, story); everyone else gets a
- * read-only view.
+ * Owner or DM can edit everything (HP, conditions, stats, story, portrait); everyone else
+ * gets a read-only view.
  *
  * Design affordances with no backing API (rendered disabled with a "soon" tag — see report):
  *  - Saving throws (no per-character save/proficiency data in the schema)
  *  - Skills (no skill/proficiency data in the schema)
  *  - Actions / attack & damage rolls (no dice-roll or actions API)
  *  - Inventory (no inventory API — `Character` has no items field)
- *  - Portrait upload (no upload endpoint; `portraitUrl` field exists but is unwritable from the UI)
  *  - D&D Beyond link (schema has `ddbId` but there is no linking flow/endpoint)
  */
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { Character } from '@campfire/schema';
+import type { Attachment, Character } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials, abilityMod } from './avatar';
 
 const ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'];
@@ -90,6 +90,16 @@ export default function CharacterPage() {
   const isOwner = character.ownerUserId != null && myUserId != null && character.ownerUserId === String(myUserId);
   const canEdit = isDm || isOwner;
   const hpPct = character.hpMax > 0 ? Math.max(0, Math.min(100, (character.hpCurrent / character.hpMax) * 100)) : 0;
+
+  async function savePortrait(attachment: Attachment) {
+    setActionError(null);
+    try {
+      await api.patch(`${API}/characters/${id}`, { portraitUrl: attachmentFileUrl(attachment.id) });
+      await load();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Couldn't save the portrait.");
+    }
+  }
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
@@ -237,10 +247,28 @@ export default function CharacterPage() {
 
         <div className="space-y-4 min-w-0">
           <Card className="items-center text-center py-6 space-y-1.5">
-            <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[11px] text-[var(--color-neutral-600)]">
-              Portrait
-            </span>
-            <span className="text-[11px] text-slate-500">Image uploads — soon</span>
+            {canEdit ? (
+              <ImageUpload
+                campaignId={cid}
+                kind="portrait"
+                shape="circle"
+                previewUrl={character.portraitUrl ?? undefined}
+                label="Portrait"
+                onUploaded={savePortrait}
+                onError={setActionError}
+              />
+            ) : character.portraitUrl ? (
+              <img
+                src={character.portraitUrl}
+                alt=""
+                className="h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
+              />
+            ) : (
+              <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[11px] text-[var(--color-neutral-600)]">
+                Portrait
+              </span>
+            )}
+            {canEdit && <span className="text-[11px] text-slate-500">Click or drop to change</span>}
           </Card>
           <Card className="space-y-2">
             <p className="card-kicker mb-0">Player</p>

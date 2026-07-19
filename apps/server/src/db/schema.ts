@@ -18,6 +18,9 @@ export const campaigns = sqliteTable('campaigns', {
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   ruleSystem: text('rule_system').notNull().default(''),
+  // Attachment (kind='map') rendered as the campaign map background on Dashboard/Location detail.
+  // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  mapAttachmentId: integer('map_attachment_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -224,6 +227,20 @@ export const proposals = sqliteTable('proposals', {
   status: text('status').notNull().default('pending'),
   resolvedBy: text('resolved_by').notNull().default(''),
   note: text('note').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Uploaded images (character portraits, campaign maps, misc). File bytes live on disk at
+// DATA_DIR/uploads/<campaignId>/<id>.<ext> — this row is metadata only. See modules/attachments.
+export const attachments = sqliteTable('attachments', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  uploaderUserId: text('uploader_user_id').notNull(),
+  kind: text('kind').notNull(),
+  filename: text('filename').notNull(),
+  mime: text('mime').notNull(),
+  size: integer('size').notNull(),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

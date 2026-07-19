@@ -30,6 +30,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     dangerLevel: row.dangerLevel as Campaign['dangerLevel'],
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
+    mapAttachmentId: row.mapAttachmentId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -77,6 +78,7 @@ export class CampaignsService {
         dangerLevel: input.dangerLevel ?? 'low',
         sessionCount: 0,
         ruleSystem: input.ruleSystem ?? '',
+        mapAttachmentId: input.mapAttachmentId ?? null,
         createdAt: ts,
         updatedAt: ts,
       })
