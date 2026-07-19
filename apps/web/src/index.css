@@ -1,29 +1,96 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
 @import "tailwindcss";
+/* Nocturne design-system component classes (.card, .btn, .input, .field, .dialog, …) —
+   copied verbatim from design/claude-design/_ds/nocturne-…/styles.css (source of truth). */
+@import "./nocturne.css";
 
 /*
-  Campfire design tokens — mirrored from design/assets/campfire.css.
-  This is a placeholder build; the real UI package will own these long-term.
+  Campfire design tokens — ported from the Nocturne design system
+  (design/claude-design/_ds/nocturne-.../styles.css). Keep the --cf-* variable
+  NAMES the app already consumes (cf-* component classes + Tailwind arbitrary
+  values reference them), but point them at Nocturne's palette. The
+  --color-* names are aliased 1:1 to Nocturne so future ports (or the design
+  package itself) can be dropped in without translation.
 */
 :root {
-  /* Surfaces */
-  --cf-bg: #020617; /* slate-950 — page background */
-  --cf-surface: #0f172a; /* slate-900 — panels-on-panels, inputs */
-  --cf-card: #1e293b; /* slate-800 — primary cards */
-  --cf-border: #334155; /* slate-700 — card borders */
-  --cf-border-dim: #1e293b;
-  /* Ink */
-  --cf-ink: #e2e8f0; /* slate-200 — body text */
+  /* ---- Nocturne primitives (source of truth) ---- */
+  --color-bg: #161826;
+  --color-surface: #232532;
+  --color-text: #e9e9ed;
+  --color-accent: #9184d9;
+  --color-accent-2: #a7a1db;
+  --color-divider: color-mix(in srgb, #e9e9ed 16%, transparent);
+
+  --color-neutral-100: #f3f5fe;
+  --color-neutral-200: #e4e7f5;
+  --color-neutral-300: #cfd3e5;
+  --color-neutral-400: #b2b6ca;
+  --color-neutral-500: #9397ab;
+  --color-neutral-600: #75798c;
+  --color-neutral-700: #595d6c;
+  --color-neutral-800: #3f424d;
+  --color-neutral-900: #292b31;
+
+  --color-accent-100: #f5f4ff;
+  --color-accent-200: #e7e5fe;
+  --color-accent-300: #d2cefd;
+  --color-accent-400: #b5abfc;
+  --color-accent-500: #968ae0;
+  --color-accent-600: #796cbf;
+  --color-accent-700: #5d5294;
+  --color-accent-800: #423a6a;
+  --color-accent-900: #2b2741;
+
+  --color-accent-2-100: #f5f4ff;
+  --color-accent-2-200: #e7e5fe;
+  --color-accent-2-300: #d2cefd;
+  --color-accent-2-400: #b5afe8;
+  --color-accent-2-500: #9690c9;
+  --color-accent-2-600: #7972a9;
+  --color-accent-2-700: #5c5783;
+  --color-accent-2-800: #423e5d;
+  --color-accent-2-900: #2b293a;
+
+  --font-heading: "Inter", system-ui, sans-serif;
+  --font-heading-weight: 500;
+  --font-body: "Inter", system-ui, sans-serif;
+
+  --space-1: 2.8px;
+  --space-2: 5.6px;
+  --space-3: 8.4px;
+  --space-4: 11.2px;
+  --space-6: 16.8px;
+  --space-8: 22.4px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+
+  --shadow-sm: 0 0 0 1px #3f424d;
+  --shadow-md: 0 0 0 1px #595d6c, 0 6px 18px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 0 0 1px #9397ab, 0 16px 40px rgba(0, 0, 0, 0.65);
+
+  /* ---- App-facing aliases (--cf-*) — mapped to Nocturne values above.
+     Kept because cf-* component classes and feature screens already
+     reference these names; do not rename without a codemod. ---- */
+  --cf-bg: var(--color-bg);
+  --cf-surface: var(--color-surface);
+  --cf-card: var(--color-surface);
+  --cf-border: var(--color-divider);
+  --cf-border-dim: color-mix(in srgb, #e9e9ed 10%, transparent);
+  --cf-ink: var(--color-text);
   --cf-ink-strong: #ffffff;
-  --cf-dim: #94a3b8; /* slate-400 — secondary text */
-  --cf-faint: #64748b; /* slate-500 — metadata */
-  /* Semantic accents */
-  --cf-accent: #f59e0b; /* amber-500 — primary, active quests, DM elements */
-  --cf-success: #10b981; /* emerald-500 — completed, explored, healthy */
-  --cf-danger: #f43f5e; /* rose-500 — danger, failed, low HP */
-  --cf-arcane: #a78bfa; /* violet-400 — lore, magic, proposals */
-  --cf-threat: #38bdf8; /* sky-400 — threats, movement paths */
-  --cf-radius: 1rem; /* rounded-2xl cards */
+  --cf-dim: var(--color-neutral-400);
+  --cf-faint: var(--color-neutral-500);
+  /* Semantic accents — Nocturne's blurple stands in for the old amber
+     primary; status colors keep the same hues Nocturne implies via tags. */
+  --cf-accent: var(--color-accent);
+  --cf-accent-2: var(--color-accent-2);
+  --cf-success: #34d399; /* emerald — completed / explored / healthy */
+  --cf-danger: #fb7185; /* rose — danger / failed / low HP */
+  --cf-arcane: var(--color-accent-2); /* lore, magic, proposals */
+  --cf-threat: #38bdf8; /* sky — threats, movement paths (unchanged) */
+  --cf-radius: var(--radius-lg);
   color-scheme: dark;
 }
 
@@ -41,7 +108,16 @@ body {
     ui-sans-serif,
     system-ui,
     sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  line-height: 1.15;
+  letter-spacing: -0.015em;
 }
 
 ::-webkit-scrollbar {
@@ -49,24 +125,24 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--cf-surface);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #475569;
+  background: var(--color-neutral-800);
   border-radius: 4px;
 }
 
 /* --- Components --- */
 .cf-card {
   background: var(--cf-card);
-  border: 1px solid var(--cf-border);
+  border: 1px solid var(--color-divider);
   border-radius: var(--cf-radius);
-  box-shadow: 0 10px 25px -12px rgb(0 0 0 / 0.6);
+  box-shadow: var(--shadow-sm);
 }
 .cf-inset {
   background: var(--cf-surface);
-  border: 1px solid var(--cf-border);
-  border-radius: 0.75rem;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
 }
 
 .cf-chip {
@@ -80,49 +156,54 @@ body {
   padding: 0.18rem 0.55rem;
   border-radius: 9999px;
 }
+/* Active / DM — accent-blurple family (primary emphasis) */
 .cf-chip-active {
-  background: rgb(245 158 11 / 0.15);
-  color: #fbbf24;
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  color: var(--color-accent-300);
 }
+.cf-chip-dm {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  color: var(--color-accent-300);
+}
+/* Available / neutral / private — neutral ramp */
 .cf-chip-available {
-  background: rgb(100 116 139 / 0.2);
-  color: #94a3b8;
+  background: color-mix(in srgb, var(--color-neutral-400) 18%, transparent);
+  color: var(--color-neutral-300);
 }
+.cf-chip-neutral {
+  background: color-mix(in srgb, var(--color-neutral-400) 18%, transparent);
+  color: var(--color-neutral-200);
+}
+.cf-chip-private {
+  background: color-mix(in srgb, var(--color-neutral-400) 18%, transparent);
+  color: var(--color-neutral-200);
+}
+/* Completed / online / party — emerald success family */
 .cf-chip-completed {
   background: rgb(16 185 129 / 0.15);
   color: #34d399;
-}
-.cf-chip-failed {
-  background: rgb(244 63 94 / 0.15);
-  color: #fb7185;
 }
 .cf-chip-online {
   background: rgb(16 185 129 / 0.15);
   color: #34d399;
 }
-.cf-chip-offline {
-  background: rgb(244 63 94 / 0.15);
-  color: #fb7185;
-}
-.cf-chip-neutral {
-  background: rgb(100 116 139 / 0.2);
-  color: #cbd5e1;
-}
-.cf-chip-private {
-  background: rgb(100 116 139 / 0.2);
-  color: #cbd5e1;
-}
-.cf-chip-dm {
-  background: rgb(245 158 11 / 0.15);
-  color: #fbbf24;
-}
 .cf-chip-party {
   background: rgb(16 185 129 / 0.15);
   color: #34d399;
 }
+/* Failed / offline — rose danger family */
+.cf-chip-failed {
+  background: rgb(244 63 94 / 0.15);
+  color: #fb7185;
+}
+.cf-chip-offline {
+  background: rgb(244 63 94 / 0.15);
+  color: #fb7185;
+}
+/* Proposal — accent-2 (lore/magic) family, distinct from primary accent */
 .cf-chip-proposal {
-  background: rgb(167 139 250 / 0.15);
-  color: #c4b5fd;
+  background: color-mix(in srgb, var(--color-accent-2) 18%, transparent);
+  color: var(--color-accent-2-300);
 }
 
 .cf-btn {
@@ -130,47 +211,56 @@ body {
   align-items: center;
   justify-content: center;
   gap: 0.45rem;
-  background: var(--cf-accent);
-  color: #1c1002;
-  font-weight: 700;
+  background: transparent;
+  color: var(--color-accent);
+  border: 1px solid var(--color-accent);
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
   font-size: 0.9rem;
   padding: 0.6rem 1.15rem;
-  border-radius: 0.75rem;
-  border: 0;
+  border-radius: var(--radius-md);
   cursor: pointer;
   min-height: 44px; /* tap target */
-  transition: filter 0.15s ease;
+  transition: background-color 0.15s ease;
 }
 .cf-btn:hover {
-  filter: brightness(1.08);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+.cf-btn:active {
+  background: color-mix(in srgb, var(--color-accent) 22%, transparent);
 }
 .cf-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
-  filter: none;
+  background: transparent;
 }
 .cf-btn-ghost {
   background: transparent;
   color: var(--cf-dim);
-  border: 1px solid var(--cf-border);
+  border: 1px solid var(--color-divider);
 }
 .cf-btn-ghost:hover {
   color: var(--cf-ink);
-  border-color: #475569;
+  border-color: color-mix(in srgb, var(--color-text) 45%, transparent);
+  background: transparent;
 }
 
 .cf-input {
   width: 100%;
   background: var(--cf-surface);
   color: var(--cf-ink);
-  border: 1px solid var(--cf-border);
-  border-radius: 0.75rem;
+  caret-color: var(--color-accent);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
   padding: 0.65rem 0.85rem;
   font-size: 0.95rem;
   min-height: 44px;
 }
+.cf-input:hover {
+  border-color: color-mix(in srgb, var(--color-text) 45%, transparent);
+}
 .cf-input:focus {
-  outline: 2px solid var(--cf-accent);
+  outline: 2px solid var(--color-accent);
   outline-offset: -1px;
 }
 .cf-input::placeholder {
@@ -182,8 +272,8 @@ body {
   width: 100%;
   background: var(--cf-surface);
   color: var(--cf-ink);
-  border: 1px solid var(--cf-border);
-  border-radius: 0.75rem;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
   padding: 0.65rem 0.85rem;
   font-size: 0.95rem;
   min-height: 44px;
@@ -195,22 +285,23 @@ body {
 }
 .cf-textarea:focus,
 .cf-select:focus {
-  outline: 2px solid var(--cf-accent);
+  outline: 2px solid var(--color-accent);
   outline-offset: -1px;
 }
 
-/* DM-only panel — always amber, always labeled */
+/* DM-only panel — always accent-tinted, always labeled, visually distinct
+   from ordinary cards. */
 .cf-dm-panel {
-  background: rgb(245 158 11 / 0.06);
-  border: 1px solid rgb(245 158 11 / 0.35);
-  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+  border-radius: var(--radius-md);
 }
 
 /* HP bar */
 .cf-hp {
   height: 6px;
   border-radius: 9999px;
-  background: #334155;
+  background: var(--color-neutral-800);
   overflow: hidden;
 }
 .cf-hp > div {
@@ -219,7 +310,7 @@ body {
   background: var(--cf-success);
 }
 .cf-hp.low > div {
-  background: var(--cf-accent);
+  background: var(--color-accent);
 }
 .cf-hp.crit > div {
   background: var(--cf-danger);
@@ -227,11 +318,11 @@ body {
 
 /* Session timeline entry */
 .cf-timeline {
-  border-left: 2px solid var(--cf-border);
+  border-left: 2px solid var(--color-divider);
   padding-left: 1rem;
 }
 .cf-timeline.active {
-  border-color: var(--cf-accent);
+  border-color: var(--color-accent);
 }
 
 /* Mobile bottom tab bar */
@@ -241,13 +332,14 @@ body {
   left: 0;
   right: 0;
   z-index: 40;
-  background: rgb(15 23 42 / 0.92);
-  backdrop-filter: blur(8px);
-  border-top: 1px solid var(--cf-border);
+  background: color-mix(in srgb, var(--color-surface) 94%, transparent);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid var(--color-divider);
   display: grid;
   grid-template-columns: repeat(5, 1fr);
 }
-.cf-tabbar a {
+.cf-tabbar a,
+.cf-tabbar button {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -260,7 +352,7 @@ body {
   min-height: 48px;
 }
 .cf-tabbar a.active {
-  color: var(--cf-accent);
+  color: var(--color-accent);
 }
 .cf-tabbar .ico {
   font-size: 18px;

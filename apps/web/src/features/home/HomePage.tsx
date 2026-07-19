@@ -1,6 +1,8 @@
 /**
- * Campaign picker — landing page for authenticated users. Grid of campaign
- * tiles plus a create-campaign card. Any user may create a campaign.
+ * Campaign picker — landing page for authenticated users, styled after the
+ * design's "Campaign hub" screen (card grid with cover strip + dashed
+ * "New campaign" tile). Grid of campaign tiles plus a create-campaign card.
+ * Any user may create a campaign.
  */
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -9,6 +11,19 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { api, ApiError, API } from '../../lib/api';
 import { Card, Chip, statusVariant, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import type { Campaign } from '@campfire/schema';
+
+/** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
+const COVERS = [
+  'linear-gradient(135deg, var(--color-accent-800), var(--color-accent-600))',
+  'linear-gradient(135deg, var(--color-accent-2-800), var(--color-accent-2-600))',
+  'linear-gradient(135deg, var(--color-neutral-800), var(--color-neutral-600))',
+  'linear-gradient(135deg, #1f3d38, #2f6f5e)',
+  'linear-gradient(135deg, #3a2a4a, #6c4f8f)',
+];
+
+function coverFor(id: number): string {
+  return COVERS[id % COVERS.length];
+}
 
 function CreateCampaignCard({ onCreated }: { onCreated: (campaign: Campaign) => void }) {
   const [open, setOpen] = useState(false);
@@ -45,10 +60,23 @@ function CreateCampaignCard({ onCreated }: { onCreated: (campaign: Campaign) => 
     return (
       <button
         onClick={() => setOpen(true)}
-        className="cf-inset border-dashed p-5 flex flex-col items-center justify-center gap-2 text-center hover:border-amber-500/50 min-h-[160px]"
+        className="flex flex-col items-center justify-center gap-2 text-center"
+        style={{
+          border: '1px dashed var(--color-neutral-700)',
+          borderRadius: 'var(--radius-lg)',
+          background: 'transparent',
+          color: 'var(--color-neutral-400)',
+          minHeight: 220,
+          fontSize: 13,
+        }}
       >
-        <span className="text-2xl">🔥</span>
-        <span className="text-sm font-semibold text-slate-300">New campaign</span>
+        <span
+          className="grid place-items-center rounded-full text-lg"
+          style={{ width: 34, height: 34, border: '1px dashed var(--color-neutral-700)' }}
+        >
+          +
+        </span>
+        New campaign
       </button>
     );
   }
@@ -56,15 +84,13 @@ function CreateCampaignCard({ onCreated }: { onCreated: (campaign: Campaign) => 
   return (
     <Card>
       <form onSubmit={onSubmit} className="space-y-3">
-        <div className="space-y-1">
-          <label className="text-xs text-slate-400 font-semibold" htmlFor="cname">
-            Campaign name
-          </label>
+        <div className="field">
+          <label htmlFor="cname">Campaign name</label>
           <TextInput id="cname" value={name} onChange={(e) => setName(e.target.value)} autoFocus required />
         </div>
-        <div className="space-y-1">
-          <label className="text-xs text-slate-400 font-semibold" htmlFor="cdesc">
-            Description <span className="text-slate-600 font-normal">(optional)</span>
+        <div className="field">
+          <label htmlFor="cdesc">
+            Description <span className="text-muted" style={{ textTransform: 'none', letterSpacing: 0 }}>· optional</span>
           </label>
           <TextArea
             id="cdesc"
@@ -96,10 +122,12 @@ export function HomePage() {
   const allCampaigns = [...campaigns, ...justCreated.filter((c) => !campaigns.some((x) => x.id === c.id))];
 
   return (
-    <div className="max-w-6xl mx-auto px-4 mt-8 space-y-6 pb-10">
-      <div className="space-y-1">
-        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Campfire</p>
-        <h1 className="text-2xl md:text-3xl font-extrabold text-white tracking-tight">Your campaigns</h1>
+    <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5">
+      <div>
+        <h3 style={{ margin: 0 }}>Your campaigns</h3>
+        <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
+          Everything on this server, one sign-in. Roles are per campaign.
+        </p>
       </div>
 
       {loading ? (
@@ -118,29 +146,47 @@ export function HomePage() {
           />
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div
+          className="grid gap-3.5"
+          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))' }}
+        >
           {allCampaigns.map((campaign) => {
             const role = roleIn(campaign.id);
             return (
               <button
                 key={campaign.id}
                 onClick={() => navigate(`/c/${campaign.id}`)}
-                className="cf-card p-5 text-left space-y-3 hover:border-amber-500/50 transition-colors"
+                className="card elev-sm text-left overflow-hidden"
+                style={{ padding: 0, gap: 0 }}
               >
-                <div className="flex items-start justify-between gap-2">
-                  <h2 className="font-bold text-white truncate">{campaign.name}</h2>
-                  <Chip variant={statusVariant(campaign.status)}>{campaign.status}</Chip>
-                </div>
-                {campaign.description && (
-                  <p className="text-xs text-slate-400 line-clamp-2">{campaign.description}</p>
-                )}
-                <div className="flex items-center justify-between pt-1">
-                  <span className="text-[11px] text-slate-500 font-semibold">
-                    Session {campaign.sessionCount}
+                <div
+                  className="h-[88px] grid place-items-center"
+                  style={{ background: coverFor(campaign.id) }}
+                >
+                  <span
+                    style={{ fontFamily: 'var(--font-heading)', fontSize: 30, color: 'var(--color-accent-100)' }}
+                  >
+                    {campaign.name.charAt(0).toUpperCase()}
                   </span>
-                  {role && (
-                    <Chip variant="dm">{role === 'dm' ? 'DM' : role === 'player' ? 'Player' : 'Viewer'}</Chip>
+                </div>
+                <div className="flex flex-col gap-2.5" style={{ padding: '14px 16px 16px' }}>
+                  <div>
+                    <div className="card-title" style={{ fontSize: 16 }}>{campaign.name}</div>
+                    <div className="flex gap-1.5 flex-wrap" style={{ marginTop: 6 }}>
+                      <Chip variant={statusVariant(campaign.status)}>{campaign.status}</Chip>
+                      {role && (
+                        <Chip variant="dm">{role === 'dm' ? 'DM' : role === 'player' ? 'Player' : 'Viewer'}</Chip>
+                      )}
+                    </div>
+                  </div>
+                  {campaign.description && (
+                    <p className="text-muted line-clamp-2" style={{ fontSize: 11.5, margin: 0 }}>
+                      {campaign.description}
+                    </p>
                   )}
+                  <div className="text-muted" style={{ fontSize: 11.5 }}>
+                    Session {campaign.sessionCount}
+                  </div>
                 </div>
               </button>
             );

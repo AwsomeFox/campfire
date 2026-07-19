@@ -1,10 +1,11 @@
 /**
- * Authenticated app chrome — sticky topbar + mobile bottom tabbar.
- * Mirrors design/02-dashboard.html. Campaign-scoped nav only renders inside
- * /c/:campaignId routes.
+ * Authenticated app chrome — desktop sidebar + mobile topbar/tabbar/More sheet.
+ * Mirrors the Nocturne app shell in design/claude-design/Campfire.dc.html
+ * (the block starting at the `inApp` sc-if, just above "Dashboard").
+ * Campaign-scoped nav only renders inside /c/:campaignId routes.
  */
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Link, NavLink, Outlet, useNavigate, useParams } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from './auth';
 import { useCampaign } from './CampaignContext';
 import { api, ApiError, API } from '../lib/api';
@@ -16,6 +17,19 @@ function initials(name: string): string {
   const parts = trimmed.split(/\s+/);
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function FlameMark({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="shrink-0">
+      <path
+        d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
+        stroke="var(--color-accent)"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function ChangePasswordModal({ onClose }: { onClose: () => void }) {
@@ -49,37 +63,40 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div className="cf-card p-5 w-full max-w-sm space-y-4" onClick={(e) => e.stopPropagation()}>
-        <h2 className="font-bold text-white">Change password</h2>
+    <div className="dialog-backdrop" style={{ zIndex: 52 }} onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-title">Change password</div>
         {done ? (
           <div className="space-y-3">
-            <p className="text-sm text-emerald-400">Password updated.</p>
+            <p className="text-sm" style={{ color: '#34d399' }}>Password updated.</p>
             <Btn className="w-full" onClick={onClose}>Done</Btn>
           </div>
         ) : (
           <form className="space-y-3" onSubmit={onSubmit}>
-            <div className="space-y-1">
-              <label className="text-xs text-slate-400 font-semibold">Current password</label>
+            <div className="field">
+              <label htmlFor="currentPassword">Current password</label>
               <TextInput
+                id="currentPassword"
                 type="password"
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 autoComplete="current-password"
               />
             </div>
-            <div className="space-y-1">
-              <label className="text-xs text-slate-400 font-semibold">New password</label>
+            <div className="field">
+              <label htmlFor="newPassword">New password</label>
               <TextInput
+                id="newPassword"
                 type="password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 autoComplete="new-password"
               />
             </div>
-            <div className="space-y-1">
-              <label className="text-xs text-slate-400 font-semibold">Confirm new password</label>
+            <div className="field">
+              <label htmlFor="confirmPassword">Confirm new password</label>
               <TextInput
+                id="confirmPassword"
                 type="password"
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
@@ -87,11 +104,9 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
               />
             </div>
             {error && <p className="text-sm text-rose-400">{error}</p>}
-            <div className="flex gap-2 pt-1">
-              <Btn ghost type="button" className="flex-1" onClick={onClose}>Cancel</Btn>
-              <Btn type="submit" className="flex-1" disabled={saving}>
-                {saving ? 'Saving…' : 'Save'}
-              </Btn>
+            <div className="dialog-actions">
+              <Btn ghost type="button" onClick={onClose}>Cancel</Btn>
+              <Btn type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</Btn>
             </div>
           </form>
         )}
@@ -100,14 +115,57 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-const campaignNavLinks = [
-  { to: '', label: 'Dashboard', end: true },
-  { to: 'npcs', label: 'NPCs' },
-  { to: 'locations', label: 'Locations' },
-  { to: 'party', label: 'Party' },
-  { to: 'sessions', label: 'Sessions' },
-  { to: 'notes', label: 'Notes' },
-];
+type NavItem = {
+  key: string;
+  label: string;
+  to?: string;
+  soon?: boolean;
+};
+
+function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: boolean; onClick?: () => void }) {
+  const inner = (
+    <>
+      <span
+        className="w-[5px] h-[5px] rounded-full shrink-0"
+        style={{ background: active ? 'var(--color-accent)' : 'transparent' }}
+      />
+      <span className="flex-1 truncate">{item.label}</span>
+      {item.soon && (
+        <span className="tag tag-neutral" style={{ fontSize: 9 }}>
+          soon
+        </span>
+      )}
+    </>
+  );
+  const sharedStyle = {
+    minHeight: 36,
+    borderRadius: 'var(--radius-md)',
+  } as const;
+  if (item.soon || !item.to) {
+    return (
+      <div
+        className="flex items-center gap-2 px-2.5 text-sm cursor-not-allowed select-none"
+        style={{ ...sharedStyle, color: 'var(--color-neutral-600)' }}
+      >
+        {inner}
+      </div>
+    );
+  }
+  return (
+    <Link
+      to={item.to}
+      onClick={onClick}
+      className="flex items-center gap-2 px-2.5 text-sm"
+      style={{
+        ...sharedStyle,
+        color: active ? 'var(--color-accent)' : 'var(--color-neutral-300)',
+        background: active ? 'color-mix(in srgb, var(--color-accent) 9%, transparent)' : 'transparent',
+      }}
+    >
+      {inner}
+    </Link>
+  );
+}
 
 export function Layout() {
   const { me, isAdmin, roleIn, logout } = useAuth();
@@ -115,12 +173,15 @@ export function Layout() {
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
   const campaign = useCampaign(campaignId);
   const navigate = useNavigate();
+  const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
+  const roleLabel = role === 'dm' ? 'DM' : role === 'player' ? 'Player' : role === 'viewer' ? 'Viewer' : null;
 
   useEffect(() => {
     function onClick(e: MouseEvent) {
@@ -134,119 +195,200 @@ export function Layout() {
 
   async function onLogout() {
     setMenuOpen(false);
+    setMoreOpen(false);
     await logout();
     navigate('/login');
   }
 
   const displayName = me?.user.displayName || me?.user.username || '';
 
+  // Nav items that actually resolve to a route. Design's Encounters/World/
+  // Compendium/Settings(player-facing) items render greyed with a "soon" tag.
+  const mainNav: NavItem[] = campaignId !== undefined
+    ? [
+        { key: 'dashboard', label: 'Dashboard', to: `/c/${campaignId}` },
+        { key: 'quests', label: 'Quests', to: `/c/${campaignId}#quests` },
+        { key: 'world', label: 'World', soon: true },
+        { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
+        { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
+        { key: 'compendium', label: 'Compendium', soon: true },
+        { key: 'notes', label: 'My Notes', to: `/c/${campaignId}/notes` },
+      ]
+    : [];
+
+  const dmNav: NavItem[] = campaignId !== undefined && isDm
+    ? [
+        { key: 'inbox', label: 'Scribe inbox', to: `/c/${campaignId}/inbox` },
+        { key: 'proposals', label: 'Proposals', to: `/c/${campaignId}/proposals` },
+        { key: 'members', label: 'Members', to: `/c/${campaignId}/members` },
+      ]
+    : [];
+
+  const isActivePath = (to?: string) => {
+    if (!to) return false;
+    const path = to.split('#')[0];
+    if (path === `/c/${campaignId}`) {
+      return location.pathname === path;
+    }
+    return location.pathname.startsWith(path);
+  };
+
   return (
-    <div className="pb-20 md:pb-10 min-h-screen">
-      <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
-        <div className="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
-          <Link to="/" className="flex items-center gap-2 font-extrabold text-white shrink-0">
-            🔥<span className="hidden sm:inline">Campfire</span>
+    <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
+      {/* Desktop sidebar */}
+      {campaignId !== undefined && (
+        <aside
+          className="hidden md:flex w-[230px] shrink-0 sticky top-0 flex-col gap-1.5 h-screen p-3.5 border-r"
+          style={{ borderColor: 'var(--color-divider)' }}
+        >
+          <Link
+            to="/"
+            className="flex items-center gap-2.5 px-2 py-1.5 mb-2 rounded-md"
+            style={{ borderRadius: 'var(--radius-md)' }}
+          >
+            <FlameMark size={22} />
+            <span className="min-w-0 leading-tight">
+              <span
+                className="block truncate text-[15px]"
+                style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, color: 'var(--color-text)' }}
+              >
+                {campaign?.name ?? 'Campfire'}
+              </span>
+              <span className="block text-[11px] text-muted">Switch campaign</span>
+            </span>
           </Link>
-          {campaign && (
+
+          <nav className="flex flex-col gap-0.5">
+            {mainNav.map((item) => (
+              <SidebarNavButton key={item.key} item={item} active={isActivePath(item.to)} />
+            ))}
+          </nav>
+
+          {isDm && (
             <>
-              <span className="text-slate-700 hidden sm:inline">/</span>
-              <span className="text-sm font-semibold text-slate-200 truncate">{campaign.name}</span>
+              <div className="text-muted text-[10.5px] uppercase tracking-wide pt-3 pb-1 px-2.5">
+                Dungeon master
+              </div>
+              <nav className="flex flex-col gap-0.5">
+                {dmNav.map((item) => (
+                  <SidebarNavButton key={item.key} item={item} active={isActivePath(item.to)} />
+                ))}
+              </nav>
             </>
           )}
-          {campaignId !== undefined && (
-            <nav className="hidden md:flex items-center gap-5 ml-6 text-sm text-slate-400">
-              {campaignNavLinks.map((link) => (
-                <NavLink
-                  key={link.label}
-                  to={`/c/${campaignId}${link.to ? `/${link.to}` : ''}`}
-                  end={link.end}
-                  className={({ isActive }) =>
-                    isActive ? 'text-white font-semibold' : 'hover:text-white'
-                  }
-                >
-                  {link.label}
-                </NavLink>
-              ))}
+
+          {isAdmin && (
+            <nav className="flex flex-col gap-0.5 mt-1">
+              <SidebarNavButton
+                item={{ key: 'admin', label: 'Admin', to: '/admin' }}
+                active={location.pathname === '/admin'}
+              />
+              <SidebarNavButton
+                item={{ key: 'tokens', label: 'Tokens', to: '/tokens' }}
+                active={location.pathname === '/tokens'}
+              />
             </nav>
           )}
-          <div className="ml-auto flex items-center gap-2.5 shrink-0 relative" ref={menuRef}>
-            {role && <span className="cf-chip cf-chip-dm">{role === 'dm' ? 'DM' : role === 'player' ? 'Player' : 'Viewer'}</span>}
-            {isAdmin && <span className="cf-chip cf-chip-proposal">Admin</span>}
-            <button
-              onClick={() => setMenuOpen((v) => !v)}
-              className="h-8 w-8 rounded-full bg-amber-500/15 border border-amber-500/60 text-amber-400 text-xs font-bold flex items-center justify-center"
-            >
-              {initials(displayName)}
-            </button>
-            {menuOpen && (
-              <div className="absolute right-0 top-11 w-56 cf-card p-2 space-y-1 text-sm z-40">
-                <p className="px-2 py-1 text-xs text-slate-500 truncate">{displayName}</p>
-                {campaignId !== undefined && (
-                  <Link
-                    to={`/c/${campaignId}/notes`}
-                    className="block px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    My notes
-                  </Link>
-                )}
-                {isAdmin && (
-                  <Link
-                    to="/admin"
-                    className="block px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Admin
-                  </Link>
-                )}
-                {isDm && campaignId !== undefined && (
-                  <Link
-                    to={`/c/${campaignId}/members`}
-                    className="block px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Members
-                  </Link>
-                )}
-                {isDm && campaignId !== undefined && (
-                  <Link
-                    to={`/c/${campaignId}/proposals`}
-                    className="block px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Proposals
-                  </Link>
-                )}
-                <Link
-                  to="/tokens"
-                  className="block px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
-                  onClick={() => setMenuOpen(false)}
-                >
-                  API tokens
-                </Link>
-                <button
-                  className="w-full text-left px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setShowPasswordModal(true);
-                  }}
-                >
-                  Change password
-                </button>
-                <button
-                  className="w-full text-left px-2 py-1.5 rounded-lg text-rose-400 hover:bg-slate-700/50"
-                  onClick={onLogout}
-                >
-                  Logout
-                </button>
-              </div>
-            )}
+
+          <div className="flex-1" />
+          <div className="hr my-1" />
+          <div className="flex items-center justify-between px-2 text-[11px] text-muted">
+            <span className="truncate">{displayName}</span>
+            {roleLabel && <span className="tag tag-accent" style={{ fontSize: 9.5 }}>{roleLabel}</span>}
           </div>
-        </div>
-      </header>
+          <div className="flex items-center gap-1.5 px-1">
+            <button
+              className="btn btn-ghost flex-1 justify-start"
+              style={{ fontSize: 12 }}
+              onClick={() => setShowPasswordModal(true)}
+            >
+              Change password
+            </button>
+          </div>
+          <button className="btn btn-ghost justify-start" style={{ fontSize: 12 }} onClick={onLogout}>
+            Sign out
+          </button>
+        </aside>
+      )}
 
-      <Outlet />
+      <div className="flex-1 min-w-0 flex flex-col">
+        {/* Mobile topbar */}
+        <header
+          className="md:hidden sticky top-0 z-30 flex items-center gap-2.5 px-3.5 py-2.5 border-b backdrop-blur"
+          style={{
+            borderColor: 'var(--color-divider)',
+            background: 'color-mix(in srgb, var(--color-bg) 88%, transparent)',
+          }}
+        >
+          <Link to="/" className="flex items-center gap-2">
+            <FlameMark />
+          </Link>
+          <div className="leading-tight min-w-0">
+            <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, fontSize: 14 }}>
+              {campaign?.name ?? 'Campfire'}
+            </div>
+          </div>
+          <div className="flex-1" />
+          {campaignId !== undefined && roleLabel && (
+            <button
+              className="tag tag-outline cursor-pointer"
+              style={{ minHeight: 30, background: 'transparent', border: '1px solid var(--color-divider)', color: 'var(--color-text)' }}
+              onClick={() => setMoreOpen(true)}
+            >
+              {roleLabel} ▾
+            </button>
+          )}
+          {campaignId === undefined && (
+            <div className="relative" ref={menuRef}>
+              <button
+                onClick={() => setMenuOpen((v) => !v)}
+                className="h-8 w-8 rounded-full text-xs font-bold flex items-center justify-center"
+                style={{
+                  background: 'var(--color-accent-900)',
+                  border: '1px solid var(--color-accent-800)',
+                  color: 'var(--color-accent-200)',
+                }}
+              >
+                {initials(displayName)}
+              </button>
+              {menuOpen && <UserMenu isAdmin={isAdmin} displayName={displayName} onLogout={onLogout} onClose={() => setMenuOpen(false)} onChangePassword={() => setShowPasswordModal(true)} />}
+            </div>
+          )}
+        </header>
 
+        {/* Desktop-only header for non-campaign routes (home, admin, tokens) */}
+        {campaignId === undefined && (
+          <header
+            className="hidden md:flex sticky top-0 z-30 items-center gap-2.5 px-5 py-3 border-b"
+            style={{ borderColor: 'var(--color-divider)' }}
+          >
+            <Link to="/" className="flex items-center gap-2.5">
+              <FlameMark />
+              <span style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, fontSize: 15 }}>Campfire</span>
+            </Link>
+            <span className="tag tag-outline" style={{ fontSize: 10 }}>self-hosted</span>
+            <div className="flex-1" />
+            {isAdmin && (
+              <Link to="/admin" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
+                Admin
+              </Link>
+            )}
+            <Link to="/tokens" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
+              Tokens
+            </Link>
+            <span className="text-muted" style={{ fontSize: 12 }}>{displayName}</span>
+            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={onLogout}>
+              Sign out
+            </button>
+          </header>
+        )}
+
+        <main className="flex-1 w-full pb-20 md:pb-10">
+          <Outlet />
+        </main>
+      </div>
+
+      {/* Mobile bottom tab bar */}
       {campaignId !== undefined && (
         <nav className="cf-tabbar">
           <NavLink to={`/c/${campaignId}`} end className={({ isActive }) => (isActive ? 'active' : '')}>
@@ -261,16 +403,138 @@ export function Layout() {
           <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
             <span className="ico">📝</span>Notes
           </NavLink>
-          <button
-            onClick={() => setMenuOpen((v) => !v)}
-            className="flex flex-col items-center gap-0.5 pt-2 text-[10px] font-semibold text-slate-500"
-          >
-            <span className="text-lg leading-none">⋯</span>More
+          <button onClick={() => setMoreOpen(true)}>
+            <span className="ico">⋯</span>More
           </button>
         </nav>
       )}
 
+      {/* More sheet (mobile) */}
+      {moreOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center"
+          style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)' }}
+          onClick={() => setMoreOpen(false)}
+        >
+          <div
+            className="card elev-lg w-full"
+            style={{
+              maxWidth: 440,
+              borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
+              padding: '18px 18px calc(18px + env(safe-area-inset-bottom))',
+              gap: 4,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="mx-auto mb-2.5"
+              style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--color-neutral-700)' }}
+            />
+            <div className="text-muted" style={{ fontSize: 11, padding: '0 6px 6px' }}>
+              Signed in as {displayName}
+              {roleLabel ? ` · viewing as ${roleLabel}` : ''}
+            </div>
+            {mainNav.map((item) => (
+              <MoreSheetItem key={item.key} item={item} onNavigate={() => setMoreOpen(false)} />
+            ))}
+            {dmNav.map((item) => (
+              <MoreSheetItem key={item.key} item={item} onNavigate={() => setMoreOpen(false)} />
+            ))}
+            {isAdmin && (
+              <MoreSheetItem item={{ key: 'admin', label: 'Admin', to: '/admin' }} onNavigate={() => setMoreOpen(false)} />
+            )}
+            <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={() => setMoreOpen(false)} />
+            <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={() => setMoreOpen(false)} />
+            <button
+              className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
+              style={{ fontSize: 14.5, color: 'var(--color-text)' }}
+              onClick={() => {
+                setMoreOpen(false);
+                setShowPasswordModal(true);
+              }}
+            >
+              Change password
+            </button>
+            <button
+              className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full text-rose-400"
+              style={{ fontSize: 14.5 }}
+              onClick={onLogout}
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      )}
+
       {showPasswordModal && <ChangePasswordModal onClose={() => setShowPasswordModal(false)} />}
+    </div>
+  );
+}
+
+function MoreSheetItem({ item, onNavigate }: { item: NavItem; onNavigate: () => void }) {
+  if (item.soon || !item.to) {
+    return (
+      <div
+        className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left"
+        style={{ fontSize: 14.5, color: 'var(--color-neutral-600)' }}
+      >
+        {item.label}
+        <span className="tag tag-neutral ml-auto" style={{ fontSize: 9 }}>soon</span>
+      </div>
+    );
+  }
+  return (
+    <Link
+      to={item.to}
+      onClick={onNavigate}
+      className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md"
+      style={{ fontSize: 14.5, color: 'var(--color-text)' }}
+    >
+      {item.label}
+    </Link>
+  );
+}
+
+function UserMenu({
+  isAdmin,
+  displayName,
+  onLogout,
+  onClose,
+  onChangePassword,
+}: {
+  isAdmin: boolean;
+  displayName: string;
+  onLogout: () => void;
+  onClose: () => void;
+  onChangePassword: () => void;
+}) {
+  return (
+    <div
+      className="absolute right-0 top-11 w-56 card elev-md p-2 space-y-1 text-sm z-40"
+      style={{ gap: 2 }}
+    >
+      <p className="px-2 py-1 text-xs text-muted truncate">{displayName}</p>
+      {isAdmin && (
+        <Link to="/admin" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+          Admin
+        </Link>
+      )}
+      <Link to="/tokens" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+        API tokens
+      </Link>
+      <button
+        className="w-full text-left px-2 py-1.5 rounded-md"
+        style={{ color: 'var(--color-text)' }}
+        onClick={() => {
+          onClose();
+          onChangePassword();
+        }}
+      >
+        Change password
+      </button>
+      <button className="w-full text-left px-2 py-1.5 rounded-md text-rose-400" onClick={onLogout}>
+        Logout
+      </button>
     </div>
   );
 }

@@ -1,13 +1,32 @@
 /**
  * First-run "light the fire" screen — creates the initial admin user.
- * Mirrors design/01-login.html aesthetic. If setup is not required, bounce
- * to /login.
+ * Same card-on-radial-ground language as LoginPage (design's Login screen).
+ * If setup is not required, bounce to /login.
  */
 import { useState, type FormEvent } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+
+function FlameMark() {
+  return (
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
+        stroke="var(--color-accent)"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M5 21l14-3M19 21L5 18"
+        stroke="var(--color-neutral-600)"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 export function SetupPage() {
   const { status, loading } = useAuthStatus();
@@ -59,83 +78,85 @@ export function SetupPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6 relative">
-      <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_top,rgba(245,158,11,.08),transparent_55%),radial-gradient(ellipse_at_bottom,rgba(56,189,248,.05),transparent_55%)] pointer-events-none" />
-      <div className="fixed inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px] opacity-30 pointer-events-none" />
+    <div
+      className="min-h-screen grid place-items-center p-6"
+      style={{
+        background:
+          'radial-gradient(80% 60% at 50% 0%, var(--color-neutral-900) 0%, var(--color-bg) 70%)',
+      }}
+    >
+      <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
+        <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+          <FlameMark />
+          <div>
+            <h3 style={{ margin: 0 }}>Campfire</h3>
+            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
+              Light the fire — set up the first admin account.
+            </p>
+          </div>
 
-      <main className="relative w-full max-w-sm space-y-6">
-        <div className="text-center space-y-2">
-          <div className="text-5xl">🔥</div>
-          <h1 className="text-3xl font-extrabold text-white tracking-tight">Campfire</h1>
-          <p className="text-sm text-slate-400">Light the fire — set up the first admin account.</p>
+          <form onSubmit={onSubmit} className="w-full flex flex-col gap-3">
+            <div className="field">
+              <label htmlFor="username">Username</label>
+              <input
+                id="username"
+                className="input"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
+                autoFocus
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="displayName">
+                Display name <span className="text-muted" style={{ textTransform: 'none', letterSpacing: 0 }}>· optional</span>
+              </label>
+              <input
+                id="displayName"
+                className="input"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                autoComplete="name"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="password">Password</label>
+              <input
+                id="password"
+                type="password"
+                className="input"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="confirm">Confirm password</label>
+              <input
+                id="confirm"
+                type="password"
+                className="input"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                autoComplete="new-password"
+                required
+              />
+            </div>
+
+            {error && <p className="text-sm text-rose-400">{error}</p>}
+
+            <button type="submit" className="btn btn-primary btn-block" style={{ minHeight: 44 }} disabled={submitting}>
+              {submitting ? 'Lighting…' : 'Light the fire'}
+            </button>
+          </form>
         </div>
 
-        <form onSubmit={onSubmit} className="cf-card p-6 space-y-4">
-          <div className="space-y-1">
-            <label className="text-xs text-slate-400 font-semibold" htmlFor="username">
-              Username
-            </label>
-            <input
-              id="username"
-              className="cf-input"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username"
-              required
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-slate-400 font-semibold" htmlFor="displayName">
-              Display name <span className="text-slate-600 font-normal">(optional)</span>
-            </label>
-            <input
-              id="displayName"
-              className="cf-input"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              autoComplete="name"
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-slate-400 font-semibold" htmlFor="password">
-              Password
-            </label>
-            <input
-              id="password"
-              type="password"
-              className="cf-input"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-slate-400 font-semibold" htmlFor="confirm">
-              Confirm password
-            </label>
-            <input
-              id="confirm"
-              type="password"
-              className="cf-input"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-
-          {error && <p className="text-sm text-rose-400">{error}</p>}
-
-          <button type="submit" className="cf-btn w-full text-base" disabled={submitting}>
-            {submitting ? 'Lighting…' : 'Light the fire'}
-          </button>
-        </form>
-
-        <p className="text-center text-[11px] text-slate-600">
-          Self-hosted with ❤️ · <span className="text-slate-500">campfire v0.1.0</span>
+        <p className="text-center text-muted" style={{ fontSize: 11 }}>
+          Self-hosted with ❤️ · campfire v0.1.0
         </p>
-      </main>
+      </div>
     </div>
   );
 }

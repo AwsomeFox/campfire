@@ -264,6 +264,53 @@ domain modules. If the domain modules imported `ProposalsModule` directly
   passthrough path double-encodes it as JSON (`{"type":"Buffer","data":[...]}`),
   which breaks the zip's binary content-type.
 
+## MCP server
+
+The full service layer is exposed as a **Model Context Protocol** server at
+`POST /mcp` (Streamable HTTP, **stateless**: fresh `McpServer` + transport per
+request, JSON responses, no session ids; `GET`/`DELETE /mcp` return 405). The
+route lives outside the `/api/v1` prefix (like `healthz`) but is **not**
+`@Public()` — the global `SessionAuthGuard`'s Bearer path is the auth.
+
+**Auth:** `Authorization: Bearer cf_pat_...` (a PAT from `POST /tokens`) or a
+real session cookie. `DEV_AUTH` header users are rejected with 401. Every tool
+resolves the caller's effective role per campaign via `CampaignAccessService`,
+so PAT scope caps (`scope`, `campaignId`) apply exactly as they do over REST,
+and audit entries record `token:<name>`.
+
+**Connect from Claude Code:**
+
+```bash
+claude mcp add --transport http campfire http://host:8080/mcp \
+  --header "Authorization: Bearer cf_pat_..."
+```
+
+**Tool catalog** (27 — `modules/mcp/mcp-tools.ts`):
+
+- **Read:** `list_campaigns`, `get_campaign_summary`, `get_quest`,
+  `list_quests`, `get_npc`, `list_npcs`, `get_location`, `list_locations`,
+  `get_character`, `get_party`, `get_session_recaps`, `read_inbox` (dm),
+  `list_proposals` (dm).
+- **Write:** `create_quest`, `update_quest`, `set_quest_status`,
+  `add_objective`, `check_objective` (player+), `upsert_npc`,
+  `upsert_location`, `add_session_recap` (`number` defaults to max+1),
+  `update_character_hp` (player owner/dm; exactly one of `delta`|`set`),
+  `add_note` (any member), `resolve_inbox_item` (dm),
+  `update_campaign_status` (dm), `approve_proposal` (dm),
+  `reject_proposal` (dm).
+
+Write tools on proposable entities (quest/npc/location/session create+update,
+including `set_quest_status`, which proposes a quest update) accept
+`propose: true` to route through `ProposalRecordsService` — identical to the
+REST `?proposed=true` flow: any member may propose; a dm applies it later via
+`approve_proposal`. `propose` is ignored where REST has no proposal path
+(objectives, characters, notes, campaign status).
+
+Tool args are validated against the same `@campfire/schema` zod shapes as the
+REST DTOs (`QuestCreate.shape` etc. spread into the MCP `inputSchema`).
+Results are JSON text content; domain errors (403/404/400) come back as
+`isError` content with the HTTP status and message, not protocol errors.
+
 ## Validation approach
 
 **nestjs-zod, chosen over a hand-rolled pipe.** Every request body schema is
