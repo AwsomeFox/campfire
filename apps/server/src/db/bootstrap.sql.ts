@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS users (
   server_role TEXT NOT NULL DEFAULT 'user',
   disabled INTEGER NOT NULL DEFAULT 0,
   oidc_sub TEXT,
+  accent_color TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

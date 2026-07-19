@@ -1,7 +1,7 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, like, ne, or } from 'drizzle-orm';
 import type { z } from 'zod';
-import { UserCreate, UserUpdate, PasswordChange } from '@campfire/schema';
+import { UserCreate, UserUpdate, PasswordChange, PreferencesUpdate } from '@campfire/schema';
 import type { User } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { users, userSessions, campaignMembers } from '../../db/schema';
@@ -11,6 +11,7 @@ import { hashPassword } from '../../common/crypto';
 type UserCreateInput = z.infer<typeof UserCreate>;
 type UserUpdateInput = z.infer<typeof UserUpdate>;
 type PasswordChangeInput = z.infer<typeof PasswordChange>;
+type PreferencesUpdateInput = z.infer<typeof PreferencesUpdate>;
 
 function toDomain(row: typeof users.$inferSelect): User {
   return {
@@ -19,6 +20,7 @@ function toDomain(row: typeof users.$inferSelect): User {
     displayName: row.displayName,
     serverRole: row.serverRole as User['serverRole'],
     disabled: row.disabled,
+    accentColor: row.accentColor,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -163,6 +165,18 @@ export class UsersService {
     if (input.displayName !== undefined) update.displayName = input.displayName;
     if (input.serverRole !== undefined) update.serverRole = input.serverRole;
     if (input.disabled !== undefined) update.disabled = input.disabled;
+
+    const [row] = await this.db.update(users).set(update).where(eq(users.id, id)).returning();
+    return toDomain(row);
+  }
+
+  /** Self-service preferences (display name + accent color) — PATCH /me/preferences. */
+  async updatePreferences(id: number, input: PreferencesUpdateInput): Promise<User> {
+    await this.getRowOrThrow(id);
+
+    const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
+    if (input.displayName !== undefined) update.displayName = input.displayName;
+    if (input.accentColor !== undefined) update.accentColor = input.accentColor;
 
     const [row] = await this.db.update(users).set(update).where(eq(users.id, id)).returning();
     return toDomain(row);

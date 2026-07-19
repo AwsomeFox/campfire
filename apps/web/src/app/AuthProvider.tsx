@@ -7,6 +7,37 @@ import type { Me, Role } from '@campfire/schema';
 import { api, ApiError, API } from '../lib/api';
 import { AuthContext, type AuthState } from './auth';
 
+/**
+ * Blends a #rrggbb hex color toward white by `ratio` (0-1). Used to derive a
+ * lighter "-2"/hover tint from the user's chosen accent, mirroring the static
+ * --color-accent-2 relationship baked into index.css for the default palette.
+ */
+function mixWithWhite(hex: string, ratio: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  const blend = (c: number) => Math.round(c + (255 - c) * ratio);
+  return `#${[blend(r), blend(g), blend(b)].map((c) => c.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Applies (or clears, when null) the user's personal accent color override as CSS custom properties. */
+function applyAccentColor(accentColor: string | null): void {
+  const root = document.documentElement.style;
+  if (accentColor) {
+    const accent2 = mixWithWhite(accentColor, 0.3);
+    root.setProperty('--color-accent', accentColor);
+    root.setProperty('--cf-accent', accentColor);
+    root.setProperty('--color-accent-2', accent2);
+    root.setProperty('--cf-accent-2', accent2);
+  } else {
+    root.removeProperty('--color-accent');
+    root.removeProperty('--cf-accent');
+    root.removeProperty('--color-accent-2');
+    root.removeProperty('--cf-accent-2');
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [ready, setReady] = useState(false);
@@ -15,9 +46,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const nextMe = await api.get<Me>(`${API}/me`);
       setMe(nextMe);
+      applyAccentColor(nextMe.user.accentColor);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setMe(null);
+        applyAccentColor(null);
       } else {
         throw err;
       }

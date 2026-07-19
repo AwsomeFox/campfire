@@ -250,12 +250,17 @@ export type CampaignSummary = z.infer<typeof CampaignSummary>;
 export const ServerRole = z.enum(['admin', 'user']);
 export type ServerRole = z.infer<typeof ServerRole>;
 
+// Hex color, e.g. #9184d9. Shared by User.accentColor and PreferencesUpdate below.
+const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+
 export const User = z.object({
   id: Id,
   username: z.string().min(2).max(60).regex(/^[a-z0-9_.-]+$/i, 'letters, numbers, _ . - only'),
   displayName: z.string().max(120).default(''),
   serverRole: ServerRole.default('user'),
   disabled: z.boolean().default(false),
+  // Personal accent color override (per-user UI theming). null = follow the server default (Nocturne blurple).
+  accentColor: HexColor.nullable().default(null),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -266,6 +271,13 @@ export const LoginRequest = z.object({ username: z.string().min(1), password: z.
 export const UserCreate = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional(), serverRole: ServerRole.optional() });
 export const UserUpdate = z.object({ displayName: z.string().max(120).optional(), serverRole: ServerRole.optional(), disabled: z.boolean().optional() });
 export const PasswordChange = z.object({ currentPassword: z.string().optional(), newPassword: Password }); // current required for self-change; admin reset omits
+
+// Self-service preferences (PATCH /me/preferences) — separate from admin-only UserUpdate above.
+export const PreferencesUpdate = z.object({
+  displayName: z.string().max(120).optional(),
+  accentColor: HexColor.nullable().optional(),
+});
+export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 
 export const AuthStatus = z.object({
   setupRequired: z.boolean(), // true until the first (admin) user exists
