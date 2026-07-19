@@ -3,10 +3,12 @@
  * Mirrors design/02-dashboard.html structure/classes; see README-less DoD notes in PR.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import type { CampaignSummary, Encounter } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaigns } from '../../app/CampaignContext';
+import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { StatusHeader } from './StatusHeader';
 import { InstallHintBanner } from './InstallHintBanner';
@@ -22,6 +24,8 @@ export default function DashboardPage() {
   const id = Number(campaignId);
   const { roleIn } = useAuth();
   const role = roleIn(id);
+  const { refresh: refreshCampaigns } = useCampaigns();
+  const { lostAccess, handle: handleAccessError } = useCampaignAccessError();
 
   const [summary, setSummary] = useState<CampaignSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -34,12 +38,17 @@ export default function DashboardPage() {
     try {
       const data = await api.get<CampaignSummary>(`${API}/campaigns/${id}/summary`);
       setSummary(data);
+      // Keep the sidebar/topbar/Home tiles in sync — StatusHeader can rename the
+      // campaign from here, and CampaignContext is the shared source for its name.
+      void refreshCampaigns();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load the campaign dashboard.");
+      if (!handleAccessError(err)) {
+        setError(err instanceof ApiError ? err.message : "Couldn't load the campaign dashboard.");
+      }
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, refreshCampaigns, handleAccessError]);
 
   useEffect(() => {
     if (Number.isFinite(id)) void load();
@@ -67,6 +76,20 @@ export default function DashboardPage() {
     return (
       <div className="max-w-7xl mx-auto px-4 mt-5">
         <ErrorNote message="No campaign selected." />
+      </div>
+    );
+  }
+
+  if (lostAccess) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 mt-5">
+        <Card className="text-center space-y-2">
+          <p className="text-2xl">🔒</p>
+          <p className="font-bold text-white">You no longer have access to this campaign</p>
+          <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
+            Back to your campaigns
+          </Link>
+        </Card>
       </div>
     );
   }

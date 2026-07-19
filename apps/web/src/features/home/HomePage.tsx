@@ -9,7 +9,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
-import { Card, Chip, statusVariant, EmptyState, Skeleton } from '../../components/ui';
+import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { NewCampaignWizard } from './NewCampaignWizard';
 import type { Campaign } from '@campfire/schema';
 
@@ -53,7 +53,7 @@ function NewCampaignTile({ onClick }: { onClick: () => void }) {
 
 export function HomePage() {
   const { roleIn } = useAuth();
-  const { campaigns, loading, refresh } = useCampaigns();
+  const { campaigns, loading, error, refresh } = useCampaigns();
   const navigate = useNavigate();
   const [justCreated, setJustCreated] = useState<Campaign[]>([]);
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -84,6 +84,8 @@ export function HomePage() {
         <Card>
           <Skeleton lines={4} />
         </Card>
+      ) : error ? (
+        <ErrorNote message="Couldn't reach the server to load your campaigns." onRetry={() => void refresh()} />
       ) : allCampaigns.length === 0 ? (
         <div className="max-w-md space-y-4">
           <EmptyState icon="🕯️" title="No campaigns yet — light the first fire." />

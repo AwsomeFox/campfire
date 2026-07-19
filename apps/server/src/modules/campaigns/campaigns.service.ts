@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CampaignCreate, CampaignUpdate } from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
@@ -11,6 +11,7 @@ import {
   notes,
   quests,
   questObjectives,
+  sessions,
   npcs,
   locations,
   characters,
@@ -103,9 +104,46 @@ export class CampaignsService {
     }
   }
 
+  /**
+   * currentLocationId (locations) and mapAttachmentId (attachments) are FK-shaped fields
+   * that previously accepted any integer with no existence/campaign check — a nonexistent
+   * id, or worse, another campaign's location/attachment id, would silently pass through.
+   * `campaignId` is the id of the campaign these fields must resolve WITHIN: on create
+   * that's the not-yet-known new campaign's own id, which can never match any existing
+   * row, so create() only ever passes null through for these two — validation on create
+   * would be a pointless always-fail. On update, `campaignId` is the existing campaign id.
+   */
+  private async validateLocationRef(locationId: number | null | undefined, campaignId: number): Promise<void> {
+    if (locationId == null) return;
+    const [row] = await this.db
+      .select({ id: locations.id })
+      .from(locations)
+      .where(and(eq(locations.id, locationId), eq(locations.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`currentLocationId ${locationId} does not exist in this campaign`);
+  }
+
+  private async validateAttachmentRef(attachmentId: number | null | undefined, campaignId: number): Promise<void> {
+    if (attachmentId == null) return;
+    const [row] = await this.db
+      .select({ id: attachments.id })
+      .from(attachments)
+      .where(and(eq(attachments.id, attachmentId), eq(attachments.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`mapAttachmentId ${attachmentId} does not exist in this campaign`);
+  }
+
   /** Any authenticated user may create a campaign; creator is auto-inserted as 'dm' (skipped for dev:* users). */
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
     await this.validateRuleSystem(input.ruleSystem);
+    // A brand-new campaign has no locations/attachments of its own yet, so any
+    // non-null currentLocationId/mapAttachmentId on create can never be valid.
+    if (input.currentLocationId != null) {
+      throw new BadRequestException('currentLocationId cannot be set on campaign create (no locations exist yet)');
+    }
+    if (input.mapAttachmentId != null) {
+      throw new BadRequestException('mapAttachmentId cannot be set on campaign create (no attachments exist yet)');
+    }
     const ts = nowIso();
     const [row] = await this.db
       .insert(campaigns)
@@ -144,6 +182,8 @@ export class CampaignsService {
   async update(id: number, input: CampaignUpdateInput, user: RequestUser): Promise<Campaign> {
     await this.getOrThrow(id);
     await this.validateRuleSystem(input.ruleSystem);
+    await this.validateLocationRef(input.currentLocationId, id);
+    await this.validateAttachmentRef(input.mapAttachmentId, id);
     const [row] = await this.db
       .update(campaigns)
       .set({ ...input, updatedAt: nowIso() })
@@ -201,6 +241,7 @@ export class CampaignsService {
       tx.delete(locations).where(eq(locations.campaignId, id)).run();
       tx.delete(characters).where(eq(characters.campaignId, id)).run();
       tx.delete(notes).where(eq(notes.campaignId, id)).run();
+      tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
       tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
       tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();
       tx.delete(apiTokens).where(eq(apiTokens.campaignId, id)).run();

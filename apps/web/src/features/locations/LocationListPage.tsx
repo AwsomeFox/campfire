@@ -4,7 +4,7 @@
  * DM can inline-create (name + kind); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -104,6 +104,9 @@ export default function LocationListPage() {
       <Card className="space-y-4">
         <div className="flex items-center justify-between border-b border-slate-700 pb-3">
           <h1 className="font-bold text-white text-lg flex items-center gap-2">🗺 Locations</h1>
+          <Link to={`/c/${id}/npcs`} className="btn btn-ghost" style={{ fontSize: 12 }}>
+            NPCs →
+          </Link>
           {isDm && !creating && (
             <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
               + New location

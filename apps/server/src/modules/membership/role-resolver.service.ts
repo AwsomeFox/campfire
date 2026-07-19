@@ -40,7 +40,15 @@ export class RoleResolver {
     return minRole(tokenContext.scope, role);
   }
 
-  private async baseEffectiveRole(user: RequestUser, campaignId: number): Promise<Role | null> {
+  /**
+   * The user's real (untapped-by-token) effective role on a campaign —
+   * membership row, devRole, or admin server-role. Used anywhere a token's
+   * own campaignId/scope must never be trusted on its own, e.g. minting a
+   * new token (TokensService.create) or scoping GET /campaigns
+   * (accessibleCampaignIds below): both must fall back to what the CALLER
+   * actually has, never the token's self-reported campaignId.
+   */
+  async baseEffectiveRole(user: RequestUser, campaignId: number): Promise<Role | null> {
     if (user.devRole) return user.devRole;
     if (user.serverRole === 'admin') return 'dm';
 
@@ -56,9 +64,24 @@ export class RoleResolver {
     return row ? (row.role as Role) : null;
   }
 
-  /** Campaign ids this user may access at all (for GET /campaigns scoping). */
+  /**
+   * Campaign ids this user may access at all (for GET /campaigns scoping).
+   *
+   * A campaign-scoped token's campaignId is NEVER trusted on its own — it
+   * must be intersected with the caller's real base accessible set
+   * (membership/admin/devRole), exactly like effectiveRole() caps via
+   * baseEffectiveRole() rather than trusting the token wholesale. Without
+   * this, a token minted for a campaign the caller isn't a member of would
+   * leak that campaign's metadata through this list (see TokensService.create,
+   * which now also refuses to mint such a token — this is belt-and-suspenders
+   * for any token that predates that fix or is otherwise inconsistent).
+   */
   async accessibleCampaignIds(user: RequestUser): Promise<number[] | 'all'> {
-    if (user.tokenContext?.campaignId != null) return [user.tokenContext.campaignId];
+    const tokenCampaignId = user.tokenContext?.campaignId;
+    if (tokenCampaignId != null) {
+      const base = await this.baseEffectiveRole(user, tokenCampaignId);
+      return base ? [tokenCampaignId] : [];
+    }
 
     if (user.devRole) return 'all';
     if (user.serverRole === 'admin') return 'all';

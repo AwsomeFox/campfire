@@ -25,7 +25,7 @@ export class TokensController {
 
   @Post()
   create(@Body() body: ApiTokenCreateDto, @CurrentUser() user: RequestUser) {
-    return this.tokens.create(requireRealUserId(user), body);
+    return this.tokens.create(requireRealUserId(user), body, user);
   }
 
   @Delete(':id')

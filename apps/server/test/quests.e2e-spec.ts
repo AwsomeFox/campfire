@@ -211,4 +211,89 @@ describe('quests (e2e)', () => {
       .send({ done: true });
     expect(rightPatch.status).toBe(200);
   });
+
+  // P2 fix pinning tests — FK-shaped fields (parentId, giverNpcId) must resolve to a
+  // real row IN THE SAME campaign, or 400.
+  describe('FK validation: parentId / giverNpcId', () => {
+    it('POST with a nonexistent parentId -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Bad parent', parentId: 999999 });
+      expect(res.status).toBe(400);
+    });
+
+    it('POST with a cross-campaign parentId -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const otherCampRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Quest Campaign' });
+      const otherCampaignId = otherCampRes.body.id;
+      const otherQuestRes = await request(server)
+        .post(`/api/v1/campaigns/${otherCampaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Quest in other campaign' });
+      const otherQuestId = otherQuestRes.body.id;
+
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Cross-campaign parent', parentId: otherQuestId });
+      expect(res.status).toBe(400);
+    });
+
+    it('PATCH quest to be its own parent -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const questRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Self parent test' });
+      const questId = questRes.body.id;
+
+      const res = await request(server).patch(`/api/v1/quests/${questId}`).set(dm).send({ parentId: questId });
+      expect(res.status).toBe(400);
+    });
+
+    it('POST with a nonexistent giverNpcId -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Bad giver npc', giverNpcId: 999999 });
+      expect(res.status).toBe(400);
+    });
+
+    it('POST with a cross-campaign giverNpcId -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const otherCampRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Npc Campaign' });
+      const otherCampaignId = otherCampRes.body.id;
+      const npcRes = await request(server)
+        .post(`/api/v1/campaigns/${otherCampaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'NPC in other campaign' });
+      const otherNpcId = npcRes.body.id;
+
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Cross-campaign giver', giverNpcId: otherNpcId });
+      expect(res.status).toBe(400);
+    });
+
+    it('POST/PATCH with a valid same-campaign parentId and giverNpcId -> 200/201', async () => {
+      const server = ctx.app.getHttpServer();
+      const npcRes = await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Quest Giver' });
+      const npcId = npcRes.body.id;
+      const parentRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Valid parent quest' });
+      const parentId = parentRes.body.id;
+
+      const createRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Valid child quest', parentId, giverNpcId: npcId });
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.parentId).toBe(parentId);
+      expect(createRes.body.giverNpcId).toBe(npcId);
+
+      const patchRes = await request(server).patch(`/api/v1/quests/${createRes.body.id}`).set(dm).send({ giverNpcId: npcId });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.giverNpcId).toBe(npcId);
+    });
+  });
 });

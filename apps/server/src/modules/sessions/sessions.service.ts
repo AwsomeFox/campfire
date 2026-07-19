@@ -1,5 +1,5 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, desc, eq, ne } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionCreate, SessionUpdate } from '@campfire/schema';
 import type { Session, Role } from '@campfire/schema';
@@ -53,18 +53,28 @@ export class SessionsService {
     return toDomain(row);
   }
 
-  /** bump campaign.sessionCount to max(current, count) */
-  private async bumpSessionCount(campaignId: number, count: number): Promise<void> {
-    const [campaign] = await this.db.select().from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
-    if (campaign && count > campaign.sessionCount) {
-      await this.db
-        .update(campaigns)
-        .set({ sessionCount: count, updatedAt: nowIso() })
-        .where(eq(campaigns.id, campaignId));
-    }
+  /**
+   * campaign.sessionCount is a denormalized COUNT(*) of this campaign's sessions —
+   * recomputed (never bumped/guessed) on every create/delete so it stays accurate
+   * regardless of session numbering (which may have gaps or be renumbered) or deletes
+   * (which previously never decremented it at all).
+   */
+  private async recomputeSessionCount(campaignId: number): Promise<void> {
+    const rows = await this.db.select({ id: sessions.id }).from(sessions).where(eq(sessions.campaignId, campaignId));
+    await this.db.update(campaigns).set({ sessionCount: rows.length, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
+  }
+
+  /** Session `number` must be unique within a campaign — 409 on a duplicate. */
+  private async assertNumberAvailable(campaignId: number, number: number, excludeId?: number): Promise<void> {
+    const conflict = excludeId
+      ? and(eq(sessions.campaignId, campaignId), eq(sessions.number, number), ne(sessions.id, excludeId))
+      : and(eq(sessions.campaignId, campaignId), eq(sessions.number, number));
+    const [row] = await this.db.select({ id: sessions.id }).from(sessions).where(conflict).limit(1);
+    if (row) throw new ConflictException(`Session number ${number} already exists in this campaign`);
   }
 
   async create(campaignId: number, input: SessionCreateInput, user: RequestUser, role: Role): Promise<Session> {
+    await this.assertNumberAvailable(campaignId, input.number);
     const ts = nowIso();
     const [row] = await this.db
       .insert(sessions)
@@ -79,7 +89,7 @@ export class SessionsService {
       })
       .returning();
 
-    await this.bumpSessionCount(campaignId, input.number);
+    await this.recomputeSessionCount(campaignId);
 
     await this.audit.log({
       actor: auditActor(user),
@@ -94,15 +104,14 @@ export class SessionsService {
 
   async update(id: number, input: SessionUpdateInput, user: RequestUser, role: Role): Promise<Session> {
     const existing = await this.getRowOrThrow(id);
+    if (input.number !== undefined) {
+      await this.assertNumberAvailable(existing.campaignId, input.number, id);
+    }
     const [row] = await this.db
       .update(sessions)
       .set({ ...input, updatedAt: nowIso() })
       .where(eq(sessions.id, id))
       .returning();
-
-    if (input.number !== undefined) {
-      await this.bumpSessionCount(existing.campaignId, input.number);
-    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -118,6 +127,7 @@ export class SessionsService {
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(sessions).where(eq(sessions.id, id));
+    await this.recomputeSessionCount(existing.campaignId);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

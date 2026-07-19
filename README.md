@@ -98,7 +98,6 @@ docker run -d \
   --name campfire \
   -p 8080:8080 \
   -v campfire-data:/data \
-  -e ORIGIN=https://campfire.example.com \
   ghcr.io/awsomefox/campfire:latest
 ```
 
@@ -127,7 +126,7 @@ running on 8080 — maps to the container's internal 8080).
 | `OIDC_REDIRECT_URI` | *(unset)* | OIDC callback URL, e.g. `https://campfire.example.com/api/v1/auth/oidc/callback` |
 | `OIDC_SCOPE` | `openid profile email` | OIDC scopes requested |
 | `OIDC_GROUPS_CLAIM` | `groups` | Claim in the ID token holding the user's group memberships |
-| `OIDC_ADMIN_GROUP` | *(unset)* | Group name that maps to the `dm` server role |
+| `OIDC_ADMIN_GROUP` | *(unset)* | Group name that grants the Campfire **server admin** role (campaign roles dm/player/viewer are per-campaign memberships managed in-app) |
 | `OIDC_ALLOW_INSECURE` | *(unset)* | Set to allow OIDC over plain HTTP — dev/testing only, never in production |
 | `TZ` | *(unset, UTC)* | Container timezone, e.g. `America/Denver` — affects displayed session/log timestamps |
 
@@ -147,7 +146,6 @@ services:
     volumes:
       - campfire-data:/data
     environment:
-      ORIGIN: ${CAMPFIRE_ORIGIN:?}
       OIDC_ISSUER: ${OIDC_ISSUER:?}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
@@ -161,7 +159,6 @@ volumes:
   campfire-data:
 ```
 
-Run with `CAMPFIRE_ORIGIN=https://campfire.example.com OIDC_ISSUER=... docker compose up -d`
 (or an `.env` file next to the compose file — keep that file out of git).
 
 ### Reverse proxy + SSO (Traefik / Authentik)

@@ -2,7 +2,9 @@ import { Controller, Get } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Public } from '../../common/decorators/public.decorator';
 
-const VERSION = '0.1.0';
+// Single-sourced from package.json so /healthz, Swagger and tags can't drift.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const VERSION: string = require('../../../package.json').version;
 
 @ApiTags('health')
 @Controller()

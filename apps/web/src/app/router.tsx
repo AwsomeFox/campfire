@@ -12,6 +12,7 @@ import { Skeleton } from '../components/ui';
 import { SetupPage } from '../features/auth/SetupPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { HomePage } from '../features/home/HomePage';
+import { NotFoundPage } from '../features/home/NotFoundPage';
 
 function lazyPage(loader: Parameters<typeof lazy>[0]) {
   const LazyComponent = lazy(loader);
@@ -137,6 +138,10 @@ export const router = createBrowserRouter([
           {
             path: '/preferences',
             element: lazyPage(() => import('../features/preferences/PreferencesPage')),
+          },
+          {
+            path: '*',
+            element: page(<NotFoundPage />),
           },
         ],
       },

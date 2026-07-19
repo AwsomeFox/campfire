@@ -16,12 +16,34 @@ function Splash() {
   );
 }
 
+function ConnectionErrorScreen({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4">
+      <div className="card elev-sm text-center space-y-2" style={{ maxWidth: 380 }}>
+        <p className="text-2xl">🔥</p>
+        <p className="font-bold text-white">Can&apos;t reach the server</p>
+        <p className="text-sm text-slate-400">Check your connection and try again.</p>
+        <button className="btn btn-primary" style={{ marginTop: 4 }} onClick={onRetry}>
+          Retry
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function AuthedLayout() {
-  const { me, ready } = useAuth();
+  const { me, ready, connectionError, refresh } = useAuth();
   const { status, loading: statusLoading } = useAuthStatus();
 
   if (!ready || statusLoading) {
     return <Splash />;
+  }
+
+  // A cold load with the API down would otherwise land here with me=null,
+  // ready=true and bounce forever between Splash and /login on every refresh
+  // attempt. Surface a retry instead of pretending the user is logged out.
+  if (connectionError && !me) {
+    return <ConnectionErrorScreen onRetry={() => void refresh()} />;
   }
 
   if (status?.setupRequired) {

@@ -73,6 +73,36 @@ describe('characters (e2e)', () => {
     expect(res.body.hpCurrent).toBe(5);
   });
 
+  // P2 fix pinning tests — CharactersService.update() now clamps hpCurrent to
+  // [0, finalHpMax] like patchHp already did, instead of writing verbatim.
+  it('PATCH hpMax below standing hpCurrent clamps hpCurrent down', async () => {
+    const server = ctx.app.getHttpServer();
+    // Reset to a known standing state: hpMax=20, hpCurrent=20.
+    const setupRes = await request(server).patch(`/api/v1/characters/${characterId}`).set(dm).send({ hpMax: 20, hpCurrent: 20 });
+    expect(setupRes.status).toBe(200);
+    expect(setupRes.body.hpCurrent).toBe(20);
+
+    const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(dm).send({ hpMax: 10 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpMax).toBe(10);
+    expect(res.body.hpCurrent).toBe(10);
+  });
+
+  it('PATCH hpCurrent above hpMax is clamped to hpMax', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(dm).send({ hpCurrent: 999 });
+    expect(res.status).toBe(200);
+    // hpMax is 10 from the previous test.
+    expect(res.body.hpCurrent).toBe(10);
+  });
+
+  it('PATCH hpCurrent negative is clamped to 0', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(dm).send({ hpCurrent: -50 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpCurrent).toBe(0);
+  });
+
   it('conditions add/remove', async () => {
     const server = ctx.app.getHttpServer();
     const addRes = await request(server)

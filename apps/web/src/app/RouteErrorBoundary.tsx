@@ -29,12 +29,20 @@ export class RouteErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <div className="max-w-lg mx-auto mt-10 px-4">
-          <Card className="text-center space-y-2">
-            <p className="text-2xl">🚧</p>
-            <p className="font-bold text-white">Screen under construction</p>
+          <Card className="text-center space-y-3">
+            <p className="text-2xl">⚠️</p>
+            <p className="font-bold text-white">Something went wrong on this screen</p>
             <p className="text-sm text-slate-400">
-              This part of Campfire isn&apos;t ready yet. Check back soon.
+              You can try reloading, or head back to your campaigns.
             </p>
+            <div className="flex gap-2 justify-center pt-1">
+              <button className="btn btn-secondary" onClick={() => window.location.reload()}>
+                Reload
+              </button>
+              <a href="/" className="btn btn-primary">
+                Back to campaigns
+              </a>
+            </div>
           </Card>
         </div>
       );

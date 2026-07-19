@@ -8,6 +8,7 @@ import { apiTokens, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateApiToken, hashApiToken, apiTokenPrefix } from '../../common/crypto';
 import type { RequestUser, TokenContext } from '../../common/user.types';
+import { RoleResolver } from '../membership/role-resolver.service';
 
 type ApiTokenCreateInput = z.infer<typeof ApiTokenCreate>;
 
@@ -35,14 +36,35 @@ export interface ResolvedToken {
 
 @Injectable()
 export class TokensService {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    private readonly roleResolver: RoleResolver,
+  ) {}
 
   async listOwn(userId: number): Promise<ApiToken[]> {
     const rows = await this.db.select().from(apiTokens).where(eq(apiTokens.userId, userId));
     return rows.map(toDomain);
   }
 
-  async create(userId: number, input: ApiTokenCreateInput): Promise<ApiTokenCreated> {
+  /**
+   * `caller` (the authenticated RequestUser, distinct from `userId` — the
+   * numeric id the new token will be owned by, always the caller's own per
+   * the controller) must have a real BASE effective role — membership row or
+   * admin/devRole, never a token's own campaignId cap — on `input.campaignId`
+   * when it's non-null. Without this, a user with no relationship to a
+   * campaign could mint a token scoped to it and use that token's mere
+   * existence to read the campaign's metadata back out (GET /campaigns /
+   * MCP list_campaigns via accessibleCampaignIds trusting the token). 403
+   * otherwise.
+   */
+  async create(userId: number, input: ApiTokenCreateInput, caller: RequestUser): Promise<ApiTokenCreated> {
+    if (input.campaignId != null) {
+      const base = await this.roleResolver.baseEffectiveRole(caller, input.campaignId);
+      if (!base) {
+        throw new ForbiddenException('You do not have access to this campaign');
+      }
+    }
+
     const raw = generateApiToken();
     const ts = nowIso();
     const [row] = await this.db

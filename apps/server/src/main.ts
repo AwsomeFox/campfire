@@ -70,6 +70,7 @@ async function bootstrap() {
   // relying on that name-sniff felt fragile). Disabling the default and registering explicitly
   // in configureApp() with a limit is the documented way to override Nest's body-parser options.
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.enableShutdownHooks(); // graceful SIGTERM as PID 1 (docker stop)
 
   configureApp(app);
 

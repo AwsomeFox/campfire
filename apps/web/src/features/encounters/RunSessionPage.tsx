@@ -23,6 +23,7 @@ import type {
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaign } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
@@ -57,6 +58,7 @@ export default function RunSessionPage() {
   const { me, roleIn } = useAuth();
   const role = roleIn(cid);
   const isDm = role === 'dm';
+  const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
 
   const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -108,9 +110,10 @@ export default function RunSessionPage() {
     };
   }, [cid]);
 
-  // Poll while running and the tab is visible.
+  // Poll while preparing or running (and the tab is visible) — players waiting for the
+  // DM to hit "Start" need to see it happen without a manual reload. Stop once ended.
   useEffect(() => {
-    if (!encounter || encounter.status !== 'running') return;
+    if (!encounter || encounter.status === 'ended') return;
     let cancelled = false;
     const tick = async () => {
       if (document.visibilityState !== 'visible') return;
@@ -277,6 +280,15 @@ export default function RunSessionPage() {
             Round {encounter.round}
           </span>
         )}
+        <button
+          type="button"
+          className="btn btn-ghost"
+          style={{ fontSize: 11.5 }}
+          onClick={() => void load()}
+          title="Refresh"
+        >
+          ↻ Refresh
+        </button>
         <div className="flex-1" />
         {isDm && (
           <div className="flex gap-2 flex-wrap">
@@ -335,7 +347,14 @@ export default function RunSessionPage() {
       </div>
 
       {isDm && encounter.status !== 'ended' && (
-        <AddCombatantPanel encounterId={eid} campaignId={cid} characters={characters} onAdded={load} />
+        <AddCombatantPanel
+          encounterId={eid}
+          campaignId={cid}
+          characters={characters}
+          existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
+          rulePack={campaign?.ruleSystem || ''}
+          onAdded={load}
+        />
       )}
 
       <DiceLog campaignId={cid} />
@@ -573,11 +592,15 @@ function AddCombatantPanel({
   encounterId,
   campaignId: cid,
   characters,
+  existingCombatantCharacterIds,
+  rulePack,
   onAdded,
 }: {
   encounterId: number;
   campaignId: number;
   characters: Character[];
+  existingCombatantCharacterIds: Set<number>;
+  rulePack: string;
   onAdded: () => Promise<void> | void;
 }) {
   const [tab, setTab] = useState<AddTab>('manual');
@@ -604,9 +627,9 @@ function AddCombatantPanel({
     (async () => {
       setSearching(true);
       try {
-        const list = await api.get<RuleEntry[]>(
-          `${API}/rules/search?type=monster&q=${encodeURIComponent(debouncedQuery.trim())}`,
-        );
+        const params = new URLSearchParams({ type: 'monster', q: debouncedQuery.trim() });
+        if (rulePack) params.set('pack', rulePack);
+        const list = await api.get<RuleEntry[]>(`${API}/rules/search?${params.toString()}`);
         if (!cancelled) setResults(list);
       } catch {
         if (!cancelled) setResults([]);
@@ -617,7 +640,7 @@ function AddCombatantPanel({
     return () => {
       cancelled = true;
     };
-  }, [tab, debouncedQuery]);
+  }, [tab, debouncedQuery, rulePack]);
 
   async function addManual(e: FormEvent) {
     e.preventDefault();
@@ -771,12 +794,23 @@ function AddCombatantPanel({
 
       {tab === 'party' && (
         <div className="space-y-1.5">
-          {characters.length === 0 ? (
-            <p className="text-muted" style={{ fontSize: 12 }}>
-              No characters in this campaign yet.
-            </p>
-          ) : (
-            characters.map((c) => (
+          {(() => {
+            const available = characters.filter((c) => !existingCombatantCharacterIds.has(c.id));
+            if (characters.length === 0) {
+              return (
+                <p className="text-muted" style={{ fontSize: 12 }}>
+                  No characters in this campaign yet.
+                </p>
+              );
+            }
+            if (available.length === 0) {
+              return (
+                <p className="text-muted" style={{ fontSize: 12 }}>
+                  The whole party is already in this encounter.
+                </p>
+              );
+            }
+            return available.map((c) => (
               <button
                 key={c.id}
                 className="card elev-sm"
@@ -800,8 +834,8 @@ function AddCombatantPanel({
                   {c.hpCurrent}/{c.hpMax}
                 </span>
               </button>
-            ))
-          )}
+            ));
+          })()}
         </div>
       )}
     </Card>

@@ -204,6 +204,91 @@ describe('attachments (e2e)', () => {
       expect(clearRes.status).toBe(200);
       expect(clearRes.body.mapAttachmentId).toBeNull();
     });
+
+    // P2 fix pinning test — deleting an attachment must clear any campaign.mapAttachmentId
+    // that pointed at it, so the campaign doesn't keep referencing a now-gone file.
+    it('deleting the attachment set as the campaign map clears campaign.mapAttachmentId', async () => {
+      const server = ctx.app.getHttpServer();
+      const uploadRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'danglemap.png', contentType: 'image/png' });
+      expect(uploadRes.status).toBe(201);
+      const attachmentId = uploadRes.body.id;
+
+      const patchRes = await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ mapAttachmentId: attachmentId });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.mapAttachmentId).toBe(attachmentId);
+
+      const deleteRes = await request(server).delete(`/api/v1/attachments/${attachmentId}`).set(dm);
+      expect(deleteRes.status).toBe(200);
+
+      const getRes = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+      expect(getRes.body.mapAttachmentId).toBeNull();
+    });
+  });
+
+  // P2 fix pinning test — deleting an attachment must clear any character.portraitUrl
+  // that pointed at it (character.portraitUrl is a resolved `.../attachments/<id>/file`
+  // URL string, not a numeric FK — see AttachmentsService.remove).
+  describe('portrait wiring', () => {
+    it('deleting the attachment used as a character portrait clears character.portraitUrl', async () => {
+      const server = ctx.app.getHttpServer();
+      const uploadRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(player)
+        .field('kind', 'portrait')
+        .attach('file', TINY_PNG, { filename: 'dangleportrait.png', contentType: 'image/png' });
+      expect(uploadRes.status).toBe(201);
+      const attachmentId = uploadRes.body.id;
+      const portraitUrl = `/api/v1/attachments/${attachmentId}/file`;
+
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(player)
+        .send({ name: 'Portrait Owner', portraitUrl });
+      expect(charRes.status).toBe(201);
+      const characterId = charRes.body.id;
+      expect(charRes.body.portraitUrl).toBe(portraitUrl);
+
+      const deleteRes = await request(server).delete(`/api/v1/attachments/${attachmentId}`).set(player);
+      expect(deleteRes.status).toBe(200);
+
+      const getRes = await request(server).get(`/api/v1/characters/${characterId}`).set(player);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.portraitUrl).toBeNull();
+    });
+
+    it('deleting an unrelated attachment does not touch a character portraitUrl pointing elsewhere', async () => {
+      const server = ctx.app.getHttpServer();
+      const keepUpload = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(player)
+        .field('kind', 'portrait')
+        .attach('file', TINY_PNG, { filename: 'keep.png', contentType: 'image/png' });
+      const keepId = keepUpload.body.id;
+      const keepUrl = `/api/v1/attachments/${keepId}/file`;
+
+      const otherUpload = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(player)
+        .field('kind', 'portrait')
+        .attach('file', TINY_PNG, { filename: 'other.png', contentType: 'image/png' });
+      const otherId = otherUpload.body.id;
+
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(player)
+        .send({ name: 'Unaffected Owner', portraitUrl: keepUrl });
+      const characterId = charRes.body.id;
+
+      const deleteRes = await request(server).delete(`/api/v1/attachments/${otherId}`).set(player);
+      expect(deleteRes.status).toBe(200);
+
+      const getRes = await request(server).get(`/api/v1/characters/${characterId}`).set(player);
+      expect(getRes.body.portraitUrl).toBe(keepUrl);
+    });
   });
 });
 

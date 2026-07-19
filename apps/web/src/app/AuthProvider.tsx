@@ -41,18 +41,24 @@ function applyAccentColor(accentColor: string | null): void {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [ready, setReady] = useState(false);
+  const [connectionError, setConnectionError] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const nextMe = await api.get<Me>(`${API}/me`);
       setMe(nextMe);
+      setConnectionError(false);
       applyAccentColor(nextMe.user.accentColor);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setMe(null);
+        setConnectionError(false);
         applyAccentColor(null);
       } else {
-        throw err;
+        // Network error or non-401 server failure (API down, 5xx, etc). Don't treat
+        // this as "not logged in" — that would bounce a real session to /login. Surface
+        // it as a connection error instead so AuthedLayout can offer a retry.
+        setConnectionError(true);
       }
     } finally {
       setReady(true);
@@ -82,8 +88,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<AuthState>(
-    () => ({ me, ready, isAdmin, roleIn, refresh, logout }),
-    [me, ready, isAdmin, roleIn, refresh, logout],
+    () => ({ me, ready, connectionError, isAdmin, roleIn, refresh, logout }),
+    [me, ready, connectionError, isAdmin, roleIn, refresh, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

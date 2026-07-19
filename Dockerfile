@@ -61,7 +61,7 @@ COPY apps/server/package.json apps/server/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/schema/package.json packages/schema/package.json
 
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --workspace apps/server --workspace packages/schema --include-workspace-root=false
 
 # ---------------------------------------------------------------------------
 # runtime: slim final image — no compilers, no dev dependencies, no web/server source.
@@ -95,6 +95,6 @@ VOLUME ["/data"]
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:${PORT}/healthz || exit 1
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "apps/server/dist/main.js"]

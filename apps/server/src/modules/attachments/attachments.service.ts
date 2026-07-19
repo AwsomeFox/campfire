@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { eq, like } from 'drizzle-orm';
 import type { Attachment, AttachmentKind, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments } from '../../db/schema';
+import { attachments, campaigns, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -105,14 +105,28 @@ export class AttachmentsService {
     return toDomain(row);
   }
 
-  /** Uploader or dm may delete; others 403. Removes both the DB row and the on-disk file. */
+  /**
+   * Uploader or dm may delete; others 403. Removes both the DB row and the on-disk file,
+   * and clears any dangling references pointing at it in the same transaction:
+   *  - campaign.mapAttachmentId, if it was this attachment (numeric FK).
+   *  - character.portraitUrl, if it points at this attachment's file route
+   *    (`.../attachments/<id>/file` — portraitUrl is a resolved URL string, not a
+   *    numeric FK, so it's matched by suffix rather than equality).
+   * Without this, deleting an attachment still in use left the campaign map / character
+   * portrait pointing at a now-404ing file.
+   */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     if (role !== 'dm' && existing.uploaderUserId !== user.id) {
       throw new ForbiddenException('Only the uploader or dm may delete this attachment');
     }
 
-    await this.db.delete(attachments).where(eq(attachments.id, id));
+    const portraitSuffix = `%/attachments/${id}/file`;
+    this.db.transaction((tx) => {
+      tx.delete(attachments).where(eq(attachments.id, id)).run();
+      tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, id)).run();
+      tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
+    });
 
     const filePath = this.filePath(existing);
     fs.rm(filePath, { force: true }, () => {

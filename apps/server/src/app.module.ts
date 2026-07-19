@@ -48,7 +48,7 @@ import { EncountersModule } from './modules/encounters/encounters.module';
  * '/api/v1/campaigns', but '/api/v1/(.*)' does.
  */
 function serveStaticImports(): DynamicModule[] {
-  const webDist = process.env.WEB_DIST || (process.env.NODE_ENV === 'production' ? join(__dirname, '../../web-dist') : undefined);
+  const webDist = process.env.WEB_DIST || (process.env.NODE_ENV === 'production' ? join(__dirname, '../../../web-dist') : undefined);
   if (!webDist) {
     return [];
   }
