@@ -1,0 +1,84 @@
+# Roadmap & status
+
+This page is an **honest, exhaustive** account of what Campfire does today, what's
+half-built, and what's planned — maintained as a living audit rather than
+marketing. If a feature isn't here, assume it doesn't exist yet.
+
+Legend: ✅ done & tested · 🔨 in progress · 🟡 partial / stale / needs polish · ⬜ planned
+
+## Core play loop ✅
+
+The end-to-end tabletop loop is complete and covered by an automated test suite.
+
+- ✅ **Campaigns** — create (guided wizard), rename, danger level, current location, delete (cascades all children)
+- ✅ **Quests** — board + detail, objectives (player-tickable), subquests, giver NPC, reward, DM-only secret
+- ✅ **NPCs** — disposition, location, body, DM secret
+- ✅ **Locations** — pin map, status (unexplored → explored → current), uploaded map image with draggable pins
+- ✅ **Characters** — stats, AC, HP, conditions, portrait upload, markdown bio, owner-or-DM editing
+- ✅ **Sessions** — numbered recaps, timeline
+- ✅ **Notes** — private / share-with-DM / share-with-party, anchored to any entity
+- ✅ **Scribe inbox** — zero-friction quick capture → DM resolves into canon
+- ✅ **Encounters / run-session** — initiative (auto-rolled d20+DEX), turn order, next-turn, at-table HP & conditions, add monsters from the compendium, HP writes back to sheets on end
+- ✅ **Dice roller** — server-side, audited, on the dashboard and in combat
+- ✅ **Compendium** — Open5e SRD import, full-text search, reader
+- ✅ **Proposals** — AI/collab writes queue for DM approval
+- ✅ **Export** — whole campaign to JSON or Markdown zip
+
+## Platform ✅
+
+- ✅ **Auth** — local accounts, first-run admin setup, sessions, change password
+- ✅ **SSO** — OIDC / Authentik, auto-provisioning, admin-group mapping
+- ✅ **Per-campaign roles** — dm / player / viewer, with last-DM & last-admin protection
+- ✅ **MCP server** — AI-operable over streamable HTTP, PAT-authenticated, scope-capped
+- ✅ **Single-image deploy** — multi-arch Docker image, one data volume, same-origin SPA serving, Traefik/Authentik ready
+- ✅ **Preferences** — per-user accent colour
+
+## In progress 🔨
+
+Landing in the current development wave:
+
+- 🔨 **Full MCP parity** — expanding the tool set so an AI can run a whole campaign over MCP alone (combat damage, character creation, campaign lifecycle, members, rule packs, deletes, read-back) plus structured errors and richer tool descriptions
+- 🔨 **Headless agent auth** — a credential→token endpoint and admin "mint a token for a user", so agents bootstrap without a browser
+- 🔨 **OpenAPI for agents** — response schemas across every endpoint so the REST API self-describes
+
+## Admin ⁄ DM separation 🔨⬜
+
+Requested and being built so the operator and the storyteller stay distinct
+(see [Admin vs DM](../administration/access-model.md)):
+
+- ⬜ **DM invite links / join codes** — let a DM bring players in without the server admin creating each account _(today: the "Invite" card is a disabled placeholder)_
+- ⬜ **Optional self-service signup** — a server setting for open registration
+- ⬜ **Admin ≠ auto-DM** — a server admin no longer implicitly sees every campaign's DM secrets; server power ≠ story access
+
+## Half-built & stale 🟡
+
+Honest rough edges that exist but aren't finished:
+
+- 🟡 **Character sheet depth** — saving throws, skills, attacks/actions, and spell slots are placeholder "soon" sections; HP, conditions, stats, and bio are real
+- 🟡 **Compendium breadth** — the importer pulls spells, monsters, magic items, and conditions; classes, races, and feats are modelled in the type system but not yet imported
+- 🟡 **Proposal diffs** — show the proposed new values only; there's no before/after snapshot to compare against current state
+- 🟡 **Real-time updates** — the run-session and dashboard use polling; live push (SSE) is planned for smoother at-the-table multi-device play
+- 🟡 **Notes anchor labels** — entity-linked notes show `Quest #12`-style references rather than the entity's name in some list views
+- 🟡 **Preferences extras** — "text size" and "notifications" cards are placeholders with no backing yet
+- 🟡 **AI scribe automation** — the proposal queue is real, but there's no built-in scheduled/automatic scribe; today it's client-driven (connect an MCP client and ask it to act)
+
+## Planned ⬜
+
+TTRPG features a weekly table wants that Campfire doesn't have yet:
+
+- ⬜ **XP & levelling** — XP tracking and a level-up flow _(today `level` is a plain editable number)_
+- ⬜ **Inventory & loot** — party treasury and per-character items _(today loot lives in prose)_
+- ⬜ **Session scheduling** — a "next session" date / availability, with an ICS feed
+- ⬜ **Read-only share links** — let an absent player catch up on a recap without an account
+- ⬜ **D&D Beyond import** — pull a public character sheet _(the `ddbId` field exists; import does not)_
+- ⬜ **Multi-system rule packs** — Pathfinder 2e and others via bundled/uploaded open-licensed datasets, since only Open5e (D&D 5e SRD) is wired today
+- ⬜ **MCP resources & prompts** — expose read surfaces as resources and add prep/recap prompts, beyond tools
+- ⬜ **AI co-DM** — generated NPCs, encounters, maps, and story beats, always routed through the approval queue
+
+## How this list is kept
+
+Campfire went through repeated adversarial review rounds — product, architecture,
+security, QA, and real-DM personas — plus a dedicated AI-operability pass. Findings
+that were fixed are folded into the ✅ sections above; everything still open is
+listed honestly here. Spot something missing from this page?
+[Open an issue](https://github.com/AwsomeFox/campfire/issues).

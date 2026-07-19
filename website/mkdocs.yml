@@ -1,0 +1,90 @@
+# Campfire docs + marketing site.
+# Built with Zensical (`pip install zensical`), which natively reads this
+# mkdocs.yml and is Material-for-MkDocs compatible.  `zensical serve` for dev,
+# `zensical build` to emit ./site.  Falls back to `mkdocs` if preferred.
+site_name: Campfire
+site_description: >-
+  Self-hosted, AI-operable campaign tracker for tabletop RPGs — quests, NPCs,
+  maps, combat, session notes, and an MCP server so any AI can help run your table.
+site_url: https://awsomefox.github.io/campfire/
+repo_url: https://github.com/AwsomeFox/campfire
+repo_name: AwsomeFox/campfire
+edit_uri: edit/main/website/docs/
+copyright: Campfire is open source under the MIT license.
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    logo: material/campfire
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Your first campaign: getting-started/quickstart.md
+      - Roles & who does what: getting-started/roles.md
+  - Playing:
+      - Running a game: guides/running-a-game.md
+      - Quests, NPCs & the world: guides/world.md
+      - Combat & the run-session screen: guides/combat.md
+      - Notes & the scribe inbox: guides/notes.md
+      - The compendium (rules): guides/compendium.md
+  - AI & MCP:
+      - Connect an AI: ai/connect.md
+      - What an AI can do: ai/capabilities.md
+      - MCP tool & API reference: ai/reference.md
+  - Administration:
+      - Server administration: administration/server.md
+      - Authentication (local & SSO): administration/authentication.md
+      - Admin vs DM (access model): administration/access-model.md
+      - Backups & upgrades: administration/operations.md
+  - Project:
+      - Roadmap & status: reference/roadmap.md
+      - Contributing: reference/contributing.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/AwsomeFox/campfire
