@@ -133,9 +133,15 @@ export const users = sqliteTable('users', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   username: text('username').notNull().unique(),
   displayName: text('display_name').notNull().default(''),
-  passwordHash: text('password_hash').notNull(),
+  // Nullable: SSO-provisioned users (OIDC) have no local password. See
+  // db/bootstrap.sql.ts for the ALTER TABLE migration note re: existing DBs.
+  passwordHash: text('password_hash'),
   serverRole: text('server_role').notNull().default('user'),
   disabled: integer('disabled', { mode: 'boolean' }).notNull().default(false),
+  // OIDC subject claim ("sub"), unique per issuer. Null for local-only users.
+  // Not compound-keyed on issuer: this app supports a single configured OIDC
+  // issuer at a time (env-gated), so `sub` alone is enough to dedupe.
+  oidcSub: text('oidc_sub'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

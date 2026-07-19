@@ -9,6 +9,59 @@ import * as schema from './schema';
 export const DB = Symbol('DB');
 export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 
+/**
+ * Migration for DBs created before OIDC support: `users.password_hash` was
+ * originally `NOT NULL`, and `users.oidc_sub` didn't exist. SQLite has no
+ * `ALTER TABLE ... DROP NOT NULL`, so when we detect the old constraint we
+ * rebuild the table (the standard SQLite "12-step" pattern) rather than
+ * requiring a separate migration-runner for what is, on this project, still
+ * a single hand-maintained bootstrap file. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column nullable.
+ */
+function migrateUsersTableForOidc(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{
+    name: string;
+    notnull: number;
+  }>;
+  const passwordHashCol = columns.find((c) => c.name === 'password_hash');
+  const hasOidcSub = columns.some((c) => c.name === 'oidc_sub');
+  const needsNotNullRelax = passwordHashCol && passwordHashCol.notnull === 1;
+
+  if (!needsNotNullRelax && hasOidcSub) return; // already migrated.
+
+  const migrate = sqlite.transaction(() => {
+    if (needsNotNullRelax) {
+      // Rebuild table with password_hash nullable (SQLite can't alter column
+      // constraints in place). oidc_sub is added here too so we only rebuild once.
+      sqlite.exec(`
+        CREATE TABLE users_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          display_name TEXT NOT NULL DEFAULT '',
+          password_hash TEXT,
+          server_role TEXT NOT NULL DEFAULT 'user',
+          disabled INTEGER NOT NULL DEFAULT 0,
+          oidc_sub TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO users_new (id, username, display_name, password_hash, server_role, disabled, created_at, updated_at)
+          SELECT id, username, display_name, password_hash, server_role, disabled, created_at, updated_at FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+      `);
+    } else if (!hasOidcSub) {
+      sqlite.exec('ALTER TABLE users ADD COLUMN oidc_sub TEXT');
+    }
+  });
+  migrate();
+}
+
 export function createDb(): DrizzleDb {
   const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', 'data');
   fs.mkdirSync(dataDir, { recursive: true });
@@ -16,7 +69,10 @@ export function createDb(): DrizzleDb {
 
   const sqlite = new Database(dbPath);
   sqlite.pragma('journal_mode = WAL');
+  migrateUsersTableForOidc(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
+  // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
+  // after the rebuild is safe and keeps idx_users_oidc_sub in sync.
 
   return drizzle(sqlite, { schema });
 }

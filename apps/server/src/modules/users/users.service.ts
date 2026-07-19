@@ -53,6 +53,11 @@ export class UsersService {
     return row ?? null;
   }
 
+  async getRowByOidcSub(sub: string) {
+    const [row] = await this.db.select().from(users).where(eq(users.oidcSub, sub)).limit(1);
+    return row ?? null;
+  }
+
   async lookup(query: string, limit = 10): Promise<Array<{ id: number; username: string; displayName: string }>> {
     const pattern = `%${query}%`;
     const rows = await this.db
@@ -62,7 +67,8 @@ export class UsersService {
     return rows.slice(0, limit).map((r) => ({ id: r.id, username: r.username, displayName: r.displayName }));
   }
 
-  private async countEnabledAdmins(excludeId?: number): Promise<number> {
+  /** Public wrapper — used by OidcService to decide whether a group-based demotion is safe. */
+  async countEnabledAdmins(excludeId?: number): Promise<number> {
     const rows = await this.db
       .select()
       .from(users)
@@ -87,6 +93,56 @@ export class UsersService {
         createdAt: ts,
         updatedAt: ts,
       })
+      .returning();
+    return toDomain(row);
+  }
+
+  /**
+   * Auto-provisions a passwordless SSO user (OIDC first login). Caller
+   * (OidcService) is responsible for producing a unique, regex-valid
+   * username (slugify + collision-suffix) before calling this.
+   */
+  async createSso(input: { username: string; displayName: string; oidcSub: string; serverRole: 'admin' | 'user' }): Promise<User> {
+    const ts = nowIso();
+    const [row] = await this.db
+      .insert(users)
+      .values({
+        username: input.username,
+        displayName: input.displayName,
+        passwordHash: null,
+        serverRole: input.serverRole,
+        disabled: false,
+        oidcSub: input.oidcSub,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+    return toDomain(row);
+  }
+
+  /**
+   * Syncs serverRole from the OIDC admin-group claim on every login (up AND
+   * down). Refuses to demote the last enabled admin — logs a warn and
+   * leaves the role untouched rather than throwing, since this runs inline
+   * in the login flow and must not block the user from signing in.
+   */
+  async syncOidcServerRole(id: number, desiredRole: 'admin' | 'user'): Promise<User> {
+    const existing = await this.getRowOrThrow(id);
+    if (existing.serverRole === desiredRole) return toDomain(existing);
+
+    if (desiredRole === 'user' && existing.serverRole === 'admin') {
+      const remaining = await this.countEnabledAdmins(id);
+      if (remaining === 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`[oidc] refusing to demote last enabled admin (user ${id}) via group sync`);
+        return toDomain(existing);
+      }
+    }
+
+    const [row] = await this.db
+      .update(users)
+      .set({ serverRole: desiredRole, updatedAt: nowIso() })
+      .where(eq(users.id, id))
       .returning();
     return toDomain(row);
   }

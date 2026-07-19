@@ -53,7 +53,14 @@ export class AuthService {
 
   async login(input: LoginInput): Promise<SessionIssueResult> {
     const row = await this.usersService.getRowByUsername(input.username);
-    if (!row || !verifyPassword(input.password, row.passwordHash)) {
+    if (!row) {
+      throw new UnauthorizedException('Invalid username or password');
+    }
+    if (row.passwordHash === null) {
+      // SSO-provisioned user (OIDC) — no local password to check.
+      throw new ForbiddenException('This account uses SSO');
+    }
+    if (!verifyPassword(input.password, row.passwordHash)) {
       throw new UnauthorizedException('Invalid username or password');
     }
     if (row.disabled) {
@@ -66,6 +73,11 @@ export class AuthService {
       }
     }
     return this.issueSession(row.id);
+  }
+
+  /** Public entry point for other auth flows (e.g. OidcService) that need to mint a session after their own credential check. */
+  async issueSessionFor(userId: number): Promise<SessionIssueResult> {
+    return this.issueSession(userId);
   }
 
   private async issueSession(userId: number): Promise<SessionIssueResult> {
@@ -129,6 +141,9 @@ export class AuthService {
   /** Self-service password change: verifies currentPassword, rehashes, kills OTHER sessions. */
   async changeOwnPassword(userId: number, currentPassword: string | undefined, newPassword: string, currentTokenHash: string): Promise<void> {
     const row = await this.usersService.getRowOrThrow(userId);
+    if (row.passwordHash === null) {
+      throw new ForbiddenException('This account uses SSO');
+    }
     if (!currentPassword || !verifyPassword(currentPassword, row.passwordHash)) {
       throw new ForbiddenException('Current password is incorrect');
     }
