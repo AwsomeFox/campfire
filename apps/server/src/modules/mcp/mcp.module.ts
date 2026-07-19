@@ -10,6 +10,7 @@ import { NotesModule } from '../notes/notes.module';
 import { ProposalRecordsModule } from '../proposals/proposal-records.module';
 import { ProposalsModule } from '../proposals/proposals.module';
 import { RulesModule } from '../rules/rules.module';
+import { EncountersModule } from '../encounters/encounters.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -27,6 +28,7 @@ import { McpController } from './mcp.controller';
     ProposalRecordsModule,
     ProposalsModule,
     RulesModule,
+    EncountersModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],

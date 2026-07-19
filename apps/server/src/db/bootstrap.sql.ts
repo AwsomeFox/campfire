@@ -229,6 +229,33 @@ CREATE TABLE IF NOT EXISTS attachments (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS encounters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'preparing',
+  round INTEGER NOT NULL DEFAULT 0,
+  turn_index INTEGER NOT NULL DEFAULT 0,
+  ended_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS combatants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  encounter_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  character_id INTEGER,
+  name TEXT NOT NULL,
+  initiative INTEGER,
+  init_mod INTEGER NOT NULL DEFAULT 0,
+  hp_current INTEGER NOT NULL DEFAULT 10,
+  hp_max INTEGER NOT NULL DEFAULT 10,
+  conditions TEXT NOT NULL DEFAULT '[]',
+  rule_entry_id INTEGER,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
@@ -248,6 +275,9 @@ CREATE INDEX IF NOT EXISTS idx_rule_entries_pack ON rule_entries(pack_id);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_type ON rule_entries(type);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_slug ON rule_entries(slug);
 CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
+CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
 `;
 
 /**

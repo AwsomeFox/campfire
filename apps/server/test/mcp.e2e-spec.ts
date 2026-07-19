@@ -30,6 +30,7 @@ const ALL_TOOLS = [
   'read_inbox',
   'list_proposals',
   'lookup_rule',
+  'get_encounter',
   // write
   'create_quest',
   'update_quest',
@@ -45,6 +46,13 @@ const ALL_TOOLS = [
   'update_campaign_status',
   'approve_proposal',
   'reject_proposal',
+  'roll_dice',
+  'create_encounter',
+  'add_combatant',
+  'roll_initiative',
+  'begin_encounter',
+  'next_turn',
+  'end_encounter',
 ];
 
 describe('mcp endpoint (e2e, real sessions + PATs)', () => {
@@ -107,7 +115,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(28);
+    expect(tools).toHaveLength(36);
   });
 
   it('get_campaign_summary works with a dm-scoped PAT', async () => {
@@ -213,6 +221,61 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const after = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
     expect(after.body.some((q: { title: string }) => q.title === 'Proposed quest')).toBe(true);
+  });
+
+  it('create_encounter -> add_combatant -> roll_initiative -> begin_encounter -> next_turn -> end_encounter via dm PAT', async () => {
+    const client = await mcpClient(dmToken);
+
+    const createResult = await client.callTool({
+      name: 'create_encounter',
+      arguments: { campaignId, name: 'MCP Skirmish' },
+    });
+    expect(createResult.isError).toBeFalsy();
+    const created = parseResult(createResult) as { id: number; status: string; combatants: unknown[] };
+    expect(created.status).toBe('preparing');
+    const encounterId = created.id;
+
+    const addResult = await client.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId, kind: 'monster', name: 'MCP Kobold', hpMax: 5 },
+    });
+    expect(addResult.isError).toBeFalsy();
+    const combatant = parseResult(addResult) as { id: number; name: string };
+    expect(combatant.name).toBe('MCP Kobold');
+
+    const getResult = await client.callTool({ name: 'get_encounter', arguments: { encounterId } });
+    expect(getResult.isError).toBeFalsy();
+    const fetched = parseResult(getResult) as { combatants: unknown[] };
+    expect(fetched.combatants.length).toBeGreaterThanOrEqual(1);
+
+    const rollInitResult = await client.callTool({ name: 'roll_initiative', arguments: { encounterId } });
+    expect(rollInitResult.isError).toBeFalsy();
+    const afterRoll = parseResult(rollInitResult) as { combatants: Array<{ initiative: number | null }> };
+    expect(afterRoll.combatants.every((c) => c.initiative !== null)).toBe(true);
+
+    const beginResult = await client.callTool({ name: 'begin_encounter', arguments: { encounterId } });
+    expect(beginResult.isError).toBeFalsy();
+    const begun = parseResult(beginResult) as { status: string; round: number };
+    expect(begun.status).toBe('running');
+    expect(begun.round).toBe(1);
+
+    const nextTurnResult = await client.callTool({ name: 'next_turn', arguments: { encounterId } });
+    expect(nextTurnResult.isError).toBeFalsy();
+
+    const endResult = await client.callTool({ name: 'end_encounter', arguments: { encounterId } });
+    expect(endResult.isError).toBeFalsy();
+    const ended = parseResult(endResult) as { status: string };
+    expect(ended.status).toBe('ended');
+  });
+
+  it('roll_dice rolls within range via dm PAT', async () => {
+    const client = await mcpClient(dmToken);
+    const result = await client.callTool({ name: 'roll_dice', arguments: { campaignId, expr: '1d20+1' } });
+    expect(result.isError).toBeFalsy();
+    const rolled = parseResult(result) as { total: number; rolls: number[] };
+    expect(rolled.rolls).toHaveLength(1);
+    expect(rolled.total).toBeGreaterThanOrEqual(2);
+    expect(rolled.total).toBeLessThanOrEqual(21);
   });
 
   it('request without Authorization gets 401; GET gets 405', async () => {

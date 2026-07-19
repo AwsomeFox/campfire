@@ -1,0 +1,836 @@
+/**
+ * Run session — live combat tracker. /c/:campaignId/encounters/:encounterId.
+ * Mirrors design/claude-design/Campfire.dc.html "Run session" live state
+ * (~L1389-1503) and "Encounter" initiative list (~L991-1024): header with
+ * status chip + round + DM controls, initiative-sorted combatant rows
+ * (current turn = accent left-border + glow), HP −/+ steppers, condition
+ * chips, DM add-combatant panel (manual / compendium / party tabs), and a
+ * dice log widget (expr input + roll history) per "Dice log" (~L1479-1499).
+ *
+ * Permissions: DM can edit any combatant, add/remove combatants, and drive
+ * turn/round/status. Players may only adjust HP/conditions on the combatant
+ * that maps to their own character (via campaign characters' ownerUserId).
+ */
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import type {
+  Character,
+  Combatant,
+  CombatantKind,
+  EncounterWithCombatants,
+  RollResult,
+  RuleEntry,
+} from '@campfire/schema';
+import { api, API, ApiError } from '../../lib/api';
+import { useAuth } from '../../app/auth';
+import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+
+const STATUS_LABEL: Record<string, string> = {
+  preparing: 'Preparing',
+  running: 'Running',
+  ended: 'Ended',
+};
+
+const STATUS_TAG_CLASS: Record<string, string> = {
+  preparing: 'tag tag-neutral',
+  running: 'tag tag-accent',
+  ended: 'tag tag-outline',
+};
+
+const CONDITION_SUGGESTIONS = ['Poisoned', 'Prone', 'Restrained', 'Stunned', 'Grappled', 'Blinded', 'Frightened'];
+
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const handle = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(handle);
+  }, [value, delayMs]);
+  return debounced;
+}
+
+export default function RunSessionPage() {
+  const { campaignId, encounterId } = useParams<{ campaignId: string; encounterId: string }>();
+  const cid = Number(campaignId);
+  const eid = Number(encounterId);
+  const navigate = useNavigate();
+  const { me, roleIn } = useAuth();
+  const role = roleIn(cid);
+  const isDm = role === 'dm';
+
+  const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
+  const [characters, setCharacters] = useState<Character[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
+      setEncounter(data);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load this encounter.");
+    } finally {
+      setLoading(false);
+    }
+  }, [eid]);
+
+  useEffect(() => {
+    if (Number.isFinite(eid)) void load();
+  }, [eid, load]);
+
+  // Fetch campaign characters once, to map a combatant.characterId -> ownerUserId
+  // so players can be scoped to only their own character's combatant.
+  useEffect(() => {
+    if (!Number.isFinite(cid)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.get<Character[]>(`${API}/campaigns/${cid}/characters`);
+        if (!cancelled) setCharacters(list);
+      } catch {
+        if (!cancelled) setCharacters([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cid]);
+
+  // Poll while running and the tab is visible.
+  useEffect(() => {
+    if (!encounter || encounter.status !== 'running') return;
+    let cancelled = false;
+    const tick = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
+        if (!cancelled) setEncounter(data);
+      } catch {
+        /* keep last-known state; next tick retries */
+      }
+    };
+    const handle = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(handle);
+    };
+  }, [eid, encounter?.status]);
+
+  const myUserId = me?.user.id;
+  const ownedCharacterIds = useMemo(
+    () =>
+      new Set(
+        characters.filter((c) => c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId)).map((c) => c.id),
+      ),
+    [characters, myUserId],
+  );
+
+  function canEditCombatant(c: Combatant): boolean {
+    if (isDm) return true;
+    if (role !== 'player') return false;
+    return c.characterId != null && ownedCharacterIds.has(c.characterId);
+  }
+
+  async function withBusy(fn: () => Promise<void>) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await fn();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'That action failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rollInitiative() {
+    await withBusy(async () => {
+      await api.post(`${API}/encounters/${eid}/roll-initiative`);
+      await load();
+    });
+  }
+
+  async function startEncounter() {
+    await withBusy(async () => {
+      await api.post(`${API}/encounters/${eid}/start`);
+      await load();
+    });
+  }
+
+  async function nextTurn() {
+    await withBusy(async () => {
+      await api.post(`${API}/encounters/${eid}/next-turn`);
+      await load();
+    });
+  }
+
+  async function endEncounter() {
+    if (!confirm('End this encounter? HP writes back to character sheets. This cannot be undone.')) return;
+    await withBusy(async () => {
+      await api.post(`${API}/encounters/${eid}/end`);
+      await load();
+    });
+  }
+
+  async function deleteEncounter() {
+    if (!confirm('Delete this encounter? This cannot be undone.')) return;
+    await withBusy(async () => {
+      await api.delete(`${API}/encounters/${eid}`);
+      navigate(`/c/${cid}/encounters`);
+    });
+  }
+
+  async function patchCombatant(combatantId: number, patch: Record<string, unknown>) {
+    await withBusy(async () => {
+      await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, patch);
+      await load();
+    });
+  }
+
+  async function removeCombatant(combatantId: number) {
+    if (!confirm('Remove this combatant from the encounter?')) return;
+    await withBusy(async () => {
+      await api.delete(`${API}/encounters/${eid}/combatants/${combatantId}`);
+      await load();
+    });
+  }
+
+  if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
+    return (
+      <div className="max-w-5xl mx-auto px-4 mt-5">
+        <ErrorNote message="Encounter not found." />
+      </div>
+    );
+  }
+
+  if (loading && !encounter) {
+    return (
+      <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4">
+        <Card>
+          <Skeleton lines={5} />
+        </Card>
+      </div>
+    );
+  }
+
+  if (error && !encounter) {
+    return (
+      <div className="max-w-4xl mx-auto px-4 mt-5">
+        <ErrorNote message={error} onRetry={load} />
+      </div>
+    );
+  }
+
+  if (!encounter) return null;
+
+  const sortedCombatants = [...encounter.combatants].sort((a, b) => {
+    const ai = a.initiative ?? -Infinity;
+    const bi = b.initiative ?? -Infinity;
+    if (ai !== bi) return bi - ai;
+    return a.sortOrder - b.sortOrder;
+  });
+
+  const currentCombatantId =
+    encounter.status === 'running' && sortedCombatants.length > 0
+      ? sortedCombatants[encounter.turnIndex % sortedCombatants.length]?.id
+      : undefined;
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+      <div>
+        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/encounters`)}>
+          ← Back
+        </Btn>
+      </div>
+
+      {(error || actionError) && (
+        <ErrorNote
+          message={actionError ?? error ?? ''}
+          onRetry={() => {
+            setActionError(null);
+            void load();
+          }}
+        />
+      )}
+
+      <div className="flex items-center gap-2.5 flex-wrap">
+        <h1 className="text-2xl font-extrabold text-white m-0">{encounter.name}</h1>
+        <span className={STATUS_TAG_CLASS[encounter.status]} style={{ fontSize: 10 }}>
+          {STATUS_LABEL[encounter.status]}
+        </span>
+        {encounter.status === 'running' && (
+          <span className="tag tag-neutral" style={{ fontSize: 10 }}>
+            Round {encounter.round}
+          </span>
+        )}
+        <div className="flex-1" />
+        {isDm && (
+          <div className="flex gap-2 flex-wrap">
+            {encounter.status === 'preparing' && (
+              <>
+                <Btn ghost disabled={busy} onClick={rollInitiative}>
+                  Roll initiative
+                </Btn>
+                <Btn disabled={busy} onClick={startEncounter}>
+                  Start
+                </Btn>
+              </>
+            )}
+            {encounter.status === 'running' && (
+              <Btn disabled={busy} onClick={nextTurn}>
+                Next turn →
+              </Btn>
+            )}
+            {encounter.status !== 'ended' && (
+              <Btn ghost danger disabled={busy} onClick={endEncounter}>
+                End
+              </Btn>
+            )}
+            {(encounter.status === 'ended' || encounter.status === 'preparing') && (
+              <Btn ghost danger disabled={busy} onClick={deleteEncounter}>
+                Delete
+              </Btn>
+            )}
+          </div>
+        )}
+      </div>
+
+      {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
+
+      <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
+        {sortedCombatants.length === 0 ? (
+          <div style={{ padding: 16 }}>
+            <EmptyState icon="⚔️" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
+          </div>
+        ) : (
+          sortedCombatants.map((c) => (
+            <CombatantRow
+              key={c.id}
+              combatant={c}
+              isCurrentTurn={c.id === currentCombatantId}
+              canEdit={canEditCombatant(c)}
+              canRemove={isDm}
+              busy={busy}
+              onHpDelta={(delta) => patchCombatant(c.id, { hpDelta: delta })}
+              onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
+              onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
+              onRemove={() => removeCombatant(c.id)}
+            />
+          ))
+        )}
+      </div>
+
+      {isDm && encounter.status !== 'ended' && <AddCombatantPanel encounterId={eid} onAdded={load} />}
+
+      <DiceLog campaignId={cid} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+function CombatantRow({
+  combatant,
+  isCurrentTurn,
+  canEdit,
+  canRemove,
+  busy,
+  onHpDelta,
+  onAddCondition,
+  onRemoveCondition,
+  onRemove,
+}: {
+  combatant: Combatant;
+  isCurrentTurn: boolean;
+  canEdit: boolean;
+  canRemove: boolean;
+  busy: boolean;
+  onHpDelta: (delta: number) => void;
+  onAddCondition: (cond: string) => void;
+  onRemoveCondition: (cond: string) => void;
+  onRemove: () => void;
+}) {
+  const [addingCondition, setAddingCondition] = useState(false);
+
+  const edgeColor = isCurrentTurn ? 'var(--color-accent)' : 'transparent';
+  const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : 'tag tag-neutral';
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 10,
+        padding: '9px 14px',
+        borderLeft: `2px solid ${edgeColor}`,
+        background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
+        boxShadow: isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+      }}
+    >
+      <span
+        style={{
+          width: 30,
+          height: 30,
+          flex: 'none',
+          borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--color-divider)',
+          display: 'grid',
+          placeItems: 'center',
+          fontSize: 13,
+          fontFamily: 'var(--font-heading)',
+          color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
+        }}
+      >
+        {combatant.initiative ?? '–'}
+      </span>
+      <div style={{ flex: 1, minWidth: 160 }}>
+        <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+          {combatant.name}
+          <span className={kindTagClass} style={{ fontSize: 9 }}>
+            {combatant.kind}
+          </span>
+        </div>
+        {combatant.conditions.length > 0 && (
+          <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+            {combatant.conditions.map((cond) => (
+              <span key={cond} className="tag tag-outline" style={{ fontSize: 9.5, gap: 6 }}>
+                {cond}
+                {canEdit && (
+                  <span
+                    onClick={() => !busy && onRemoveCondition(cond)}
+                    style={{ cursor: 'pointer', opacity: 0.7 }}
+                  >
+                    ✕
+                  </span>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
+        {canEdit && (
+          <div style={{ marginTop: 4 }}>
+            {addingCondition ? (
+              <div className="flex gap-1 flex-wrap">
+                {CONDITION_SUGGESTIONS.filter((s) => !combatant.conditions.includes(s)).map((s) => (
+                  <button
+                    key={s}
+                    className="btn btn-ghost"
+                    style={{ fontSize: 10.5, border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                    onClick={() => {
+                      onAddCondition(s);
+                      setAddingCondition(false);
+                    }}
+                  >
+                    + {s}
+                  </button>
+                ))}
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px' }}
+                  onClick={() => setAddingCondition(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 10.5, border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                onClick={() => setAddingCondition(true)}
+              >
+                + condition
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <div style={{ minWidth: 130, flex: 'none' }}>
+        <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3 }}>
+          {combatant.hpCurrent} / {combatant.hpMax}
+        </div>
+        <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
+      </div>
+      {canEdit && (
+        <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
+          <button
+            className="btn btn-icon btn-secondary"
+            style={{ width: 44, height: 44, fontSize: 16 }}
+            disabled={busy}
+            onClick={() => onHpDelta(-1)}
+          >
+            −
+          </button>
+          <button
+            className="btn btn-icon btn-secondary"
+            style={{ width: 44, height: 44, fontSize: 16 }}
+            disabled={busy}
+            onClick={() => onHpDelta(1)}
+          >
+            +
+          </button>
+        </div>
+      )}
+      {canRemove && (
+        <button
+          className="btn btn-icon btn-ghost"
+          style={{ width: 30, height: 30, fontSize: 12, flex: 'none' }}
+          disabled={busy}
+          onClick={onRemove}
+          title="Remove combatant"
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
+function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
+  const fallen = encounter.combatants.filter((c) => c.hpCurrent <= 0);
+  const survivors = encounter.combatants.filter((c) => c.hpCurrent > 0);
+  return (
+    <Card>
+      <span className="card-kicker">Summary</span>
+      <div className="flex gap-4 flex-wrap" style={{ fontSize: 13.5 }}>
+        <span>
+          Rounds: <b>{encounter.round}</b>
+        </span>
+        <span>
+          Fallen: <b>{fallen.length}</b>
+          {fallen.length > 0 && <span className="text-muted"> ({fallen.map((c) => c.name).join(', ')})</span>}
+        </span>
+        <span>
+          Survivors: <b>{survivors.length}</b>
+        </span>
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+type AddTab = 'manual' | 'compendium' | 'party';
+
+function AddCombatantPanel({ encounterId, onAdded }: { encounterId: number; onAdded: () => Promise<void> | void }) {
+  const { campaignId } = useParams<{ campaignId: string }>();
+  const cid = Number(campaignId);
+  const [tab, setTab] = useState<AddTab>('manual');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Manual
+  const [name, setName] = useState('');
+  const [hpMax, setHpMax] = useState('');
+  const [initMod, setInitMod] = useState('');
+
+  // Compendium
+  const [query, setQuery] = useState('');
+  const debouncedQuery = useDebounced(query, 300);
+  const [results, setResults] = useState<RuleEntry[]>([]);
+  const [searching, setSearching] = useState(false);
+
+  // Party
+  const [characters, setCharacters] = useState<Character[]>([]);
+  const [loadingCharacters, setLoadingCharacters] = useState(false);
+
+  useEffect(() => {
+    if (tab !== 'compendium' || !debouncedQuery.trim()) {
+      setResults([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setSearching(true);
+      try {
+        const list = await api.get<RuleEntry[]>(
+          `${API}/rules/search?type=monster&q=${encodeURIComponent(debouncedQuery.trim())}`,
+        );
+        if (!cancelled) setResults(list);
+      } catch {
+        if (!cancelled) setResults([]);
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, debouncedQuery]);
+
+  useEffect(() => {
+    if (tab !== 'party' || !Number.isFinite(cid)) return;
+    let cancelled = false;
+    (async () => {
+      setLoadingCharacters(true);
+      try {
+        const list = await api.get<Character[]>(`${API}/campaigns/${cid}/characters`);
+        if (!cancelled) setCharacters(list);
+      } catch {
+        if (!cancelled) setCharacters([]);
+      } finally {
+        if (!cancelled) setLoadingCharacters(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, cid]);
+
+  async function addManual(e: FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/encounters/${encounterId}/combatants`, {
+        kind: 'monster' as CombatantKind,
+        name: name.trim(),
+        hpMax: hpMax ? Math.max(1, Number(hpMax)) : undefined,
+        initMod: initMod ? Number(initMod) : undefined,
+      });
+      setName('');
+      setHpMax('');
+      setInitMod('');
+      await onAdded();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addFromCompendium(entry: RuleEntry) {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/encounters/${encounterId}/combatants`, {
+        kind: 'monster' as CombatantKind,
+        name: entry.name,
+        ruleEntryId: entry.id,
+      });
+      await onAdded();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addFromParty(character: Character) {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/encounters/${encounterId}/combatants`, {
+        kind: 'character' as CombatantKind,
+        characterId: character.id,
+        name: character.name,
+        hpMax: character.hpMax,
+      });
+      await onAdded();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-3">
+      <span className="card-kicker">Add combatant</span>
+      <div className="seg self-start inline-flex">
+        {(['manual', 'compendium', 'party'] as AddTab[]).map((t) => (
+          <button
+            key={t}
+            style={{
+              padding: '7px 13px',
+              font: 'inherit',
+              fontSize: 12,
+              border: 0,
+              background: 'transparent',
+              cursor: 'pointer',
+              color: tab === t ? 'var(--color-accent)' : 'var(--color-text)',
+              boxShadow: tab === t ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
+              minHeight: 32,
+            }}
+            onClick={() => setTab(t)}
+          >
+            {t === 'manual' ? 'Manual' : t === 'compendium' ? 'Compendium' : 'Party'}
+          </button>
+        ))}
+      </div>
+
+      {error && <p className="text-sm text-rose-400">{error}</p>}
+
+      {tab === 'manual' && (
+        <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
+          <div className="field" style={{ flex: 1, minWidth: 140 }}>
+            <label>Name</label>
+            <TextInput placeholder="Ashen cultist" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="field" style={{ width: 80 }}>
+            <label>HP</label>
+            <TextInput placeholder="22" value={hpMax} onChange={(e) => setHpMax(e.target.value)} />
+          </div>
+          <div className="field" style={{ width: 80 }}>
+            <label>Init mod</label>
+            <TextInput placeholder="2" value={initMod} onChange={(e) => setInitMod(e.target.value)} />
+          </div>
+          <Btn type="submit" disabled={saving || !name.trim()}>
+            {saving ? 'Adding…' : 'Add'}
+          </Btn>
+        </form>
+      )}
+
+      {tab === 'compendium' && (
+        <div className="space-y-2">
+          <TextInput
+            placeholder="Search monsters…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            autoFocus
+          />
+          {searching ? (
+            <Skeleton lines={2} />
+          ) : results.length === 0 ? (
+            <p className="text-muted" style={{ fontSize: 12 }}>
+              {query.trim() ? 'No matches.' : 'Start typing to search the compendium.'}
+            </p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {results.map((entry) => (
+                <button
+                  key={entry.id}
+                  className="card elev-sm"
+                  style={{
+                    border: 0,
+                    font: 'inherit',
+                    color: 'var(--color-text)',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: '8px 12px',
+                  }}
+                  disabled={saving}
+                  onClick={() => addFromCompendium(entry)}
+                >
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
+                  <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>
+                    monster
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'party' && (
+        <div className="space-y-1.5">
+          {loadingCharacters ? (
+            <Skeleton lines={2} />
+          ) : characters.length === 0 ? (
+            <p className="text-muted" style={{ fontSize: 12 }}>
+              No characters in this campaign yet.
+            </p>
+          ) : (
+            characters.map((c) => (
+              <button
+                key={c.id}
+                className="card elev-sm"
+                style={{
+                  border: 0,
+                  font: 'inherit',
+                  color: 'var(--color-text)',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '8px 12px',
+                  width: '100%',
+                }}
+                disabled={saving}
+                onClick={() => addFromParty(c)}
+              >
+                <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{c.name}</span>
+                <span className="text-muted" style={{ fontSize: 11 }}>
+                  {c.hpCurrent}/{c.hpMax}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+function DiceLog({ campaignId }: { campaignId: number }) {
+  const [expr, setExpr] = useState('1d20');
+  const [rolling, setRolling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [rolls, setRolls] = useState<RollResult[]>([]);
+
+  async function roll(e: FormEvent) {
+    e.preventDefault();
+    if (!expr.trim()) return;
+    setRolling(true);
+    setError(null);
+    try {
+      const result = await api.post<RollResult>(`${API}/campaigns/${campaignId}/roll`, { expr: expr.trim() });
+      setRolls((prev) => [result, ...prev].slice(0, 5));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't roll.");
+    } finally {
+      setRolling(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-2.5">
+      <span className="card-kicker">Dice log</span>
+      <form onSubmit={roll} className="flex gap-2 items-end flex-wrap">
+        <div className="field" style={{ flex: 1, minWidth: 120 }}>
+          <label>Expression</label>
+          <TextInput placeholder="1d20+3" value={expr} onChange={(e) => setExpr(e.target.value)} />
+        </div>
+        <Btn type="submit" disabled={rolling || !expr.trim()}>
+          {rolling ? 'Rolling…' : 'Roll'}
+        </Btn>
+      </form>
+      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {rolls.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {rolls.map((r, i) => (
+            <div
+              key={`${r.expr}-${i}-${r.total}`}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 32 }}
+            >
+              <span style={{ flex: 1, minWidth: 0, fontSize: 12.5 }}>{r.expr}</span>
+              <span className="text-muted" style={{ fontSize: 11 }}>
+                [{r.rolls.join(', ')}]
+              </span>
+              <span
+                style={{
+                  fontFamily: 'var(--font-heading)',
+                  fontSize: 18,
+                  color: 'var(--color-accent)',
+                  flex: 'none',
+                }}
+              >
+                {r.total}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}

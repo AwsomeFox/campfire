@@ -244,3 +244,32 @@ export const attachments = sqliteTable('attachments', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+
+// Combat tracker — see modules/encounters. One encounter belongs to a campaign and
+// carries N combatants (party members auto-added on create, monsters/NPCs added by the DM).
+export const encounters = sqliteTable('encounters', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  name: text('name').notNull(),
+  status: text('status').notNull().default('preparing'),
+  round: integer('round').notNull().default(0),
+  turnIndex: integer('turn_index').notNull().default(0),
+  endedAt: text('ended_at'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const combatants = sqliteTable('combatants', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  encounterId: integer('encounter_id').notNull(),
+  kind: text('kind').notNull(), // 'character' | 'monster'
+  characterId: integer('character_id'), // set when kind='character' — links back to characters.id
+  name: text('name').notNull(),
+  initiative: integer('initiative'), // null until rolled
+  initMod: integer('init_mod').notNull().default(0),
+  hpCurrent: integer('hp_current').notNull().default(10),
+  hpMax: integer('hp_max').notNull().default(10),
+  conditions: text('conditions').notNull().default('[]'),
+  ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
+  sortOrder: integer('sort_order').notNull().default(0),
+});

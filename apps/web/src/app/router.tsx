@@ -91,6 +91,14 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/sessions/SessionsPage')),
           },
           {
+            path: '/c/:campaignId/encounters',
+            element: lazyPage(() => import('../features/encounters/EncounterListPage')),
+          },
+          {
+            path: '/c/:campaignId/encounters/:encounterId',
+            element: lazyPage(() => import('../features/encounters/RunSessionPage')),
+          },
+          {
             path: '/c/:campaignId/notes',
             element: lazyPage(() => import('../features/notes/MyNotesPage')),
           },
