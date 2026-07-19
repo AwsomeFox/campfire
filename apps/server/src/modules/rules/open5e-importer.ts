@@ -32,7 +32,13 @@ import type { RuleEntryType } from '@campfire/schema';
 export const OPEN5E_DEFAULT_BASE_URL = 'https://api.open5e.com/v2';
 export const MAX_ENTRIES_PER_SECTION = 2000;
 const PAGE_LIMIT = 100;
-const FETCH_TIMEOUT_MS = 10_000;
+// Real Open5e pages have been observed taking 6-11s to respond (large spell/creature
+// pages especially) — 10s was too tight and produced spurious timeouts. 30s gives
+// enough headroom while still bounding a truly hung request.
+const FETCH_TIMEOUT_MS = 30_000;
+// Retries are for transient failures only (timeout or 5xx) — a 4xx or malformed-JSON
+// response is a real problem with the request/upstream shape and retrying won't help.
+const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 
 export type Open5eSection = 'spells' | 'monsters' | 'items' | 'conditions';
 
@@ -189,6 +195,51 @@ async function fetchWithTimeout(url: string): Promise<Response> {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetches one page with retry on transient failures: a request timeout (AbortError) or
+ * an HTTP 5xx response. Retries PAGE_RETRY_BACKOFFS_MS.length times with the configured
+ * backoff between attempts (1s, then 3s). A 4xx response or a network error that isn't a
+ * timeout is NOT retried — those indicate a real problem with the request itself, not a
+ * transient blip, and retrying would just waste time before failing anyway.
+ */
+async function fetchPageWithRetry(url: string, section: Open5eSection, logger: Open5eImportLogger): Promise<Response> {
+  let lastErr: Error | null = null;
+  let lastRes: Response | null = null;
+
+  for (let attempt = 0; attempt <= PAGE_RETRY_BACKOFFS_MS.length; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url);
+      if (res.ok) return res;
+      if (res.status >= 500 && res.status < 600) {
+        lastRes = res;
+        lastErr = null;
+      } else {
+        // 4xx or other non-ok, non-5xx status — not transient, fail immediately.
+        return res;
+      }
+    } catch (err) {
+      lastErr = err as Error;
+      lastRes = null;
+    }
+
+    if (attempt < PAGE_RETRY_BACKOFFS_MS.length) {
+      const backoff = PAGE_RETRY_BACKOFFS_MS[attempt];
+      const reason = lastErr ? lastErr.message : `HTTP ${lastRes?.status}`;
+      logger.warn(
+        `[open5e-importer] section "${section}": fetch of ${url} failed (${reason}), retrying in ${backoff}ms (attempt ${attempt + 1}/${PAGE_RETRY_BACKOFFS_MS.length})`,
+      );
+      await sleep(backoff);
+    }
+  }
+
+  if (lastRes) return lastRes;
+  throw lastErr ?? new Error('unknown fetch failure');
+}
+
 /** True if `candidate` has the same scheme+host+port as `origin` (both parsed as URLs). */
 function isSameOrigin(origin: string, candidate: string): boolean {
   try {
@@ -205,7 +256,7 @@ function isSameOrigin(origin: string, candidate: string): boolean {
  * Network/parse failures are wrapped as BadRequestException so the caller
  * gets a clean 400 instead of a raw fetch error leaking through.
  *
- * Two hardening measures beyond the original implementation:
+ * Hardening measures beyond the original implementation:
  *  - **Pagination guard**: `page.next` is only followed if it's same-origin as the
  *    configured `baseUrl`. A misbehaving or compromised upstream returning a
  *    cross-origin `next` link (accidentally or maliciously) can't redirect this
@@ -214,6 +265,9 @@ function isSameOrigin(origin: string, candidate: string): boolean {
  *  - **Skip accounting**: malformed rows (mapper throw) and any refused cross-origin
  *    `next` page are counted and reported via `logger.warn` once at the end of the
  *    section, instead of disappearing silently.
+ *  - **Retry on transient failure**: each page fetch gets up to 2 retries (1s, then 3s
+ *    backoff) on a request timeout or HTTP 5xx before giving up — real Open5e pages have
+ *    been observed taking 6-11s, and occasional 5xx blips shouldn't fail an entire import.
  */
 export async function fetchOpen5eSection(
   baseUrl: string,
@@ -229,7 +283,7 @@ export async function fetchOpen5eSection(
   while (url && entries.length < MAX_ENTRIES_PER_SECTION) {
     let res: Response;
     try {
-      res = await fetchWithTimeout(url);
+      res = await fetchPageWithRetry(url, section, logger);
     } catch (err) {
       throw new BadRequestException(`Failed to fetch Open5e section "${section}" from ${url}: ${(err as Error).message}`);
     }

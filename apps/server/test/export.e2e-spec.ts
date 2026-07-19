@@ -1,4 +1,5 @@
 import request from 'supertest';
+import JSZip from 'jszip';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 describe('export (e2e, real cookie sessions)', () => {
@@ -30,6 +31,13 @@ describe('export (e2e, real cookie sessions)', () => {
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({ name: 'Mysterious Stranger', dmSecret: 'is a dragon' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/locations`).send({ name: 'Hidden Cave', dmSecret: 'trap inside' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The party arrived.' });
+
+    // Round-2 finding #6: export must include encounters (with combatants).
+    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Ambush at the Bridge' });
+    const encounterId = encRes.body.id;
+    await dmAgent
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .send({ kind: 'monster', name: 'Bridge Troll', hpMax: 40 });
   });
 
   afterAll(async () => {
@@ -50,6 +58,14 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(Array.isArray(res.body.members)).toBe(true);
     expect(Array.isArray(res.body.audit)).toBe(true);
     expect(Array.isArray(res.body.proposals)).toBe(true);
+
+    // Round-2 finding #6: encounters (with their combatants) are present in the export.
+    expect(Array.isArray(res.body.encounters)).toBe(true);
+    expect(res.body.encounters.length).toBe(1);
+    const encounter = res.body.encounters[0];
+    expect(encounter.name).toBe('Ambush at the Bridge');
+    expect(Array.isArray(encounter.combatants)).toBe(true);
+    expect(encounter.combatants.some((c: { name: string }) => c.name === 'Bridge Troll')).toBe(true);
   });
 
   it('403 for player (non-dm)', async () => {
@@ -69,5 +85,16 @@ describe('export (e2e, real cookie sessions)', () => {
     // zip file magic number
     const buf = res.body as Buffer;
     expect(buf.slice(0, 2).toString('hex')).toBe('504b');
+
+    // Round-2 finding #6: mdzip has an encounters/ folder with a per-encounter markdown
+    // file containing name, status, round, and a combatant table.
+    const zip = await JSZip.loadAsync(buf);
+    const encounterFile = zip.file('encounters/ambush-at-the-bridge.md');
+    expect(encounterFile).not.toBeNull();
+    const content = await encounterFile!.async('string');
+    expect(content).toContain('# Ambush at the Bridge');
+    expect(content).toContain('Status:');
+    expect(content).toContain('Round:');
+    expect(content).toContain('Bridge Troll');
   });
 });

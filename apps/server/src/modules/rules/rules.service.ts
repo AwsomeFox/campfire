@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, sql } from 'drizzle-orm';
 import type { RuleEntry, RuleEntryType, RulePack, RulePackInstall } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
@@ -13,8 +13,22 @@ import {
   OPEN5E_DEFAULT_BASE_URL,
   entryTypeForSection,
   fetchOpen5eSection,
+  type ImportedEntry,
   type Open5eSection,
 } from './open5e-importer';
+
+/**
+ * better-sqlite3 throws a synchronous Error with `.code` set to one of the
+ * SQLITE_CONSTRAINT_* codes on a constraint violation. We only care about UNIQUE here
+ * (rule_packs.slug) — used to detect a lost race between concurrent installs so it can
+ * be turned into a clean incremental-install retry instead of a raw 500.
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as { code?: string } | undefined)?.code;
+  if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return true;
+  const message = err instanceof Error ? err.message : '';
+  return /UNIQUE constraint failed/i.test(message);
+}
 
 function packToDomain(row: typeof rulePacks.$inferSelect): RulePack {
   return {
@@ -80,20 +94,31 @@ export class RulesService {
   }
 
   /**
-   * Installs a rule pack from Open5e. Fetches each requested section live,
-   * maps to RuleEntry rows, and writes pack + entries in one transaction so a
-   * failed import never leaves a half-populated pack. Re-installing the same
-   * slug is rejected (409) — uninstall first if you want to refresh.
+   * Installs a rule pack from Open5e, or — if "open5e-srd" is already installed —
+   * incrementally adds whatever entries from the requested sections aren't present yet
+   * (round-2 finding #2). Dedupe key is (slug, type): an entry already in the pack with
+   * the same slug+type is skipped rather than duplicated or overwritten.
+   *
+   * Fresh install: 201, returns the RulePack as before.
+   * Incremental install (pack already exists): 200, returns
+   * `RulePack & { added: number; skippedExisting: number }`. We deliberately never 409
+   * here even if every requested entry already existed (added:0, skippedExisting:N) —
+   * simpler UX than forcing the caller to pre-check section coverage, and idempotent:
+   * calling install repeatedly with the same sections converges to a 200 no-op rather
+   * than an error the caller has to special-case.
+   *
+   * Concurrency (round-2 finding #3): two concurrent *fresh* installs can both pass the
+   * `existing` pack check before either commits. The first INSERT wins; the second hits
+   * `rule_packs.slug`'s UNIQUE constraint. That constraint violation is caught and the
+   * call is retried once as an incremental install against the now-existing row, so
+   * concurrent installs converge to one 201 and the rest clean 200/409s — never a raw 500.
    */
-  async installFromOpen5e(input: RulePackInstall, user: RequestUser): Promise<RulePack> {
+  async installFromOpen5e(input: RulePackInstall, user: RequestUser): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? OPEN5E_DEFAULT_BASE_URL;
     const sections: Open5eSection[] = input.sections?.length ? (input.sections as Open5eSection[]) : ALL_OPEN5E_SECTIONS;
     const slug = 'open5e-srd';
 
     const [existing] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).limit(1);
-    if (existing) {
-      throw new ConflictException(`Rule pack "${slug}" is already installed — uninstall it first to reimport`);
-    }
 
     const sectionResults = await Promise.all(sections.map((s) => fetchOpen5eSection(baseUrl, s)));
     const allEntries = sectionResults.flatMap((r) => r.entries);
@@ -108,43 +133,58 @@ export class RulesService {
       );
     }
 
+    if (existing) {
+      return this.addEntriesToExistingPack(existing, allEntries, sections, user);
+    }
+
     const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
     const license = licenses.size > 0 ? [...licenses].join(', ') : 'OGL/CC';
     const ts = nowIso();
 
-    const pack = this.db.transaction((tx) => {
-      const [packRow] = tx
-        .insert(rulePacks)
-        .values({
-          slug,
-          name: 'Open5e SRD',
-          version: ts.slice(0, 10),
-          license,
-          sourceUrl: baseUrl,
-          installedAt: ts,
-          entryCount: allEntries.length,
-        })
-        .returning()
-        .all();
-
-      for (const entry of allEntries) {
-        tx.insert(ruleEntries)
+    let pack: typeof rulePacks.$inferSelect;
+    try {
+      pack = this.db.transaction((tx) => {
+        const [packRow] = tx
+          .insert(rulePacks)
           .values({
-            packId: packRow.id,
-            slug: entry.slug,
-            name: entry.name,
-            type: entry.type,
-            summary: entry.summary,
-            body: entry.body,
-            dataJson: entry.dataJson,
-            createdAt: ts,
-            updatedAt: ts,
+            slug,
+            name: 'Open5e SRD',
+            version: ts.slice(0, 10),
+            license,
+            sourceUrl: baseUrl,
+            installedAt: ts,
+            entryCount: allEntries.length,
           })
-          .run();
-      }
+          .returning()
+          .all();
 
-      return packRow;
-    });
+        for (const entry of allEntries) {
+          tx.insert(ruleEntries)
+            .values({
+              packId: packRow.id,
+              slug: entry.slug,
+              name: entry.name,
+              type: entry.type,
+              summary: entry.summary,
+              body: entry.body,
+              dataJson: entry.dataJson,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run();
+        }
+
+        return packRow;
+      });
+    } catch (err) {
+      if (!isUniqueConstraintError(err)) throw err;
+      // Lost a race with a concurrent fresh install that committed between our
+      // existence check and our INSERT — the pack now exists, so fall back to the
+      // incremental path against it instead of surfacing a raw 500.
+      const [raced] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).limit(1);
+      if (!raced) throw err; // shouldn't happen, but don't swallow a genuine failure
+      return this.addEntriesToExistingPack(raced, allEntries, sections, user);
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -156,6 +196,87 @@ export class RulesService {
     });
 
     return packToDomain(pack);
+  }
+
+  /**
+   * Adds whichever of `fetchedEntries` aren't already present (by slug+type) in
+   * `packRow`'s entries, bumping entryCount/version. Wrapped in a transaction so a
+   * partial write never happens; also absorbs a UNIQUE-constraint race between two
+   * concurrent incremental installs targeting the same pack (one retries against the
+   * fresh entry list rather than 500ing).
+   */
+  private async addEntriesToExistingPack(
+    packRow: typeof rulePacks.$inferSelect,
+    fetchedEntries: ImportedEntry[],
+    sections: Open5eSection[],
+    user: RequestUser,
+  ): Promise<RulePack & { added: number; skippedExisting: number }> {
+    const existingRows = await this.db
+      .select({ slug: ruleEntries.slug, type: ruleEntries.type })
+      .from(ruleEntries)
+      .where(eq(ruleEntries.packId, packRow.id));
+    const existingKeys = new Set(existingRows.map((r) => `${r.type}::${r.slug}`));
+
+    const toAdd = fetchedEntries.filter((e) => !existingKeys.has(`${e.type}::${e.slug}`));
+    const skippedExisting = fetchedEntries.length - toAdd.length;
+    const ts = nowIso();
+
+    let updatedPack = packRow;
+    if (toAdd.length > 0) {
+      try {
+        updatedPack = this.db.transaction((tx) => {
+          for (const entry of toAdd) {
+            tx.insert(ruleEntries)
+              .values({
+                packId: packRow.id,
+                slug: entry.slug,
+                name: entry.name,
+                type: entry.type,
+                summary: entry.summary,
+                body: entry.body,
+                dataJson: entry.dataJson,
+                createdAt: ts,
+                updatedAt: ts,
+              })
+              .run();
+          }
+          const [row] = tx
+            .update(rulePacks)
+            .set({ entryCount: packRow.entryCount + toAdd.length, version: ts.slice(0, 10) })
+            .where(eq(rulePacks.id, packRow.id))
+            .returning()
+            .all();
+          return row;
+        });
+      } catch (err) {
+        if (!isUniqueConstraintError(err)) throw err;
+        // Another concurrent incremental install inserted one of the same (slug,type)
+        // rows first — re-derive what's actually there now rather than 500ing. This
+        // install just contributed nothing new (safe under the dedupe-by-slug+type rule).
+        const [freshPack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, packRow.id)).limit(1);
+        updatedPack = freshPack ?? packRow;
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'rulepack.install',
+          entityType: 'rule_pack',
+          entityId: updatedPack.id,
+          detail: `incremental install lost a race for pack "${packRow.slug}" (sections ${sections.join(',')}) — 0 added after retry`,
+        });
+        return { ...packToDomain(updatedPack), added: 0, skippedExisting: fetchedEntries.length };
+      }
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'rulepack.install',
+      entityType: 'rule_pack',
+      entityId: updatedPack.id,
+      detail: `incremental install for pack "${packRow.slug}": +${toAdd.length} entries from sections ${sections.join(',')}, ${skippedExisting} already present`,
+    });
+
+    return { ...packToDomain(updatedPack), added: toAdd.length, skippedExisting };
   }
 
   async uninstall(id: number, user: RequestUser): Promise<void> {

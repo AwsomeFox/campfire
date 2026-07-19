@@ -10,6 +10,7 @@ import { SessionsModule } from '../sessions/sessions.module';
 import { CharactersModule } from '../characters/characters.module';
 import { NotesModule } from '../notes/notes.module';
 import { ProposalsModule } from '../proposals/proposals.module';
+import { EncountersModule } from '../encounters/encounters.module';
 import { ExportService } from './export.service';
 import { ExportController } from './export.controller';
 
@@ -26,6 +27,7 @@ import { ExportController } from './export.controller';
     CharactersModule,
     NotesModule,
     ProposalsModule,
+    EncountersModule,
   ],
   controllers: [ExportController],
   providers: [ExportService],

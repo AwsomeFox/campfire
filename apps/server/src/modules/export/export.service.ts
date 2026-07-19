@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import JSZip from 'jszip';
+import type { EncounterWithCombatants } from '@campfire/schema';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -10,6 +11,7 @@ import { NotesService } from '../notes/notes.service';
 import { MembersService } from '../membership/members.service';
 import { AuditService } from '../audit/audit.service';
 import { ProposalsService } from '../proposals/proposals.service';
+import { EncountersService } from '../encounters/encounters.service';
 import type { RequestUser } from '../../common/user.types';
 
 /** Filesystem/URL-safe slug for filenames — lowercase, alnum + hyphens. */
@@ -35,6 +37,7 @@ export class ExportService {
     private readonly members: MembersService,
     private readonly audit: AuditService,
     private readonly proposals: ProposalsService,
+    private readonly encounters: EncountersService,
   ) {}
 
   /**
@@ -46,7 +49,7 @@ export class ExportService {
   async buildExport(campaignId: number, user: RequestUser) {
     const role = 'dm' as const;
 
-    const [campaign, questList, npcList, locationList, sessionList, characterList, noteList, memberList, auditList, proposalList] =
+    const [campaign, questList, npcList, locationList, sessionList, characterList, noteList, memberList, auditList, proposalList, encounterList] =
       await Promise.all([
         this.campaigns.getOrThrow(campaignId),
         this.quests.listForCampaignWithObjectives(campaignId, role),
@@ -58,7 +61,14 @@ export class ExportService {
         this.members.listForCampaign(campaignId),
         this.audit.listForCampaign(campaignId, 500),
         this.proposals.listForCampaign(campaignId, undefined),
+        this.encounters.listForCampaign(campaignId),
       ]);
+
+    // Encounters need their combatants too (listForCampaign only returns the bare
+    // Encounter rows) — fetch each one's full detail in parallel.
+    const encountersWithCombatants: EncounterWithCombatants[] = await Promise.all(
+      encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
+    );
 
     // members "sans anything sensitive" — CampaignMember already carries no
     // password/session data, but drop nothing further needed; kept explicit
@@ -86,6 +96,7 @@ export class ExportService {
       members,
       audit: auditList,
       proposals: proposalList,
+      encounters: encountersWithCombatants,
     };
   }
 
@@ -125,6 +136,11 @@ export class ExportService {
     const charactersFolder = zip.folder('characters')!;
     for (const c of data.characters) {
       charactersFolder.file(`${slugify(c.name)}.md`, this.characterMarkdown(c));
+    }
+
+    const encountersFolder = zip.folder('encounters')!;
+    for (const e of data.encounters) {
+      encountersFolder.file(`${slugify(e.name)}.md`, this.encounterMarkdown(e));
     }
 
     return zip.generateAsync({ type: 'nodebuffer' });
@@ -235,6 +251,29 @@ export class ExportService {
       '',
       c.notes || '_none_',
     ];
+    return lines.join('\n') + '\n';
+  }
+
+  private encounterMarkdown(e: EncounterWithCombatants): string {
+    const lines = [
+      `# ${e.name}`,
+      '',
+      `- Status: ${e.status}`,
+      `- Round: ${e.round}`,
+      '',
+      '## Combatants',
+      '',
+    ];
+    if (e.combatants.length) {
+      lines.push('| Name | Kind | Initiative | HP | Conditions |', '| --- | --- | --- | --- | --- |');
+      for (const c of e.combatants) {
+        lines.push(
+          `| ${c.name} | ${c.kind} | ${c.initiative ?? '_unrolled_'} | ${c.hpCurrent}/${c.hpMax} | ${c.conditions.length ? c.conditions.join(', ') : '_none_'} |`,
+        );
+      }
+    } else {
+      lines.push('_none_');
+    }
     return lines.join('\n') + '\n';
   }
 }

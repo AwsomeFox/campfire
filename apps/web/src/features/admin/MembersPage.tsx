@@ -130,7 +130,7 @@ export default function MembersPage() {
 
       <Card className="space-y-3">
         <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Audit log</h2>
-        <AuditList entries={audit ?? []} />
+        <AuditList entries={audit ?? []} members={members ?? []} />
       </Card>
     </div>
   );
@@ -512,17 +512,45 @@ function timeAgo(iso: string): string {
 
 const ACTOR_ICON: Record<Role, string> = { dm: '🎩', player: '👤', viewer: '👤' };
 
-function AuditList({ entries }: { entries: AuditEntry[] }) {
+/**
+ * Resolve an AuditEntry.actor (see auditActor() in apps/server/src/common/user.types.ts)
+ * to something human-readable:
+ *  - `token:<name>` → PAT actor, rendered as-is with a subtle "token" tag
+ *  - a plain user id string that matches a campaign member's userId → that member's
+ *    displayName || username
+ *  - anything else (e.g. a user id no longer in this campaign) → falls back to `#id`
+ */
+function resolveActorLabel(actor: string, members: CampaignMember[]): { label: string; isToken: boolean } {
+  if (actor.startsWith('token:')) {
+    return { label: actor.slice('token:'.length), isToken: true };
+  }
+  const member = members.find((m) => String(m.userId) === actor);
+  if (member) {
+    return { label: member.displayName || member.username || `#${actor}`, isToken: false };
+  }
+  return { label: `#${actor}`, isToken: false };
+}
+
+function AuditList({ entries, members }: { entries: AuditEntry[]; members: CampaignMember[] }) {
   if (entries.length === 0) return <EmptyState icon="📜" title="No activity yet" />;
   return (
     <ul className="text-xs space-y-2 text-slate-400">
-      {entries.slice(0, 20).map((e) => (
-        <li key={e.id}>
-          <span className="text-slate-600">{timeAgo(e.createdAt)}</span> {ACTOR_ICON[e.actorRole]}{' '}
-          <b className="text-slate-300">{e.actor}</b> {e.action}
-          {e.detail && <span className="text-slate-500"> — {e.detail}</span>}
-        </li>
-      ))}
+      {entries.slice(0, 20).map((e) => {
+        const { label, isToken } = resolveActorLabel(e.actor, members);
+        return (
+          <li key={e.id}>
+            <span className="text-slate-600">{timeAgo(e.createdAt)}</span> {ACTOR_ICON[e.actorRole]}{' '}
+            <b className="text-slate-300">{label}</b>{' '}
+            {isToken && (
+              <span className="tag tag-neutral" style={{ fontSize: 9 }}>
+                token
+              </span>
+            )}{' '}
+            {e.action}
+            {e.detail && <span className="text-slate-500"> — {e.detail}</span>}
+          </li>
+        );
+      })}
     </ul>
   );
 }

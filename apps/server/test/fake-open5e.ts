@@ -82,6 +82,52 @@ export async function startFakeOpen5e(): Promise<FakeOpen5e> {
  *    from the imported results proves the cross-origin guard actually worked, not just
  *    that pagination happened to stop.
  */
+/**
+ * Fake Open5e server exercising the importer's retry/timeout hardening (round-2 finding
+ * #1): `/v2/spells/` fails with a 503 on its first TWO requests, then succeeds on the
+ * third — pinning that fetchOpen5eSection retries (2 retries, 1s/3s backoff) rather than
+ * failing the whole import on a single transient 5xx. Other sections succeed immediately
+ * so the test isn't slowed down by unrelated retries.
+ */
+export interface FakeOpen5eFlaky extends FakeOpen5e {
+  spellsRequestCount(): number;
+}
+
+export async function startFakeOpen5eFlaky(): Promise<FakeOpen5eFlaky> {
+  let spellsRequests = 0;
+
+  const app = express();
+  app.get('/v2/spells/', (_req, res) => {
+    spellsRequests += 1;
+    if (spellsRequests <= 2) {
+      res.status(503).json({ detail: 'temporarily unavailable' });
+      return;
+    }
+    res.json(page(SPELLS));
+  });
+  app.get('/v2/creatures/', (_req, res) => res.json(page(CREATURES)));
+  app.get('/v2/magicitems/', (_req, res) => res.json(page(MAGIC_ITEMS)));
+  app.get('/v2/conditions/', (_req, res) => res.json(page(CONDITIONS)));
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');
+  const baseUrl = `http://127.0.0.1:${address.port}/v2`;
+
+  return {
+    baseUrl,
+    server,
+    spellsRequestCount: () => spellsRequests,
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}
+
 export interface FakeOpen5eWithBadPagination extends FakeOpen5e {
   evilBaseUrl: string;
   evilWasHit(): boolean;
