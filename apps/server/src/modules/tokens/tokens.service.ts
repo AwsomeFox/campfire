@@ -7,7 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { apiTokens, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateApiToken, hashApiToken, apiTokenPrefix } from '../../common/crypto';
-import type { RequestUser, TokenContext } from '../../common/user.types';
+import { hasServerAdminPower, type RequestUser, type TokenContext } from '../../common/user.types';
 import { RoleResolver } from '../membership/role-resolver.service';
 
 type ApiTokenCreateInput = z.infer<typeof ApiTokenCreate>;
@@ -17,6 +17,7 @@ export interface MintForInput {
   tokenName: string;
   scope?: TokenScope;
   campaignId?: number | null;
+  adminEnabled?: boolean;
 }
 
 /** Least-privilege default when a mint request omits `scope` — matches ApiToken.scope semantics (caps effective role). */
@@ -32,6 +33,7 @@ function toDomain(row: typeof apiTokens.$inferSelect): ApiToken {
     name: row.name,
     scope: row.scope as ApiToken['scope'],
     campaignId: row.campaignId,
+    adminEnabled: !!row.adminEnabled,
     tokenPrefix: row.tokenPrefix,
     lastUsedAt: row.lastUsedAt,
     createdAt: row.createdAt,
@@ -66,6 +68,22 @@ export class TokensService {
    * existence to read the campaign's metadata back out (GET /campaigns /
    * MCP list_campaigns via accessibleCampaignIds trusting the token). 403
    * otherwise.
+   *
+   * `input.adminEnabled` (whether the new token may exercise SERVER-admin
+   * power — see hasServerAdminPower()) is only ever honored when `caller`
+   * CURRENTLY holds real server-admin power (hasServerAdminPower(caller)):
+   * a non-admin, or an admin acting through an already-capped token, cannot
+   * mint themselves (or anyone) a more-privileged admin-enabled token —
+   * otherwise the cap would be trivially bypassable by re-minting. This is
+   * THE authorization check for `adminEnabled` on the self-service path
+   * (POST /tokens, where `caller` is the authenticated request's own user).
+   * mintFor() below additionally applies its own target-must-be-admin rule
+   * before ever passing `adminEnabled: true` in here, since its `caller` arg
+   * (used for the campaign-access check, per its own contract) is not
+   * necessarily the actor whose privilege should gate `adminEnabled`. Any
+   * unauthorized request for adminEnabled:true is silently downgraded to
+   * false rather than rejected outright, matching the existing
+   * least-privilege default behavior for an omitted `scope`.
    */
   async create(userId: number, input: ApiTokenCreateInput, caller: RequestUser): Promise<ApiTokenCreated> {
     if (input.campaignId != null) {
@@ -74,6 +92,8 @@ export class TokensService {
         throw new ForbiddenException('You do not have access to this campaign');
       }
     }
+
+    const adminEnabled = input.adminEnabled === true && hasServerAdminPower(caller);
 
     const raw = generateApiToken();
     const ts = nowIso();
@@ -84,6 +104,7 @@ export class TokensService {
         name: input.name,
         scope: input.scope,
         campaignId: input.campaignId ?? null,
+        adminEnabled,
         tokenHash: hashApiToken(raw),
         tokenPrefix: apiTokenPrefix(raw),
         lastUsedAt: null,
@@ -96,20 +117,33 @@ export class TokensService {
 
   /**
    * Shared entry point for both mint-a-PAT-in-one-call flows:
-   *  - AuthController.token() (POST /auth/token, @Public): `owner` and `caller`
+   *  - AuthController.token() (POST /auth/token, @Public): `owner` and `requester`
    *    are the SAME just-credential-verified user — access is checked against
-   *    their own campaign membership, identical to the self-service POST /tokens.
+   *    their own campaign membership, identical to the self-service POST /tokens,
+   *    and `adminEnabled:true` requires that user to themselves currently be a
+   *    server admin (fresh credential check — no tokenContext exists yet on this
+   *    path, so hasServerAdminPower() reduces to a plain serverRole check).
    *  - UsersController.mintToken() (POST /users/:id/tokens, server-admin only):
-   *    `owner` is the target user being provisioned for; `caller` is ALSO the
-   *    target user (not the admin) so scope/campaignId are validated against
-   *    THAT user's access, never the admin's — an admin can't use this to mint
-   *    a token scoped to a campaign the target user has no relationship to.
+   *    `owner` is the target user being provisioned for — passed to create() as
+   *    `caller` too, so scope/campaignId are validated against THAT user's
+   *    access, never the admin's, exactly as before this fix. `requester` is
+   *    the REAL calling admin, passed separately (defaults to `owner` for the
+   *    headless-bootstrap case above where there is no separate actor) purely
+   *    to decide `adminEnabled`: honored only when `requester` currently holds
+   *    real server-admin power AND the TARGET (`owner`) is themselves a server
+   *    admin — minting an admin-capable token for a non-admin target would let
+   *    that user exercise power their own serverRole doesn't carry, defeating
+   *    hasServerAdminPower()'s premise that the underlying user must already
+   *    be serverRole==='admin'. Resolved to a plain boolean here (not left for
+   *    create() to re-derive from `caller`=owner) since owner's own admin
+   *    power is irrelevant to whether THIS request is authorized to grant it.
    * Applies the least-privilege 'viewer' default when scope is omitted.
    */
-  async mintFor(owner: RequestUser, ownerId: number, input: MintForInput): Promise<ApiTokenCreated> {
+  async mintFor(owner: RequestUser, ownerId: number, input: MintForInput, requester: RequestUser = owner): Promise<ApiTokenCreated> {
+    const adminEnabled = input.adminEnabled === true && owner.serverRole === 'admin' && hasServerAdminPower(requester);
     return this.create(
       ownerId,
-      { name: input.tokenName, scope: input.scope ?? DEFAULT_TOKEN_SCOPE, campaignId: input.campaignId ?? null },
+      { name: input.tokenName, scope: input.scope ?? DEFAULT_TOKEN_SCOPE, campaignId: input.campaignId ?? null, adminEnabled },
       owner,
     );
   }
@@ -154,6 +188,7 @@ export class TokensService {
       name: row.name,
       scope: row.scope as TokenContext['scope'],
       campaignId: row.campaignId,
+      adminEnabled: !!row.adminEnabled,
     };
     return { user, tokenContext };
   }

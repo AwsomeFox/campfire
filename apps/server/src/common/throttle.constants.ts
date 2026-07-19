@@ -1,0 +1,39 @@
+/**
+ * Rate limiting (P2 DoS fix): @Public auth endpoints (POST /auth/login,
+ * /auth/token, /auth/setup) run a full scrypt password hash/verify (~30ms of
+ * CPU) per request, unauthenticated, unbounded — a trivial DoS vector against
+ * an otherwise cheap-to-serve API. @nestjs/throttler is wired in globally
+ * (see AppModule) with a loose default limit everywhere, and a much stricter
+ * per-IP limit applied directly to the three auth routes via @Throttle(...).
+ *
+ * The tracker is IP-based (ThrottlerGuard's default `req.ip`), which respects
+ * Express's `trust proxy` setting — enabled in main.ts's configureApp() so
+ * this reads the real client IP from X-Forwarded-For behind the Traefik
+ * reverse proxy in production, rather than bucketing every request under
+ * Traefik's own IP.
+ */
+
+/** Named throttler config keys, matching ThrottlerModule.forRoot()'s `throttlers[].name`. */
+export const THROTTLE_DEFAULT = 'default';
+export const THROTTLE_AUTH = 'auth';
+
+/** Loose default: normal API usage (including MCP tool-call bursts) should never realistically hit this. */
+export const DEFAULT_THROTTLE_LIMIT = 300;
+export const DEFAULT_THROTTLE_TTL_MS = 60_000;
+
+/** Strict: login/token/setup — 10 attempts/minute/IP is generous for a real user, punishing for a scrypt-DoS script. */
+export const AUTH_THROTTLE_LIMIT = 10;
+export const AUTH_THROTTLE_TTL_MS = 60_000;
+
+/**
+ * Test-env escape hatch: e2e suites legitimately fire many rapid auth calls
+ * across a single jest file (e.g. auth.e2e-spec.ts's ~28 login/setup calls in
+ * one run) — real per-test-file throttling would make those suites flaky
+ * rather than testing anything meaningful. Sibling to the existing DEV_AUTH
+ * env-gate pattern (see session-auth.guard.ts). Sets are opt-in: only
+ * test/test-app.ts's helpers set THROTTLE_DISABLED=1; the dedicated
+ * throttle.e2e-spec.ts suite explicitly unsets it to exercise the real path.
+ */
+export function isThrottleDisabled(): boolean {
+  return process.env.THROTTLE_DISABLED === '1';
+}

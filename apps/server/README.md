@@ -163,6 +163,20 @@ Audit/proposal actor strings use `common/user.types.ts`'s `auditActor(user)`
 helper, which renders as `token:<name>` instead of the raw user id whenever
 `tokenContext` is present.
 
+**PAT SERVER-admin cap (separate from the scope cap above).** `scope` only
+ever caps *campaign* role via `RoleResolver`. Server-wide admin power
+(`@ServerRoles('admin')`-gated routes — `POST /users`, `/settings` — and the
+MCP `install_rule_pack` tool) is gated by `common/user.types.ts`'s
+`hasServerAdminPower(user)` instead of a raw `user.serverRole === 'admin'`
+check: true only when `serverRole === 'admin'` AND (`tokenContext` is unset —
+a cookie session — OR `tokenContext.adminEnabled === true`). `adminEnabled`
+lives on `ApiToken`/`api_tokens.admin_enabled`, defaults `false`, and can only
+be set `true` at mint time by a caller who *currently* has real (non-token-
+capped) server-admin power — see `TokensService.create`/`mintFor`. This closes
+a privilege-escalation gap where a viewer-scoped token minted for an admin
+still inherited that admin's server-wide power: the "least-privilege" token
+an operator hands an AI agent is no longer secretly root.
+
 ### Invariants enforced server-side (409 on violation)
 
 - Cannot demote (`serverRole` away from `admin`), disable, or delete the
@@ -490,8 +504,12 @@ combat — over MCP alone.
   `reject_proposal` (dm), `add_member`/`update_member`/`remove_member` (dm;
   refuses to demote/remove the campaign's last dm).
 - **Write — compendium:** `install_rule_pack` (**server admin**, not just
-  campaign dm — checked via `user.serverRole`, matching the REST
-  `@ServerRoles('admin')` gate on `POST /rules/packs/install`).
+  campaign dm — checked via `hasServerAdminPower(user)`, matching the REST
+  `@ServerRoles('admin')` gate on `POST /rules/packs/install`. A PAT only
+  passes this check when it was explicitly minted with `adminEnabled: true`
+  by a caller who was themselves a real admin at mint time — an admin's
+  ordinary/scope-only token does NOT carry server-admin power by default;
+  see "PAT SERVER-admin cap" above).
 - **Write — combat:** `roll_dice` (any member), `create_encounter`,
   `add_combatant` (`kind` required; `ruleEntryId` pulls a monster statblock's
   name/hp/DEX-derived `initMod`, `characterId` pulls from a character
@@ -520,6 +538,10 @@ combat — over MCP alone.
    additionally *caps* the effective role to `min(token scope, real
    membership role)` and, if bound to one `campaignId`, 403s on every other
    campaign — even for server admins acting through a scoped token.
+   SERVER-admin power (install_rule_pack, and REST-only routes) is capped
+   separately and more strictly: it requires the token to have been minted
+   with `adminEnabled: true`, not just campaign scope — see "PAT SERVER-admin
+   cap" above.
 3. **Propose-then-approve.** quest/npc/location/session create+update (incl.
    `set_quest_status`) accept `propose: true`: any member may submit a
    pending `Proposal` instead of writing directly; a dm later calls
@@ -587,18 +609,42 @@ curl -s -X POST http://localhost:8080/api/v1/auth/token \
 
 Use the returned `token` as `Authorization: Bearer cf_pat_...` on every
 subsequent REST call or the MCP endpoint — no cookie needed. `scope` caps the
-effective role (`dm`/`player`/`viewer`, defaults to `viewer` if omitted);
-`campaignId` optionally locks the token to one campaign (403 if the
+effective *campaign* role (`dm`/`player`/`viewer`, defaults to `viewer` if
+omitted); `campaignId` optionally locks the token to one campaign (403 if the
 authenticating user has no real access to it). Credential checks are
 identical to `POST /auth/login` — same 401 on bad creds, same 403s for
 disabled/SSO-only accounts or local-login-disabled non-admins.
 
+By default a minted token carries **no server-admin power**, even if its
+owner is a server admin — `scope` only ever caps campaign role, never
+server-wide capability (see "PAT SERVER-admin cap" earlier in this doc). To
+mint a token that CAN exercise server-admin routes/tools, pass
+`"adminEnabled": true`; this is only honored when the authenticating user is
+themselves a real admin at mint time (silently downgraded to `false`
+otherwise, not rejected):
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/auth/token \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "username": "my-admin-user",
+    "password": "the-password",
+    "tokenName": "admin-agent-2026-07-19",
+    "scope": "dm",
+    "adminEnabled": true
+  }'
+# -> {"token":"cf_pat_<48 hex>","apiToken":{"id":2,"scope":"dm","adminEnabled":true,...}}
+```
+
 **Admin provisioning, for a DM/orchestrator agent setting up a whole table:**
 a server admin can mint a token on behalf of *another* user without knowing
 their password, via `POST /users/:id/tokens` `{tokenName, scope?,
-campaignId?}` — access is checked against the **target** user, not the
-admin, so this can't be used to hand out access the target user doesn't
-already have.
+campaignId?, adminEnabled?}` — scope/campaignId access is checked against the
+**target** user, not the admin, so this can't be used to hand out campaign
+access the target user doesn't already have. `adminEnabled: true` is
+additionally honored only when BOTH the calling admin currently holds real
+(non-token-capped) server-admin power AND the target user is themselves a
+server admin.
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/users/7/tokens \
@@ -923,6 +969,30 @@ see "Tests" below):
   operator controls network exposure; if you're deploying Campfire on the open
   internet, put it behind your reverse proxy's own auth or IP allowlist if you
   don't want the API shape publicly browsable.
+- **`app.set('trust proxy', ...)`** — trusts the first hop's `X-Forwarded-For`
+  by default (override with `TRUST_PROXY`, e.g. a hop count or `false`),
+  needed for the rate limiter below (and `req.ip`/`req.secure` generally) to
+  see the real client IP behind a reverse proxy (Traefik in the reference
+  deployment) instead of bucketing every request under the proxy's own
+  address.
+- **Rate limiting (`@nestjs/throttler`, `ThrottlerGuard` as a global
+  `APP_GUARD`, registered before `SessionAuthGuard`/`ServerRolesGuard` so a
+  throttled request never reaches session/token resolution).** Two named
+  throttlers (`common/throttle.constants.ts`):
+  - `default` — loose ceiling (300 req/min/IP) applied to every route; normal
+    API/MCP usage should never realistically hit it.
+  - `auth` — same loose ceiling at the module level, but overridden per-route
+    via `@Throttle({auth: {...}})` to a strict **10 req/min/IP** on the three
+    `@Public` credential-checking routes: `POST /auth/login`, `/auth/token`,
+    `/auth/setup`. These each run a full scrypt hash/verify (~30ms CPU) on
+    unauthenticated input, so without a limit a flood of well-formed,
+    wrong-password requests is a cheap CPU-exhaustion DoS. Over the limit ->
+    `429`.
+  - `THROTTLE_DISABLED=1` (env) fully disables the guard — set automatically
+    by `test/test-app.ts`'s helpers so ordinary e2e suites (which legitimately
+    fire many rapid auth calls that aren't testing throttling) don't flake;
+    `test/throttle.e2e-spec.ts` is the one suite that unsets it to exercise
+    the real 429 path end-to-end.
 
 ## OpenAPI
 

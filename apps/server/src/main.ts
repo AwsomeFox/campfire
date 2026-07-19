@@ -41,6 +41,19 @@ export function resolveCorsOrigin(): string[] | undefined {
  * otherwise — see that file's header comment).
  */
 export function configureApp(app: INestApplication): void {
+  // Trust the first hop's X-Forwarded-For (Traefik in production — see deployment docs).
+  // Required for ThrottlerGuard's per-IP rate limiting (P2 DoS fix) to see the real client
+  // IP rather than bucketing every request under the reverse proxy's own address; also
+  // makes req.ip/req.secure correct generally. TRUST_PROXY env overrides the Express
+  // setting value directly (e.g. a hop count, or 'false' to disable) for deployments
+  // behind more than one proxy hop; defaults to trusting exactly one hop.
+  // Goes through the underlying Express instance (rather than the NestExpressApplication-only
+  // app.set() wrapper) so this works against the plain INestApplication type this function is
+  // typed with — same type test/main-hardening.e2e-spec.ts builds against.
+  const trustProxy = process.env.TRUST_PROXY;
+  const expressInstance = app.getHttpAdapter().getInstance() as { set(key: string, value: unknown): void };
+  expressInstance.set('trust proxy', trustProxy !== undefined ? (trustProxy === 'false' ? false : trustProxy) : 1);
+
   app.use(helmet());
   app.use(cookieParser());
   // Explicit body-size cap on JSON/urlencoded bodies — unbounded request bodies are a

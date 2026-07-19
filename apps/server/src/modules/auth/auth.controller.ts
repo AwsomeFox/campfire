@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, Patch, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiCookieAuth } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import type { AuthStatus, Me, User, ApiTokenCreated } from '@campfire/schema';
 import { Public } from '../../common/decorators/public.decorator';
@@ -13,6 +14,15 @@ import { TokensService } from '../tokens/tokens.service';
 import { SetupRequestDto, LoginRequestDto, PasswordChangeDto, AuthTokenRequestDto } from './auth.dto';
 import { PreferencesUpdateDto } from '../users/users.dto';
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, VERSION } from './auth.constants';
+import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
+
+/**
+ * P2 DoS fix: these three @Public routes each run a full scrypt password
+ * hash/verify (~30ms CPU) against unauthenticated, un-rate-limited input —
+ * setup() and login() on a wrong-but-well-formed password, token() the same
+ * plus a token mint on success. Strict per-IP cap; see throttle.constants.ts.
+ */
+const AUTH_THROTTLE = Throttle({ [THROTTLE_AUTH]: { limit: AUTH_THROTTLE_LIMIT, ttl: AUTH_THROTTLE_TTL_MS } });
 
 function cookieOptions() {
   return {
@@ -52,6 +62,7 @@ export class AuthController {
   }
 
   @Public()
+  @AUTH_THROTTLE
   @Post('setup')
   @ApiOperation({ summary: 'First-run setup', description: 'Creates the first (admin) user and starts a session. Only available while no users exist yet — 409 afterward.' })
   @ApiResponse({ status: 201, description: 'Admin user created; session cookie set.' })
@@ -63,6 +74,7 @@ export class AuthController {
   }
 
   @Public()
+  @AUTH_THROTTLE
   @Post('login')
   @ApiOperation({ summary: 'Log in (cookie session)', description: 'Verifies username/password and starts an httpOnly cookie session. Browser/interactive flow — for headless/agent auth without a cookie jar, use POST /auth/token instead.' })
   @ApiResponse({ status: 201, description: 'Authenticated; session cookie set.' })
@@ -89,6 +101,7 @@ export class AuthController {
    * campaign the credentials' owner has no access to (403).
    */
   @Public()
+  @AUTH_THROTTLE
   @Post('token')
   @ApiOperation({
     summary: 'Headless PAT bootstrap',
