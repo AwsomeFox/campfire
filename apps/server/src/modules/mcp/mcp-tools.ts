@@ -29,7 +29,7 @@ import {
   SessionCreate,
   SessionUpdate,
 } from '@campfire/schema';
-import type { RequestUser } from '../../common/user.types';
+import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
@@ -174,7 +174,11 @@ export class McpToolsService {
         'act on combatants linked to characters they own. viewer: read-only, plus dice rolls and notes/inbox (any ' +
         'member may post). A PAT (personal access token) additionally CAPS the effective role to min(token scope, ' +
         'real membership role) and, if the token is bound to one campaignId, 403s on every other campaign — this ' +
-        'applies even to server admins acting through a scoped token.\n\n' +
+        'applies even to server admins acting through a scoped token. SERVER-admin power (install_rule_pack, and ' +
+        'REST-only routes like POST /users and /settings) is capped separately and more strictly: a PAT never ' +
+        'carries server-admin power unless it was explicitly minted with adminEnabled:true by a caller who ' +
+        'currently held real server-admin power themselves — an admin\'s ordinary/viewer-scoped token is NOT an ' +
+        'admin token by default.\n\n' +
         'PROPOSE-THEN-APPROVE — quest/npc/location/session create+update (and set_quest_status, which proposes a ' +
         'quest update) accept propose:true: any member may submit a change as a pending Proposal instead of writing ' +
         'directly; a dm later calls approve_proposal (applies it through the normal write path) or reject_proposal. ' +
@@ -1060,7 +1064,10 @@ export class McpToolsService {
         'conditions — so lookup_rule/get_rule_entry and add_combatant\'s ruleEntryId can find them.',
       { ...RulePackInstall.shape },
       async ({ source, url, sections }) => {
-        if (user.serverRole !== 'admin') {
+        // hasServerAdminPower(), not a raw serverRole check — a token minted for a server
+        // admin must NOT carry that admin's server-wide power unless it was explicitly
+        // minted with adminEnabled=true. See user.types.ts / the P1 finding this closes.
+        if (!hasServerAdminPower(user)) {
           throw new ForbiddenException('Requires server admin');
         }
         const validated = RulePackInstall.parse({

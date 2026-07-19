@@ -23,6 +23,9 @@ export async function createTestApp(): Promise<TestAppContext> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
   process.env.DATA_DIR = dataDir;
   process.env.DEV_AUTH = '1';
+  // Rate limiting (P2 fix) is opt-out for ordinary e2e suites — see throttle.constants.ts.
+  // Suites that specifically exercise throttling (throttle.e2e-spec.ts) unset this themselves.
+  process.env.THROTTLE_DISABLED = '1';
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
@@ -48,6 +51,9 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
   process.env.DATA_DIR = dataDir;
   delete process.env.DEV_AUTH;
+  // Rate limiting (P2 fix) is opt-out for ordinary e2e suites — see throttle.constants.ts.
+  // Suites that specifically exercise throttling (throttle.e2e-spec.ts) unset this themselves.
+  process.env.THROTTLE_DISABLED = '1';
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],

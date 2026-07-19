@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   name TEXT NOT NULL,
   scope TEXT NOT NULL,
   campaign_id INTEGER,
+  admin_enabled INTEGER NOT NULL DEFAULT 0,
   token_hash TEXT NOT NULL UNIQUE,
   token_prefix TEXT NOT NULL,
   last_used_at TEXT,

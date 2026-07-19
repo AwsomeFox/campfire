@@ -139,6 +139,32 @@ function migrateCampaignsTableForMapAttachment(sqlite: Database.Database): void 
   sqlite.exec('ALTER TABLE campaigns ADD COLUMN map_attachment_id INTEGER');
 }
 
+/**
+ * P1 security fix migration: `api_tokens.admin_enabled` didn't exist before a
+ * token's `scope` was found to cap only per-campaign role, NOT server-wide
+ * capability — a viewer-scoped PAT minted for a server admin still passed
+ * every @ServerRoles('admin') gate and install_rule_pack. Plain NOT NULL
+ * DEFAULT 0 ADD COLUMN — no table rebuild needed, same as
+ * migrateCampaignsTableForMapAttachment above. Defaulting to 0 (false) is the
+ * safe direction: every pre-existing token becomes non-admin-capable on
+ * upgrade, even if its owner is a server admin — operators who need an
+ * admin-capable token must explicitly mint a new one (adminEnabled:true) as a
+ * currently-real admin. New DBs never hit this path — BOOTSTRAP_SQL already
+ * declares the column.
+ */
+function migrateApiTokensTableForAdminEnabled(sqlite: Database.Database): void {
+  const hasApiTokensTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='api_tokens'")
+    .get();
+  if (!hasApiTokensTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(api_tokens)').all() as Array<{ name: string }>;
+  const hasAdminEnabled = columns.some((c) => c.name === 'admin_enabled');
+  if (hasAdminEnabled) return;
+
+  sqlite.exec('ALTER TABLE api_tokens ADD COLUMN admin_enabled INTEGER NOT NULL DEFAULT 0');
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -155,6 +181,7 @@ export function createDb(): DrizzleDb {
   migrateCampaignsTableForRuleSystem(sqlite);
   migrateUsersTableForAccentColor(sqlite);
   migrateCampaignsTableForMapAttachment(sqlite);
+  migrateApiTokensTableForAdminEnabled(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.

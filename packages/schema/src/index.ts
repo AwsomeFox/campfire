@@ -326,12 +326,24 @@ export const ApiToken = z.object({
   name: z.string().min(1).max(80),
   scope: TokenScope,
   campaignId: Id.nullable().default(null), // null = all campaigns the owner can access
+  // Whether this token may exercise SERVER-admin powers (ServerRolesGuard-gated routes,
+  // install_rule_pack, etc) on behalf of an admin owner. Independent of `scope`, which
+  // only caps per-campaign role — see RoleResolver / user.types.ts hasServerAdminPower().
+  // Default false: a token minted without this explicitly set is never server-admin-capable,
+  // even if its owner is a server admin. Only a caller who is CURRENTLY exercising real
+  // server-admin power may mint a token with this true (TokensService.create).
+  adminEnabled: z.boolean().default(false),
   tokenPrefix: z.string().max(12), // display only, e.g. cf_pat_9f2a
   lastUsedAt: IsoDate.nullable().default(null),
   ...timestamps,
 }); // raw token is returned ONCE at creation, stored hashed
 export type ApiToken = z.infer<typeof ApiToken>;
-export const ApiTokenCreate = z.object({ name: z.string().min(1).max(80), scope: TokenScope, campaignId: Id.nullable().optional() });
+export const ApiTokenCreate = z.object({
+  name: z.string().min(1).max(80),
+  scope: TokenScope,
+  campaignId: Id.nullable().optional(),
+  adminEnabled: z.boolean().optional(), // requires the caller to currently hold real server-admin power; silently forced false otherwise
+});
 export const ApiTokenCreated = z.object({ token: z.string(), apiToken: ApiToken });
 
 // Headless PAT bootstrap (POST /auth/token, @Public): verifies credentials in the
@@ -343,6 +355,7 @@ export const AuthTokenRequest = z.object({
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer' (least privilege) — see TokensService.mintFor
   campaignId: Id.nullable().optional(),
+  adminEnabled: z.boolean().optional(), // caller (the just-authenticated user) must currently be a server admin — see TokensService.create
 });
 export type AuthTokenRequest = z.infer<typeof AuthTokenRequest>;
 
@@ -353,6 +366,10 @@ export const AdminTokenCreate = z.object({
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer'
   campaignId: Id.nullable().optional(),
+  // May only be set true when the TARGET user (owner of the minted token) is themself
+  // a server admin, AND the calling admin currently holds real (non-token-capped)
+  // server-admin power — see UsersController.mintToken() / TokensService.create.
+  adminEnabled: z.boolean().optional(),
 });
 export type AdminTokenCreate = z.infer<typeof AdminTokenCreate>;
 

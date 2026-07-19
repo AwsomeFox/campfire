@@ -2,10 +2,20 @@ import { join } from 'path';
 import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { ServeStaticModule } from '@nestjs/serve-static';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { DbModule } from './db/db.module';
 import { SessionAuthGuard } from './common/guards/session-auth.guard';
 import { ServerRolesGuard } from './common/guards/server-roles.guard';
+import {
+  THROTTLE_DEFAULT,
+  THROTTLE_AUTH,
+  DEFAULT_THROTTLE_LIMIT,
+  DEFAULT_THROTTLE_TTL_MS,
+  AUTH_THROTTLE_LIMIT,
+  AUTH_THROTTLE_TTL_MS,
+  isThrottleDisabled,
+} from './common/throttle.constants';
 import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
@@ -72,6 +82,24 @@ function serveStaticImports(): DynamicModule[] {
 @Module({
   imports: [
     ...serveStaticImports(),
+    // Global rate limiting (P2 DoS fix). `default` is a loose ceiling for normal API/MCP
+    // usage; the much stricter `auth` throttler (see throttle.constants.ts) is applied
+    // per-route via @Throttle({auth: {...}}) on POST /auth/login|token|setup only.
+    // skipIf(): test suites opt out entirely via THROTTLE_DISABLED=1 (set by
+    // test/test-app.ts) since e2e suites legitimately fire many rapid auth calls that
+    // aren't testing throttling — the dedicated throttle.e2e-spec.ts suite unsets it.
+    ThrottlerModule.forRoot({
+      throttlers: [
+        { name: THROTTLE_DEFAULT, limit: DEFAULT_THROTTLE_LIMIT, ttl: DEFAULT_THROTTLE_TTL_MS },
+        // Registered globally (ThrottlerGuard evaluates every named throttler against every
+        // route), but given a very loose ceiling here — the strict AUTH_THROTTLE_LIMIT/TTL is
+        // applied per-route via @Throttle({auth: {...}}) on POST /auth/login|token|setup only
+        // (see auth.controller.ts), which overrides these module-level defaults for THOSE
+        // routes specifically. Every other route effectively never hits this bucket.
+        { name: THROTTLE_AUTH, limit: DEFAULT_THROTTLE_LIMIT, ttl: DEFAULT_THROTTLE_TTL_MS },
+      ],
+      skipIf: () => isThrottleDisabled(),
+    }),
     DbModule,
     HealthModule,
     AuthModule,
@@ -96,6 +124,10 @@ function serveStaticImports(): DynamicModule[] {
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },
+    // ThrottlerGuard runs FIRST (Nest applies APP_GUARD providers in registration order) so a
+    // hammered IP is rejected (429) before SessionAuthGuard does any DB/crypto work resolving
+    // its session/PAT — the whole point of throttling the scrypt-heavy @Public auth routes.
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: SessionAuthGuard },
     { provide: APP_GUARD, useClass: ServerRolesGuard },
   ],

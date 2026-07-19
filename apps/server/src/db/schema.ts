@@ -185,6 +185,10 @@ export const apiTokens = sqliteTable('api_tokens', {
   name: text('name').notNull(),
   scope: text('scope').notNull(),
   campaignId: integer('campaign_id'),
+  // See db/db.module.ts ALTER TABLE note — existing DBs get this added via
+  // migrateApiTokensTableForAdminEnabled(), defaulting to 0 (false), which is the
+  // safe/least-privilege value: pre-existing tokens never gain server-admin power.
+  adminEnabled: integer('admin_enabled', { mode: 'boolean' }).notNull().default(false),
   tokenHash: text('token_hash').notNull().unique(),
   tokenPrefix: text('token_prefix').notNull(),
   lastUsedAt: text('last_used_at'),

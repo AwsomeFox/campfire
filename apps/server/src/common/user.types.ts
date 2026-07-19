@@ -31,6 +31,15 @@ export interface TokenContext {
   name: string;
   scope: Role;
   campaignId: number | null;
+  /**
+   * Whether this specific token is allowed to exercise SERVER-admin powers
+   * (ServerRolesGuard-gated routes, install_rule_pack, etc). Independent of
+   * `scope`, which only caps per-campaign role. Defaults false at mint time
+   * (see ApiToken.adminEnabled in @campfire/schema) — an admin's token is NOT
+   * server-admin-capable unless it was explicitly minted that way by a caller
+   * who currently held real server-admin power. See hasServerAdminPower() below.
+   */
+  adminEnabled: boolean;
 }
 
 /** dm > player > viewer */
@@ -47,4 +56,27 @@ export function roleAtLeast(role: Role, min: Role): boolean {
 /** Audit-log / proposer actor string: `token:<name>` when acting via a PAT, else the user id. */
 export function auditActor(user: RequestUser): string {
   return user.tokenContext ? `token:${user.tokenContext.name}` : user.id;
+}
+
+/**
+ * Whether `user` may exercise SERVER-admin powers right now: ServerRolesGuard
+ * (POST /users, /settings, etc) and the MCP install_rule_pack tool both gate on
+ * this instead of the raw `user.serverRole === 'admin'` check.
+ *
+ * A token's `scope` (dm/player/viewer) only ever caps per-campaign role via
+ * RoleResolver — it does NOT touch server-wide capability on its own. Without
+ * this function, a viewer-scoped PAT minted for a server admin would still
+ * carry that admin's serverRole through untouched and pass every server-admin
+ * gate: the "least-privilege" token an operator hands an AI agent would
+ * actually be root. See the P1 finding this closes.
+ *
+ * Rule: real serverRole must be 'admin' AND (not authenticated via a token, OR
+ * the token was explicitly minted with adminEnabled=true). Session-cookie
+ * logins have no tokenContext, so admins via cookie are unaffected — only the
+ * PAT path is capped.
+ */
+export function hasServerAdminPower(user: RequestUser): boolean {
+  if (user.serverRole !== 'admin') return false;
+  if (!user.tokenContext) return true;
+  return user.tokenContext.adminEnabled === true;
 }

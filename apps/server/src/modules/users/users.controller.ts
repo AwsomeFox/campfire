@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Po
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { ApiTokenCreated } from '@campfire/schema';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { UsersService } from './users.service';
 import { TokensService } from '../tokens/tokens.service';
@@ -84,20 +85,33 @@ export class UsersController {
    * (POST /auth/token) checks the authenticating user's own access. An admin
    * cannot use this route to mint a token scoped to a campaign the target user
    * has no relationship to (403), even though the admin themself could access it.
+   *
+   * `requester` (the REAL calling admin, from the session/PAT that authenticated
+   * this request) is passed separately from `owner` (the target) so
+   * TokensService.mintFor() can decide `body.adminEnabled` against the actor
+   * actually making the call: honored only when `requester` currently holds real
+   * server-admin power (this route is already @ServerRoles('admin')-gated, but
+   * that alone doesn't prove non-token-capped power post-P1-fix — see
+   * hasServerAdminPower()) AND the target is themselves a server admin.
    */
   @Post(':id/tokens')
   @ApiOperation({
     summary: 'Mint a PAT for another user (admin provisioning)',
     description:
       "Server-admin only. Mints a personal access token owned by user `id`, without needing that user's password. " +
-      "scope/campaignId are validated against the TARGET user's own campaign access, not the admin's — an admin cannot mint a token scoped to a campaign the target user cannot access.",
+      "scope/campaignId are validated against the TARGET user's own campaign access, not the admin's — an admin cannot mint a token scoped to a campaign the target user cannot access. " +
+      'adminEnabled:true additionally requires the calling admin to currently hold real (non-token-capped) server-admin power AND the target user to themselves be a server admin.',
   })
   @ApiResponse({ status: 201, description: 'PAT minted for the target user. `token` is shown once — store it now.' })
   @ApiResponse({ status: 403, description: 'Target user has no access to the requested campaignId.' })
   @ApiResponse({ status: 404, description: 'User not found.' })
-  async mintToken(@Param('id', ParseIntPipe) id: number, @Body() body: AdminTokenCreateDto): Promise<ApiTokenCreated> {
+  async mintToken(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AdminTokenCreateDto,
+    @CurrentUser() requester: RequestUser,
+  ): Promise<ApiTokenCreated> {
     const target = await this.users.getOrThrow(id);
     const owner: RequestUser = { id: String(target.id), name: target.displayName || target.username, serverRole: target.serverRole };
-    return this.tokens.mintFor(owner, target.id, body);
+    return this.tokens.mintFor(owner, target.id, body, requester);
   }
 }

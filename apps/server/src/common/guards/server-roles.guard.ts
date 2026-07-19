@@ -4,7 +4,7 @@ import type { Request } from 'express';
 import type { ServerRole } from '@campfire/schema';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { SERVER_ROLES_KEY } from '../decorators/server-roles.decorator';
-import type { RequestUser } from '../user.types';
+import { hasServerAdminPower, type RequestUser } from '../user.types';
 
 /** Enforces @ServerRoles(...) — server-wide admin gating (users admin, settings). */
 @Injectable()
@@ -29,7 +29,10 @@ export class ServerRolesGuard implements CanActivate {
     if (!user) throw new ForbiddenException('No user context');
 
     // Only 'admin' is ever required in practice; dev:* header users always carry serverRole 'admin'.
-    const ok = required.every((r) => (r === 'admin' ? user.serverRole === 'admin' : true));
+    // hasServerAdminPower additionally requires that a PAT-authenticated caller's token was
+    // explicitly minted with adminEnabled=true — a scope-capped token must NOT inherit its
+    // owner's server-admin power just because serverRole==='admin'. See user.types.ts.
+    const ok = required.every((r) => (r === 'admin' ? hasServerAdminPower(user) : true));
     if (!ok) {
       throw new ForbiddenException(`Requires server role: ${required.join(', ')}`);
     }
