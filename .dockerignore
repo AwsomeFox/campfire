@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+apps/server/data
+apps/server/dist
+apps/web/dist
+packages/schema/dist
+dist
+.git
+design
+*.md
+.env
+.env.local
+apps/server/*.db
+apps/server/*.db-*
+**/*.tsbuildinfo
+coverage
+.DS_Store

@@ -86,6 +86,94 @@ Role semantics: `dm` = full write incl. `dmSecret` fields · `player` = read can
 - SQLite file lives at `apps/server/data/campfire.db` (env `DATA_DIR`); migrations run automatically on boot.
 - Every write is audit-logged with actor + role.
 
+## Deployment
+
+Campfire ships as a **single Docker image** — the API and the built web SPA are served
+by one Node process on one port, backed by one SQLite file on one volume. No reverse
+proxy, database, or object store required (though you can put a reverse proxy in front
+for TLS/auth — see the Traefik/Authentik note below).
+
+```bash
+docker run -d \
+  --name campfire \
+  -p 8080:8080 \
+  -v campfire-data:/data \
+  -e ORIGIN=https://campfire.example.com \
+  ghcr.io/awsomefox/campfire:latest
+```
+
+Or build locally: `just docker-build` (tags `campfire:local`) then `just docker-run`
+(serves on host port **8081**, so it doesn't collide with a `just dev` stack already
+running on 8080 — maps to the container's internal 8080).
+
+### Image
+
+- `ghcr.io/awsomefox/campfire:latest` and `:<version>` — built for `linux/amd64` and
+  `linux/arm64` on every tagged release (`v*`) by `.github/workflows/ci.yml`'s
+  `release` job.
+- Single stateful volume: `/data` — the SQLite database (`campfire.db`) and uploaded
+  attachments both live under here. Back up this volume; that's the entire app state.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `8080` | Port the server listens on inside the container |
+| `DATA_DIR` | `/data` | SQLite DB + attachment uploads live here (the volume mount point) |
+| `ORIGIN` | *(unset)* | Comma-separated allowed CORS origin(s). Leave unset for same-origin deployments (the default — SPA + API on one origin) |
+| `OIDC_ISSUER` | *(unset)* | OIDC provider issuer URL (enables SSO login when set, alongside local auth) |
+| `OIDC_CLIENT_ID` | *(unset)* | OIDC client ID |
+| `OIDC_CLIENT_SECRET` | *(unset)* | OIDC client secret |
+| `OIDC_REDIRECT_URI` | *(unset)* | OIDC callback URL, e.g. `https://campfire.example.com/api/v1/auth/oidc/callback` |
+| `OIDC_SCOPE` | `openid profile email` | OIDC scopes requested |
+| `OIDC_GROUPS_CLAIM` | `groups` | Claim in the ID token holding the user's group memberships |
+| `OIDC_ADMIN_GROUP` | *(unset)* | Group name that maps to the `dm` server role |
+| `OIDC_ALLOW_INSECURE` | *(unset)* | Set to allow OIDC over plain HTTP — dev/testing only, never in production |
+| `TZ` | *(unset, UTC)* | Container timezone, e.g. `America/Denver` — affects displayed session/log timestamps |
+
+`WEB_DIST` and `NODE_ENV` are already baked into the image (`NODE_ENV=production`,
+`WEB_DIST=/app/web-dist`) — you shouldn't need to set either.
+
+### Compose example
+
+No secrets are inlined below — `${VAR:?}` fails the compose run with a clear error if
+you forget to export it, instead of silently booting with an empty value.
+
+```yaml
+services:
+  campfire:
+    image: ghcr.io/awsomefox/campfire:latest
+    restart: unless-stopped
+    volumes:
+      - campfire-data:/data
+    environment:
+      ORIGIN: ${CAMPFIRE_ORIGIN:?}
+      OIDC_ISSUER: ${OIDC_ISSUER:?}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:?}
+      OIDC_ADMIN_GROUP: ${OIDC_ADMIN_GROUP:?}
+      TZ: ${TZ:-UTC}
+    # No `ports:` published here — reverse-proxied, see below. For a standalone
+    # host without a proxy, add: ports: ["8080:8080"]
+
+volumes:
+  campfire-data:
+```
+
+Run with `CAMPFIRE_ORIGIN=https://campfire.example.com OIDC_ISSUER=... docker compose up -d`
+(or an `.env` file next to the compose file — keep that file out of git).
+
+### Reverse proxy + SSO (Traefik / Authentik)
+
+The common self-hosted pattern: **Traefik** terminates TLS and routes
+`campfire.example.com` to the container on its internal port 8080 (via Docker labels
+or a dynamic config file), while **Authentik** is the OIDC provider — create an
+OAuth2/OIDC provider + application in Authentik, point `OIDC_ISSUER` at it, and map
+an Authentik group (e.g. `campfire-dm`) to `OIDC_ADMIN_GROUP` so its members land in
+Campfire with the `dm` role. Campfire itself never needs a public port in this setup
+— only Traefik does; Campfire and Traefik talk over the Docker network.
+
 ## Roadmap
 
 Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (36 tools), media & maps (attachments), SRD rules search (compendium), encounter/combat tracker, AI scribe via any MCP client with a DM-approval proposal queue. Ahead: D&D Beyond sync, built-in scheduled/automated AI scribe runs (today it's client-driven — connect an MCP client and ask it to act), AI co-DM. Full plan lives in the repo wiki.
