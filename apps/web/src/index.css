@@ -1,0 +1,162 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import "tailwindcss";
+
+/*
+  Campfire design tokens — mirrored from design/assets/campfire.css.
+  This is a placeholder build; the real UI package will own these long-term.
+*/
+:root {
+  /* Surfaces */
+  --cf-bg: #020617; /* slate-950 — page background */
+  --cf-surface: #0f172a; /* slate-900 — panels-on-panels, inputs */
+  --cf-card: #1e293b; /* slate-800 — primary cards */
+  --cf-border: #334155; /* slate-700 — card borders */
+  --cf-border-dim: #1e293b;
+  /* Ink */
+  --cf-ink: #e2e8f0; /* slate-200 — body text */
+  --cf-ink-strong: #ffffff;
+  --cf-dim: #94a3b8; /* slate-400 — secondary text */
+  --cf-faint: #64748b; /* slate-500 — metadata */
+  /* Semantic accents */
+  --cf-accent: #f59e0b; /* amber-500 — primary, active quests, DM elements */
+  --cf-success: #10b981; /* emerald-500 — completed, explored, healthy */
+  --cf-danger: #f43f5e; /* rose-500 — danger, failed, low HP */
+  --cf-arcane: #a78bfa; /* violet-400 — lore, magic, proposals */
+  --cf-threat: #38bdf8; /* sky-400 — threats, movement paths */
+  --cf-radius: 1rem; /* rounded-2xl cards */
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--cf-bg);
+  color: var(--cf-ink);
+  font-family:
+    "Inter",
+    ui-sans-serif,
+    system-ui,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--cf-surface);
+}
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+
+/* --- Components --- */
+.cf-card {
+  background: var(--cf-card);
+  border: 1px solid var(--cf-border);
+  border-radius: var(--cf-radius);
+  box-shadow: 0 10px 25px -12px rgb(0 0 0 / 0.6);
+}
+.cf-inset {
+  background: var(--cf-surface);
+  border: 1px solid var(--cf-border);
+  border-radius: 0.75rem;
+}
+
+.cf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.18rem 0.55rem;
+  border-radius: 9999px;
+}
+.cf-chip-active {
+  background: rgb(245 158 11 / 0.15);
+  color: #fbbf24;
+}
+.cf-chip-available {
+  background: rgb(100 116 139 / 0.2);
+  color: #94a3b8;
+}
+.cf-chip-completed {
+  background: rgb(16 185 129 / 0.15);
+  color: #34d399;
+}
+.cf-chip-failed {
+  background: rgb(244 63 94 / 0.15);
+  color: #fb7185;
+}
+.cf-chip-online {
+  background: rgb(16 185 129 / 0.15);
+  color: #34d399;
+}
+.cf-chip-offline {
+  background: rgb(244 63 94 / 0.15);
+  color: #fb7185;
+}
+.cf-chip-neutral {
+  background: rgb(100 116 139 / 0.2);
+  color: #cbd5e1;
+}
+
+.cf-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  background: var(--cf-accent);
+  color: #1c1002;
+  font-weight: 700;
+  font-size: 0.9rem;
+  padding: 0.6rem 1.15rem;
+  border-radius: 0.75rem;
+  border: 0;
+  cursor: pointer;
+  min-height: 44px; /* tap target */
+  transition: filter 0.15s ease;
+}
+.cf-btn:hover {
+  filter: brightness(1.08);
+}
+.cf-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  filter: none;
+}
+.cf-btn-ghost {
+  background: transparent;
+  color: var(--cf-dim);
+  border: 1px solid var(--cf-border);
+}
+.cf-btn-ghost:hover {
+  color: var(--cf-ink);
+  border-color: #475569;
+}
+
+.cf-input {
+  width: 100%;
+  background: var(--cf-surface);
+  color: var(--cf-ink);
+  border: 1px solid var(--cf-border);
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  font-size: 0.95rem;
+  min-height: 44px;
+}
+.cf-input:focus {
+  outline: 2px solid var(--cf-accent);
+  outline-offset: -1px;
+}
+.cf-input::placeholder {
+  color: var(--cf-faint);
+}
