@@ -17,12 +17,16 @@ import { LocationsModule } from './modules/locations/locations.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
 import { NotesModule } from './modules/notes/notes.module';
 import { AuditModule } from './modules/audit/audit.module';
+import { TokensModule } from './modules/tokens/tokens.module';
+import { ProposalsModule } from './modules/proposals/proposals.module';
+import { ExportModule } from './modules/export/export.module';
 
 @Module({
   imports: [
     DbModule,
     HealthModule,
     AuthModule,
+    TokensModule,
     UsersModule,
     SettingsModule,
     MembershipModule,
@@ -34,6 +38,8 @@ import { AuditModule } from './modules/audit/audit.module';
     LocationsModule,
     SessionsModule,
     NotesModule,
+    ProposalsModule,
+    ExportModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },

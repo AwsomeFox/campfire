@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { notes } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
 type NoteCreateInput = z.infer<typeof NoteCreate>;
@@ -98,7 +99,7 @@ export class NotesService {
       .returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'note.create',
       entityType: 'note',
@@ -123,7 +124,7 @@ export class NotesService {
       .returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'note.update',
       entityType: 'note',
@@ -141,7 +142,7 @@ export class NotesService {
     }
     await this.db.delete(notes).where(eq(notes.id, id));
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'note.delete',
       entityType: 'note',
@@ -172,7 +173,7 @@ export class NotesService {
       .returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'inbox.create',
       entityType: 'note',
@@ -202,7 +203,7 @@ export class NotesService {
       .returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'inbox.resolve',
       entityType: 'note',

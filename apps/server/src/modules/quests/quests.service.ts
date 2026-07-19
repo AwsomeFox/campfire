@@ -8,6 +8,7 @@ import { quests, questObjectives } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
 type QuestCreateInput = z.infer<typeof QuestCreate>;
@@ -115,7 +116,7 @@ export class QuestsService {
       })
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'quest.create',
       entityType: 'quest',
@@ -133,7 +134,7 @@ export class QuestsService {
       .where(eq(quests.id, id))
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'quest.update',
       entityType: 'quest',
@@ -148,7 +149,7 @@ export class QuestsService {
     await this.db.delete(questObjectives).where(eq(questObjectives.questId, id));
     await this.db.delete(quests).where(eq(quests.id, id));
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'quest.delete',
       entityType: 'quest',
@@ -165,7 +166,7 @@ export class QuestsService {
       .where(eq(quests.id, id))
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'quest.status',
       entityType: 'quest',
@@ -188,7 +189,7 @@ export class QuestsService {
       })
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'quest.objective.create',
       entityType: 'quest_objective',
@@ -231,7 +232,7 @@ export class QuestsService {
       .returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'quest.objective.update',
       entityType: 'quest_objective',
@@ -247,7 +248,7 @@ export class QuestsService {
       .delete(questObjectives)
       .where(and(eq(questObjectives.id, objectiveId), eq(questObjectives.questId, questId)));
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'quest.objective.delete',
       entityType: 'quest_objective',

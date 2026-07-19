@@ -8,6 +8,7 @@ import { locations, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
 type LocationCreateInput = z.infer<typeof LocationCreate>;
@@ -70,7 +71,7 @@ export class LocationsService {
       })
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'location.create',
       entityType: 'location',
@@ -88,7 +89,7 @@ export class LocationsService {
       .where(eq(locations.id, id))
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'location.update',
       entityType: 'location',
@@ -102,7 +103,7 @@ export class LocationsService {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(locations).where(eq(locations.id, id));
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'location.delete',
       entityType: 'location',
@@ -148,7 +149,7 @@ export class LocationsService {
     }
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'location.discover',
       entityType: 'location',

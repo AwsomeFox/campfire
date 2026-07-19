@@ -3,16 +3,19 @@ import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { Role } from '@campfire/schema';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
-import type { RequestUser } from '../user.types';
+import type { RequestUser, TokenContext } from '../user.types';
+import { looksLikeApiToken } from '../crypto';
 import { AuthService } from '../../modules/auth/auth.service';
 import { SESSION_COOKIE_NAME } from '../../modules/auth/auth.constants';
+import { TokensService } from '../../modules/tokens/tokens.service';
 
 /**
  * Resolves req.user from, in order:
- *  (a) the session cookie (real local-auth users), else
- *  (b) if env DEV_AUTH=1: legacy x-dev-user/x-dev-role headers — synthetic
+ *  (a) an `Authorization: Bearer cf_pat_...` PAT header, else
+ *  (b) the session cookie (real local-auth users), else
+ *  (c) if env DEV_AUTH=1: legacy x-dev-user/x-dev-role headers — synthetic
  *      user id `dev:<name>`, keeps all pre-auth e2e tests passing, else
- *  (c) unauthenticated -> 401, unless the route is @Public().
+ *  (d) unauthenticated -> 401, unless the route is @Public().
  *
  * Replaces the old header-only DevAuthGuard. Kept as a single global guard
  * (APP_GUARD) so every route (including @Public ones) gets req.user
@@ -23,6 +26,7 @@ export class SessionAuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly authService: AuthService,
+    private readonly tokensService: TokensService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -31,7 +35,21 @@ export class SessionAuthGuard implements CanActivate {
       context.getClass(),
     ]);
 
-    const req = context.switchToHttp().getRequest<Request & { user?: RequestUser }>();
+    const req = context.switchToHttp().getRequest<Request & { user?: RequestUser; tokenContext?: TokenContext }>();
+
+    const authHeader = req.headers['authorization'];
+    if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      const rawToken = authHeader.slice('Bearer '.length).trim();
+      if (looksLikeApiToken(rawToken)) {
+        const resolved = await this.tokensService.resolveByRawToken(rawToken);
+        if (resolved) {
+          req.user = { ...resolved.user, tokenContext: resolved.tokenContext };
+          req.tokenContext = resolved.tokenContext;
+          return true;
+        }
+        // Known PAT format but not found/owner disabled: fall through (won't match cookie/dev-auth either) -> 401 below unless @Public.
+      }
+    }
 
     const token = req.cookies?.[SESSION_COOKIE_NAME] as string | undefined;
     if (token) {

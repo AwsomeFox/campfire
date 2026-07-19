@@ -1,0 +1,33 @@
+import { Module } from '@nestjs/common';
+import { AuditModule } from '../audit/audit.module';
+import { RoleAccessModule } from '../membership/role-access.module';
+import { MembershipModule } from '../membership/membership.module';
+import { CampaignsModule } from '../campaigns/campaigns.module';
+import { QuestsModule } from '../quests/quests.module';
+import { NpcsModule } from '../npcs/npcs.module';
+import { LocationsModule } from '../locations/locations.module';
+import { SessionsModule } from '../sessions/sessions.module';
+import { CharactersModule } from '../characters/characters.module';
+import { NotesModule } from '../notes/notes.module';
+import { ProposalsModule } from '../proposals/proposals.module';
+import { ExportService } from './export.service';
+import { ExportController } from './export.controller';
+
+@Module({
+  imports: [
+    AuditModule,
+    RoleAccessModule,
+    MembershipModule,
+    CampaignsModule,
+    QuestsModule,
+    NpcsModule,
+    LocationsModule,
+    SessionsModule,
+    CharactersModule,
+    NotesModule,
+    ProposalsModule,
+  ],
+  controllers: [ExportController],
+  providers: [ExportService],
+})
+export class ExportModule {}
