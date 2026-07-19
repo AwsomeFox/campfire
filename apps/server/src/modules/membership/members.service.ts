@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaignMembers, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
 type MemberCreateInput = z.infer<typeof MemberCreate>;
@@ -98,7 +99,7 @@ export class MembersService {
       .returning();
 
     await this.audit.log({
-      actor: actor.id,
+      actor: auditActor(actor),
       actorRole: 'dm',
       action: 'member.create',
       entityType: 'campaign_member',
@@ -129,7 +130,7 @@ export class MembersService {
     await this.db.update(campaignMembers).set(update).where(eq(campaignMembers.id, memberId));
 
     await this.audit.log({
-      actor: actor.id,
+      actor: auditActor(actor),
       actorRole: 'dm',
       action: 'member.update',
       entityType: 'campaign_member',
@@ -157,7 +158,7 @@ export class MembersService {
     await this.db.delete(campaignMembers).where(eq(campaignMembers.id, memberId));
 
     await this.audit.log({
-      actor: actor.id,
+      actor: auditActor(actor),
       actorRole: 'dm',
       action: 'member.delete',
       entityType: 'campaign_member',

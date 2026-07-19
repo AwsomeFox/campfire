@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
 type SessionCreateInput = z.infer<typeof SessionCreate>;
@@ -81,7 +82,7 @@ export class SessionsService {
     await this.bumpSessionCount(campaignId, input.number);
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'session.create',
       entityType: 'session',
@@ -104,7 +105,7 @@ export class SessionsService {
     }
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'session.update',
       entityType: 'session',
@@ -118,7 +119,7 @@ export class SessionsService {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(sessions).where(eq(sessions.id, id));
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'session.delete',
       entityType: 'session',

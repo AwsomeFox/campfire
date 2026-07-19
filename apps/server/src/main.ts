@@ -43,10 +43,17 @@ async function bootstrap() {
     .addTag('sessions')
     .addTag('notes')
     .addTag('audit')
+    .addTag('tokens')
+    .addTag('proposals')
+    .addTag('export')
     .addTag('health')
     .addCookieAuth(SESSION_COOKIE_NAME, { type: 'apiKey', in: 'cookie', name: SESSION_COOKIE_NAME })
     .addApiKey({ type: 'apiKey', name: 'x-dev-role', in: 'header', description: 'dev-auth only (DEV_AUTH=1): dm | player | viewer (default dm)' }, 'x-dev-role')
     .addApiKey({ type: 'apiKey', name: 'x-dev-user', in: 'header', description: 'dev-auth only (DEV_AUTH=1): dev user id (default dev-user)' }, 'x-dev-user')
+    .addBearerAuth(
+      { type: 'http', scheme: 'bearer', bearerFormat: 'cf_pat_<48 hex>', description: 'Personal access token — Authorization: Bearer cf_pat_...' },
+      'bearer',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

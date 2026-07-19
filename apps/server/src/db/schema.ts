@@ -163,3 +163,31 @@ export const campaignMembers = sqliteTable('campaign_members', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+
+export const apiTokens = sqliteTable('api_tokens', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  name: text('name').notNull(),
+  scope: text('scope').notNull(),
+  campaignId: integer('campaign_id'),
+  tokenHash: text('token_hash').notNull().unique(),
+  tokenPrefix: text('token_prefix').notNull(),
+  lastUsedAt: text('last_used_at'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const proposals = sqliteTable('proposals', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  entityType: text('entity_type').notNull(),
+  entityId: integer('entity_id'),
+  action: text('action').notNull(),
+  payload: text('payload').notNull().default('{}'),
+  proposer: text('proposer').notNull(),
+  status: text('status').notNull().default('pending'),
+  resolvedBy: text('resolved_by').notNull().default(''),
+  note: text('note').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});

@@ -14,6 +14,7 @@ import { CharactersService } from '../characters/characters.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
 type CampaignCreateInput = z.infer<typeof CampaignCreate>;
@@ -87,7 +88,7 @@ export class CampaignsService {
     }
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: 'dm',
       action: 'campaign.create',
       entityType: 'campaign',
@@ -105,7 +106,7 @@ export class CampaignsService {
       .where(eq(campaigns.id, id))
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: 'dm',
       action: 'campaign.update',
       entityType: 'campaign',
@@ -119,7 +120,7 @@ export class CampaignsService {
     await this.getOrThrow(id);
     await this.db.delete(campaigns).where(eq(campaigns.id, id));
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: 'dm',
       action: 'campaign.delete',
       entityType: 'campaign',

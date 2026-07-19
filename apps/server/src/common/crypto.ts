@@ -39,3 +39,27 @@ export function generateSessionToken(): string {
 export function hashSessionToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
+
+/**
+ * API (PAT) token: `cf_pat_<48 hex chars>` (24 random bytes). DB stores
+ * sha256(token); `tokenPrefix` (first 11 chars, e.g. `cf_pat_9f2a`) is kept
+ * alongside for display purposes only — never enough to guess the token.
+ */
+const API_TOKEN_PREFIX = 'cf_pat_';
+const API_TOKEN_DISPLAY_PREFIX_LEN = 11;
+
+export function generateApiToken(): string {
+  return `${API_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
+}
+
+export function hashApiToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export function apiTokenPrefix(token: string): string {
+  return token.slice(0, API_TOKEN_DISPLAY_PREFIX_LEN);
+}
+
+export function looksLikeApiToken(token: string): boolean {
+  return /^cf_pat_[0-9a-f]{48}$/.test(token);
+}

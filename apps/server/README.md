@@ -38,6 +38,11 @@ src/
     sessions/                  campaign-scoped + /sessions/:id
     notes/                     campaign-scoped notes + inbox + /notes/:id, resolve
     audit/                     AuditService.log() + GET /campaigns/:id/audit (dm)
+    tokens/                    PAT CRUD (/tokens) + TokensService.resolveByRawToken() (used by the guard)
+    proposals/                 proposal-records.service.ts (leaf: CRUD on `proposals`, imported by
+                                quests/npcs/locations/sessions for `?proposed=true`) +
+                                proposals.service.ts (approve/reject, applies via the target domain service)
+    export/                    GET /campaigns/:id/export?format=json|mdzip (dm)
 ```
 
 Each domain module (except health/auth/users/settings) follows the same
@@ -71,13 +76,20 @@ use (`AuthService.resolveSessionUser`).
 
 Global guard (`APP_GUARD`) that resolves `req.user` in order:
 
-1. `campfire_session` cookie -> `AuthService.resolveSessionUser()` -> real
+1. `Authorization: Bearer cf_pat_<48 hex>` header -> `TokensService.resolveByRawToken()`
+   (sha256 lookup in `api_tokens`) -> `RequestUser` resolved from the
+   **owning** user, plus `tokenContext: {tokenId, name, scope, campaignId}`
+   carried both on `RequestUser.tokenContext` (so `RoleResolver` picks up the
+   scope cap with no call-site changes) and on `req.tokenContext` (for the
+   `@CurrentTokenContext()` decorator). `lastUsedAt` is updated, throttled to
+   once/hour.
+2. `campfire_session` cookie -> `AuthService.resolveSessionUser()` -> real
    `RequestUser { id: String(users.id), name, serverRole }`.
-2. Else, if env `DEV_AUTH=1`: legacy `x-dev-role`/`x-dev-user` headers ->
+3. Else, if env `DEV_AUTH=1`: legacy `x-dev-role`/`x-dev-user` headers ->
    synthetic `RequestUser { id: 'dev:<name>', name, serverRole: 'admin',
    devRole }`. This keeps every pre-auth e2e suite working unchanged —
    `test/test-app.ts`'s `createTestApp()` sets `DEV_AUTH=1` before boot.
-3. Else 401, unless the route is `@Public()` (e.g. `/healthz`,
+4. Else 401, unless the route is `@Public()` (e.g. `/healthz`,
    `/auth/status`, `/auth/setup`, `/auth/login`).
 
 `ServerRolesGuard` (also `APP_GUARD`) separately enforces `@ServerRoles('admin')`
@@ -119,6 +131,18 @@ row in. `POST /campaigns` is open to any authenticated user; the creator is
 auto-inserted as that campaign's `dm` (skipped for `dev:*` users, who have no
 numeric id to store).
 
+**PAT token scope cap.** When `user.tokenContext` is set (see SessionAuthGuard
+above), `RoleResolver.effectiveRole()` applies it *after* computing the normal
+effective role: if the token is bound to a `campaignId` and this isn't it,
+the caller is treated as a non-member (`null`, -> 403) — even for admins.
+Otherwise the result is `min(tokenContext.scope, real effective role)` using
+the `dm > player > viewer` rank — `serverRole: 'admin'` does **not** bypass
+this cap when acting through a token. `accessibleCampaignIds()` is similarly
+narrowed to `[tokenContext.campaignId]` when the token is campaign-bound.
+Audit/proposal actor strings use `common/user.types.ts`'s `auditActor(user)`
+helper, which renders as `token:<name>` instead of the raw user id whenever
+`tokenContext` is present.
+
 ### Invariants enforced server-side (409 on violation)
 
 - Cannot demote (`serverRole` away from `admin`), disable, or delete the
@@ -152,6 +176,93 @@ free-text string, not a FK).
 - `GET /settings`, `PATCH /settings` — admin only.
 - `GET/POST/PATCH/DELETE /campaigns/:id/members[/:memberId]` — dm for
   writes, any member for read.
+
+## API tokens, proposals & export
+
+### API tokens (PATs)
+
+Table `api_tokens` (`id, userId, name, scope, campaignId NULL, tokenHash
+UNIQUE, tokenPrefix, lastUsedAt, createdAt, updatedAt`). Raw token format
+`cf_pat_<48 hex chars>` (`common/crypto.ts`'s `generateApiToken()` — 24
+random bytes); the DB stores `sha256(token)` only, plus `tokenPrefix` (first
+11 chars, e.g. `cf_pat_9f2a`) for display. The raw token is returned exactly
+once, at creation (`POST /tokens` -> `ApiTokenCreated { token, apiToken }`).
+
+- `GET /tokens` — the caller's own tokens.
+- `POST /tokens` — `ApiTokenCreate {name, scope, campaignId?}` -> `ApiTokenCreated`.
+- `DELETE /tokens/:id` — own tokens only (404 for someone else's, matching the
+  "don't leak existence" pattern used elsewhere).
+- Any authenticated **non-dev** user (`dev:*` header users 403 — they have no
+  `users.id` row to own a token against).
+
+See "PAT token scope cap" above for how `scope`/`campaignId` cap the
+effective role at request time; there's no separate token-auth code path in
+the domain controllers — `RoleResolver` does all the work.
+
+### Proposals (pending-approval writes)
+
+Table `proposals` (`id, campaignId, entityType, entityId NULL, action
+create|update, payload JSON, proposer, status pending|approved|rejected,
+resolvedBy, note, createdAt, updatedAt`).
+
+- **Write-path integration**: `POST`/`PATCH` on quests, npcs, locations,
+  sessions (create + update only — not delete/status/objectives) accept
+  `?proposed=true`. Any role that can **read** the campaign may propose
+  (viewer included) — the body is still validated against the normal
+  Create/Update Zod schema, then stored as a pending `Proposal` instead of
+  being applied; response is `202 {proposal}`. A dm submitting with
+  `?proposed=true` also gets a pending proposal, not a direct write — useful
+  for AI-with-dm-token flows that want a review step.
+- `GET /campaigns/:id/proposals?status=` — dm only.
+- `POST /proposals/:id/approve` `{note?}` — dm only; re-validates the stored
+  payload and applies it through the **same** service `create()`/`update()`
+  method the direct write endpoint uses (so every invariant — e.g. quest
+  objective dm-only text edits, character owner checks — still holds), then
+  marks the proposal `approved` with `resolvedBy`/`note`.
+- `POST /proposals/:id/reject` `{note?}` — dm only; marks `rejected`, no
+  entity change.
+- Approving/rejecting an already-resolved proposal is a 403.
+
+**Module split to avoid a DI cycle**: `proposal-records.service.ts` (leaf,
+plain CRUD on the `proposals` table, no domain-service dependency) lives in
+`ProposalRecordsModule` and is what `QuestsModule`/`NpcsModule`/
+`LocationsModule`/`SessionsModule` import for the `?proposed=true` write
+path. `proposals.service.ts` (the `approve`/`reject` orchestrator, which
+*does* depend on all five domain services to apply an approved proposal)
+lives in `ProposalsModule`, which imports `ProposalRecordsModule` plus the
+domain modules. If the domain modules imported `ProposalsModule` directly
+(instead of the leaf `ProposalRecordsModule`), that would cycle back through
+`ProposalsModule -> QuestsModule -> ProposalsModule`.
+
+### Export
+
+`GET /campaigns/:id/export?format=json|mdzip` — dm only.
+
+- **json** (default): single JSON object `{campaign, quests(+objectives),
+  npcs, locations, sessions, characters, notes, members, audit, proposals}`.
+  `dmSecret` fields are included (role is forced to `'dm'` throughout the
+  export, same as any dm request). `notes` uses the **same visibility rule**
+  as `GET /notes` (`NotesService.listForCampaign` with the requesting dm's
+  identity) — `party_shared` and `dm_shared` notes plus the dm's own
+  `private` notes are included; other members' `private` notes are
+  deliberately excluded. `members` is the same sanitized shape
+  `GET /members` already returns (no password/session data ever lived on
+  `CampaignMember`). `audit` is capped at the latest 500 entries.
+  `Content-Disposition: attachment; filename="campfire-<slug>-<date>.json"`.
+- **mdzip**: a zip (via `jszip`, pure-JS, no native dep) of markdown —
+  `campaign.md` (+ visible notes), `quests/<slug>.md` (objectives rendered as
+  a `- [ ]`/`- [x]` checklist, `dmSecret` as a trailing section),
+  `npcs/<slug>.md`, `locations/<slug>.md`, `sessions/<slug-or-number>.md`,
+  `characters/<slug>.md` — same dm-secret/notes-visibility rules as the json
+  export. `Content-Type: application/zip`, same `Content-Disposition`
+  pattern (`.zip` extension). Filenames are slugified (`slugify()` in
+  `export.service.ts`) from each entity's display name; collisions within a
+  folder simply overwrite (not deduped — acceptable for an export snapshot).
+- Both formats write the response manually via `@Res() res` +
+  `res.end()`/`res.send()` (not Nest's default return-value handling) —
+  returning a `Buffer`/pre-serialized string through Nest's normal
+  passthrough path double-encodes it as JSON (`{"type":"Buffer","data":[...]}`),
+  which breaks the zip's binary content-type.
 
 ## Validation approach
 
@@ -201,7 +312,9 @@ Swagger doc) is identical to any other `createZodDto` DTO.
 `/api/openapi.json` (both excluded from the global `api/v1` prefix, along
 with `/healthz`). Session-cookie auth is documented via `addCookieAuth`
 (`campfire_session`); `x-dev-role`/`x-dev-user` are still documented as
-API-key-style header parameters (`addApiKey`), noted as DEV_AUTH-only.
+API-key-style header parameters (`addApiKey`), noted as DEV_AUTH-only. PAT
+bearer auth is documented via `addBearerAuth` (scheme id `bearer`,
+`cf_pat_<48 hex>` format).
 
 ## Tests
 
@@ -215,8 +328,12 @@ provider factory picks it up), and clean the directory up in `afterAll`.
   suites (campaigns/characters/quests/npcs/locations/notes/healthz) keep
   using `x-dev-role`/`x-dev-user` headers unchanged.
 - `createTestAppNoDevAuth()` — unsets `DEV_AUTH`, for the new auth-flow
-  suites (`auth.e2e-spec.ts`, `membership.e2e-spec.ts`), which use a real
-  `supertest.agent()` to persist the session cookie across requests.
+  suites (`auth.e2e-spec.ts`, `membership.e2e-spec.ts`, and the tokens/
+  proposals/export suites below), which use a real `supertest.agent()` to
+  persist the session cookie across requests. PATs need a real (non-`dev:*`)
+  `users.id` to own the token against, so `tokens.e2e-spec.ts`,
+  `proposals.e2e-spec.ts`, and `export.e2e-spec.ts` all use this bootstrap
+  too, even where they don't directly exercise the Bearer path.
 
 Both also register `cookie-parser` middleware, mirroring `main.ts`, since
 `Test.createTestingModule` doesn't run `main.ts`'s bootstrap code.
@@ -273,3 +390,42 @@ SQLite file — safe to parallelize later if it becomes a bottleneck.
   `dist/` and then emit nothing (tsc believes there's nothing to do). It's
   gitignored and never committed, but if a local build produces an empty/
   missing `dist/`, `rm apps/server/tsconfig.tsbuildinfo` and rebuild.
+- **`TokenContext` is carried on `RequestUser` itself, not only on the raw
+  request.** The alternative (threading a second `tokenContext` parameter
+  through every `CampaignAccessService`/`RoleResolver` call site across 9+
+  controllers) would have been far more invasive and error-prone. Setting
+  `req.user.tokenContext` in `SessionAuthGuard` means every existing
+  `access.requireMember(user, campaignId)` / `access.requireRole(user,
+  campaignId, min)` call automatically picks up the PAT scope cap with zero
+  signature changes — the same reasoning that put `devRole` on `RequestUser`
+  originally. `req.tokenContext` is also set (mirrored) for the
+  `@CurrentTokenContext()` decorator, for the rare case a handler wants the
+  raw token metadata without going through `RequestUser`.
+- **`ProposalRecordsService`/`ProposalRecordsModule` split out from
+  `ProposalsService`/`ProposalsModule`** for the same reason
+  `RoleResolver`/`CampaignAccessService` live in a dependency-free leaf
+  module (see above): `QuestsModule`/`NpcsModule`/`LocationsModule`/
+  `SessionsModule` need to create proposal rows for `?proposed=true`, but
+  `ProposalsModule`'s `approve()` needs to import all four of those modules
+  (to apply an approved proposal via the real service). If the domain
+  modules imported the full `ProposalsModule`, that's
+  `ProposalsModule -> QuestsModule -> ProposalsModule`, a cycle;
+  `ProposalRecordsModule` (plain CRUD on the `proposals` table, no domain
+  dependency) breaks it.
+- **`characters` is deliberately excluded from the `?proposed=true` write
+  path** — the task spec's list is "quests, npcs, locations, sessions", and
+  `characters` already has its own more permissive owner-or-dm write model
+  (`CharactersService.assertCanWrite`), which doesn't map cleanly onto a
+  dm-approval queue. `ProposalsService.approve()` still supports applying a
+  `character` proposal (the entity-type union includes it, for forward
+  compatibility / direct API use), it's just not reachable from the
+  characters write endpoints.
+- **Export writes the HTTP response manually (`@Res() res` without
+  `passthrough`, calling `res.end()`/`res.send()` directly)** instead of
+  returning a value for Nest to serialize. Discovered via a failing e2e test:
+  returning a `Buffer` (or any value) through Nest's normal
+  `@Res({passthrough: true})` path re-serializes it as JSON — a returned
+  `Buffer` came back over the wire as `{"type":"Buffer","data":[...]}`
+  instead of raw zip bytes, even with `Content-Type: application/zip` set via
+  `res.set()`. Bypassing Nest's response handling entirely for this one
+  route fixed it.

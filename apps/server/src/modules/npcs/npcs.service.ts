@@ -8,6 +8,7 @@ import { npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
 type NpcCreateInput = z.infer<typeof NpcCreate>;
@@ -68,7 +69,7 @@ export class NpcsService {
       })
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'npc.create',
       entityType: 'npc',
@@ -86,7 +87,7 @@ export class NpcsService {
       .where(eq(npcs.id, id))
       .returning();
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'npc.update',
       entityType: 'npc',
@@ -100,7 +101,7 @@ export class NpcsService {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(npcs).where(eq(npcs.id, id));
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'npc.delete',
       entityType: 'npc',

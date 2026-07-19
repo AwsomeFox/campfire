@@ -8,6 +8,7 @@ import { characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { AuditService } from '../audit/audit.service';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
@@ -97,7 +98,7 @@ export class CharactersService {
       .returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'character.create',
       entityType: 'character',
@@ -131,7 +132,7 @@ export class CharactersService {
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'character.update',
       entityType: 'character',
@@ -146,7 +147,7 @@ export class CharactersService {
     // Deletion is a canon write -> dm only, enforced at controller
     await this.db.delete(characters).where(eq(characters.id, id));
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'character.delete',
       entityType: 'character',
@@ -175,7 +176,7 @@ export class CharactersService {
       .returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'character.hp',
       entityType: 'character',
@@ -201,7 +202,7 @@ export class CharactersService {
       .returning();
 
     await this.audit.log({
-      actor: user.id,
+      actor: auditActor(user),
       actorRole: role,
       action: 'character.conditions',
       entityType: 'character',

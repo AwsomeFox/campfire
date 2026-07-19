@@ -1,8 +1,12 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
+import { SessionCreate, SessionUpdate } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
+import { ProposalRecordsService } from '../proposals/proposal-records.service';
+import { isProposed } from '../../common/proposed.util';
 import { SessionsService } from './sessions.service';
 import { SessionCreateDto, SessionUpdateDto } from './sessions.dto';
 
@@ -12,6 +16,7 @@ export class CampaignSessionsController {
   constructor(
     private readonly sessions: SessionsService,
     private readonly access: CampaignAccessService,
+    private readonly proposals: ProposalRecordsService,
   ) {}
 
   @Get()
@@ -24,9 +29,19 @@ export class CampaignSessionsController {
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: SessionCreateDto,
+    @Query('proposed') proposed: string | undefined,
     @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
   ) {
+    if (isProposed(proposed)) {
+      const role = await this.access.requireMember(user, campaignId);
+      const validated = SessionCreate.parse(body);
+      const proposal = await this.proposals.create(campaignId, 'session', null, 'create', validated, user, role);
+      res.status(202);
+      return { proposal };
+    }
     const role = await this.access.requireRole(user, campaignId, 'dm');
+    res.status(201);
     return this.sessions.create(campaignId, body, user, role);
   }
 }
@@ -37,6 +52,7 @@ export class SessionsController {
   constructor(
     private readonly sessions: SessionsService,
     private readonly access: CampaignAccessService,
+    private readonly proposals: ProposalRecordsService,
   ) {}
 
   @Get(':id')
@@ -47,8 +63,21 @@ export class SessionsController {
   }
 
   @Patch(':id')
-  async update(@Param('id', ParseIntPipe) id: number, @Body() body: SessionUpdateDto, @CurrentUser() user: RequestUser) {
+  async update(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: SessionUpdateDto,
+    @Query('proposed') proposed: string | undefined,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const row = await this.sessions.getRowOrThrow(id);
+    if (isProposed(proposed)) {
+      const role = await this.access.requireMember(user, row.campaignId);
+      const validated = SessionUpdate.parse(body);
+      const proposal = await this.proposals.create(row.campaignId, 'session', id, 'update', validated, user, role);
+      res.status(202);
+      return { proposal };
+    }
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.sessions.update(id, body, user, role);
   }
