@@ -208,6 +208,22 @@ export function Layout() {
                     Members
                   </Link>
                 )}
+                {isDm && campaignId !== undefined && (
+                  <Link
+                    to={`/c/${campaignId}/proposals`}
+                    className="block px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Proposals
+                  </Link>
+                )}
+                <Link
+                  to="/tokens"
+                  className="block px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
+                  onClick={() => setMenuOpen(false)}
+                >
+                  API tokens
+                </Link>
                 <button
                   className="w-full text-left px-2 py-1.5 rounded-lg text-slate-200 hover:bg-slate-700/50"
                   onClick={() => {
