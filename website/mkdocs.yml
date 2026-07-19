@@ -82,6 +82,7 @@ nav:
       - Backups & upgrades: administration/operations.md
   - Project:
       - Roadmap & status: reference/roadmap.md
+      - Run · play · maintain (audit): reference/operator-audit.md
       - Contributing: reference/contributing.md
 
 extra:
