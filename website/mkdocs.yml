@@ -6,7 +6,7 @@ site_name: Campfire
 site_description: >-
   Self-hosted, AI-operable campaign tracker for tabletop RPGs — quests, NPCs,
   maps, combat, session notes, and an MCP server so any AI can help run your table.
-site_url: https://awsomefox.github.io/campfire/
+site_url: https://playcampfire.net/
 repo_url: https://github.com/AwsomeFox/campfire
 repo_name: AwsomeFox/campfire
 edit_uri: edit/main/website/docs/
