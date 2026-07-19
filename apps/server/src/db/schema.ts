@@ -15,6 +15,9 @@ export const campaigns = sqliteTable('campaigns', {
   currentLocationId: integer('current_location_id'),
   dangerLevel: text('danger_level').notNull().default('low'),
   sessionCount: integer('session_count').notNull().default(0),
+  // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
+  // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  ruleSystem: text('rule_system').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -179,6 +182,30 @@ export const apiTokens = sqliteTable('api_tokens', {
   tokenHash: text('token_hash').notNull().unique(),
   tokenPrefix: text('token_prefix').notNull(),
   lastUsedAt: text('last_used_at'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const rulePacks = sqliteTable('rule_packs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  slug: text('slug').notNull().unique(),
+  name: text('name').notNull(),
+  version: text('version').notNull().default(''),
+  license: text('license').notNull().default(''),
+  sourceUrl: text('source_url').notNull().default(''),
+  installedAt: text('installed_at').notNull(),
+  entryCount: integer('entry_count').notNull().default(0),
+});
+
+export const ruleEntries = sqliteTable('rule_entries', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  packId: integer('pack_id').notNull(),
+  slug: text('slug').notNull(),
+  name: text('name').notNull(),
+  type: text('type').notNull(),
+  summary: text('summary').notNull().default(''),
+  body: text('body').notNull().default(''),
+  dataJson: text('data_json'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

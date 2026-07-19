@@ -62,7 +62,19 @@ export class QuestsService {
   }
 
   async listForCampaignWithObjectives(campaignId: number, role: Role) {
-    const questList = await this.listForCampaign(campaignId, role);
+    return this.embedObjectives(await this.listForCampaign(campaignId, role));
+  }
+
+  /**
+   * Same shape as the summary endpoint's quest list (each quest embeds its
+   * objectives) — the quest board in the design needs objectives inline, so
+   * this reuses the summary's embed pattern rather than duplicating it.
+   */
+  async listForCampaignByStatusWithObjectives(campaignId: number, status: string | undefined, role: Role) {
+    return this.embedObjectives(await this.listForCampaignByStatus(campaignId, status, role));
+  }
+
+  private async embedObjectives(questList: Quest[]) {
     const results = [];
     for (const q of questList) {
       const objectives = await this.objectivesForQuest(q.id);
@@ -146,8 +158,15 @@ export class QuestsService {
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    await this.db.delete(questObjectives).where(eq(questObjectives.questId, id));
-    await this.db.delete(quests).where(eq(quests.id, id));
+    // Promote any subquests to top level (parentId=null) in the same
+    // transaction as the delete, so a quest's children never dangle on a
+    // deleted parentId — mirrors how the design's quest board expects
+    // orphaned subquests to resurface as top-level quests, not vanish.
+    this.db.transaction((tx) => {
+      tx.update(quests).set({ parentId: null, updatedAt: nowIso() }).where(eq(quests.parentId, id)).run();
+      tx.delete(questObjectives).where(eq(questObjectives.questId, id)).run();
+      tx.delete(quests).where(eq(quests.id, id)).run();
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

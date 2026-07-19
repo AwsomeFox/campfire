@@ -44,6 +44,8 @@ src/
                                 quests/npcs/locations/sessions for `?proposed=true`) +
                                 proposals.service.ts (approve/reject, applies via the target domain service)
     export/                    GET /campaigns/:id/export?format=json|mdzip (dm)
+    rules/                     rule packs (Compendium backend) — /rules/packs, /rules/search,
+                                /rules/entries/:id; Open5e importer — see "Rule packs" below
 ```
 
 Each domain module (except health/auth/users/settings) follows the same
@@ -397,12 +399,14 @@ claude mcp add --transport http campfire http://host:8080/mcp \
   --header "Authorization: Bearer cf_pat_..."
 ```
 
-**Tool catalog** (27 — `modules/mcp/mcp-tools.ts`):
+**Tool catalog** (28 — `modules/mcp/mcp-tools.ts`):
 
 - **Read:** `list_campaigns`, `get_campaign_summary`, `get_quest`,
   `list_quests`, `get_npc`, `list_npcs`, `get_location`, `list_locations`,
   `get_character`, `get_party`, `get_session_recaps`, `read_inbox` (dm),
-  `list_proposals` (dm).
+  `list_proposals` (dm), `lookup_rule` (any authed — searches installed rule
+  packs; top match includes full body text for citation, the rest are
+  summary-only).
 - **Write:** `create_quest`, `update_quest`, `set_quest_status`,
   `add_objective`, `check_objective` (player+), `upsert_npc`,
   `upsert_location`, `add_session_recap` (`number` defaults to max+1),
@@ -422,6 +426,151 @@ Tool args are validated against the same `@campfire/schema` zod shapes as the
 REST DTOs (`QuestCreate.shape` etc. spread into the MCP `inputSchema`).
 Results are JSON text content; domain errors (403/404/400) come back as
 `isError` content with the HTTP status and message, not protocol errors.
+
+## Rule packs (Compendium backend)
+
+Server-wide (not per-campaign) rules content — spells, monsters, magic items,
+conditions — imported from an **openly-licensed** source and cached locally
+so the Compendium/Reader screens and the `lookup_rule` MCP tool can search it
+without hitting a third party on every request. `Campaign.ruleSystem`
+(additive field, see below) records which pack slug a campaign is using; it's
+informational only — installing/uninstalling a pack is server-wide and
+doesn't depend on any campaign having picked it.
+
+**Tables** (`db/bootstrap.sql.ts`): `rule_packs` (`id, slug UNIQUE, name,
+version, license, sourceUrl, installedAt, entryCount`), `rule_entries` (`id,
+packId, slug, name, type, summary, body, dataJson NULL, createdAt,
+updatedAt`). `type` is one of `spell | monster | item | class | race |
+condition | section | other` (`RuleEntryType` in `@campfire/schema`) — the
+Open5e importer currently populates `spell`/`monster`/`item`/`condition`;
+`class`/`race`/`section`/`other` are reserved for future sources (e.g. a
+class/species import, or homebrew sections) and are additive, not invented
+speculatively into the importer itself.
+
+### Endpoints
+
+- `GET /rules/packs` — any authenticated user.
+- `POST /rules/packs/install` — **server admin only**
+  (`@ServerRoles('admin')`, same guard as `/settings` and `/users`).
+  Body: `{source: 'open5e', url?, sections?}` (`RulePackInstall`). `url`
+  overrides the Open5e API base (used by tests against a local fake server;
+  omit it in production to hit `https://api.open5e.com/v2`). `sections`
+  defaults to all four (`spells`, `monsters`, `items`, `conditions`); pass a
+  subset to import only some. Installing when a pack with the same slug
+  (`open5e-srd` — see "One pack per source" below) already exists is a 409;
+  uninstall first to reimport/refresh.
+- `DELETE /rules/packs/:id` — server admin only. Deletes the pack and all its
+  entries in one transaction.
+- `GET /rules/search?q=&type=&pack=` — any authenticated user. `q` is
+  optional (omit it to browse by `type`/`pack` alone); `type` filters to one
+  `RuleEntryType`; `pack` filters to one pack slug. Returns up to 50 entries
+  (list shape, no `body` truncation — the Reader/Compendium screens fetch the
+  full entry by id when the user opens one).
+- `GET /rules/entries/:id` — any authenticated user. Full entry including
+  `body` and `dataJson`.
+
+### Open5e importer (`modules/rules/open5e-importer.ts`)
+
+Targets the **v2** API (`https://api.open5e.com/v2/`) — verified against the
+**live** endpoints during development (2026-07-18), not assumed from docs,
+because v1 and v2 disagree in ways that would silently break a mapper written
+against stale documentation:
+
+- There is **no `/v2/monsters/` route**. The monster/statblock list lives at
+  `/v2/creatures/`; the importer fetches that path but still stores results
+  as Campfire's `type: 'monster'` (our vocabulary, not Open5e's).
+- Every list is paginated (`{count, next, previous, results}`); `next` is a
+  full URL, so the importer just follows it rather than re-deriving page
+  numbers.
+- Display fields are nested in sub-objects, not flat strings — e.g. spell
+  `school.name`, creature `type.name`/`size.name`, magic item
+  `category.name`/`rarity.name`. The mapper reads `.name` with `?? ''`
+  fallbacks throughout, since Open5e's community-maintained data isn't
+  perfectly uniform entry-to-entry.
+- License isn't a per-entry field; it's read from each row's own
+  `document.licenses[].name` (falls back to `'OGL/CC'` if a section returns
+  entries with no license info at all — this has not been observed in
+  practice but is handled rather than left to throw).
+
+**Resilience & caps:**
+
+- Each section fetch has a 10s timeout (`AbortController`); a timeout,
+  non-2xx response, or unparseable JSON becomes a `BadRequestException`
+  (clean 400) rather than an unhandled fetch error.
+  A single malformed row within an otherwise-good page is skipped, not fatal
+  to the whole import.
+- **`MAX_ENTRIES_PER_SECTION = 2000`** — pagination stops once a section hits
+  this cap, so one install can't pull unbounded data from a third-party API
+  into the local DB. (Open5e's `spells`/`creatures`/`magicitems` sections
+  each currently return low thousands of rows across all supported game
+  systems — see "One pack per source" below re: why this matters less than
+  it sounds.)
+- Sections are fetched **concurrently** (`Promise.all`) — one slow/failed
+  section fails the whole install (still transactional — see below), rather
+  than partially importing.
+
+**Transactional write:** pack row + all entry rows are inserted inside one
+`db.transaction()` (better-sqlite3's synchronous transaction API — same
+pattern as `QuestsService.remove()`'s subquest-promotion fix), so a crash or
+constraint violation mid-import never leaves a pack with a wrong
+`entryCount` or partial entries.
+
+### Search: FTS5 with a LIKE fallback
+
+`db.module.ts` **probes** for the SQLite `fts5` extension at boot by
+attempting the real `CREATE VIRTUAL TABLE ... USING fts5(...)` DDL from
+`bootstrap.sql.ts`'s `RULE_ENTRIES_FTS_SQL` (content table `rule_entries`
+itself, `content_rowid='id'`, kept in sync via `AFTER INSERT/UPDATE/DELETE`
+triggers) — not by checking a version string, since availability depends on
+how the specific `better-sqlite3` native build was compiled, which a version
+number doesn't reliably tell you. The result is exposed as a DI token
+(`RULE_ENTRIES_FTS_AVAILABLE` in `db.module.ts`) that `RulesService` injects.
+
+- **FTS5 available** (the common case — better-sqlite3's bundled SQLite ships
+  it): `search()` runs an `fts5 MATCH` query, tokenized with a trailing `*`
+  per word for prefix matching (e.g. `fire` matches `Fireball`).
+- **FTS5 unavailable**: falls back to a `LIKE '%q%'` scan across
+  `name`/`summary`/`body`. Slower on a large corpus, but functionally
+  correct, and the 2000/section cap keeps a LIKE scan cheap enough in
+  practice for a self-hosted single-table-per-pack corpus. This path is
+  covered by the same importer/mapper code — only the query strategy
+  differs — so `type`/`pack` filtering behaves identically either way.
+
+### `Campaign.ruleSystem` (additive schema field)
+
+`Campaign` gained `ruleSystem: z.string().max(80).default('')` — the slug of
+the installed rule pack a campaign is using, or `''` if unset. Purely
+descriptive (no FK enforcement against `rule_packs.slug` — a campaign can
+reference a slug for a pack that's since been uninstalled; the UI is expected
+to handle that as "pack no longer installed" rather than the server
+rejecting the PATCH). Existing DBs get the column via
+`migrateCampaignsTableForRuleSystem` in `db.module.ts` — a plain
+`ALTER TABLE campaigns ADD COLUMN rule_system TEXT NOT NULL DEFAULT ''`
+(simpler than the OIDC `password_hash` migration above since this column has
+no constraint that needs relaxing, just adding). `PATCH /campaigns/:id`
+already applies `CampaignUpdate` generically (`{...input, updatedAt}`), so
+`ruleSystem` passes through with no controller/service change beyond adding
+it to the schema and the `create()` insert.
+
+### `lookup_rule` MCP tool
+
+Registered in `registerReadTools` (`modules/mcp/mcp-tools.ts`) — any
+authenticated caller (no campaign-role check, since rule packs are
+server-wide, not campaign-scoped, unlike every other MCP tool). Returns up to
+5 matches; only the **first** (best) match includes its `body` — the rest are
+summary-only, to keep the tool result compact for a model that's scanning
+several candidates before deciding which one to cite.
+
+### One pack per source (current simplification)
+
+The importer always installs under a single fixed slug, `open5e-srd`,
+regardless of which `sections` were requested — installing `sections:
+['spells']` then later wanting to add `monsters` requires uninstalling and
+reinstalling with both sections, not an incremental "add a section" call.
+This matches the task scope (install/uninstall, not incremental pack
+editing) and keeps the 409-on-duplicate-slug check simple; a future version
+could support multiple named packs per source (e.g. per game system) by
+deriving the slug from the request instead of hardcoding it.
 
 ## Validation approach
 
@@ -496,6 +645,13 @@ provider factory picks it up), and clean the directory up in `afterAll`.
 
 Both also register `cookie-parser` middleware, mirroring `main.ts`, since
 `Test.createTestingModule` doesn't run `main.ts`'s bootstrap code.
+
+`test/fake-open5e.ts` is an in-process Express server (same pattern as
+`test/fake-idp.ts` for OIDC) serving 2-3 entries per section using the real
+v2 response shape, bound to an ephemeral port — `rules.e2e-spec.ts` points
+`RulePackInstall.url` at it, so the importer's actual field-mapping code runs
+against realistic payloads with no network dependency in CI. It also backs
+the `lookup_rule` smoke test in `mcp.e2e-spec.ts`.
 
 Run with `npm run test -w apps/server` (repo root) or `npm test` from this
 directory. Jest is configured `maxWorkers: 1` since every suite opens its own
@@ -588,3 +744,35 @@ SQLite file — safe to parallelize later if it becomes a bottleneck.
   instead of raw zip bytes, even with `Content-Type: application/zip` set via
   `res.set()`. Bypassing Nest's response handling entirely for this one
   route fixed it.
+- **`GET /campaigns/:id/quests` deleting a quest promotes its subquests
+  instead of leaving `parentId` pointing at a deleted row.** The spec only
+  said "promote subquests to top level... in the same transaction"; the
+  service now sets `parentId = NULL` on every direct child before deleting
+  the parent, inside one `db.transaction()` alongside the objective/quest
+  deletes. Grandchildren (a subquest of a subquest) are unaffected by a
+  grandparent's deletion — only *direct* children of the deleted quest are
+  promoted, which matches "promote subquests" read literally (one level, not
+  a recursive re-parent of the whole subtree).
+- **Rule packs are server-wide, gated by `@ServerRoles('admin')`, not by any
+  campaign's `dm` role.** The design's "Server admin → Rule systems" screen
+  (not a per-campaign settings screen) and the task's explicit "SERVER ADMIN
+  only" both point the same way — a campaign's `dm` cannot install/uninstall
+  packs for the whole server, only a server admin can. Reads (`GET
+  /rules/packs`, `/rules/search`, `/rules/entries/:id`) are open to any
+  authenticated user (including dev-header `player`/`viewer`, which — per
+  `session-auth.guard.ts` — always carry `serverRole: 'admin'` in the
+  DEV_AUTH path; the real server-admin-vs-user gate is only meaningfully
+  exercised with real sessions, which `rules.e2e-spec.ts`'s second `describe`
+  block does explicitly).
+- **Open5e importer always installs under one fixed slug (`open5e-srd`)
+  regardless of `sections` requested** — see "One pack per source" in the
+  Rule packs section above. Incremental per-section installs/uninstalls
+  (e.g. "add monsters to an existing spells-only pack") are out of scope;
+  uninstall and reinstall with the desired section set instead.
+- **`RuleEntryType` includes `class`/`race`/`section`/`other` even though the
+  Open5e importer only ever produces `spell`/`monster`/`item`/`condition`.**
+  These extra variants are additive schema surface for future importers
+  (class/species data, homebrew "section" entries) per the task's own type
+  list — not wired to anything yet, so `GET /rules/search?type=class` simply
+  returns an empty array today, correctly (no entries have that type, no
+  error).

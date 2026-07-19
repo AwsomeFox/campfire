@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   current_location_id INTEGER,
   danger_level TEXT NOT NULL DEFAULT 'low',
   session_count INTEGER NOT NULL DEFAULT 0,
+  rule_system TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -175,6 +176,30 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS rule_packs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  version TEXT NOT NULL DEFAULT '',
+  license TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
+  installed_at TEXT NOT NULL,
+  entry_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS rule_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pack_id INTEGER NOT NULL,
+  slug TEXT NOT NULL,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  data_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS proposals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
@@ -205,4 +230,34 @@ CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_campaign ON proposals(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
+CREATE INDEX IF NOT EXISTS idx_rule_entries_pack ON rule_entries(pack_id);
+CREATE INDEX IF NOT EXISTS idx_rule_entries_type ON rule_entries(type);
+CREATE INDEX IF NOT EXISTS idx_rule_entries_slug ON rule_entries(slug);
+`;
+
+/**
+ * FTS5 virtual table + sync triggers for rule_entries, created separately
+ * from BOOTSTRAP_SQL (not every SQLite build ships the fts5 extension —
+ * better-sqlite3's bundled build does, but we detect at runtime in
+ * db.module.ts rather than assume, and fall back to LIKE search when it's
+ * unavailable). Content table is rule_entries itself (contentless=no) so we
+ * don't duplicate storage; triggers keep the index in sync on write.
+ */
+export const RULE_ENTRIES_FTS_SQL = `
+CREATE VIRTUAL TABLE IF NOT EXISTS rule_entries_fts USING fts5(
+  name, summary, body, content='rule_entries', content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS rule_entries_ai AFTER INSERT ON rule_entries BEGIN
+  INSERT INTO rule_entries_fts(rowid, name, summary, body) VALUES (new.id, new.name, new.summary, new.body);
+END;
+
+CREATE TRIGGER IF NOT EXISTS rule_entries_ad AFTER DELETE ON rule_entries BEGIN
+  INSERT INTO rule_entries_fts(rule_entries_fts, rowid, name, summary, body) VALUES ('delete', old.id, old.name, old.summary, old.body);
+END;
+
+CREATE TRIGGER IF NOT EXISTS rule_entries_au AFTER UPDATE ON rule_entries BEGIN
+  INSERT INTO rule_entries_fts(rule_entries_fts, rowid, name, summary, body) VALUES ('delete', old.id, old.name, old.summary, old.body);
+  INSERT INTO rule_entries_fts(rowid, name, summary, body) VALUES (new.id, new.name, new.summary, new.body);
+END;
 `;

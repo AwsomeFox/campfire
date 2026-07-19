@@ -13,6 +13,7 @@ import {
   QuestCreate,
   QuestStatus,
   QuestUpdate,
+  RuleEntryType,
   SessionCreate,
 } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
@@ -26,6 +27,7 @@ import { CharactersService } from '../characters/characters.service';
 import { NotesService } from '../notes/notes.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { ProposalsService } from '../proposals/proposals.service';
+import { RulesService } from '../rules/rules.service';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -83,6 +85,7 @@ export class McpToolsService {
     private readonly notes: NotesService,
     private readonly proposalRecords: ProposalRecordsService,
     private readonly proposals: ProposalsService,
+    private readonly rules: RulesService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
@@ -249,6 +252,18 @@ export class McpToolsService {
       async ({ campaignId, status }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
         return this.proposals.listForCampaign(campaignId as number, status as string | undefined);
+      },
+    );
+
+    this.tool(
+      server,
+      'lookup_rule',
+      'Search installed rule packs (spells, monsters, items, conditions, etc.) for a rules question. Returns up to 5 ' +
+        'matches; the top match includes its full body text so the caller can quote/cite it directly.',
+      { query: z.string().min(1).max(200).describe('Free-text search query'), type: RuleEntryType.optional().describe('Filter by entry type') },
+      async ({ query, type }) => {
+        const results = await this.rules.search({ q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined }, 5);
+        return results.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
       },
     );
   }

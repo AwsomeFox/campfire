@@ -35,10 +35,11 @@ export const Campaign = z.object({
   currentLocationId: Id.nullable().default(null),
   dangerLevel: DangerLevel.default('low'),
   sessionCount: z.number().int().nonnegative().default(0),
+  ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // ---------- character ----------
@@ -186,6 +187,51 @@ export const InboxCreate = z.object({
   body: z.string().min(1).max(20_000),
 });
 export const InboxResolve = z.object({ resolvedNote: z.string().max(1000).default('') });
+
+// ---------- rule packs (Compendium backend) ----------
+// Installed, server-wide rules content (spells/monsters/items/…) imported from
+// an open-licensed source (currently Open5e). Read by any authed user;
+// install/uninstall is server-admin only (see rules.controller.ts).
+export const RulePack = z.object({
+  id: Id,
+  slug: z.string().min(1).max(80), // e.g. "open5e-srd", unique
+  name: z.string().min(1).max(120),
+  version: z.string().max(40).default(''),
+  license: z.string().max(120).default(''), // e.g. "OGL 1.0a", "CC-BY-4.0"
+  sourceUrl: z.string().max(500).default(''),
+  installedAt: IsoDate,
+  entryCount: z.number().int().nonnegative().default(0),
+});
+export type RulePack = z.infer<typeof RulePack>;
+
+export const RuleEntryType = z.enum(['spell', 'monster', 'item', 'class', 'race', 'condition', 'section', 'other']);
+export type RuleEntryType = z.infer<typeof RuleEntryType>;
+
+export const RuleEntry = z.object({
+  id: Id,
+  packId: Id,
+  slug: z.string().min(1).max(160),
+  name: z.string().min(1).max(200),
+  type: RuleEntryType,
+  summary: z.string().max(1000).default(''),
+  body: z.string().max(50_000).default(''), // markdown
+  dataJson: z.string().nullable().default(null), // raw structured fields (stats etc.), JSON-encoded
+  ...timestamps,
+});
+export type RuleEntry = z.infer<typeof RuleEntry>;
+
+export const RulePackInstall = z.object({
+  source: z.literal('open5e'),
+  url: z.string().max(500).optional(), // override API base, mainly for tests (fake server)
+  sections: z.array(z.enum(['spells', 'monsters', 'items', 'conditions'])).optional(), // default: all
+});
+export type RulePackInstall = z.infer<typeof RulePackInstall>;
+
+export const RuleSearchQuery = z.object({
+  q: z.string().max(200).default(''),
+  type: RuleEntryType.optional(),
+  pack: z.string().max(80).optional(), // pack slug
+});
 
 // ---------- campaign summary (dashboard aggregate / AI primer) ----------
 export const CampaignSummary = z.object({

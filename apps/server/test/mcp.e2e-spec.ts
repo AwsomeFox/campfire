@@ -2,6 +2,7 @@ import request from 'supertest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 
 interface TextContent {
   type: 'text';
@@ -28,6 +29,7 @@ const ALL_TOOLS = [
   'get_session_recaps',
   'read_inbox',
   'list_proposals',
+  'lookup_rule',
   // write
   'create_quest',
   'update_quest',
@@ -52,6 +54,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
   let campaignId: number;
   let dmToken: string;
   let viewerToken: string;
+  let fakeOpen5e: FakeOpen5e;
   const clients: Client[] = [];
 
   async function mcpClient(token: string): Promise<Client> {
@@ -83,12 +86,19 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const viewerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-viewer-token', scope: 'viewer' });
     expect(viewerTokenRes.status).toBe(201);
     viewerToken = viewerTokenRes.body.token;
+
+    // mcp-dm is the first user created via /auth/setup, so it's also the server admin —
+    // install a rule pack from the fake Open5e server for the lookup_rule smoke test below.
+    fakeOpen5e = await startFakeOpen5e();
+    const installRes = await dmAgent.post('/api/v1/rules/packs/install').send({ source: 'open5e', url: fakeOpen5e.baseUrl });
+    expect(installRes.status).toBe(201);
   });
 
   afterAll(async () => {
     for (const client of clients) {
       await client.close().catch(() => undefined);
     }
+    await fakeOpen5e.close();
     await closeTestApp(ctx);
   });
 
@@ -97,7 +107,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(27);
+    expect(tools).toHaveLength(28);
   });
 
   it('get_campaign_summary works with a dm-scoped PAT', async () => {
@@ -151,6 +161,26 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const created = parseResult(note) as { body: string; kind: string };
     expect(created.body).toBe('A viewer note over MCP');
     expect(created.kind).toBe('note');
+  });
+
+  it('lookup_rule finds an installed rule pack entry and includes body on the top match', async () => {
+    const client = await mcpClient(viewerToken); // read tool — viewer scope is enough
+    const result = await client.callTool({ name: 'lookup_rule', arguments: { query: 'fireball' } });
+    expect(result.isError).toBeFalsy();
+    const matches = parseResult(result) as Array<{ name: string; type: string; body?: string }>;
+    expect(matches.length).toBeGreaterThan(0);
+    expect(matches[0].name).toBe('Fireball');
+    expect(matches[0].type).toBe('spell');
+    expect(matches[0].body).toContain('bright streak');
+  });
+
+  it('lookup_rule respects the type filter', async () => {
+    const client = await mcpClient(viewerToken);
+    const result = await client.callTool({ name: 'lookup_rule', arguments: { query: 'goblin', type: 'monster' } });
+    expect(result.isError).toBeFalsy();
+    const matches = parseResult(result) as Array<{ name: string; type: string }>;
+    expect(matches.some((m) => m.name === 'Goblin')).toBe(true);
+    for (const m of matches) expect(m.type).toBe('monster');
   });
 
   it('propose:true returns a proposal; quest applied only after approve_proposal', async () => {

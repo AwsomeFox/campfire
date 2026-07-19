@@ -3,11 +3,30 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { BOOTSTRAP_SQL } from './bootstrap.sql';
+import { BOOTSTRAP_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
 import * as schema from './schema';
 
 export const DB = Symbol('DB');
 export type DrizzleDb = BetterSQLite3Database<typeof schema>;
+
+/** Injection token for whether the FTS5 extension is available on this SQLite build (see RulesService). */
+export const RULE_ENTRIES_FTS_AVAILABLE = Symbol('RULE_ENTRIES_FTS_AVAILABLE');
+
+/**
+ * fts5 ships with better-sqlite3's bundled SQLite by default, but this is not
+ * guaranteed on every platform/build (e.g. a system libsqlite3 without fts5
+ * compiled in). Probe by attempting the real DDL rather than trusting a
+ * version string, and fall back to a LIKE-based search (see
+ * rules/rules.service.ts) if it fails — documented in README's Rules section.
+ */
+function setupRuleEntriesFts(sqlite: Database.Database): boolean {
+  try {
+    sqlite.exec(RULE_ENTRIES_FTS_SQL);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Migration for DBs created before OIDC support: `users.password_hash` was
@@ -62,6 +81,31 @@ function migrateUsersTableForOidc(sqlite: Database.Database): void {
   migrate();
 }
 
+/**
+ * Migration for DBs created before rule packs: `campaigns.rule_system` didn't
+ * exist. SQLite supports `ALTER TABLE ... ADD COLUMN` for a simple nullable
+ * (or defaulted) column, so this is a plain add — no table rebuild needed,
+ * unlike migrateUsersTableForOidc above. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForRuleSystem(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  const hasRuleSystem = columns.some((c) => c.name === 'rule_system');
+  if (hasRuleSystem) return;
+
+  sqlite.exec("ALTER TABLE campaigns ADD COLUMN rule_system TEXT NOT NULL DEFAULT ''");
+}
+
+// Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
+// provider below — both providers must derive from the same sqlite.exec()
+// probe (asking twice could disagree if it were ever non-deterministic).
+let ruleEntriesFtsAvailable = false;
+
 export function createDb(): DrizzleDb {
   const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', 'data');
   fs.mkdirSync(dataDir, { recursive: true });
@@ -70,16 +114,23 @@ export function createDb(): DrizzleDb {
   const sqlite = new Database(dbPath);
   sqlite.pragma('journal_mode = WAL');
   migrateUsersTableForOidc(sqlite);
+  migrateCampaignsTableForRuleSystem(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.
+  ruleEntriesFtsAvailable = setupRuleEntriesFts(sqlite);
 
   return drizzle(sqlite, { schema });
 }
 
 @Global()
 @Module({
-  providers: [{ provide: DB, useFactory: createDb }],
-  exports: [DB],
+  providers: [
+    { provide: DB, useFactory: createDb },
+    // Depends on DB purely for init ordering — createDb() must run first so
+    // ruleEntriesFtsAvailable is set before this factory reads it.
+    { provide: RULE_ENTRIES_FTS_AVAILABLE, useFactory: (_db: DrizzleDb) => ruleEntriesFtsAvailable, inject: [DB] },
+  ],
+  exports: [DB, RULE_ENTRIES_FTS_AVAILABLE],
 })
 export class DbModule {}
