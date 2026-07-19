@@ -20,6 +20,7 @@
     "better-sqlite3": "^11.7.0",
     "cookie-parser": "^1.4.7",
     "drizzle-orm": "^0.38.3",
+    "helmet": "^8.3.0",
     "jszip": "^3.10.1",
     "multer": "^2.0.2",
     "nestjs-zod": "^4.2.0",

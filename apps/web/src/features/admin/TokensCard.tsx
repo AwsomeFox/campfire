@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ApiToken, Campaign } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 type TokenScope = ApiToken['scope'];
 type ApiTokenCreated = { token: string; apiToken: ApiToken };
@@ -26,6 +27,8 @@ export function TokensCard() {
   const [loading, setLoading] = useState(true);
   const [showNew, setShowNew] = useState(false);
   const [created, setCreated] = useState<ApiTokenCreated | null>(null);
+  const [revoking, setRevoking] = useState(false);
+  const [confirmRevoke, setConfirmRevoke] = useState<ApiToken | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -49,13 +52,16 @@ export function TokensCard() {
   }, [load]);
 
   async function revoke(token: ApiToken) {
-    if (!confirm(`Revoke token "${token.name}"? Anything using it will stop working immediately.`)) return;
+    setRevoking(true);
     setError(null);
     try {
       await api.delete(`${API}/tokens/${token.id}`);
+      setConfirmRevoke(null);
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't revoke token.");
+    } finally {
+      setRevoking(false);
     }
   }
 
@@ -100,9 +106,20 @@ export function TokensCard() {
       ) : (
         <div className="space-y-2">
           {(tokens ?? []).map((t) => (
-            <TokenRow key={t.id} token={t} onRevoke={() => revoke(t)} />
+            <TokenRow key={t.id} token={t} onRevoke={() => setConfirmRevoke(t)} />
           ))}
         </div>
+      )}
+
+      {confirmRevoke && (
+        <ConfirmDialog
+          title={`Revoke token "${confirmRevoke.name}"?`}
+          body="Anything using it will stop working immediately."
+          confirmLabel={revoking ? 'Revoking…' : 'Revoke'}
+          busy={revoking}
+          onConfirm={() => revoke(confirmRevoke)}
+          onCancel={() => setConfirmRevoke(null)}
+        />
       )}
     </Card>
   );

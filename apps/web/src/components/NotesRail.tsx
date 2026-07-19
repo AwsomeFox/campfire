@@ -56,21 +56,30 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
         <div key={n.id} className="cf-inset p-3 space-y-1">
           <div className="flex items-center justify-between">
             <Chip variant={visMeta[n.visibility].chip}>{visMeta[n.visibility].label}</Chip>
-            <span className="text-[10px] text-slate-600">{n.authorName || n.authorUserId}</span>
+            <span className="text-[10px]" style={{ color: 'var(--color-neutral-600)' }}>
+              {n.authorName || n.authorUserId}
+            </span>
           </div>
-          <p className="text-xs text-slate-300 whitespace-pre-wrap">{n.body}</p>
+          <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--color-neutral-300)' }}>
+            {n.body}
+          </p>
         </div>
       ))}
       <div className="space-y-2">
         <TextArea style={{ minHeight: 70 }} placeholder="Add a note… (private by default)" value={body} onChange={(e) => setBody(e.target.value)} />
         <div className="flex items-center justify-between gap-2">
-          <div className="flex rounded-lg overflow-hidden border border-slate-700 text-[11px] font-semibold">
+          <div className="seg">
             {(Object.keys(visMeta) as Note['visibility'][]).map((v) => (
               <button
                 key={v}
                 type="button"
                 onClick={() => setVisibility(v)}
-                className={`px-2.5 py-1.5 ${visibility === v ? 'bg-slate-700 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                className="seg-opt"
+                style={
+                  visibility === v
+                    ? { color: 'var(--color-accent)', boxShadow: 'inset 0 0 0 1px var(--color-accent)' }
+                    : undefined
+                }
               >
                 {visMeta[v].label}
               </button>

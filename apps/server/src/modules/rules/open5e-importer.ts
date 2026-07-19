@@ -60,6 +60,22 @@ export interface ImportedEntry {
   license: string;
 }
 
+/** Minimal structured logger so a summary can be asserted on in tests without console spying. */
+export interface Open5eImportLogger {
+  warn(message: string): void;
+}
+
+const consoleLogger: Open5eImportLogger = {
+  // eslint-disable-next-line no-console
+  warn: (message: string) => console.warn(message),
+};
+
+export interface Open5eSectionResult {
+  entries: ImportedEntry[];
+  /** Rows present in a fetched page but skipped (malformed row, or a cross-origin `next` link refused). */
+  skippedCount: number;
+}
+
 interface Open5ePage {
   count: number;
   next: string | null;
@@ -173,17 +189,41 @@ async function fetchWithTimeout(url: string): Promise<Response> {
   }
 }
 
+/** True if `candidate` has the same scheme+host+port as `origin` (both parsed as URLs). */
+function isSameOrigin(origin: string, candidate: string): boolean {
+  try {
+    return new URL(origin).origin === new URL(candidate).origin;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Fetches and maps one section's entries, paginating until either the API
  * runs out of pages or MAX_ENTRIES_PER_SECTION is hit (size cap so a single
  * install can't pull unbounded data from a third-party API into our DB).
  * Network/parse failures are wrapped as BadRequestException so the caller
  * gets a clean 400 instead of a raw fetch error leaking through.
+ *
+ * Two hardening measures beyond the original implementation:
+ *  - **Pagination guard**: `page.next` is only followed if it's same-origin as the
+ *    configured `baseUrl`. A misbehaving or compromised upstream returning a
+ *    cross-origin `next` link (accidentally or maliciously) can't redirect this
+ *    server into fetching from an arbitrary third party using our request budget/timeout.
+ *    Pagination just stops (not an error — whatever was collected so far is returned).
+ *  - **Skip accounting**: malformed rows (mapper throw) and any refused cross-origin
+ *    `next` page are counted and reported via `logger.warn` once at the end of the
+ *    section, instead of disappearing silently.
  */
-export async function fetchOpen5eSection(baseUrl: string, section: Open5eSection): Promise<ImportedEntry[]> {
+export async function fetchOpen5eSection(
+  baseUrl: string,
+  section: Open5eSection,
+  logger: Open5eImportLogger = consoleLogger,
+): Promise<Open5eSectionResult> {
   const path = SECTION_TO_PATH[section];
   const mapper = SECTION_MAPPER[section];
   const entries: ImportedEntry[] = [];
+  let skippedCount = 0;
   let url: string | null = `${baseUrl.replace(/\/$/, '')}/${path}/?limit=${PAGE_LIMIT}`;
 
   while (url && entries.length < MAX_ENTRIES_PER_SECTION) {
@@ -211,12 +251,26 @@ export async function fetchOpen5eSection(baseUrl: string, section: Open5eSection
         entries.push(mapper(row));
       } catch {
         // Skip a single malformed row rather than failing the whole import.
+        skippedCount += 1;
       }
     }
-    url = page.next;
+
+    if (page.next && !isSameOrigin(baseUrl, page.next)) {
+      skippedCount += 1;
+      logger.warn(
+        `[open5e-importer] section "${section}": refusing to follow cross-origin pagination link (base=${baseUrl}, next=${page.next}) — stopping pagination`,
+      );
+      url = null;
+    } else {
+      url = page.next;
+    }
   }
 
-  return entries;
+  if (skippedCount > 0) {
+    logger.warn(`[open5e-importer] section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
+  }
+
+  return { entries, skippedCount };
 }
 
 export function entryTypeForSection(section: Open5eSection): RuleEntryType {

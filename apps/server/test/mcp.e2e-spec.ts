@@ -278,6 +278,37 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolled.total).toBeLessThanOrEqual(21);
   });
 
+  it('admin-owned campaign-scoped PAT 403s on a different campaign, incl. an MCP tool call (punch list item 12)', async () => {
+    // mcp-dm is the server admin (first user via /auth/setup — see beforeAll comment).
+    // RoleResolver.effectiveRole()'s PAT cap says a campaign-bound token treats the
+    // caller as a non-member outside that campaign, EVEN for admins — this pins that
+    // behavior end-to-end via both REST and one real MCP tool call.
+    const otherCampRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Other Campaign' });
+    expect(otherCampRes.status).toBe(201);
+    const otherCampaignId = otherCampRes.body.id;
+
+    const scopedTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-admin-scoped-token', scope: 'dm', campaignId });
+    expect(scopedTokenRes.status).toBe(201);
+    const scopedToken = scopedTokenRes.body.token;
+
+    // REST: scoped token works on ITS campaign, 403s on the other.
+    const restOk = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}`).set('Authorization', `Bearer ${scopedToken}`);
+    expect(restOk.status).toBe(200);
+    const restForbidden = await request(ctx.app.getHttpServer())
+      .get(`/api/v1/campaigns/${otherCampaignId}`)
+      .set('Authorization', `Bearer ${scopedToken}`);
+    expect(restForbidden.status).toBe(403);
+
+    // MCP: same cap applies to a real tool call against the OTHER campaign.
+    const client = await mcpClient(scopedToken);
+    const deniedResult = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId: otherCampaignId } });
+    expect(deniedResult.isError).toBe(true);
+
+    // Sanity: the same token, same client, still works against ITS OWN campaign.
+    const okResult = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
+    expect(okResult.isError).toBeFalsy();
+  });
+
   it('request without Authorization gets 401; GET gets 405', async () => {
     const noAuth = await request(ctx.app.getHttpServer())
       .post('/mcp')

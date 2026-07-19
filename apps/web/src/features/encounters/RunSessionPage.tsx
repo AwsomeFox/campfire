@@ -11,7 +11,7 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type {
   Character,
@@ -24,6 +24,7 @@ import type {
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -63,6 +64,15 @@ export default function RunSessionPage() {
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Mirrors `busy` but updates synchronously (state updates are batched/async in React,
+  // so a rapid double-click on e.g. the HP +/- steppers could fire twice before the
+  // first setBusy(true) re-render lands). withBusy checks+sets this ref before anything
+  // async happens, closing that race.
+  const busyRef = useRef(false);
+
+  const [confirmEnd, setConfirmEnd] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -134,6 +144,8 @@ export default function RunSessionPage() {
   }
 
   async function withBusy(fn: () => Promise<void>) {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setActionError(null);
     try {
@@ -141,6 +153,7 @@ export default function RunSessionPage() {
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'That action failed.');
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
@@ -167,15 +180,14 @@ export default function RunSessionPage() {
   }
 
   async function endEncounter() {
-    if (!confirm('End this encounter? HP writes back to character sheets. This cannot be undone.')) return;
     await withBusy(async () => {
       await api.post(`${API}/encounters/${eid}/end`);
+      setConfirmEnd(false);
       await load();
     });
   }
 
   async function deleteEncounter() {
-    if (!confirm('Delete this encounter? This cannot be undone.')) return;
     await withBusy(async () => {
       await api.delete(`${API}/encounters/${eid}`);
       navigate(`/c/${cid}/encounters`);
@@ -190,9 +202,9 @@ export default function RunSessionPage() {
   }
 
   async function removeCombatant(combatantId: number) {
-    if (!confirm('Remove this combatant from the encounter?')) return;
     await withBusy(async () => {
       await api.delete(`${API}/encounters/${eid}/combatants/${combatantId}`);
+      setConfirmRemoveCombatantId(null);
       await load();
     });
   }
@@ -284,12 +296,12 @@ export default function RunSessionPage() {
               </Btn>
             )}
             {encounter.status !== 'ended' && (
-              <Btn ghost danger disabled={busy} onClick={endEncounter}>
+              <Btn ghost danger disabled={busy} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
             {(encounter.status === 'ended' || encounter.status === 'preparing') && (
-              <Btn ghost danger disabled={busy} onClick={deleteEncounter}>
+              <Btn ghost danger disabled={busy} onClick={() => setConfirmDelete(true)}>
                 Delete
               </Btn>
             )}
@@ -316,15 +328,47 @@ export default function RunSessionPage() {
               onHpDelta={(delta) => patchCombatant(c.id, { hpDelta: delta })}
               onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
               onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
-              onRemove={() => removeCombatant(c.id)}
+              onRemove={() => setConfirmRemoveCombatantId(c.id)}
             />
           ))
         )}
       </div>
 
-      {isDm && encounter.status !== 'ended' && <AddCombatantPanel encounterId={eid} onAdded={load} />}
+      {isDm && encounter.status !== 'ended' && (
+        <AddCombatantPanel encounterId={eid} campaignId={cid} characters={characters} onAdded={load} />
+      )}
 
       <DiceLog campaignId={cid} />
+
+      {confirmEnd && (
+        <ConfirmDialog
+          title="End this encounter?"
+          body="HP writes back to character sheets. This cannot be undone."
+          confirmLabel={busy ? 'Ending…' : 'End encounter'}
+          busy={busy}
+          onConfirm={endEncounter}
+          onCancel={() => setConfirmEnd(false)}
+        />
+      )}
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Delete this encounter?"
+          body="This cannot be undone."
+          confirmLabel={busy ? 'Deleting…' : 'Delete encounter'}
+          busy={busy}
+          onConfirm={deleteEncounter}
+          onCancel={() => setConfirmDelete(false)}
+        />
+      )}
+      {confirmRemoveCombatantId != null && (
+        <ConfirmDialog
+          title="Remove this combatant from the encounter?"
+          confirmLabel={busy ? 'Removing…' : 'Remove'}
+          busy={busy}
+          onConfirm={() => removeCombatant(confirmRemoveCombatantId)}
+          onCancel={() => setConfirmRemoveCombatantId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -399,12 +443,23 @@ function CombatantRow({
               <span key={cond} className="tag tag-outline" style={{ fontSize: 9.5, gap: 6 }}>
                 {cond}
                 {canEdit && (
-                  <span
-                    onClick={() => !busy && onRemoveCondition(cond)}
-                    style={{ cursor: 'pointer', opacity: 0.7 }}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${cond}`}
+                    onClick={() => onRemoveCondition(cond)}
+                    disabled={busy}
+                    style={{
+                      cursor: busy ? 'default' : 'pointer',
+                      opacity: 0.7,
+                      background: 'transparent',
+                      border: 0,
+                      padding: 0,
+                      font: 'inherit',
+                      color: 'inherit',
+                    }}
                   >
                     ✕
-                  </span>
+                  </button>
                 )}
               </span>
             ))}
@@ -514,9 +569,17 @@ function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
 
 type AddTab = 'manual' | 'compendium' | 'party';
 
-function AddCombatantPanel({ encounterId, onAdded }: { encounterId: number; onAdded: () => Promise<void> | void }) {
-  const { campaignId } = useParams<{ campaignId: string }>();
-  const cid = Number(campaignId);
+function AddCombatantPanel({
+  encounterId,
+  campaignId: cid,
+  characters,
+  onAdded,
+}: {
+  encounterId: number;
+  campaignId: number;
+  characters: Character[];
+  onAdded: () => Promise<void> | void;
+}) {
   const [tab, setTab] = useState<AddTab>('manual');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -531,10 +594,6 @@ function AddCombatantPanel({ encounterId, onAdded }: { encounterId: number; onAd
   const debouncedQuery = useDebounced(query, 300);
   const [results, setResults] = useState<RuleEntry[]>([]);
   const [searching, setSearching] = useState(false);
-
-  // Party
-  const [characters, setCharacters] = useState<Character[]>([]);
-  const [loadingCharacters, setLoadingCharacters] = useState(false);
 
   useEffect(() => {
     if (tab !== 'compendium' || !debouncedQuery.trim()) {
@@ -559,25 +618,6 @@ function AddCombatantPanel({ encounterId, onAdded }: { encounterId: number; onAd
       cancelled = true;
     };
   }, [tab, debouncedQuery]);
-
-  useEffect(() => {
-    if (tab !== 'party' || !Number.isFinite(cid)) return;
-    let cancelled = false;
-    (async () => {
-      setLoadingCharacters(true);
-      try {
-        const list = await api.get<Character[]>(`${API}/campaigns/${cid}/characters`);
-        if (!cancelled) setCharacters(list);
-      } catch {
-        if (!cancelled) setCharacters([]);
-      } finally {
-        if (!cancelled) setLoadingCharacters(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, cid]);
 
   async function addManual(e: FormEvent) {
     e.preventDefault();
@@ -731,9 +771,7 @@ function AddCombatantPanel({ encounterId, onAdded }: { encounterId: number; onAd
 
       {tab === 'party' && (
         <div className="space-y-1.5">
-          {loadingCharacters ? (
-            <Skeleton lines={2} />
-          ) : characters.length === 0 ? (
+          {characters.length === 0 ? (
             <p className="text-muted" style={{ fontSize: 12 }}>
               No characters in this campaign yet.
             </p>

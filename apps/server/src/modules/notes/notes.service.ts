@@ -151,7 +151,13 @@ export class NotesService {
     });
   }
 
-  /** ANY role incl. viewer may post inbox items. */
+  /**
+   * ANY role incl. viewer may post inbox items. `authorName` is always the authenticated
+   * caller's own displayName/username — a client-supplied `input.authorName` (if the DTO
+   * ever grows one) is intentionally ignored here, not trusted, since every inbox post
+   * requires a real `requireMember()`-checked session/token (there's no anonymous path
+   * that would need a caller-supplied display name in the first place).
+   */
   async createInbox(campaignId: number, input: InboxCreateInput, user: RequestUser, role: Role): Promise<Note> {
     const ts = nowIso();
     const [row] = await this.db
@@ -159,7 +165,7 @@ export class NotesService {
       .values({
         campaignId,
         authorUserId: user.id,
-        authorName: input.authorName ?? user.name,
+        authorName: user.name,
         kind: 'inbox',
         visibility: 'dm_shared',
         entityType: null,

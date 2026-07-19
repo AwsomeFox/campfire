@@ -107,3 +107,99 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
     expect(bList.body.some((c: { id: number }) => c.id === otherCampaign.body.id)).toBe(false);
   });
 });
+
+/**
+ * Punch list item 2: deleting a user (admin-only DELETE /users/:id) used to cascade
+ * campaign_members without the same last-dm guard MembersService's own DELETE endpoint
+ * enforces (see the "removing the last dm is refused (409)" test above) — so deleting the
+ * user row was a silent bypass that could orphan a campaign with zero dms. UsersService.remove()
+ * now runs the same check across every campaign the target user dms.
+ */
+describe('user delete last-dm guard (e2e, real cookie sessions)', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+  let soleDmAgent: ReturnType<typeof request.agent>;
+  let soleDmId: number;
+  let sharedDmAgent: ReturnType<typeof request.agent>;
+  let sharedDmId: number;
+  let coDmAgent: ReturnType<typeof request.agent>;
+  let coDmId: number;
+  let soleDmCampaignId: number;
+  let sharedCampaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'del-admin', password: 'admin-password-1' });
+
+    const soleDmCreate = await adminAgent.post('/api/v1/users').send({ username: 'sole-dm', password: 'sole-dm-password', serverRole: 'user' });
+    soleDmId = soleDmCreate.body.id;
+    soleDmAgent = request.agent(server);
+    await soleDmAgent.post('/api/v1/auth/login').send({ username: 'sole-dm', password: 'sole-dm-password' });
+
+    const sharedDmCreate = await adminAgent.post('/api/v1/users').send({ username: 'shared-dm', password: 'shared-dm-password', serverRole: 'user' });
+    sharedDmId = sharedDmCreate.body.id;
+    sharedDmAgent = request.agent(server);
+    await sharedDmAgent.post('/api/v1/auth/login').send({ username: 'shared-dm', password: 'shared-dm-password' });
+
+    const coDmCreate = await adminAgent.post('/api/v1/users').send({ username: 'co-dm', password: 'co-dm-password', serverRole: 'user' });
+    coDmId = coDmCreate.body.id;
+    coDmAgent = request.agent(server);
+    await coDmAgent.post('/api/v1/auth/login').send({ username: 'co-dm', password: 'co-dm-password' });
+
+    // sole-dm is the ONLY dm of this campaign — deleting them should be refused.
+    const soleCampRes = await soleDmAgent.post('/api/v1/campaigns').send({ name: 'Sole DM Campaign' });
+    soleDmCampaignId = soleCampRes.body.id;
+
+    // shared-dm campaign has a second dm (co-dm) — deleting shared-dm should be allowed.
+    const sharedCampRes = await sharedDmAgent.post('/api/v1/campaigns').send({ name: 'Shared DM Campaign' });
+    sharedCampaignId = sharedCampRes.body.id;
+    const membersRes = await sharedDmAgent.get(`/api/v1/campaigns/${sharedCampaignId}/members`);
+    const sharedDmMemberRow = membersRes.body.find((m: { role: string }) => m.role === 'dm');
+    const promoteRes = await sharedDmAgent
+      .post(`/api/v1/campaigns/${sharedCampaignId}/members`)
+      .send({ userId: coDmId, role: 'dm' });
+    expect(promoteRes.status).toBe(201);
+    expect(sharedDmMemberRow.role).toBe('dm');
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('deleting the sole dm of a campaign is refused (409, names the campaign)', async () => {
+    const res = await adminAgent.delete(`/api/v1/users/${soleDmId}`);
+    expect(res.status).toBe(409);
+    expect(res.body.message).toContain('Sole DM Campaign');
+
+    // user still exists and can still log in
+    const stillThere = await adminAgent.get('/api/v1/users');
+    expect(stillThere.body.some((u: { id: number }) => u.id === soleDmId)).toBe(true);
+  });
+
+  it('deleting a dm who shares dm duties with another dm succeeds (204)', async () => {
+    const res = await adminAgent.delete(`/api/v1/users/${sharedDmId}`);
+    expect(res.status).toBe(204);
+
+    const listRes = await adminAgent.get('/api/v1/users');
+    expect(listRes.body.some((u: { id: number }) => u.id === sharedDmId)).toBe(false);
+
+    // co-dm remains the sole dm now, campaign still reachable
+    const campRes = await coDmAgent.get(`/api/v1/campaigns/${sharedCampaignId}`);
+    expect(campRes.status).toBe(200);
+  });
+
+  it('after reassigning a co-dm, deleting the original sole dm now succeeds', async () => {
+    const membersRes = await soleDmAgent.get(`/api/v1/campaigns/${soleDmCampaignId}/members`);
+    const soleDmMemberRow = membersRes.body.find((m: { role: string }) => m.role === 'dm');
+    expect(soleDmMemberRow).toBeDefined();
+
+    const addCoDm = await soleDmAgent.post(`/api/v1/campaigns/${soleDmCampaignId}/members`).send({ userId: coDmId, role: 'dm' });
+    expect(addCoDm.status).toBe(201);
+
+    const res = await adminAgent.delete(`/api/v1/users/${soleDmId}`);
+    expect(res.status).toBe(204);
+  });
+});

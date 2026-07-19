@@ -131,8 +131,7 @@ export default function DashboardPage() {
       </div>
 
       <p className="text-[11px] text-slate-600 pb-4">
-        Role degradation: <b>player</b> sees no Edit/New buttons on canon, can tick objectives, edits own character;{' '}
-        <b>viewer</b> is fully read-only and keeps only the &quot;Leave a note&quot; quick-capture.
+        Players can tick objectives and edit their own character; viewers can read and leave notes.
       </p>
     </div>
   );

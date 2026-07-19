@@ -21,6 +21,8 @@ import {
 } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { Toggle } from '../../components/Toggle';
 
 type QuestWithObjectives = Quest & { objectives: QuestObjective[] };
 type QuestStatusValue = Quest['status'];
@@ -73,6 +75,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Objectives being toggled right now (keyed by objective id). Guards against the
+  // optimistic-update race where a fast double-toggle could roll back to the wrong
+  // "previous" value — see toggleObjective below.
+  const [pendingObjectives, setPendingObjectives] = useState<Record<number, boolean>>({});
 
   const load = useCallback(async () => {
     setError(null);
@@ -147,16 +154,34 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
   async function toggleObjective(objective: QuestObjective) {
     if (!quest) return;
-    // optimistic update
-    const prev = quest.objectives;
-    setQuest({ ...quest, objectives: prev.map((o) => (o.id === objective.id ? { ...o, done: !o.done } : o)) });
+    // Ignore toggles on an objective that already has a request in flight — prevents
+    // a fast double-click from firing two overlapping PATCHes whose responses could
+    // land out of order and roll the checkbox back to the wrong state.
+    if (pendingObjectives[objective.id]) return;
+
+    const previousDone = objective.done;
+    const nextDone = !previousDone;
+    setPendingObjectives((p) => ({ ...p, [objective.id]: true }));
+    setQuest((q) =>
+      q ? { ...q, objectives: q.objectives.map((o) => (o.id === objective.id ? { ...o, done: nextDone } : o)) } : q,
+    );
     try {
       await api.patch<QuestObjective>(`${API}/quests/${quest.id}/objectives/${objective.id}`, {
-        done: !objective.done,
+        done: nextDone,
       });
     } catch {
-      setQuest((q) => (q ? { ...q, objectives: prev } : q));
+      // Roll back only to the pre-THIS-toggle value, not to whatever the objectives
+      // array looked like when the request started (which could now be stale).
+      setQuest((q) =>
+        q ? { ...q, objectives: q.objectives.map((o) => (o.id === objective.id ? { ...o, done: previousDone } : o)) } : q,
+      );
       setError("Couldn't update the objective.");
+    } finally {
+      setPendingObjectives((p) => {
+        const next = { ...p };
+        delete next[objective.id];
+        return next;
+      });
     }
   }
 
@@ -350,26 +375,13 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             {quest.objectives.length === 0 && <p className="text-xs text-slate-600">No objectives yet.</p>}
             {quest.objectives.map((o) => (
               <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 34 }}>
-                <span
-                  onClick={() => canToggleObjectives && toggleObjective(o)}
-                  role={canToggleObjectives ? 'button' : undefined}
-                  style={{
-                    width: 17,
-                    height: 17,
-                    flex: 'none',
-                    borderRadius: 4,
-                    border: '1.5px solid var(--color-neutral-600)',
-                    display: 'grid',
-                    placeItems: 'center',
-                    fontSize: 11,
-                    color: 'var(--color-accent-100)',
-                    cursor: canToggleObjectives ? 'pointer' : 'default',
-                    background: o.done ? 'var(--color-accent)' : 'transparent',
-                    borderColor: o.done ? 'var(--color-accent)' : 'var(--color-neutral-600)',
-                  }}
-                >
-                  {o.done ? '✓' : ''}
-                </span>
+                <Toggle
+                  checked={o.done}
+                  onChange={() => toggleObjective(o)}
+                  disabled={!canToggleObjectives || !!pendingObjectives[o.id]}
+                  label={o.done ? `Mark "${o.text}" not done` : `Mark "${o.text}" done`}
+                  size={17}
+                />
                 {editingObjectiveId === o.id ? (
                   <div className="flex-1 flex items-center gap-2">
                     <TextInput
@@ -540,26 +552,22 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       </div>
 
       {confirmingDelete && (
-        <div className="dialog-backdrop" onClick={() => !deleting && setConfirmingDelete(false)}>
-          <div className="dialog" onClick={(e) => e.stopPropagation()}>
-            <p className="dialog-title">Delete &quot;{quest.title}&quot;?</p>
-            <p className="dialog-body">
+        <ConfirmDialog
+          title={`Delete "${quest.title}"?`}
+          body={
+            <>
               This permanently deletes the quest and its objectives.
               {hasSubs
                 ? ` It will NOT promote its ${subquests.length} sub-quest${subquests.length === 1 ? '' : 's'} — they will be orphaned (kept, but pointing at a deleted parent) until you reassign them.`
                 : ''}{' '}
               This can&apos;t be undone.
-            </p>
-            <div className="dialog-actions">
-              <Btn ghost onClick={() => setConfirmingDelete(false)} disabled={deleting}>
-                Cancel
-              </Btn>
-              <Btn danger onClick={deleteQuest} disabled={deleting}>
-                {deleting ? 'Deleting…' : 'Delete quest'}
-              </Btn>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+          confirmLabel={deleting ? 'Deleting…' : 'Delete quest'}
+          busy={deleting}
+          onConfirm={deleteQuest}
+          onCancel={() => setConfirmingDelete(false)}
+        />
       )}
     </div>
   );

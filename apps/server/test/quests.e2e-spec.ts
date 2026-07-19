@@ -181,4 +181,34 @@ describe('quests (e2e)', () => {
     const parentGet = await request(server).get(`/api/v1/quests/${parentId}`).set(dm);
     expect(parentGet.status).toBe(404);
   });
+
+  it('objective routes 404 when questId doesn\'t own the objective (cross-parent-id pin)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const questARes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Quest A' });
+    const questAId = questARes.body.id;
+    const questBRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Quest B' });
+    const questBId = questBRes.body.id;
+
+    const objRes = await request(server).post(`/api/v1/quests/${questAId}/objectives`).set(dm).send({ text: 'Belongs to A' });
+    const objectiveId = objRes.body.id;
+
+    // PATCH through the WRONG quest's route (questB, but objective belongs to questA) -> 404
+    const wrongPatch = await request(server)
+      .patch(`/api/v1/quests/${questBId}/objectives/${objectiveId}`)
+      .set(dm)
+      .send({ done: true });
+    expect(wrongPatch.status).toBe(404);
+
+    // DELETE through the WRONG quest's route -> 404
+    const wrongDelete = await request(server).delete(`/api/v1/quests/${questBId}/objectives/${objectiveId}`).set(dm);
+    expect(wrongDelete.status).toBe(404);
+
+    // sanity: correct quest route still works
+    const rightPatch = await request(server)
+      .patch(`/api/v1/quests/${questAId}/objectives/${objectiveId}`)
+      .set(dm)
+      .send({ done: true });
+    expect(rightPatch.status).toBe(200);
+  });
 });

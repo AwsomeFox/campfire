@@ -129,6 +129,10 @@ export default function ProposalsPage() {
       <p className="text-muted text-xs m-0">
         AI and collaborator edits land here as pending changes. Nothing touches canon until you approve it.
       </p>
+      <p className="text-muted text-xs m-0">
+        AI scribe = any MCP-capable assistant (like Claude) connected with an API token — set up in{' '}
+        <Link to="/tokens" className="text-purple-400 hover:underline">API tokens</Link>.
+      </p>
 
       {error && <ErrorNote message={error} onRetry={load} />}
 

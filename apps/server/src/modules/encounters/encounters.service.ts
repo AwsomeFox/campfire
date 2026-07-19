@@ -178,7 +178,10 @@ export class EncountersService {
     let hpMax = input.hpMax;
     let initMod = input.initMod ?? 0;
     let hpCurrent: number | undefined;
-    let ruleEntryId: number | null = input.ruleEntryId ?? null;
+    // NOT pre-seeded from input.ruleEntryId — only set once the row is confirmed to exist
+    // below, so a dangling id can never make it into the INSERT (was previously assigned
+    // unconditionally here, so a bogus/deleted ruleEntryId silently got stored).
+    let ruleEntryId: number | null = null;
     let characterId: number | null = null;
 
     if (input.kind === 'character' && input.characterId !== undefined) {
@@ -192,15 +195,19 @@ export class EncountersService {
         const stats = fromJsonText<Record<string, number>>(character.stats, {});
         initMod = typeof stats.DEX === 'number' ? abilityMod(stats.DEX) : 0;
       }
-    } else if (input.kind === 'monster' && input.ruleEntryId !== undefined) {
+    } else if (input.ruleEntryId !== undefined) {
+      // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
+      // real rule_entries row — 400 rather than silently dropping it and inserting a
+      // combatant with a dangling reference.
       const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, input.ruleEntryId)).limit(1);
-      if (entry) {
-        ruleEntryId = entry.id;
-        name = name ?? entry.name;
-        const data = fromJsonText<Record<string, unknown>>(entry.dataJson, {});
-        const hp = data.hitPoints ?? data.hit_points ?? data.hp;
-        if (hpMax === undefined && typeof hp === 'number' && hp > 0) hpMax = Math.round(hp);
+      if (!entry) {
+        throw new BadRequestException(`Rule entry ${input.ruleEntryId} not found`);
       }
+      ruleEntryId = entry.id;
+      name = name ?? entry.name;
+      const data = fromJsonText<Record<string, unknown>>(entry.dataJson, {});
+      const hp = data.hitPoints ?? data.hit_points ?? data.hp;
+      if (hpMax === undefined && typeof hp === 'number' && hp > 0) hpMax = Math.round(hp);
     }
 
     if (!name) {
@@ -362,6 +369,12 @@ export class EncountersService {
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    if (encounterRow.status !== 'preparing') {
+      // Without this guard, /start on an already-'ended' encounter revives it with a
+      // stale endedAt still set (or re-starts a 'running' one, resetting round/turnIndex
+      // mid-fight) — status must be 'preparing' to (re)start.
+      throw new BadRequestException(`Encounter must be in 'preparing' status to start (currently '${encounterRow.status}')`);
+    }
     const rows = await this.listCombatantRows(encounterId);
     if (rows.some((r) => r.initiative === null)) {
       throw new BadRequestException('All combatants must have initiative rolled before starting the encounter');
@@ -418,22 +431,31 @@ export class EncountersService {
     return this.getWithCombatantsOrThrow(encounterId);
   }
 
-  /** Ends the encounter and writes each character-combatant's current HP back onto its character row. */
+  /**
+   * Ends the encounter and writes each character-combatant's current HP back onto its
+   * character row. Requires status 'running' — without this guard, /end on an already-
+   * 'ended' encounter double-fires: it re-writes (harmless but wasteful) HP back onto
+   * characters and stomps `endedAt` with a fresh timestamp, silently masking when combat
+   * actually ended. The HP write-back + status update run in one db.transaction() (mirrors
+   * QuestsService.remove()'s subquest-promotion pattern) so a mid-loop failure can't leave
+   * some characters' HP synced and others not while the encounter still shows 'running'.
+   */
   async end(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    if (encounterRow.status !== 'running') {
+      throw new BadRequestException(`Encounter must be 'running' to end (currently '${encounterRow.status}')`);
+    }
     const rows = await this.listCombatantRows(encounterId);
 
-    for (const row of rows) {
-      if (row.kind === 'character' && row.characterId !== null) {
-        await this.db
-          .update(characters)
-          .set({ hpCurrent: row.hpCurrent, updatedAt: nowIso() })
-          .where(eq(characters.id, row.characterId));
-      }
-    }
-
     const ts = nowIso();
-    await this.db.update(encounters).set({ status: 'ended', endedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId));
+    this.db.transaction((tx) => {
+      for (const row of rows) {
+        if (row.kind === 'character' && row.characterId !== null) {
+          tx.update(characters).set({ hpCurrent: row.hpCurrent, updatedAt: ts }).where(eq(characters.id, row.characterId)).run();
+        }
+      }
+      tx.update(encounters).set({ status: 'ended', endedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
+    });
 
     await this.audit.log({
       actor: auditActor(user),

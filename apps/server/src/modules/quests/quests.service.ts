@@ -263,6 +263,18 @@ export class QuestsService {
 
   async removeObjective(questId: number, objectiveId: number, user: RequestUser, role: Role): Promise<void> {
     const quest = await this.getRowOrThrow(questId);
+    // Verify the objective actually belongs to THIS quest before deleting — the DELETE's
+    // own WHERE clause already scopes on questId (so it can never touch another quest's
+    // row), but without this existence check it silently no-ops and reports success (200)
+    // when called with a mismatched (questId, objectiveId) pair, e.g. objective's real
+    // parent is a different quest. 404, matching patchObjective's behavior above.
+    const [existing] = await this.db
+      .select()
+      .from(questObjectives)
+      .where(and(eq(questObjectives.id, objectiveId), eq(questObjectives.questId, questId)))
+      .limit(1);
+    if (!existing) throw new NotFoundException(`Objective ${objectiveId} not found`);
+
     await this.db
       .delete(questObjectives)
       .where(and(eq(questObjectives.id, objectiveId), eq(questObjectives.questId, questId)));

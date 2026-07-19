@@ -8,7 +8,9 @@ via drizzle-orm/better-sqlite3, domain contract imported from
 
 ```
 src/
-  main.ts                 bootstrap: cookie-parser, CORS (credentials), global prefix, Swagger
+  main.ts                 bootstrap: helmet, cookie-parser, JSON/urlencoded body-size limit,
+                           CORS (env-driven, credentials), global prefix, Swagger — see
+                           "Prod hardening" below
   app.module.ts            wires DbModule + all domain modules + global guards/pipe
   db/
     schema.ts               drizzle table defs mirroring @campfire/schema entities
@@ -31,7 +33,9 @@ src/
     settings/                server settings (/settings, admin) — allowLocalLogin, JSON key/value store
     membership/              RoleResolver + CampaignAccessService (effective-role resolution),
                               MembersService/-Controller (/campaigns/:id/members)
-    campaigns/                campaigns CRUD (user-scoped list) + GET :id/summary (aggregate)
+    campaigns/                campaigns CRUD (user-scoped list) + GET :id/summary (aggregate);
+                               DELETE cascades every child table + the on-disk upload dir —
+                               see CampaignsService.remove()'s doc comment
     characters/                campaign-scoped + /characters/:id, hp, conditions
     quests/                    campaign-scoped + /quests/:id, status, objectives
     npcs/                      campaign-scoped + /npcs/:id
@@ -46,6 +50,11 @@ src/
     export/                    GET /campaigns/:id/export?format=json|mdzip (dm)
     rules/                     rule packs (Compendium backend) — /rules/packs, /rules/search,
                                 /rules/entries/:id; Open5e importer — see "Rule packs" below
+    encounters/                combat tracker — /campaigns/:id/encounters, /encounters/:id,
+                                combatants, roll-initiative/start/next-turn/end (state machine:
+                                preparing -> running -> ended, guarded both ways — see
+                                EncountersService.start()/end()); /campaigns/:id/roll (dice)
+    attachments/                image uploads (portraits/maps/misc), DATA_DIR/uploads/<campaignId>/<id>.<ext>
 ```
 
 Each domain module (except health/auth/users/settings) follows the same
@@ -76,6 +85,12 @@ the bearer token, cookie `campfire_session` (httpOnly, `sameSite=lax`,
 `path=/`, 30-day maxAge, `secure` only when `NODE_ENV=production`); the DB
 stores only `sha256(token)`. `lastSeenAt` slides forward at most once/hour on
 use (`AuthService.resolveSessionUser`).
+
+**Expired session sweep.** `AuthService.purgeExpiredSessions()` deletes every
+`user_sessions` row past its `expiresAt`. `AuthService` implements
+`OnApplicationBootstrap`, so this runs once at boot (`await`ed — see the method's
+doc comment for why that matters for test teardown timing) and then hourly via
+an `.unref()`d `setInterval` (never keeps the Node process alive on its own).
 
 ### 2. SessionAuthGuard (replaces DevAuthGuard)
 
@@ -153,7 +168,13 @@ helper, which renders as `token:<name>` instead of the raw user id whenever
 - Cannot demote (`serverRole` away from `admin`), disable, or delete the
   **last enabled admin** (`UsersService`).
 - Cannot demote or remove the **last `dm` of a campaign**
-  (`MembersService`).
+  (`MembersService.remove()`/`update()`).
+- Cannot **delete a user** who is the sole `dm` of any campaign
+  (`UsersService.remove()`) — checked across every campaign that user dms;
+  409 lists the affected campaign names ("reassign DM first"). This mirrors
+  the `MembersService` guard above, which alone isn't enough: deleting the
+  `users` row bypasses `MembersService.remove()` entirely and cascades
+  `campaign_members` directly, so the same check has to be re-applied here.
 
 Deleting a user cascades to their `user_sessions` and `campaign_members`
 rows; their notes/characters are left as-is (`Character.ownerUserId` is a
@@ -399,21 +420,25 @@ claude mcp add --transport http campfire http://host:8080/mcp \
   --header "Authorization: Bearer cf_pat_..."
 ```
 
-**Tool catalog** (28 — `modules/mcp/mcp-tools.ts`):
+**Tool catalog** (36 — `modules/mcp/mcp-tools.ts`; see `test/mcp.e2e-spec.ts`'s
+`ALL_TOOLS` for the exact, test-pinned list):
 
 - **Read:** `list_campaigns`, `get_campaign_summary`, `get_quest`,
   `list_quests`, `get_npc`, `list_npcs`, `get_location`, `list_locations`,
   `get_character`, `get_party`, `get_session_recaps`, `read_inbox` (dm),
   `list_proposals` (dm), `lookup_rule` (any authed — searches installed rule
   packs; top match includes full body text for citation, the rest are
-  summary-only).
+  summary-only), `get_encounter`.
 - **Write:** `create_quest`, `update_quest`, `set_quest_status`,
   `add_objective`, `check_objective` (player+), `upsert_npc`,
   `upsert_location`, `add_session_recap` (`number` defaults to max+1),
   `update_character_hp` (player owner/dm; exactly one of `delta`|`set`),
   `add_note` (any member), `resolve_inbox_item` (dm),
   `update_campaign_status` (dm), `approve_proposal` (dm),
-  `reject_proposal` (dm).
+  `reject_proposal` (dm), `roll_dice`, `create_encounter`, `add_combatant`,
+  `roll_initiative`, `begin_encounter`, `next_turn`, `end_encounter`
+  (encounter/combat tracker — mirrors the REST `/encounters` state machine,
+  including its `preparing -> running -> ended` guards).
 
 Write tools on proposable entities (quest/npc/location/session create+update,
 including `set_quest_status`, which proposes a quest update) accept
@@ -460,7 +485,12 @@ speculatively into the importer itself.
   (`open5e-srd` — see "One pack per source" below) already exists is a 409;
   uninstall first to reimport/refresh.
 - `DELETE /rules/packs/:id` — server admin only. Deletes the pack and all its
-  entries in one transaction.
+  entries in one transaction; any encounter combatant whose `ruleEntryId`
+  pointed at one of those entries (set via `POST /encounters/:id/combatants`
+  with an explicit `ruleEntryId`, e.g. a monster statblock) gets that field
+  nulled out in the **same** transaction, so it's never left dangling. Adding
+  a combatant with a `ruleEntryId` that doesn't resolve to a real row is
+  itself rejected 400 (`EncountersService.addCombatant`), for the same reason.
 - `GET /rules/search?q=&type=&pack=` — any authenticated user. `q` is
   optional (omit it to browse by `type`/`pack` alone); `type` filters to one
   `RuleEntryType`; `pack` filters to one pack slug. Returns up to 50 entries
@@ -505,6 +535,18 @@ against stale documentation:
   each currently return low thousands of rows across all supported game
   systems — see "One pack per source" below re: why this matters less than
   it sounds.)
+- **Pagination is same-origin only.** A page's `next` link is only followed if
+  it resolves to the same origin (scheme+host+port) as the configured
+  `baseUrl`/`url` — a misbehaving or malicious upstream returning a
+  cross-origin `next` link can't redirect the importer into fetching from an
+  arbitrary third party. Pagination just stops in that case (not an error);
+  whatever was collected so far is kept.
+- **Skips are counted and logged, not silent.** Both a malformed row (mapper
+  throw) and a refused cross-origin `next` link increment a per-section
+  skip counter; if any skips happened, `fetchOpen5eSection` logs a one-line
+  `console.warn` summary for that section, and `RulesService.installFromOpen5e`
+  logs a second summary across all requested sections plus records the total
+  skip count in the `rulepack.install` audit log entry's `detail`.
 - Sections are fetched **concurrently** (`Promise.all`) — one slow/failed
   section fails the whole install (still transactional — see below), rather
   than partially importing.
@@ -613,6 +655,38 @@ Swagger doc) is identical to any other `createZodDto` DTO.
 - The domain `sessions` table (game sessions, `@campfire/schema`'s `Session`)
   predates auth; the new auth-session table is named `user_sessions` in SQL
   (`userSessions` in drizzle) to avoid a name collision.
+
+## Prod hardening
+
+`main.ts`'s `bootstrap()` applies (via the exported `configureApp()`, which
+`test/main-hardening.e2e-spec.ts` also exercises directly against a
+`Test.createTestingModule()`-built app — the only piece of `main.ts` any e2e
+suite runs, since `test/test-app.ts`'s bootstraps deliberately skip the rest,
+see "Tests" below):
+
+- **`helmet()`** — standard security headers (`X-Content-Type-Options: nosniff`,
+  no `X-Powered-By`, etc.), default config, no per-route tuning yet.
+- **Body-size limit.** `NestFactory.create(AppModule, { bodyParser: false })`
+  disables Nest's default (unbounded) body-parser registration, and
+  `configureApp()` registers `express.json({ limit: '1mb' })` +
+  `express.urlencoded({ extended: true, limit: '1mb' })` explicitly. Multipart
+  uploads (`/attachments`) go through multer's own `FileInterceptor` size cap
+  (8MB, see `attachments.service.ts`), not these parsers, so this limit doesn't
+  affect them. A JSON body over 1MB gets a 413.
+- **CORS, env-driven (`resolveCorsOrigin()` in `main.ts`).** `ORIGIN` env
+  (comma-split, e.g. `ORIGIN=https://campfire.example.com,https://alt.example.com`)
+  takes priority whenever set, in any environment. Otherwise, outside
+  production (`NODE_ENV !== 'production'`), CORS defaults to the Vite dev
+  server origin (`http://localhost:5173`) — matches every existing dev/e2e
+  workflow unchanged. In production with no `ORIGIN` set, CORS is **not
+  enabled at all** — the deployment plan is same-origin serving (the web build
+  served by this same API process or a reverse proxy in front of both), so no
+  cross-origin requests are expected unless an operator opts in via `ORIGIN`.
+- Swagger (`/api/docs`, `/api/openapi.json`) stays **public** in every
+  environment — a deliberate, accepted tradeoff for a self-hosted app where the
+  operator controls network exposure; if you're deploying Campfire on the open
+  internet, put it behind your reverse proxy's own auth or IP allowlist if you
+  don't want the API shape publicly browsable.
 
 ## OpenAPI
 

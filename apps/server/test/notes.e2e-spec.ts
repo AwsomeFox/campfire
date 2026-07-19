@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const authorPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'author-1' };
@@ -115,6 +115,10 @@ describe('notes privacy (e2e)', () => {
     const inboxId = inboxRes.body.id;
     expect(inboxRes.body.kind).toBe('inbox');
     expect(inboxRes.body.visibility).toBe('dm_shared');
+    // Punch list item 8: client-supplied `authorName` ('Anonymous') is ignored — the server
+    // always stamps the authenticated caller's own name (dev-auth mirrors x-dev-user, 'v-1').
+    expect(inboxRes.body.authorName).toBe('v-1');
+    expect(inboxRes.body.authorName).not.toBe('Anonymous');
 
     const listInbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
     expect(listInbox.status).toBe(200);
@@ -133,5 +137,52 @@ describe('notes privacy (e2e)', () => {
 
     const listInboxAfter = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
     expect(listInboxAfter.body.some((n: { id: number }) => n.id === inboxId)).toBe(false);
+  });
+});
+
+/**
+ * Punch list item 8, real-session variant: proves the authorName override isn't a
+ * dev-auth-only artifact — a real logged-in user's displayName wins over a spoofed
+ * client-supplied authorName too.
+ */
+describe('inbox authorName spoofing (e2e, real cookie sessions)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let memberAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'inbox-dm', password: 'dm-password-1' });
+    await dmAgent.post('/api/v1/users').send({
+      username: 'inbox-member',
+      password: 'member-password-1',
+      displayName: 'Real Display Name',
+      serverRole: 'user',
+    });
+
+    memberAgent = request.agent(server);
+    await memberAgent.post('/api/v1/auth/login').send({ username: 'inbox-member', password: 'member-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Inbox Spoof Campaign' });
+    campaignId = campRes.body.id;
+    const meRes = await memberAgent.get('/api/v1/me');
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: meRes.body.user.id, role: 'player' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a real user posting inbox with a spoofed authorName gets their own displayName stamped instead', async () => {
+    const res = await memberAgent
+      .post(`/api/v1/campaigns/${campaignId}/inbox`)
+      .send({ body: 'Trying to impersonate the DM', authorName: 'The DM' });
+    expect(res.status).toBe(201);
+    expect(res.body.authorName).toBe('Real Display Name');
+    expect(res.body.authorName).not.toBe('The DM');
   });
 });

@@ -69,3 +69,78 @@ export async function startFakeOpen5e(): Promise<FakeOpen5e> {
     },
   };
 }
+
+/**
+ * Fake Open5e server that exercises the importer's hardening (punch list item 10):
+ *  - `/v2/spells/` page 1 has ONE malformed row (missing `name`/`key` -> mapper still
+ *    succeeds since asString() falls back to '' rather than throwing... so instead we
+ *    make the row a non-object, which DOES throw inside mapSpell's property access)
+ *    plus one well-formed row, and a `next` link pointing at a DIFFERENT origin (a
+ *    second, "evil" server bound on its own ephemeral port) — the importer must refuse
+ *    to follow it.
+ *  - The "evil" second server, if ever reached, serves an extra spell — its absence
+ *    from the imported results proves the cross-origin guard actually worked, not just
+ *    that pagination happened to stop.
+ */
+export interface FakeOpen5eWithBadPagination extends FakeOpen5e {
+  evilBaseUrl: string;
+  evilWasHit(): boolean;
+}
+
+export async function startFakeOpen5eWithBadPagination(): Promise<FakeOpen5eWithBadPagination> {
+  let evilHit = false;
+
+  const evilApp = express();
+  evilApp.get('/v2/spells/', (_req, res) => {
+    evilHit = true;
+    res.json(page([{ key: 'evil_spell', name: 'Should Never Be Imported', desc: 'x', document: DOCUMENT }]));
+  });
+  const evilServer: Server = await new Promise((resolve) => {
+    const s = evilApp.listen(0, () => resolve(s));
+  });
+  const evilAddress = evilServer.address();
+  if (!evilAddress || typeof evilAddress === 'string') throw new Error('failed to bind evil fake Open5e server');
+  const evilBaseUrl = `http://127.0.0.1:${evilAddress.port}/v2`;
+
+  const app = express();
+  app.get('/v2/spells/', (_req, res) => {
+    res.json({
+      count: 3,
+      // Cross-origin next link — the importer must NOT follow this.
+      next: `${evilBaseUrl}/spells/?limit=100&page=2`,
+      previous: null,
+      results: [
+        { key: 'srd_fireball', name: 'Fireball', desc: 'A bright streak.', level: 3, school: { name: 'Evocation' }, document: DOCUMENT },
+        // Malformed: `document.licenses` is a string instead of an array, and — more
+        // importantly — the row itself is `null`, which throws inside the mapper
+        // (`row.desc` etc. on null) rather than silently mapping to empty strings.
+        null,
+      ],
+    });
+  });
+  app.get('/v2/creatures/', (_req, res) => res.json(page([])));
+  app.get('/v2/magicitems/', (_req, res) => res.json(page([])));
+  app.get('/v2/conditions/', (_req, res) => res.json(page([])));
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');
+  const baseUrl = `http://127.0.0.1:${address.port}/v2`;
+
+  return {
+    baseUrl,
+    evilBaseUrl,
+    server,
+    evilWasHit: () => evilHit,
+    async close() {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await new Promise<void>((resolve, reject) => {
+        evilServer.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}

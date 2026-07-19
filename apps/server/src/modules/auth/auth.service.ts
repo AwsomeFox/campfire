@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  OnApplicationBootstrap,
   UnauthorizedException,
 } from '@nestjs/common';
 import { eq, lt } from 'drizzle-orm';
@@ -26,13 +27,47 @@ export interface SessionIssueResult {
   me: Me;
 }
 
+/** Sweep expired sessions once an hour — see AuthService.onApplicationBootstrap(). */
+const SESSION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
 @Injectable()
-export class AuthService {
+export class AuthService implements OnApplicationBootstrap {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly usersService: UsersService,
     private readonly settingsService: SettingsService,
   ) {}
+
+  /**
+   * purgeExpiredSessions() previously existed with zero call sites — expired
+   * user_sessions rows just accumulated forever. Sweep once at boot (catches
+   * whatever piled up while the server was down) and then hourly.
+   *
+   * The boot-time sweep is `await`ed — Nest's ModulesContainer runs
+   * `onApplicationBootstrap()` hooks as part of `app.init()` and awaits
+   * whatever they return (see `@nestjs/core/hooks/on-app-bootstrap.hook.js`),
+   * so returning a Promise here means the purge is guaranteed to finish
+   * before `app.init()` resolves. That matters most in tests: `.close()`
+   * (called right after `app.init()` returns, e.g. `test/test-app.ts`'s
+   * `closeTestApp()`) can otherwise race a still-in-flight fire-and-forget
+   * DB write against a temp-dir deletion, occasionally tripping Jest's
+   * "Test environment has been torn down" error in a LATER, unrelated test
+   * file — reproduced during this fix's own test run before `await` was added.
+   *
+   * The hourly re-sweep is intentionally NOT awaited here (this method
+   * returns once boot's purge settles, not once every future interval tick
+   * settles) and its timer is `.unref()`d so it never keeps the Node process
+   * alive on its own — a background tick failing or running long has no
+   * flakiness implication for `app.init()`/`app.close()` timing the way the
+   * boot-time purge did.
+   */
+  async onApplicationBootstrap(): Promise<void> {
+    await this.purgeExpiredSessions();
+    const timer = setInterval(() => {
+      void this.purgeExpiredSessions();
+    }, SESSION_SWEEP_INTERVAL_MS);
+    timer.unref();
+  }
 
   async setupRequired(): Promise<boolean> {
     return (await this.usersService.count()) === 0;

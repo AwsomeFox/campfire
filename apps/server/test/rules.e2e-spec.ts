@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
+import { startFakeOpen5e, startFakeOpen5eWithBadPagination, type FakeOpen5e, type FakeOpen5eWithBadPagination } from './fake-open5e';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' }; // dev-header users always carry serverRole 'admin'
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -138,6 +138,42 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       .send({ source: 'open5e', url: 'http://127.0.0.1:1' }); // nothing listens here
     expect(res.status).toBe(400);
   });
+
+  it('uninstalling a pack nulls out ruleEntryId on any combatant that referenced one of its entries', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Uninstall Cascade Campaign' });
+    const campaignId = campRes.body.id;
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Goblin Fight' });
+    const encounterId = encRes.body.id;
+
+    const installRes = await request(server)
+      .post('/api/v1/rules/packs/install')
+      .set(dm)
+      .send({ source: 'open5e', url: fake.baseUrl, sections: ['monsters'] });
+    expect(installRes.status).toBe(201);
+    const packId = installRes.body.id;
+
+    const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin' }).set(dm);
+    const goblinEntry = searchRes.body.find((e: { name: string }) => e.name === 'Goblin');
+    expect(goblinEntry).toBeDefined();
+
+    const combatantRes = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: goblinEntry.id });
+    expect(combatantRes.status).toBe(201);
+    expect(combatantRes.body.ruleEntryId).toBe(goblinEntry.id);
+    const combatantId = combatantRes.body.id;
+
+    const uninstallRes = await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dm);
+    expect(uninstallRes.status).toBe(200);
+
+    const encGetRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatant = encGetRes.body.combatants.find((c: { id: number }) => c.id === combatantId);
+    expect(combatant).toBeDefined();
+    expect(combatant.ruleEntryId).toBeNull();
+  });
 });
 
 describe('rules / rule packs — server-admin gating (e2e, real sessions)', () => {
@@ -186,5 +222,66 @@ describe('rules / rule packs — server-admin gating (e2e, real sessions)', () =
     const installRes = await adminAgent.post('/api/v1/rules/packs/install').send({ source: 'open5e', url: fake.baseUrl });
     expect(installRes.status).toBe(201);
     await adminAgent.delete(`/api/v1/rules/packs/${installRes.body.id}`);
+  });
+});
+
+/**
+ * Punch list item 10 (Open5e importer hardening): (a) a cross-origin `next` pagination
+ * link must be refused, not followed; (b) malformed rows are skipped, not fatal to the
+ * whole import — and both cases are counted/logged rather than disappearing silently.
+ */
+describe('rules / rule packs — Open5e importer hardening (e2e, fake server with bad pagination)', () => {
+  let ctx: TestAppContext;
+  let fake: FakeOpen5eWithBadPagination;
+  let warnSpy: jest.SpyInstance;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    fake = await startFakeOpen5eWithBadPagination();
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+  });
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('refuses the cross-origin next link and skips the malformed row, while still importing the good one', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const installRes = await request(server)
+      .post('/api/v1/rules/packs/install')
+      .set({ 'x-dev-role': 'dm', 'x-dev-user': 'importer-hardening-dm' })
+      .send({ source: 'open5e', url: fake.baseUrl, sections: ['spells'] });
+    expect(installRes.status).toBe(201);
+    // Only the one well-formed row (Fireball) made it in — the null row was skipped,
+    // and pagination stopped at the cross-origin `next` link instead of following it.
+    expect(installRes.body.entryCount).toBe(1);
+
+    // The "evil" second-origin server was never actually reached.
+    expect(fake.evilWasHit()).toBe(false);
+
+    const searchRes = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'fireball' })
+      .set({ 'x-dev-role': 'dm', 'x-dev-user': 'importer-hardening-dm' });
+    expect(searchRes.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+    expect(searchRes.body.some((e: { name: string }) => e.name === 'Should Never Be Imported')).toBe(false);
+
+    // Skip accounting was logged (both the per-section summary and the malformed row).
+    const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
+    expect(warnCalls.some((m) => m.includes('cross-origin pagination'))).toBe(true);
+    expect(warnCalls.some((m) => m.includes('skipped'))).toBe(true);
+
+    await request(server)
+      .delete(`/api/v1/rules/packs/${installRes.body.id}`)
+      .set({ 'x-dev-role': 'dm', 'x-dev-user': 'importer-hardening-dm' });
   });
 });

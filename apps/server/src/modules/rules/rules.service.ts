@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { and, eq, sql } from 'drizzle-orm';
 import type { RuleEntry, RuleEntryType, RulePack, RulePackInstall } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
-import { rulePacks, ruleEntries } from '../../db/schema';
+import { rulePacks, ruleEntries, combatants } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -96,9 +96,16 @@ export class RulesService {
     }
 
     const sectionResults = await Promise.all(sections.map((s) => fetchOpen5eSection(baseUrl, s)));
-    const allEntries = sectionResults.flat();
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
     if (allEntries.length === 0) {
       throw new BadRequestException('Open5e import returned no entries for the requested sections');
+    }
+    if (totalSkipped > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[open5e-importer] install "${slug}": ${allEntries.length} entries imported across ${sections.length} section(s), ${totalSkipped} row(s) skipped total (see per-section warnings above)`,
+      );
     }
 
     const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
@@ -145,7 +152,7 @@ export class RulesService {
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: pack.id,
-      detail: `${allEntries.length} entries from ${sections.join(',')} (cap ${MAX_ENTRIES_PER_SECTION}/section)`,
+      detail: `${allEntries.length} entries from ${sections.join(',')} (cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
     });
 
     return packToDomain(pack);
@@ -153,7 +160,17 @@ export class RulesService {
 
   async uninstall(id: number, user: RequestUser): Promise<void> {
     const pack = await this.getPackOrThrow(id);
+    // Any combatant referencing one of this pack's entries (added via addCombatant's
+    // ruleEntryId path) would otherwise be left with a dangling rule_entry_id once the
+    // entries are gone — null it out in the SAME transaction as the entries/pack delete,
+    // so there's never a window where the FK-shaped reference points at nothing.
+    const entryRows = await this.db.select({ id: ruleEntries.id }).from(ruleEntries).where(eq(ruleEntries.packId, id));
+    const entryIds = entryRows.map((r) => r.id);
+
     this.db.transaction((tx) => {
+      for (const entryId of entryIds) {
+        tx.update(combatants).set({ ruleEntryId: null }).where(eq(combatants.ruleEntryId, entryId)).run();
+      }
       tx.delete(ruleEntries).where(eq(ruleEntries.packId, id)).run();
       tx.delete(rulePacks).where(eq(rulePacks.id, id)).run();
     });

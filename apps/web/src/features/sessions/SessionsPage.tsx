@@ -16,6 +16,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -246,6 +247,7 @@ function SessionDetail({
   const [recapDraft, setRecapDraft] = useState(session.recap);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -274,7 +276,6 @@ function SessionDetail({
   }
 
   async function remove() {
-    if (!confirm(`Delete Session ${session.number}? This cannot be undone.`)) return;
     setDeleting(true);
     setError(null);
     try {
@@ -344,10 +345,21 @@ function SessionDetail({
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
           </Btn>
-          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={remove} disabled={deleting}>
+          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} disabled={deleting}>
             {deleting ? 'Deleting…' : 'Delete'}
           </Btn>
         </div>
+      )}
+
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={`Delete Session ${session.number}?`}
+          body="This cannot be undone."
+          confirmLabel={deleting ? 'Deleting…' : 'Delete session'}
+          busy={deleting}
+          onConfirm={remove}
+          onCancel={() => setConfirmingDelete(false)}
+        />
       )}
     </div>
   );

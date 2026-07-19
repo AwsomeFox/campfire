@@ -292,6 +292,53 @@ describe('encounters (e2e)', () => {
       expect(getRes.body.combatants.some((c: { id: number }) => c.id === ruleMonsterId)).toBe(false);
     });
 
+    it('combatant routes 404 when encounterId doesn\'t own the combatant (cross-parent-id pin)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // A second, unrelated encounter in the same campaign.
+      const otherEncRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Unrelated Fight' });
+      const otherEncounterId = otherEncRes.body.id;
+
+      // ariaCombatantId belongs to `encounterId`, not `otherEncounterId`.
+      const wrongPatch = await request(server)
+        .patch(`/api/v1/encounters/${otherEncounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ hpDelta: -1 });
+      expect(wrongPatch.status).toBe(404);
+
+      const wrongDelete = await request(server).delete(`/api/v1/encounters/${otherEncounterId}/combatants/${ariaCombatantId}`).set(dm);
+      expect(wrongDelete.status).toBe(404);
+    });
+
+    it('dangling ruleEntryId (nonexistent rule entry) is rejected 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', ruleEntryId: 999_999 });
+      expect(res.status).toBe(400);
+    });
+
+    it('/next-turn on a non-running encounter is rejected 400 (state machine, verify existing guard)', async () => {
+      // `encounterId` is currently 'running' at this point in the suite (started earlier) —
+      // exercise the guard against a fresh 'preparing' encounter instead.
+      const server = ctx.app.getHttpServer();
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Not Started Yet' });
+      const freshId = freshRes.body.id;
+
+      const res = await request(server).post(`/api/v1/encounters/${freshId}/next-turn`).set(dm);
+      expect(res.status).toBe(400);
+    });
+
+    it('/end on a non-running (preparing) encounter is rejected 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Never Started' });
+      const freshId = freshRes.body.id;
+
+      const res = await request(server).post(`/api/v1/encounters/${freshId}/end`).set(dm);
+      expect(res.status).toBe(400);
+    });
+
     it('dm ends the encounter and character hp is written back', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
@@ -302,6 +349,19 @@ describe('encounters (e2e)', () => {
       const charRes = await request(server).get(`/api/v1/characters/${ownedCharacterId}`).set(dm);
       expect(charRes.status).toBe(200);
       expect(charRes.body.hpCurrent).toBe(15); // matches the combatant's hp at end time
+    });
+
+    it('/start on an already-ended encounter is rejected 400 (no stale-endedAt revival)', async () => {
+      // `encounterId` is now 'ended' from the previous test.
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+      expect(res.status).toBe(400);
+    });
+
+    it('/end on an already-ended encounter is rejected 400 (no double-fire)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
+      expect(res.status).toBe(400);
     });
 
     it('dm deletes the encounter', async () => {

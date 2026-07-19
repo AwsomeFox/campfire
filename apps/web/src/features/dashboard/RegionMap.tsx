@@ -8,15 +8,31 @@ import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } fro
 const VIEW_W = 500;
 const VIEW_H = 260;
 
+// Status tones follow the app's existing chip convention (see cf-chip-* in index.css):
+// accent for "current" (matches the legend dot below), the emerald success family for
+// "explored" (same #10b981/#34d399 pairing as cf-chip-completed), and the neutral ramp
+// for "unexplored" — no bare Tailwind slate/amber hexes.
 const STATUS_COLOR: Record<Location['status'], string> = {
-  current: '#f59e0b',
+  current: 'var(--color-accent)',
   explored: '#10b981',
-  unexplored: '#64748b',
+  unexplored: 'var(--color-neutral-500)',
 };
 const STATUS_TEXT_COLOR: Record<Location['status'], string> = {
-  current: '#fbbf24',
+  current: 'var(--color-accent-300)',
   explored: '#34d399',
-  unexplored: '#94a3b8',
+  unexplored: 'var(--color-neutral-400)',
+};
+const STATUS_LABEL: Record<Location['status'], string> = {
+  current: 'Current',
+  explored: 'Explored',
+  unexplored: 'Unexplored',
+};
+// Status glyphs pair with color so pins read color+text, not color-only (matches the
+// suffix already used in the no-map SVG view below).
+const STATUS_GLYPH: Record<Location['status'], string> = {
+  current: '📍',
+  explored: '✓',
+  unexplored: '?',
 };
 
 export function RegionMap({
@@ -217,14 +233,15 @@ export function RegionMap({
                         height: isCurrent ? 14 : 10,
                         borderRadius: '50%',
                         background: STATUS_COLOR[loc.status],
-                        boxShadow: `0 0 0 6px ${STATUS_COLOR[loc.status]}33`,
+                        boxShadow: `0 0 0 6px color-mix(in srgb, ${STATUS_COLOR[loc.status]} 20%, transparent)`,
                       }}
                     />
                     <span
                       className="text-[10px] font-bold px-1 rounded"
                       style={{ color: STATUS_TEXT_COLOR[loc.status], background: 'rgba(15,23,42,.6)' }}
+                      title={STATUS_LABEL[loc.status]}
                     >
-                      {loc.name}
+                      {STATUS_GLYPH[loc.status]} {loc.name}
                     </span>
                   </Link>
                 </div>
@@ -240,21 +257,25 @@ export function RegionMap({
               const isExplored = loc.status === 'explored';
               const r = isCurrent ? 5.5 : loc.status === 'unexplored' ? 3.5 : 4.5;
               const glowR = isCurrent ? 12 : isExplored ? 9 : 7;
-              const suffix = isCurrent ? ' 📍' : isExplored ? ' ✓' : ' ?';
+              const suffix = ` ${STATUS_GLYPH[loc.status]}`;
               return (
                 <g key={loc.id} transform={`translate(${x}, ${y})`}>
                   <Link to={`/c/${campaignId}/locations/${loc.id}`}>
-                    <circle r={glowR} fill={STATUS_COLOR[loc.status]} fillOpacity={isCurrent ? 0.25 : isExplored ? 0.2 : 0.3}>
+                    <circle
+                      r={glowR}
+                      style={{ fill: STATUS_COLOR[loc.status] }}
+                      fillOpacity={isCurrent ? 0.25 : isExplored ? 0.2 : 0.3}
+                    >
                       {isCurrent && (
                         <animate attributeName="fill-opacity" values=".25;.5;.25" dur="2s" repeatCount="indefinite" />
                       )}
                     </circle>
-                    <circle r={r} fill={STATUS_COLOR[loc.status]} />
+                    <circle r={r} style={{ fill: STATUS_COLOR[loc.status] }} />
                     <text
                       x={isCurrent ? -12 : isExplored ? 13 : 12}
                       y={isCurrent ? -12 : isExplored ? 4 : 4}
                       fontSize="11"
-                      fill={STATUS_TEXT_COLOR[loc.status]}
+                      style={{ fill: STATUS_TEXT_COLOR[loc.status] }}
                       fontWeight={isCurrent ? 'bold' : undefined}
                       textAnchor={isCurrent ? 'end' : 'start'}
                     >
@@ -276,9 +297,12 @@ export function RegionMap({
               key={loc.id}
               to={`/c/${campaignId}/locations/${loc.id}`}
               className="cf-chip"
-              style={{ background: 'rgb(100 116 139 / .2)', color: STATUS_TEXT_COLOR[loc.status] }}
+              style={{
+                background: 'color-mix(in srgb, var(--color-neutral-500) 20%, transparent)',
+                color: STATUS_TEXT_COLOR[loc.status],
+              }}
             >
-              {loc.name}
+              {STATUS_GLYPH[loc.status]} {loc.name}
             </Link>
           ))}
         </div>
@@ -295,16 +319,16 @@ export function RegionMap({
         }}
       >
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-accent)' }} />
-          Current
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS_COLOR.current }} />
+          {STATUS_GLYPH.current} {STATUS_LABEL.current}
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-neutral-500)' }} />
-          Explored
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS_COLOR.explored }} />
+          {STATUS_GLYPH.explored} {STATUS_LABEL.explored}
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <span style={{ width: 8, height: 8, borderRadius: '50%', border: '1px dashed var(--color-neutral-600)' }} />
-          Unexplored
+          {STATUS_GLYPH.unexplored} {STATUS_LABEL.unexplored}
         </span>
         <span style={{ marginLeft: 'auto' }}>{isDm && mapImageUrl ? 'Drag a pin to move it' : 'Drag to pan · tap a pin'}</span>
       </div>

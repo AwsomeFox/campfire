@@ -18,6 +18,7 @@ import type { Character, CampaignMember, Role, AuditEntry } from '@campfire/sche
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -247,8 +248,7 @@ function MembersCard({
         </div>
       )}
       <p className="text-[11px] text-slate-500">
-        Removing someone keeps their character and notes — the seat just closes. New players need an account first —
-        a server admin creates one in Admin → Users.
+        Removing someone keeps their character and notes — the seat just closes.
       </p>
     </Card>
   );
@@ -269,6 +269,8 @@ function MemberRow({
 }) {
   const [savingRole, setSavingRole] = useState(false);
   const [savingChar, setSavingChar] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
 
   async function changeRole(role: Role) {
     setSavingRole(true);
@@ -297,13 +299,16 @@ function MemberRow({
   }
 
   async function remove() {
-    if (!confirm(`Remove ${member.displayName || member.username} from this campaign?`)) return;
+    setRemoving(true);
     onError(null);
     try {
       await api.delete(`${API}/campaigns/${campaignId}/members/${member.id}`);
+      setConfirmingRemove(false);
       onChange();
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't remove member.");
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -346,9 +351,18 @@ function MemberRow({
           </option>
         ))}
       </select>
-      <button type="button" className="text-[12px] text-slate-500 hover:text-rose-400" onClick={remove}>
+      <button type="button" className="text-[12px] text-slate-500 hover:text-rose-400" onClick={() => setConfirmingRemove(true)}>
         Remove
       </button>
+      {confirmingRemove && (
+        <ConfirmDialog
+          title={`Remove ${member.displayName || member.username} from this campaign?`}
+          confirmLabel={removing ? 'Removing…' : 'Remove'}
+          busy={removing}
+          onConfirm={remove}
+          onCancel={() => setConfirmingRemove(false)}
+        />
+      )}
     </div>
   );
 }
@@ -417,6 +431,10 @@ function AddMemberForm({
   return (
     <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
       <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Add member</p>
+      <p className="text-[12px] text-amber-200/90 cf-inset !border-amber-500/20 px-2.5 py-2">
+        Accounts are created by a server admin (Admin → Users). Once an account exists, add it to this campaign
+        below by username.
+      </p>
       {selected ? (
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <p className="text-sm text-white">
@@ -469,9 +487,6 @@ function AddMemberForm({
           <option value="viewer">Role: Viewer</option>
         </select>
       </div>
-      <p className="text-[11px] text-slate-500">
-        Players need an account first — a server admin creates one in Admin → Users.
-      </p>
       <div className="flex gap-2 justify-end">
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
           Cancel

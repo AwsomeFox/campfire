@@ -16,6 +16,7 @@ import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, Emp
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { attachmentFileUrl } from '../../components/ImageUpload';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const statusLabel: Record<Location['status'], string> = {
   unexplored: 'Unexplored',
@@ -56,6 +57,7 @@ export default function LocationPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [statusSaving, setStatusSaving] = useState(false);
@@ -125,7 +127,6 @@ export default function LocationPage() {
   }
 
   async function remove() {
-    if (!confirm(`Delete ${location?.name}? This cannot be undone.`)) return;
     setDeleting(true);
     try {
       await api.delete(`${API}/locations/${id}`);
@@ -411,7 +412,7 @@ export default function LocationPage() {
             <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
           </div>
           <div className="flex items-center justify-between gap-2">
-            <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={remove}>
+            <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
               {deleting ? 'Deleting…' : 'Delete location'}
             </Btn>
             <div className="flex gap-2">
@@ -424,6 +425,16 @@ export default function LocationPage() {
             </div>
           </div>
         </Card>
+      )}
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={`Delete ${location?.name}?`}
+          body="This cannot be undone."
+          confirmLabel={deleting ? 'Deleting…' : 'Delete location'}
+          busy={deleting}
+          onConfirm={remove}
+          onCancel={() => setConfirmingDelete(false)}
+        />
       )}
     </div>
   );

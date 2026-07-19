@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { UserCreate, UserUpdate, PasswordChange, PreferencesUpdate } from '@campfire/schema';
 import type { User } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { users, userSessions, campaignMembers } from '../../db/schema';
+import { users, userSessions, campaignMembers, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
 
@@ -188,6 +188,38 @@ export class UsersService {
       const remaining = await this.countEnabledAdmins(id);
       if (remaining === 0) {
         throw new ConflictException('Cannot delete the last enabled admin');
+      }
+    }
+
+    // Last-dm guard: deleting a user cascades their campaign_members rows, which
+    // silently orphans any campaign where they're the ONLY dm — MembersService's
+    // own DELETE endpoint already refuses this (see members.service.ts `remove()`),
+    // but that guard is bypassed entirely when the user row itself is deleted
+    // instead. Mirror the same check here: for every campaign this user dms,
+    // count OTHER dms; if any campaign would be left with zero, 409 listing them
+    // by name so the admin can reassign a dm first instead of losing the campaign.
+    const dmMemberships = await this.db
+      .select()
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.userId, id), eq(campaignMembers.role, 'dm')));
+
+    if (dmMemberships.length > 0) {
+      const orphanedCampaignNames: string[] = [];
+      for (const membership of dmMemberships) {
+        const otherDms = await this.db
+          .select()
+          .from(campaignMembers)
+          .where(and(eq(campaignMembers.campaignId, membership.campaignId), eq(campaignMembers.role, 'dm')));
+        const remainingDms = otherDms.filter((m) => m.userId !== id);
+        if (remainingDms.length === 0) {
+          const [campaign] = await this.db.select().from(campaigns).where(eq(campaigns.id, membership.campaignId)).limit(1);
+          orphanedCampaignNames.push(campaign?.name ?? `campaign ${membership.campaignId}`);
+        }
+      }
+      if (orphanedCampaignNames.length > 0) {
+        throw new ConflictException(
+          `Cannot delete: reassign DM first for: ${orphanedCampaignNames.join(', ')}`,
+        );
       }
     }
 

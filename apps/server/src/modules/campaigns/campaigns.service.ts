@@ -1,10 +1,26 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CampaignCreate, CampaignUpdate } from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, notes } from '../../db/schema';
+import {
+  campaigns,
+  notes,
+  quests,
+  questObjectives,
+  npcs,
+  locations,
+  characters,
+  encounters,
+  combatants,
+  proposals,
+  campaignMembers,
+  apiTokens,
+  attachments,
+} from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { QuestsService } from '../quests/quests.service';
@@ -16,6 +32,12 @@ import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+
+/** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
+function uploadsRoot(): string {
+  const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', '..', 'data');
+  return path.join(dataDir, 'uploads');
+}
 
 type CampaignCreateInput = z.infer<typeof CampaignCreate>;
 type CampaignUpdateInput = z.infer<typeof CampaignUpdate>;
@@ -120,9 +142,63 @@ export class CampaignsService {
     return toDomain(row);
   }
 
+  /**
+   * Full cascade delete — campaigns.service used to only delete the single
+   * campaigns row, orphaning every child table (quests, npcs, locations,
+   * characters, encounters+combatants, notes, proposals, campaign_members,
+   * api_tokens) plus attachment rows AND their on-disk files. All DB rows are
+   * removed in one db.transaction() (better-sqlite3 synchronous transaction
+   * API — same pattern as QuestsService.remove()/RulesService.uninstall()),
+   * with the campaigns row cleared last so a mid-transaction failure never
+   * leaves an orphaned-but-still-"deleted"-looking campaign. The on-disk
+   * upload directory is removed after the transaction commits (best-effort,
+   * mirroring AttachmentsService.remove()'s fs.rm — the DB is the source of
+   * truth for what exists; a stray directory is harmless, but we still try
+   * synchronously here since this is a rarer, heavier operation than a
+   * single attachment delete).
+   */
   async remove(id: number, user: RequestUser): Promise<void> {
     await this.getOrThrow(id);
-    await this.db.delete(campaigns).where(eq(campaigns.id, id));
+
+    // Every quest in this campaign — objectives cascade off quest ids, not campaignId directly.
+    const questRows = await this.db.select({ id: quests.id }).from(quests).where(eq(quests.campaignId, id));
+    const questIds = questRows.map((r) => r.id);
+
+    // Every encounter in this campaign — combatants cascade off encounter ids.
+    const encounterRows = await this.db.select({ id: encounters.id }).from(encounters).where(eq(encounters.campaignId, id));
+    const encounterIds = encounterRows.map((r) => r.id);
+
+    this.db.transaction((tx) => {
+      for (const questId of questIds) {
+        tx.delete(questObjectives).where(eq(questObjectives.questId, questId)).run();
+      }
+      tx.delete(quests).where(eq(quests.campaignId, id)).run();
+
+      for (const encounterId of encounterIds) {
+        tx.delete(combatants).where(eq(combatants.encounterId, encounterId)).run();
+      }
+      tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
+
+      tx.delete(npcs).where(eq(npcs.campaignId, id)).run();
+      tx.delete(locations).where(eq(locations.campaignId, id)).run();
+      tx.delete(characters).where(eq(characters.campaignId, id)).run();
+      tx.delete(notes).where(eq(notes.campaignId, id)).run();
+      tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
+      tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();
+      tx.delete(apiTokens).where(eq(apiTokens.campaignId, id)).run();
+      tx.delete(attachments).where(eq(attachments.campaignId, id)).run();
+
+      tx.delete(campaigns).where(eq(campaigns.id, id)).run();
+    });
+
+    // Best-effort: remove the on-disk upload directory for this campaign. The DB rows
+    // are already gone (source of truth), so a failure here just leaves an orphaned
+    // directory — logged-free, matching AttachmentsService.remove()'s best-effort fs.rm.
+    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
+    fs.rm(campaignUploadsDir, { recursive: true, force: true }, () => {
+      /* best-effort — DB rows are already gone; a stray directory is harmless */
+    });
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',

@@ -11,6 +11,7 @@ import type { Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote, type ChipVariant } from '../../components/ui';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 
@@ -61,6 +62,8 @@ export default function MyNotesPage() {
 
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<Note | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -112,14 +115,17 @@ export default function MyNotesPage() {
   }
 
   async function deleteNote(note: Note) {
-    if (!confirm('Delete this note? This cannot be undone.')) return;
     const prev = notes;
+    setDeleting(true);
     setNotes((cur) => cur.filter((n) => n.id !== note.id));
     try {
       await api.delete(`${API}/notes/${note.id}`);
+      setPendingDelete(null);
     } catch {
       setNotes(prev);
       setError("Couldn't delete the note.");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -221,7 +227,7 @@ export default function MyNotesPage() {
                 note={note}
                 editable
                 onCycleVisibility={() => setVisibility(note, VIS_CYCLE[note.visibility])}
-                onDelete={() => deleteNote(note)}
+                onDelete={() => setPendingDelete(note)}
               />
             ))}
           </section>
@@ -249,6 +255,17 @@ export default function MyNotesPage() {
         Notes are per-user: the DM cannot read private notes (API-enforced). Shared-with-DM notes appear in the DM&apos;s
         scribe view; shared-with-party notes appear on entity pages for everyone.
       </p>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete this note?"
+          body="This cannot be undone."
+          confirmLabel={deleting ? 'Deleting…' : 'Delete note'}
+          busy={deleting}
+          onConfirm={() => deleteNote(pendingDelete)}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 }
