@@ -366,6 +366,75 @@ export const Attachment = z.object({
 });
 export type Attachment = z.infer<typeof Attachment>;
 
+// ---------- encounters (combat tracker) ----------
+export const EncounterStatus = z.enum(['preparing', 'running', 'ended']);
+export type EncounterStatus = z.infer<typeof EncounterStatus>;
+
+export const Encounter = z.object({
+  id: Id,
+  campaignId: Id,
+  name: z.string().min(1).max(120),
+  status: EncounterStatus.default('preparing'),
+  round: z.number().int().nonnegative().default(0),
+  turnIndex: z.number().int().nonnegative().default(0),
+  endedAt: IsoDate.nullable().default(null),
+  ...timestamps,
+});
+export type Encounter = z.infer<typeof Encounter>;
+export const EncounterCreate = z.object({ name: z.string().min(1).max(120) });
+
+export const CombatantKind = z.enum(['character', 'monster']);
+export type CombatantKind = z.infer<typeof CombatantKind>;
+
+export const Combatant = z.object({
+  id: Id,
+  encounterId: Id,
+  kind: CombatantKind,
+  characterId: Id.nullable().default(null),
+  name: z.string().min(1).max(120),
+  initiative: z.number().int().nullable().default(null),
+  initMod: z.number().int().default(0),
+  hpCurrent: z.number().int().default(10),
+  hpMax: z.number().int().min(1).default(10),
+  conditions: z.array(z.string().max(40)).default([]),
+  ruleEntryId: Id.nullable().default(null),
+  sortOrder: z.number().int().default(0),
+});
+export type Combatant = z.infer<typeof Combatant>;
+
+export const CombatantCreate = z.object({
+  kind: CombatantKind,
+  name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId
+  characterId: Id.optional(), // link a late-joining party member
+  ruleEntryId: Id.optional(),
+  hpMax: z.number().int().min(1).optional(),
+  initMod: z.number().int().optional(),
+});
+export const CombatantUpdate = z.object({
+  hpDelta: z.number().int().optional(),
+  hpSet: z.number().int().nonnegative().optional(),
+  addConditions: z.array(z.string().max(40)).optional(),
+  removeConditions: z.array(z.string().max(40)).optional(),
+  initiative: z.number().int().optional(), // dm only, enforced server-side
+});
+
+export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
+export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
+
+// ---------- dice rolling ----------
+// Safe, restricted dice expression: NdM optionally followed by +K or -K, e.g. "1d20+3", "2d6-1", "d20".
+export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*([+-]\s*\d{1,3})?\s*$/i;
+export const RollRequest = z.object({
+  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected NdM+K, e.g. "1d20+3"'),
+});
+export type RollRequest = z.infer<typeof RollRequest>;
+export const RollResult = z.object({
+  expr: z.string(),
+  rolls: z.array(z.number().int()),
+  total: z.number().int(),
+});
+export type RollResult = z.infer<typeof RollResult>;
+
 // ---------- audit ----------
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
 export type DangerLevel = z.infer<typeof DangerLevel>;
