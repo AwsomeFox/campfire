@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import type { CampaignSummary } from '@campfire/schema';
+import type { CampaignSummary, Encounter } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
@@ -26,6 +26,7 @@ export default function DashboardPage() {
   const [summary, setSummary] = useState<CampaignSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [liveEncounter, setLiveEncounter] = useState<Encounter | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -43,6 +44,24 @@ export default function DashboardPage() {
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  // After the summary loads, check for a running encounter to surface a "Live" chip.
+  // Best-effort: an empty/failed lookup just means no chip, not a page error.
+  useEffect(() => {
+    if (!summary || !Number.isFinite(id)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const running = await api.get<Encounter[]>(`${API}/campaigns/${id}/encounters?status=running`);
+        if (!cancelled) setLiveEncounter(running[0] ?? null);
+      } catch {
+        if (!cancelled) setLiveEncounter(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [summary, id]);
 
   if (!Number.isFinite(id)) {
     return (
@@ -91,7 +110,7 @@ export default function DashboardPage() {
     <div className="max-w-7xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      <StatusHeader campaignId={id} summary={summary} role={role} onChange={load} />
+      <StatusHeader campaignId={id} summary={summary} role={role} onChange={load} liveEncounter={liveEncounter} />
 
       <InstallHintBanner />
 

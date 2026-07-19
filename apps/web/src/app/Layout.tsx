@@ -211,6 +211,7 @@ export function Layout() {
         { key: 'world', label: 'World', soon: true },
         { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
         { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
+        { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
         { key: 'compendium', label: 'Compendium', to: `/c/${campaignId}/compendium` },
         { key: 'notes', label: 'My Notes', to: `/c/${campaignId}/notes` },
       ]

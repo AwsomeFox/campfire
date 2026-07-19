@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { CampaignSummary, Role, Campaign } from '@campfire/schema';
+import type { CampaignSummary, Role, Campaign, Encounter } from '@campfire/schema';
 
 type DangerLevel = Campaign['dangerLevel'];
 import { api, API, ApiError } from '../../lib/api';
@@ -19,11 +19,13 @@ export function StatusHeader({
   summary,
   role,
   onChange,
+  liveEncounter,
 }: {
   campaignId: number;
   summary: CampaignSummary;
   role: Role | null;
   onChange: () => void;
+  liveEncounter?: Encounter | null;
 }) {
   const isDm = role === 'dm';
   const { campaign, currentLocation } = summary;
@@ -95,6 +97,15 @@ export function StatusHeader({
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 14px' }}>
       <h3 style={{ margin: 0 }}>{campaign.name}</h3>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+        {liveEncounter && (
+          <Link
+            to={`/c/${campaignId}/encounters/${liveEncounter.id}`}
+            className="tag tag-accent"
+            style={{ whiteSpace: 'nowrap', cursor: 'pointer', textDecoration: 'none' }}
+          >
+            Live · Round {liveEncounter.round}
+          </Link>
+        )}
         <span className="tag tag-neutral" style={{ whiteSpace: 'nowrap' }}>
           Session {campaign.sessionCount}
         </span>

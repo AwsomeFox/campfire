@@ -2,6 +2,7 @@ import { BadRequestException, HttpException, Injectable } from '@nestjs/common';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
+  CombatantCreate,
   DangerLevel,
   EntityType,
   Id,
@@ -13,6 +14,7 @@ import {
   QuestCreate,
   QuestStatus,
   QuestUpdate,
+  RollRequest,
   RuleEntryType,
   SessionCreate,
 } from '@campfire/schema';
@@ -28,6 +30,7 @@ import { NotesService } from '../notes/notes.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { RulesService } from '../rules/rules.service';
+import { EncountersService } from '../encounters/encounters.service';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -86,6 +89,7 @@ export class McpToolsService {
     private readonly proposalRecords: ProposalRecordsService,
     private readonly proposals: ProposalsService,
     private readonly rules: RulesService,
+    private readonly encounters: EncountersService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
@@ -264,6 +268,18 @@ export class McpToolsService {
       async ({ query, type }) => {
         const results = await this.rules.search({ q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined }, 5);
         return results.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
+      },
+    );
+
+    this.tool(
+      server,
+      'get_encounter',
+      'Get an encounter (combat tracker) by id, including its full combatant list sorted by turn order.',
+      { encounterId: Id.describe('Encounter id') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        await this.access.requireMember(user, row.campaignId);
+        return this.encounters.getWithCombatantsOrThrow(encounterId as number);
       },
     );
   }
@@ -556,6 +572,93 @@ export class McpToolsService {
         const row = await this.proposals.getRowOrThrow(proposalId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.proposals.reject(proposalId as number, { note: note as string | undefined }, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'roll_dice',
+      'Roll a dice expression, e.g. "1d20+3" or "2d6", in the context of a campaign. Any campaign member may use ' +
+        'this; the roll is audited (action "dice.roll").',
+      { campaignId: CampaignIdArg, expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3"') },
+      async ({ campaignId, expr }) => {
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.encounters.rollDiceForCampaign(campaignId as number, { expr: expr as string }, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'create_encounter',
+      'DM only: create a new encounter (combat tracker) in a campaign, status=preparing. Auto-adds every campaign ' +
+        'character as a combatant with hp from their sheet and initiative modifier from DEX.',
+      { campaignId: CampaignIdArg, name: z.string().min(1).max(120).describe('Encounter name') },
+      async ({ campaignId, name }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.encounters.create(campaignId as number, { name: name as string }, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'add_combatant',
+      'DM only: add a combatant (monster or character) to an encounter. Pass ruleEntryId to pull name/hp from a ' +
+        'compendium monster statblock, or characterId to pull from a character sheet, when name/hpMax are omitted.',
+      { encounterId: Id.describe('Encounter id'), ...CombatantCreate.shape },
+      async ({ encounterId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const validated = CombatantCreate.parse(fields);
+        return this.encounters.addCombatant(encounterId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'roll_initiative',
+      'DM only: roll d20+initMod for every combatant in an encounter that does not already have an initiative set.',
+      { encounterId: Id.describe('Encounter id') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.rollInitiative(encounterId as number, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'begin_encounter',
+      'DM only: start an encounter (status=running, round=1, turn 0). Fails with a 400 if any combatant is missing ' +
+        'initiative — roll_initiative first.',
+      { encounterId: Id.describe('Encounter id') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.start(encounterId as number, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'next_turn',
+      'DM only: advance an encounter to the next combatant’s turn, wrapping to the next round when past the last combatant.',
+      { encounterId: Id.describe('Encounter id') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.nextTurn(encounterId as number, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'end_encounter',
+      'DM only: end an encounter and write every character combatant’s current hp back onto their character record.',
+      { encounterId: Id.describe('Encounter id') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.end(encounterId as number, user, role);
       },
     );
   }
