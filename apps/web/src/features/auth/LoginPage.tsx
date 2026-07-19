@@ -93,6 +93,12 @@ export function LoginPage() {
             {submitting ? 'Signing in…' : 'Sign in'}
           </button>
 
+          {status?.oidcEnabled && (
+            <a href="/api/v1/auth/oidc/login" className="cf-btn cf-btn-ghost w-full text-base">
+              Sign in with SSO
+            </a>
+          )}
+
           <p className="text-[11px] text-slate-500 text-center leading-relaxed">
             One account for the whole table — SSO (Authentik, Google &amp; Discord) is coming soon.
           </p>

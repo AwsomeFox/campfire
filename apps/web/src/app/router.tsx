@@ -99,8 +99,16 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/admin/MembersPage')),
           },
           {
+            path: '/c/:campaignId/proposals',
+            element: lazyPage(() => import('../features/proposals/ProposalsPage')),
+          },
+          {
             path: '/admin',
             element: lazyPage(() => import('../features/admin/AdminPage')),
+          },
+          {
+            path: '/tokens',
+            element: lazyPage(() => import('../features/admin/TokensPage')),
           },
         ],
       },

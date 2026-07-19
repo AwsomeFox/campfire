@@ -293,6 +293,18 @@ export type Proposal = z.infer<typeof Proposal>;
 export const ProposalResolve = z.object({ note: z.string().max(1000).optional() });
 
 // ---------- audit ----------
+// Type aliases for enum/value exports (TS declaration merging: value + type share the name)
+export type DangerLevel = z.infer<typeof DangerLevel>;
+export type QuestStatus = z.infer<typeof QuestStatus>;
+export type LocationStatus = z.infer<typeof LocationStatus>;
+export type NoteVisibility = z.infer<typeof NoteVisibility>;
+export type NoteKind = z.infer<typeof NoteKind>;
+export type EntityType = z.infer<typeof EntityType>;
+export type TokenScope = z.infer<typeof TokenScope>;
+export type ProposalAction = z.infer<typeof ProposalAction>;
+export type ProposalStatus = z.infer<typeof ProposalStatus>;
+export type ApiTokenCreated = z.infer<typeof ApiTokenCreated>;
+
 export const AuditEntry = z.object({
   id: Id,
   campaignId: Id.nullable(),
