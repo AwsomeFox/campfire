@@ -55,6 +55,10 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/dashboard/DashboardPage')),
           },
           {
+            path: '/c/:campaignId/quests',
+            element: lazyPage(() => import('../features/quests/QuestListPage')),
+          },
+          {
             path: '/c/:campaignId/quests/:questId',
             element: lazyPage(() => import('../features/quests/QuestPage')),
           },

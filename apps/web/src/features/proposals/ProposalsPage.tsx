@@ -1,5 +1,7 @@
 /**
- * Proposals — /c/:campaignId/proposals. Mirrors design/11-proposal-review.html.
+ * Proposals — /c/:campaignId/proposals. Mirrors design/claude-design/Campfire.dc.html
+ * "Proposals" (~1127-1153): target + proposer tag, why-text, a field/old->new diff table,
+ * Approve/Reject (or a decided-status tag once resolved).
  * DM-only guardrail queue for AI/collab writes: nothing touches canon until approved.
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -28,8 +30,6 @@ const entityIcon: Record<EntityType, string> = {
   session: '📓',
   campaign: '🔥',
 };
-
-const MARKDOWN_FIELDS = new Set(['body', 'recap', 'dmSecret']);
 
 export default function ProposalsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -124,16 +124,11 @@ export default function ProposalsPage() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <div>
-        <h1 className="text-xl font-extrabold text-white flex items-center gap-2 flex-wrap">
-          🔮 Proposals <Chip variant="proposal">{(pending ?? []).length} pending</Chip>
-        </h1>
-        <p className="text-xs text-slate-500 mt-1">
-          Changes suggested by AI agents (or players) — nothing touches canon until you approve. This is the AI-DM
-          guardrail.
-        </p>
-      </div>
+    <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
+      <h1 className="text-xl font-extrabold text-white m-0">Proposals</h1>
+      <p className="text-muted text-xs m-0">
+        AI and collaborator edits land here as pending changes. Nothing touches canon until you approve it.
+      </p>
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
@@ -206,59 +201,46 @@ function ProposalCard({
   }
 
   return (
-    <Card className="!p-4 md:!p-5 space-y-3 border-purple-500/40">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-xs font-bold text-slate-300">
-          ✨ {proposal.proposer} <span className="text-slate-600 font-normal">· {timeAgo(proposal.createdAt)}</span>
+    <Card className="space-y-2.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <p className="card-title text-[15px] m-0">
+          {entityIcon[proposal.entityType]} {proposalTitle(proposal)}
         </p>
-        <Chip variant="proposal">
-          {proposal.action === 'create' ? 'New' : 'Update'} {proposal.entityType}
-        </Chip>
+        <Chip variant="proposal">{proposal.proposer}</Chip>
       </div>
-
-      <p className="text-sm font-bold text-white">
-        {entityIcon[proposal.entityType]} {proposalTitle(proposal)}
+      <p className="text-muted text-xs m-0">
+        {proposal.action === 'create' ? 'New' : 'Update'} {proposal.entityType}
+        {proposal.entityId && href ? (
+          <>
+            {' '}
+            · <Link to={href} className="text-purple-400 hover:underline">view target</Link>
+          </>
+        ) : null}
+        {' '}· {timeAgo(proposal.createdAt)}
       </p>
 
-      {proposal.entityId && href && (
-        <p className="text-[11px] text-slate-500">
-          Target: <Link to={href} className="text-purple-400 hover:underline">
-            {proposal.entityType} #{proposal.entityId}
-          </Link>
-        </p>
-      )}
-
-      {expanded ? (
-        <DiffView payload={proposal.payload} />
-      ) : (
-        <button type="button" className="text-xs text-purple-400 hover:underline" onClick={onToggle}>
-          Review diff ▾
-        </button>
-      )}
+      <DiffView payload={proposal.payload} />
 
       {expanded && (
-        <>
-          <TextInput
-            className="!min-h-0 !py-2 text-sm"
-            placeholder="Optional note…"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-          <div className="flex items-center justify-between pt-1 gap-2 flex-wrap">
-            <button type="button" className="text-[11px] text-slate-500 hover:text-white" onClick={onToggle}>
-              Collapse ▴
-            </button>
-            <div className="flex gap-2">
-              <Btn ghost danger className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onReject)} disabled={busy}>
-                Reject
-              </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onApprove)} disabled={busy}>
-                ✓ Approve
-              </Btn>
-            </div>
-          </div>
-        </>
+        <TextInput
+          className="!min-h-0 !py-2 text-sm"
+          placeholder="Optional note…"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+        />
       )}
+
+      <div className="flex items-center gap-2 justify-end">
+        <button type="button" className="text-[11px] text-slate-500 hover:text-white mr-auto" onClick={onToggle}>
+          {expanded ? 'Hide note field' : '+ note'}
+        </button>
+        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onReject)} disabled={busy}>
+          Reject
+        </Btn>
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onApprove)} disabled={busy}>
+          Approve
+        </Btn>
+      </div>
     </Card>
   );
 }
@@ -268,20 +250,22 @@ function DiffView({ payload }: { payload: Record<string, unknown> }) {
   if (entries.length === 0) {
     return <p className="text-xs text-slate-500">No fields in this proposal.</p>;
   }
+  // Note: Proposal.payload only carries the proposed values — the server doesn't snapshot
+  // the entity's prior state, so there's no "old" value to show struck through as the design
+  // depicts. We show field -> new value, which is the best-effort mapping without inventing
+  // a diff-tracking API.
   return (
-    <div className="cf-inset overflow-hidden text-[13px] font-mono leading-relaxed">
+    <div className="border border-[var(--color-divider)] rounded-[var(--radius-md)] overflow-hidden">
       {entries.map(([key, value], i) => (
-        <div key={key} className={i > 0 ? 'border-t border-slate-700' : ''}>
-          <div className="px-3 py-1.5 text-[10px] font-sans font-bold uppercase tracking-wide text-slate-500 border-b border-slate-700">
-            {key}
-          </div>
-          <div className="px-3 py-2">
-            {MARKDOWN_FIELDS.has(key) && typeof value === 'string' ? (
-              <p className="bg-emerald-500/10 text-emerald-300 px-1 rounded whitespace-pre-wrap">+ {value}</p>
-            ) : (
-              <p className="text-slate-300 whitespace-pre-wrap break-all">{formatValue(value)}</p>
-            )}
-          </div>
+        <div
+          key={key}
+          className="flex gap-2.5 px-3 py-2 text-[12.5px] items-baseline"
+          style={i > 0 ? { borderTop: '1px solid var(--color-divider)' } : undefined}
+        >
+          <span className="text-muted w-[86px] shrink-0 text-[11px]">{key}</span>
+          <span style={{ color: 'var(--color-accent-300)' }} className="whitespace-pre-wrap break-all">
+            → {formatValue(value)}
+          </span>
         </div>
       ))}
     </div>
@@ -297,12 +281,12 @@ function formatValue(value: unknown): string {
 function HistoryRow({ proposal }: { proposal: Proposal }) {
   const failed = proposal.status === 'rejected';
   return (
-    <div className="cf-card p-3.5 flex items-center justify-between opacity-60">
-      <p className="text-sm text-slate-400">
+    <div className="cf-card p-3.5 flex items-center justify-between gap-2 opacity-70">
+      <p className="text-sm text-slate-400 m-0">
         {entityIcon[proposal.entityType]} {proposalTitle(proposal)}{' '}
         <span className="text-slate-600">· {proposal.proposer}</span>
       </p>
-      <span className={`cf-chip ${failed ? 'cf-chip-failed' : 'cf-chip-completed'}`}>
+      <span className={`tag ${failed ? 'tag-neutral' : 'tag-accent'}`}>
         {failed ? `Rejected${proposal.note ? ` — ${proposal.note}` : ''}` : 'Approved'}
       </span>
     </div>

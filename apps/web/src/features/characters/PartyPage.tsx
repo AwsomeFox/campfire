@@ -1,5 +1,6 @@
 /**
- * Party roster — one card per character in the campaign, linking to the character sheet.
+ * Party roster — mirrors design/claude-design/Campfire.dc.html "Party roster" (~701-717):
+ * a card grid, avatar + name/class/level/owner, HP bar, condition tags. Links to the sheet.
  * "+ New character" is offered to players without a character yet, and always to the DM.
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
@@ -7,7 +8,7 @@ import { useParams, Link } from 'react-router-dom';
 import type { Character } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
+import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { avatarTone, initials } from './avatar';
 
 export default function PartyPage() {
@@ -51,9 +52,15 @@ export default function PartyPage() {
   const canCreate = isDm || (role === 'player' && !hasOwnCharacter);
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <div className="flex items-center justify-between gap-3">
+    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+      <div className="flex items-center gap-3">
         <h1 className="text-2xl font-extrabold text-white">Party</h1>
+        <div className="flex-1" />
+        {canCreate && !creating && characters.length > 0 && (
+          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
+            + New character
+          </Btn>
+        )}
       </div>
 
       {error && <ErrorNote message={error} onRetry={load} />}
@@ -65,83 +72,82 @@ export default function PartyPage() {
       ) : characters.length === 0 && !canCreate ? (
         <EmptyState icon="🛡️" title="No characters yet" hint="Ask the DM to add the party." />
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
           {characters.map((c, i) => (
             <CharacterCard key={c.id} campaignId={id} character={c} index={i} />
           ))}
         </div>
       )}
 
-      {canCreate && <NewCharacterForm campaignId={id} creating={creating} setCreating={setCreating} onCreated={load} />}
+      {canCreate && (creating || characters.length === 0) && (
+        <NewCharacterForm campaignId={id} onCancel={characters.length > 0 ? () => setCreating(false) : undefined} onCreated={load} />
+      )}
     </div>
   );
 }
 
 function CharacterCard({ campaignId, character, index }: { campaignId: number; character: Character; index: number }) {
   const tone = avatarTone(index);
+  const hpPct = character.hpMax > 0 ? Math.max(0, Math.min(100, (character.hpCurrent / character.hpMax) * 100)) : 0;
   return (
     <Link
       to={`/c/${campaignId}/characters/${character.id}`}
-      className="cf-card p-4 flex gap-4 items-start hover:border-amber-500/50 transition-colors"
+      className="cf-card p-3.5 space-y-2.5 hover:border-amber-500/50 transition-colors"
     >
-      <div
-        className={`h-14 w-14 rounded-2xl ${tone.bg} border ${tone.border} ${tone.text} text-sm font-bold flex items-center justify-center shrink-0`}
-      >
-        {initials(character.name)}
-      </div>
-      <div className="flex-1 min-w-0 space-y-1.5">
-        <div className="flex items-start justify-between gap-2">
-          <p className="font-bold text-white truncate">{character.name}</p>
+      <div className="flex items-center gap-2.5">
+        <div
+          className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}
+        >
+          {initials(character.name)}
         </div>
-        <p className="text-xs text-slate-400 truncate">
-          {character.species || 'Unknown species'} ·{' '}
-          <span className="font-semibold text-slate-300">
-            {character.className || 'Unknown class'} {character.level}
-          </span>
-        </p>
-        {character.ownerUserId && <p className="text-[10px] text-slate-600">Owner: {character.ownerUserId}</p>}
-        {character.conditions.length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {character.conditions.map((cond) => (
-              <Chip key={cond} variant={statusVariant('failed')}>
-                {cond}
-              </Chip>
-            ))}
-          </div>
-        )}
-        <div className="space-y-1 pt-1">
-          <HpBar current={character.hpCurrent} max={character.hpMax} />
-          <p className="text-[11px] text-slate-500">
-            {character.hpCurrent} <span className="text-slate-600">/ {character.hpMax}</span>
+        <div className="flex-1 min-w-0">
+          <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
+          <p className="text-[11.5px] text-slate-500 truncate">
+            {character.className || 'Unknown class'} · Lv {character.level}
+            {character.ownerUserId && ` · ${character.ownerUserId}`}
           </p>
         </div>
       </div>
+      <div className="flex justify-between text-[11.5px] text-slate-500">
+        <span>HP</span>
+        <span>
+          {character.hpCurrent} / {character.hpMax}
+        </span>
+      </div>
+      <div className="h-[5px] rounded-full bg-[var(--color-neutral-800)] overflow-hidden">
+        <div className="h-full rounded-full bg-[var(--color-accent)]" style={{ width: `${hpPct}%` }} />
+      </div>
+      {character.conditions.length > 0 && (
+        <div className="flex gap-1.5 flex-wrap">
+          <span className="tag tag-outline" style={{ fontSize: 10 }}>
+            {character.conditions.join(', ')}
+          </span>
+        </div>
+      )}
     </Link>
   );
 }
 
 function NewCharacterForm({
   campaignId,
-  creating,
-  setCreating,
+  onCancel,
   onCreated,
 }: {
   campaignId: number;
-  creating: boolean;
-  setCreating: (v: boolean) => void;
+  onCancel?: () => void;
   onCreated: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [species, setSpecies] = useState('');
   const [className, setClassName] = useState('');
   const [level, setLevel] = useState('1');
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!name.trim()) return;
-    setCreating(true);
+    setSaving(true);
     setError(null);
     try {
       await api.post(`${API}/campaigns/${campaignId}/characters`, {
@@ -154,21 +160,13 @@ function NewCharacterForm({
       setSpecies('');
       setClassName('');
       setLevel('1');
-      setOpen(false);
+      onCancel?.();
       onCreated();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create the character.");
     } finally {
-      setCreating(false);
+      setSaving(false);
     }
-  }
-
-  if (!open) {
-    return (
-      <Btn onClick={() => setOpen(true)} className="w-full sm:w-auto">
-        + New character
-      </Btn>
-    );
   }
 
   return (
@@ -193,11 +191,13 @@ function NewCharacterForm({
           <div />
         </div>
         <div className="flex gap-2 justify-end">
-          <Btn ghost type="button" onClick={() => setOpen(false)} disabled={creating}>
-            Cancel
-          </Btn>
-          <Btn type="submit" disabled={creating || !name.trim()}>
-            {creating ? 'Creating…' : 'Create'}
+          {onCancel && (
+            <Btn ghost type="button" onClick={onCancel} disabled={saving}>
+              Cancel
+            </Btn>
+          )}
+          <Btn type="submit" disabled={saving || !name.trim()}>
+            {saving ? 'Creating…' : 'Create'}
           </Btn>
         </div>
       </form>

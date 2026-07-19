@@ -69,37 +69,52 @@ export function NotesQuickRail({
   }
 
   return (
-    <section className="cf-card p-5 space-y-3">
-      <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-        <h2 className="font-bold text-white flex items-center gap-2">📝 My notes</h2>
+    <div className="card elev-sm">
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <span className="card-kicker">My notes</span>
+        <div style={{ flex: 1 }} />
         {isDm ? (
-          <Link to={`/c/${campaignId}/inbox`} className="text-xs text-slate-400 hover:text-white flex items-center gap-1.5">
+          <Link to={`/c/${campaignId}/inbox`} className="btn btn-ghost" style={{ fontSize: 12, gap: 6 }}>
             Inbox
             {openInboxCount > 0 && <span className="cf-chip cf-chip-active">{openInboxCount}</span>}
           </Link>
         ) : (
-          <Link to={`/c/${campaignId}/notes`} className="text-xs text-slate-400 hover:text-white">
-            All notes →
+          <Link to={`/c/${campaignId}/notes`} className="btn btn-ghost" style={{ fontSize: 12 }}>
+            All →
           </Link>
         )}
       </div>
 
       {error && <ErrorNote message={error} onRetry={isViewer ? undefined : load} />}
 
-      {!isViewer && (
-        notes.length === 0 ? (
+      {!isViewer &&
+        (notes.length === 0 ? (
           <EmptyState icon="📝" title="No notes yet" hint="Jot your first thought below." />
         ) : (
           notes.slice(0, 5).map((n) => (
-            <div key={n.id} className="cf-inset p-3 space-y-1">
-              <div className="flex items-center justify-between">
+            <div
+              key={n.id}
+              style={{
+                padding: '7px 0',
+                background:
+                  'linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent) no-repeat top / 100% 1px',
+              }}
+            >
+              <div style={{ fontSize: 13, color: 'var(--color-neutral-200)' }}>{n.body}</div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center' }}>
                 <Chip variant={visMeta[n.visibility].chip}>{visMeta[n.visibility].label}</Chip>
-                <span className="text-[10px] text-slate-600">{timeAgo(n.updatedAt)}</span>
+                <span className="text-muted" style={{ fontSize: 10.5 }}>
+                  {timeAgo(n.updatedAt)}
+                </span>
               </div>
-              <p className="text-xs text-slate-300">{n.body}</p>
             </div>
           ))
-        )
+        ))}
+
+      {isViewer && (
+        <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
+          Notes need a player seat — viewers can still leave a note for the DM.
+        </p>
       )}
 
       <form className="flex gap-2 pt-1" onSubmit={leaveNote}>
@@ -117,6 +132,6 @@ export function NotesQuickRail({
         </Btn>
       </form>
       {saved && <p className="text-[11px] text-emerald-400">Sent to the DM&apos;s inbox.</p>}
-    </section>
+    </div>
   );
 }

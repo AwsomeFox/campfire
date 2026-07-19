@@ -1,5 +1,6 @@
 /**
- * Location roster — list cards with status chip, kind, mapX/mapY badge.
+ * Location roster — mirrors design/claude-design/Campfire.dc.html "World" Locations tab
+ * (~1259-1271): a stacked row list, name + status chip + DM-secret tag, body preview.
  * DM can inline-create (name + kind); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -138,7 +139,7 @@ export default function LocationListPage() {
         {locations.length === 0 ? (
           <EmptyState icon="🗺" title="No locations yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any locations yet.'} />
         ) : (
-          <div className="space-y-3">
+          <div className="flex flex-col gap-2.5" style={{ maxWidth: 720 }}>
             {locations.map((loc) => (
               <a
                 key={loc.id}
@@ -147,21 +148,21 @@ export default function LocationListPage() {
                   e.preventDefault();
                   navigate(`/c/${id}/locations/${loc.id}`);
                 }}
-                className="block cf-inset p-3.5 space-y-1 hover:border-amber-500/50"
+                className="cf-card flex items-center gap-3 p-3.5 hover:border-amber-500/50"
               >
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
-                  <div className="flex items-center gap-1.5">
-                    {loc.mapX != null && loc.mapY != null && (
-                      <span className="cf-chip cf-chip-neutral">
-                        📍 {Math.round(loc.mapX)},{Math.round(loc.mapY)}
-                      </span>
-                    )}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
                     <Chip variant={statusVariant(loc.status)}>{statusLabel[loc.status]}</Chip>
+                    {isDm && loc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   </div>
+                  <p className="text-xs text-slate-400 truncate mt-0.5">{loc.kind || firstLine(loc.body) || ' '}</p>
                 </div>
-                {loc.kind && <p className="text-[11px] text-slate-500">{loc.kind}</p>}
-                {firstLine(loc.body) && <p className="text-xs text-slate-400 line-clamp-2">{firstLine(loc.body)}</p>}
+                {loc.mapX != null && loc.mapY != null && (
+                  <span className="text-[11px] text-slate-500 shrink-0">
+                    📍 {Math.round(loc.mapX)},{Math.round(loc.mapY)}
+                  </span>
+                )}
               </a>
             ))}
           </div>

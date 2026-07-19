@@ -20,16 +20,15 @@ export function RegionMap({ campaignId, locations }: { campaignId: number; locat
   const unpinned = locations.filter((l) => l.mapX == null || l.mapY == null);
 
   return (
-    <section className="cf-card p-5 space-y-3">
-      <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-        <h2 className="font-bold text-white flex items-center gap-2">
-          <span className="text-amber-500">🗺</span> Region
-        </h2>
-        <Link to={`/c/${campaignId}/locations`} className="text-xs text-slate-400 hover:text-white">
+    <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0' }}>
+        <span className="card-kicker">World map</span>
+        <div style={{ flex: 1 }} />
+        <Link to={`/c/${campaignId}/locations`} className="btn btn-ghost" style={{ fontSize: 12 }}>
           All locations →
         </Link>
       </div>
-      <div className="relative cf-inset overflow-hidden h-56 md:h-64">
+      <div className="relative overflow-hidden h-56 md:h-64" style={{ margin: '8px 14px' }}>
         <div
           className="absolute inset-0 opacity-35"
           style={{
@@ -73,7 +72,7 @@ export function RegionMap({ campaignId, locations }: { campaignId: number; locat
         </svg>
       </div>
       {unpinned.length > 0 && (
-        <div className="flex flex-wrap gap-2 pt-1">
+        <div className="flex flex-wrap gap-2" style={{ padding: '0 14px 10px' }}>
           {unpinned.map((loc) => (
             <Link
               key={loc.id}
@@ -86,7 +85,31 @@ export function RegionMap({ campaignId, locations }: { campaignId: number; locat
           ))}
         </div>
       )}
-      <p className="text-[11px] text-slate-500">MVP: abstract pin canvas · P1: upload a map image, drag pins onto it.</p>
-    </section>
+      <div
+        className="text-muted"
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 12,
+          padding: '10px 14px',
+          borderTop: '1px solid var(--color-divider)',
+          fontSize: 11,
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-accent)' }} />
+          Current
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-neutral-500)' }} />
+          Explored
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', border: '1px dashed var(--color-neutral-600)' }} />
+          Unexplored
+        </span>
+        <span style={{ marginLeft: 'auto' }}>Drag to pan · tap a pin</span>
+      </div>
+    </div>
   );
 }

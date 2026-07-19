@@ -1,13 +1,6 @@
 import { Link } from 'react-router-dom';
 import type { Character } from '@campfire/schema';
-import { HpBar, EmptyState } from '../../components/ui';
-
-const AVATAR_PALETTE = [
-  { bg: 'bg-purple-500/15', border: 'border-purple-500/60', text: 'text-purple-400', hover: 'hover:border-purple-500/50' },
-  { bg: 'bg-emerald-500/15', border: 'border-emerald-500/60', text: 'text-emerald-400', hover: 'hover:border-emerald-500/50' },
-  { bg: 'bg-amber-500/15', border: 'border-amber-500/60', text: 'text-amber-400', hover: 'hover:border-amber-500/50' },
-  { bg: 'bg-rose-500/15', border: 'border-rose-500/60', text: 'text-rose-400', hover: 'hover:border-rose-500/50' },
-];
+import { EmptyState } from '../../components/ui';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/);
@@ -17,54 +10,91 @@ function initials(name: string): string {
 
 export function PartyCard({ campaignId, characters }: { campaignId: number; characters: Character[] }) {
   return (
-    <section className="cf-card p-5 space-y-3">
-      <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-        <h2 className="font-bold text-white flex items-center gap-2">🛡 Party</h2>
-        <Link to={`/c/${campaignId}/party`} className="text-xs text-slate-400 hover:text-white">
+    <div className="card elev-sm">
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <span className="card-kicker">Party</span>
+        <div style={{ flex: 1 }} />
+        <Link to={`/c/${campaignId}/party`} className="btn btn-ghost" style={{ fontSize: 12 }}>
           Roster →
         </Link>
       </div>
       {characters.length === 0 ? (
         <EmptyState icon="🛡" title="No characters yet" />
       ) : (
-        characters.map((c, i) => {
-          const palette = AVATAR_PALETTE[i % AVATAR_PALETTE.length];
-          const isCrit = c.hpMax > 0 && c.hpCurrent / c.hpMax < 0.25;
+        characters.map((c) => {
+          const pct = c.hpMax > 0 ? Math.max(0, Math.min(100, (c.hpCurrent / c.hpMax) * 100)) : 0;
           return (
             <Link
               key={c.id}
               to={`/c/${campaignId}/characters/${c.id}`}
-              className={`cf-inset p-3.5 flex gap-3 items-center ${palette.hover}`}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                color: 'var(--color-text)',
+                textDecoration: 'none',
+                cursor: 'pointer',
+                padding: '6px 0',
+                minHeight: 44,
+              }}
             >
-              <div
-                className={`h-10 w-10 rounded-lg ${palette.bg} border ${palette.border} flex items-center justify-center font-bold ${palette.text} text-xs shrink-0`}
+              <span
+                style={{
+                  width: 34,
+                  height: 34,
+                  flex: 'none',
+                  borderRadius: '50%',
+                  background: 'var(--color-accent-900)',
+                  color: 'var(--color-accent-200)',
+                  display: 'grid',
+                  placeItems: 'center',
+                  fontSize: 12,
+                  fontWeight: 500,
+                }}
               >
                 {initials(c.name)}
-              </div>
-              <div className="flex-1 min-w-0 space-y-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <p className="font-bold text-white text-sm truncate">{c.name}</p>
-                  <span className="cf-chip" style={{ background: 'rgb(167 139 250/.15)', color: '#c4b5fd' }}>
-                    {c.className || 'Adventurer'} {c.level}
-                  </span>
-                  {c.conditions.map((cond) => (
-                    <span key={cond} className="cf-chip cf-chip-failed">
-                      {cond}
-                    </span>
-                  ))}
-                </div>
-                <div className="flex items-center gap-2">
-                  <HpBar current={c.hpCurrent} max={c.hpMax} />
-                  <span className={`text-[10px] font-semibold ${isCrit ? 'text-rose-400' : 'text-slate-400'}`}>
+              </span>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 13.5 }}>
+                  <span>{c.name}</span>
+                  <span className="text-muted" style={{ fontSize: 11 }}>
                     {c.hpCurrent}/{c.hpMax}
-                    {isCrit ? ' ⚠' : ''}
                   </span>
-                </div>
-              </div>
+                </span>
+                <span
+                  style={{
+                    display: 'block',
+                    height: 4,
+                    borderRadius: 2,
+                    background: 'var(--color-neutral-800)',
+                    marginTop: 5,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <span
+                    style={{
+                      display: 'block',
+                      height: '100%',
+                      borderRadius: 2,
+                      background: 'var(--color-accent)',
+                      width: `${pct}%`,
+                    }}
+                  />
+                </span>
+                {c.conditions.length > 0 && (
+                  <span style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+                    {c.conditions.map((cond) => (
+                      <span key={cond} className="tag tag-neutral" style={{ fontSize: 9 }}>
+                        {cond}
+                      </span>
+                    ))}
+                  </span>
+                )}
+              </span>
             </Link>
           );
         })
       )}
-    </section>
+    </div>
   );
 }

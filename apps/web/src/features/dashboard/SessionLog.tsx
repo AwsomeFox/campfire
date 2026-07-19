@@ -16,37 +16,41 @@ export function SessionLog({ campaignId, sessions }: { campaignId: number; sessi
   const latest3 = sorted.slice(0, 3);
 
   return (
-    <section className="cf-card p-5 space-y-4">
-      <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-        <h2 className="font-bold text-white flex items-center gap-2">📓 Session log</h2>
-        <Link to={`/c/${campaignId}/sessions`} className="text-xs text-slate-400 hover:text-white">
+    <div className="card elev-sm">
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <span className="card-kicker">Session log</span>
+        <div style={{ flex: 1 }} />
+        <Link to={`/c/${campaignId}/sessions`} className="btn btn-ghost" style={{ fontSize: 12 }}>
           All sessions →
         </Link>
       </div>
       {latest3.length === 0 ? (
         <EmptyState icon="📓" title="No sessions logged yet" />
       ) : (
-        <div className="space-y-4 max-h-72 overflow-y-auto pr-1">
-          {latest3.map((s, i) => (
-            <Link
-              key={s.id}
-              to={`/c/${campaignId}/sessions`}
-              className={`block cf-timeline space-y-1 ${i === 0 ? 'active' : ''}`}
-            >
-              <div className="flex items-center justify-between">
-                <p className={`font-bold text-sm ${i === 0 ? 'text-white' : 'text-slate-300'}`}>
-                  S{s.number}
-                  {s.title ? ` · ${s.title}` : ''}
-                </p>
-                {i === 0 && <span className="cf-chip cf-chip-active">Latest</span>}
-              </div>
-              <p className={`text-xs line-clamp-2 ${i === 0 ? 'text-slate-400' : 'text-slate-500'}`}>
-                {firstLinePlain(s.recap) || 'No recap yet.'}
-              </p>
-            </Link>
-          ))}
-        </div>
+        latest3.map((s) => (
+          <Link
+            key={s.id}
+            to={`/c/${campaignId}/sessions`}
+            style={{
+              display: 'flex',
+              gap: 12,
+              alignItems: 'baseline',
+              color: 'var(--color-text)',
+              textDecoration: 'none',
+              cursor: 'pointer',
+              padding: '8px 0',
+              borderLeft: '2px solid var(--color-accent-800)',
+              paddingLeft: 12,
+            }}
+          >
+            <span style={{ fontSize: 12, color: 'var(--color-accent)', flex: 'none' }}>S{s.number}</span>
+            <span style={{ fontSize: 14 }}>{s.title || firstLinePlain(s.recap) || 'No recap yet.'}</span>
+            <span className="text-muted" style={{ fontSize: 11, marginLeft: 'auto', flex: 'none' }}>
+              {s.playedAt ? new Date(s.playedAt).toLocaleDateString() : ''}
+            </span>
+          </Link>
+        ))
       )}
-    </section>
+    </div>
   );
 }

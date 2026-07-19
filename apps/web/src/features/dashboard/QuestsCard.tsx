@@ -1,11 +1,29 @@
+/**
+ * Dashboard "Quests" card — design/claude-design/Campfire.dc.html ~L455-480.
+ * Shows root quests with their objectives + subquests inline (glyph + strike-through
+ * done objectives); "All quests →" links to the Quests list/board screen.
+ */
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { CampaignSummary, QuestObjective, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { Chip, statusVariant } from '../../components/ui';
 import { EmptyState } from '../../components/ui';
 
 type QuestWithObjectives = CampaignSummary['quests'][number];
+
+const STATUS_GLYPH: Record<QuestWithObjectives['status'], { glyph: string; color: string }> = {
+  available: { glyph: '○', color: 'var(--color-neutral-500)' },
+  active: { glyph: '◐', color: 'var(--color-accent)' },
+  completed: { glyph: '✓', color: 'var(--color-neutral-500)' },
+  failed: { glyph: '✕', color: 'var(--color-neutral-600)' },
+};
+
+const STATUS_LABEL: Record<QuestWithObjectives['status'], string> = {
+  available: 'Available',
+  active: 'Active',
+  completed: 'Completed',
+  failed: 'Failed',
+};
 
 export function QuestsCard({
   campaignId,
@@ -18,7 +36,6 @@ export function QuestsCard({
   role: Role | null;
   onChange: () => void;
 }) {
-  const isDm = role === 'dm';
   const canTick = role === 'dm' || role === 'player';
   const [pending, setPending] = useState<Record<number, boolean>>({});
   const [error, setError] = useState<string | null>(null);
@@ -27,9 +44,7 @@ export function QuestsCard({
   const roots = quests.filter((q) => q.parentId == null);
   const childrenOf = (parentId: number) => quests.filter((q) => q.parentId === parentId);
 
-  async function toggleObjective(obj: QuestObjective, e: React.MouseEvent) {
-    e.preventDefault();
-    e.stopPropagation();
+  async function toggleObjective(obj: QuestObjective) {
     if (!canTick || pending[obj.id]) return;
     const nextDone = !(localObjectives[obj.id] ?? obj.done);
     setLocalObjectives((prev) => ({ ...prev, [obj.id]: nextDone }));
@@ -46,72 +61,117 @@ export function QuestsCard({
     }
   }
 
-  function renderQuest(q: QuestWithObjectives, depth: number) {
+  function renderQuest(q: QuestWithObjectives) {
     const kids = childrenOf(q.id);
-    const titleColor =
-      q.status === 'completed' ? 'text-emerald-400' : q.status === 'active' ? 'text-white' : 'text-slate-300';
-    const isFaded = q.status === 'completed';
+    const meta = STATUS_GLYPH[q.status];
+    const isFaded = q.status === 'completed' || q.status === 'failed';
 
     return (
-      <div key={q.id} className={depth > 0 ? 'pl-4 border-l border-slate-700' : ''}>
-        <Link
-          to={`/c/${campaignId}/quests/${q.id}`}
-          className={`block cf-inset p-4 space-y-3 hover:border-amber-500/50 ${isFaded ? 'opacity-60' : ''}`}
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="space-y-1">
-              <p className={`font-bold ${titleColor}`}>
-                {depth > 0 && <span className="text-rose-400">↳ </span>}
-                {q.title} <Chip variant={statusVariant(q.status)} className="ml-1">{q.status}</Chip>
-              </p>
-              {q.body && <p className="text-xs text-slate-400">{q.body.split('\n')[0]}</p>}
-            </div>
-            {q.reward && <span className="text-xs font-bold text-amber-500 whitespace-nowrap">{q.reward}</span>}
-          </div>
-          {q.objectives.length > 0 && (
-            <div className="space-y-1.5 text-sm">
-              {q.objectives.map((obj) => {
-                const done = localObjectives[obj.id] ?? obj.done;
-                return (
-                  <label key={obj.id} className="flex items-center gap-2.5 text-slate-300">
-                    <input
-                      type="checkbox"
-                      checked={done}
-                      disabled={!canTick || pending[obj.id]}
-                      onClick={(e) => toggleObjective(obj, e)}
-                      onChange={() => {}}
-                      className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-amber-500"
-                    />
-                    {done ? <s className="opacity-60">{obj.text}</s> : obj.text}
-                  </label>
-                );
-              })}
-            </div>
+      <div
+        key={q.id}
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+          padding: '9px 0',
+          background:
+            'linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent) no-repeat top / 100% 1px',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 28 }}>
+          <span style={{ fontSize: 13, width: 18, textAlign: 'center', color: meta.color }}>{meta.glyph}</span>
+          <Link
+            to={`/c/${campaignId}/quests/${q.id}`}
+            style={{
+              color: 'var(--color-text)',
+              fontSize: 14.5,
+              textDecoration: 'none',
+              opacity: isFaded ? 0.6 : 1,
+              textDecorationLine: q.status === 'completed' ? 'line-through' : 'none',
+            }}
+          >
+            {q.title}
+          </Link>
+          <div style={{ flex: 1 }} />
+          {q.reward && (
+            <span className="tag tag-neutral" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>
+              {q.reward}
+            </span>
           )}
-        </Link>
-        {kids.map((kid) => renderQuest(kid, depth + 1))}
+        </div>
+        {q.objectives.map((obj) => {
+          const done = localObjectives[obj.id] ?? obj.done;
+          return (
+            <div key={obj.id} style={{ display: 'flex', alignItems: 'center', gap: 9, paddingLeft: 27, minHeight: 26 }}>
+              <span
+                onClick={() => toggleObjective(obj)}
+                role={canTick ? 'button' : undefined}
+                aria-disabled={!canTick || pending[obj.id]}
+                style={{
+                  width: 15,
+                  height: 15,
+                  flex: 'none',
+                  borderRadius: 4,
+                  border: '1.5px solid var(--color-neutral-600)',
+                  display: 'grid',
+                  placeItems: 'center',
+                  fontSize: 10,
+                  color: 'var(--color-accent-100)',
+                  cursor: canTick ? 'pointer' : 'default',
+                  background: done ? 'var(--color-accent)' : 'transparent',
+                  borderColor: done ? 'var(--color-accent)' : 'var(--color-neutral-600)',
+                }}
+              >
+                {done ? '✓' : ''}
+              </span>
+              <span
+                style={{
+                  fontSize: 13,
+                  color: 'var(--color-neutral-300)',
+                  textDecorationLine: done ? 'line-through' : 'none',
+                  opacity: done ? 0.6 : 1,
+                }}
+              >
+                {obj.text}
+              </span>
+            </div>
+          );
+        })}
+        {kids.map((s) => (
+          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 9, paddingLeft: 27, minHeight: 26 }}>
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              ↳
+            </span>
+            <Link
+              to={`/c/${campaignId}/quests/${s.id}`}
+              style={{ color: 'var(--color-neutral-300)', fontSize: 13, textDecoration: 'none' }}
+            >
+              {s.title}
+            </Link>
+            <span className="tag tag-neutral" style={{ fontSize: 10 }}>
+              {STATUS_LABEL[s.status]}
+            </span>
+          </div>
+        ))}
       </div>
     );
   }
 
   return (
-    <section id="quests" className="cf-card p-5 space-y-4 scroll-mt-16">
-      <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-        <h2 className="font-bold text-white flex items-center gap-2">
-          <span className="text-amber-500">📜</span> Quests
-        </h2>
-        {isDm && (
-          <Link to={`/c/${campaignId}/quests/new`} className="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs">
-            + New quest
-          </Link>
-        )}
+    <div className="card elev-sm">
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <span className="card-kicker">Quests</span>
+        <div style={{ flex: 1 }} />
+        <Link to={`/c/${campaignId}/quests`} className="btn btn-ghost" style={{ fontSize: 12 }}>
+          All quests →
+        </Link>
       </div>
       {error && <p className="text-xs text-rose-400">{error}</p>}
       {roots.length === 0 ? (
-        <EmptyState icon="📜" title="No quests yet" hint={isDm ? 'Start one with "+ New quest".' : 'Check back after the next session.'} />
+        <EmptyState icon="📜" title="No quests yet" hint={role === 'dm' ? 'Start one from the Quests page.' : 'Check back after the next session.'} />
       ) : (
-        roots.map((q) => renderQuest(q, 0))
+        roots.map((q) => renderQuest(q))
       )}
-    </section>
+    </div>
   );
 }

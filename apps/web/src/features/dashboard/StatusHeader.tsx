@@ -13,12 +13,6 @@ const DANGER_LABEL: Record<DangerLevel, string> = {
   high: 'High',
   deadly: 'Deadly',
 };
-const DANGER_COLOR: Record<DangerLevel, string> = {
-  low: 'text-emerald-400',
-  moderate: 'text-rose-500',
-  high: 'text-rose-500',
-  deadly: 'text-rose-500',
-};
 
 export function StatusHeader({
   campaignId,
@@ -74,7 +68,7 @@ export function StatusHeader({
 
   if (editing) {
     return (
-      <section className="cf-card p-5 md:p-6 space-y-3">
+      <section className="card elev-sm" style={{ padding: 16 }}>
         {error && <p className="text-sm text-rose-400">{error}</p>}
         <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Campaign name" />
         <TextArea
@@ -95,48 +89,44 @@ export function StatusHeader({
     );
   }
 
+  // Design: header row is just the campaign name + a wrapped chip row
+  // (session, danger, location) — no boxed card. See Campfire.dc.html ~L417-425.
   return (
-    <section className="cf-card p-5 md:p-6 flex flex-col md:flex-row md:items-center gap-4">
-      <div className="space-y-1 flex-1 min-w-0">
-        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
-          {campaign.status === 'active' ? 'Active campaign' : campaign.status}
-        </p>
-        <h1 className="text-2xl md:text-3xl font-extrabold text-white tracking-tight">{campaign.name}</h1>
-        <p className="text-sm text-slate-400">
-          Current location:{' '}
-          {currentLocation ? (
-            <Link to={`/c/${campaignId}/locations/${currentLocation.id}`} className="text-emerald-400 font-semibold hover:underline">
-              {currentLocation.name}
-            </Link>
-          ) : (
-            <span className="text-slate-500">Unset</span>
-          )}
-        </p>
-        {error && <p className="text-xs text-rose-400">{error}</p>}
-      </div>
-      <div className="flex gap-3">
-        <div className="cf-inset px-4 py-2 text-center">
-          <p className="text-[10px] text-slate-500 font-bold uppercase">Session</p>
-          <p className="text-lg font-bold text-white">{campaign.sessionCount}</p>
-        </div>
+    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 14px' }}>
+      <h3 style={{ margin: 0 }}>{campaign.name}</h3>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+        <span className="tag tag-neutral" style={{ whiteSpace: 'nowrap' }}>
+          Session {campaign.sessionCount}
+        </span>
         <button
           type="button"
           onClick={cycleDanger}
           disabled={!isDm}
-          className="cf-inset px-4 py-2 text-center disabled:cursor-default"
+          className="tag tag-accent"
+          style={{ whiteSpace: 'nowrap', border: 0, font: 'inherit', fontSize: 11, cursor: isDm ? 'pointer' : 'default' }}
           title={isDm ? 'Click to cycle danger level' : undefined}
         >
-          <p className="text-[10px] text-slate-500 font-bold uppercase">Danger</p>
-          <p className={`text-lg font-bold ${DANGER_COLOR[campaign.dangerLevel]}`}>
-            ⚠️ {DANGER_LABEL[campaign.dangerLevel]}
-          </p>
+          {DANGER_LABEL[campaign.dangerLevel]} danger
         </button>
+        <span className="tag tag-outline" style={{ whiteSpace: 'nowrap' }}>
+          {currentLocation ? (
+            <Link
+              to={`/c/${campaignId}/locations/${currentLocation.id}`}
+              style={{ color: 'inherit', textDecoration: 'none' }}
+            >
+              {currentLocation.name}
+            </Link>
+          ) : (
+            'Location unset'
+          )}
+        </span>
         {isDm && (
-          <Btn ghost className="hidden md:inline-flex" title="DM only" onClick={startEdit}>
+          <Btn ghost style={{ fontSize: 12 }} title="DM only" onClick={startEdit}>
             ✎ Edit
           </Btn>
         )}
       </div>
-    </section>
+      {error && <p className="text-xs text-rose-400" style={{ width: '100%', margin: 0 }}>{error}</p>}
+    </div>
   );
 }

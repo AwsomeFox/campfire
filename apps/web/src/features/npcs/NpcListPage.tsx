@@ -1,17 +1,20 @@
 /**
- * NPC roster — card grid, mirrors the dashboard's "🤝 NPCs" section styling.
+ * NPC roster — mirrors design/claude-design/Campfire.dc.html "World" NPC tab (~1239-1258):
+ * a compact card grid, avatar + name/role, disposition badge + last-seen location.
  * DM can inline-create (name + role); everyone can browse & open a detail page.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { Npc } from '@campfire/schema';
+import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
 
-function firstLine(body: string): string {
-  const line = body.split('\n').find((l) => l.trim().length > 0);
-  return line?.trim() ?? '';
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 function dispositionVariant(disposition: string) {
@@ -31,6 +34,7 @@ export default function NpcListPage() {
   const isDm = role === 'dm';
 
   const [npcs, setNpcs] = useState<Npc[]>([]);
+  const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,13 +48,23 @@ export default function NpcListPage() {
     setLoading(true);
     setError(null);
     try {
-      setNpcs(await api.get<Npc[]>(`${API}/campaigns/${id}/npcs`));
+      const [npcData, locationData] = await Promise.all([
+        api.get<Npc[]>(`${API}/campaigns/${id}/npcs`),
+        api.get<Location[]>(`${API}/campaigns/${id}/locations`),
+      ]);
+      setNpcs(npcData);
+      setLocations(locationData);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load NPCs.");
     } finally {
       setLoading(false);
     }
   }, [id]);
+
+  const locationName = useMemo(() => {
+    const byId = new Map(locations.map((l) => [l.id, l.name]));
+    return (locationId: number | null) => (locationId ? byId.get(locationId) : undefined);
+  }, [locations]);
 
   useEffect(() => {
     if (Number.isFinite(id)) void load();
@@ -140,7 +154,7 @@ export default function NpcListPage() {
         {npcs.length === 0 ? (
           <EmptyState icon="🤝" title="No NPCs yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any NPCs yet.'} />
         ) : (
-          <div className="grid sm:grid-cols-2 gap-3">
+          <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {npcs.map((npc) => (
               <a
                 key={npc.id}
@@ -149,14 +163,24 @@ export default function NpcListPage() {
                   e.preventDefault();
                   navigate(`/c/${id}/npcs/${npc.id}`);
                 }}
-                className="cf-inset p-3.5 space-y-1 hover:border-amber-500/50"
+                className="cf-card p-3.5 space-y-2 hover:border-amber-500/50"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <p className="font-bold text-slate-200 text-sm truncate">{npc.name}</p>
-                  <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
+                <div className="flex items-center gap-2.5">
+                  <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)]">
+                    {initials(npc.name)}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-bold text-slate-200 text-sm truncate">{npc.name}</p>
+                    {npc.role && <p className="text-[11.5px] text-slate-500 truncate">{npc.role}</p>}
+                  </div>
                 </div>
-                {npc.role && <p className="text-[11px] text-slate-500">{npc.role}</p>}
-                {firstLine(npc.body) && <p className="text-xs text-slate-400 line-clamp-2">{firstLine(npc.body)}</p>}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
+                  {isDm && npc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
+                  {locationName(npc.locationId) && (
+                    <span className="text-[11px] text-slate-500 ml-auto">{locationName(npc.locationId)}</span>
+                  )}
+                </div>
               </a>
             ))}
           </div>
