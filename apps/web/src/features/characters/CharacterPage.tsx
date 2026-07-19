@@ -10,7 +10,9 @@
  * Design affordances with no backing API (rendered disabled with a "soon" tag — see report):
  *  - Saving throws (no per-character save/proficiency data in the schema)
  *  - Skills (no skill/proficiency data in the schema)
- *  - Actions / attack & damage rolls (no dice-roll or actions API)
+ *  - Actions (no per-attack/action-row API; dice themselves ARE modeled —
+ *    see POST /campaigns/:id/roll, used by the dashboard Dice card and
+ *    encounter dice log — this card is about missing action rows, not dice)
  *  - Inventory (no inventory API — `Character` has no items field)
  *  - D&D Beyond link (schema has `ddbId` but there is no linking flow/endpoint)
  */
@@ -212,7 +214,8 @@ export default function CharacterPage() {
               <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
             </div>
             <p className="text-xs text-slate-500">
-              Attack rolls and damage rolls arrive once actions &amp; dice are modeled server-side.
+              Per-attack action rows aren't modeled yet — attach a weapon/spell list here. Dice already work: roll
+              from the dashboard's Dice card or an encounter's dice log.
             </p>
           </Card>
 

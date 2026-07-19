@@ -30,7 +30,7 @@ const ROLE_LABEL: Record<Role, string> = { dm: 'DM', player: 'Player', viewer: '
 export default function MembersPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const { roleIn } = useAuth();
+  const { roleIn, isAdmin } = useAuth();
   const role = roleIn(id);
 
   const [members, setMembers] = useState<CampaignMember[] | null>(null);
@@ -123,6 +123,15 @@ export default function MembersPage() {
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
       <h1 className="text-xl font-extrabold text-white m-0">Members</h1>
       {error && <ErrorNote message={error} onRetry={load} />}
+
+      {!isAdmin && (
+        <div className="cf-inset border-amber-500/30 p-3.5">
+          <p className="text-[12.5px] text-amber-200/90 m-0">
+            <strong>Players need an account first</strong> — ask a server admin to create one at Admin → Users,
+            then add them here by username.
+          </p>
+        </div>
+      )}
 
       <InviteCard />
 

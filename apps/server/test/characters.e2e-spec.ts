@@ -73,6 +73,18 @@ describe('characters (e2e)', () => {
     expect(res.body.hpCurrent).toBe(5);
   });
 
+  // Strict-validation (task P1 item 3): CharacterUpdateDto is now .strict() at
+  // the DTO layer — an unrecognized key 400s instead of the global
+  // ZodValidationPipe silently stripping it and 200-ing as a no-op.
+  it('unknown key in character PATCH body -> 400, not silently stripped', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(dm)
+      .send({ hp: 999 }); // not a real field (real fields: hpCurrent/hpMax, and hp writes go through /hp anyway)
+    expect(res.status).toBe(400);
+  });
+
   // P2 fix pinning tests — CharactersService.update() now clamps hpCurrent to
   // [0, finalHpMax] like patchHp already did, instead of writing verbatim.
   it('PATCH hpMax below standing hpCurrent clamps hpCurrent down', async () => {

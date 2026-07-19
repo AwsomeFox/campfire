@@ -2,7 +2,7 @@ import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nest
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { ApiTokenCreate } from '@campfire/schema';
-import type { ApiToken, ApiTokenCreated } from '@campfire/schema';
+import type { ApiToken, ApiTokenCreated, TokenScope } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { apiTokens, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -11,6 +11,16 @@ import type { RequestUser, TokenContext } from '../../common/user.types';
 import { RoleResolver } from '../membership/role-resolver.service';
 
 type ApiTokenCreateInput = z.infer<typeof ApiTokenCreate>;
+
+/** Shape shared by AuthTokenRequest (headless bootstrap) and AdminTokenCreate (admin provisioning) — `tokenName` rather than `name`, `scope` optional (defaults to least-privilege 'viewer'). */
+export interface MintForInput {
+  tokenName: string;
+  scope?: TokenScope;
+  campaignId?: number | null;
+}
+
+/** Least-privilege default when a mint request omits `scope` — matches ApiToken.scope semantics (caps effective role). */
+const DEFAULT_TOKEN_SCOPE: TokenScope = 'viewer';
 
 /** Throttle lastUsedAt writes to at most once per hour per token. */
 const LAST_USED_THROTTLE_MS = 60 * 60 * 1000;
@@ -82,6 +92,26 @@ export class TokensService {
       })
       .returning();
     return { token: raw, apiToken: toDomain(row) };
+  }
+
+  /**
+   * Shared entry point for both mint-a-PAT-in-one-call flows:
+   *  - AuthController.token() (POST /auth/token, @Public): `owner` and `caller`
+   *    are the SAME just-credential-verified user — access is checked against
+   *    their own campaign membership, identical to the self-service POST /tokens.
+   *  - UsersController.mintToken() (POST /users/:id/tokens, server-admin only):
+   *    `owner` is the target user being provisioned for; `caller` is ALSO the
+   *    target user (not the admin) so scope/campaignId are validated against
+   *    THAT user's access, never the admin's — an admin can't use this to mint
+   *    a token scoped to a campaign the target user has no relationship to.
+   * Applies the least-privilege 'viewer' default when scope is omitted.
+   */
+  async mintFor(owner: RequestUser, ownerId: number, input: MintForInput): Promise<ApiTokenCreated> {
+    return this.create(
+      ownerId,
+      { name: input.tokenName, scope: input.scope ?? DEFAULT_TOKEN_SCOPE, campaignId: input.campaignId ?? null },
+      owner,
+    );
   }
 
   async remove(userId: number, id: number): Promise<void> {

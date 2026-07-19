@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { SessionCreate, SessionUpdate } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -20,12 +20,18 @@ export class CampaignSessionsController {
   ) {}
 
   @Get()
+  @ApiOperation({ summary: 'List sessions (play logs) in a campaign', description: 'Requires campaign membership.' })
+  @ApiResponse({ status: 200, description: 'Sessions in the campaign.' })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     await this.access.requireMember(user, campaignId);
     return this.sessions.listForCampaign(campaignId);
   }
 
   @Post()
+  @ApiOperation({ summary: 'Create a session log', description: 'dm role required, unless `?proposed=true` — then any member may submit it as a pending proposal.' })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
+  @ApiResponse({ status: 201, description: 'Created session (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: SessionCreateDto,
@@ -56,6 +62,8 @@ export class SessionsController {
   ) {}
 
   @Get(':id')
+  @ApiOperation({ summary: 'Get a session log', description: 'Requires campaign membership.' })
+  @ApiResponse({ status: 200, description: 'Session.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.sessions.getRowOrThrow(id);
     await this.access.requireMember(user, row.campaignId);
@@ -63,6 +71,10 @@ export class SessionsController {
   }
 
   @Patch(':id')
+  @ApiOperation({ summary: 'Update a session log', description: 'dm role required, unless `?proposed=true` — then any member may submit it as a pending proposal.' })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
+  @ApiResponse({ status: 200, description: 'Updated session (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: SessionUpdateDto,
@@ -83,6 +95,8 @@ export class SessionsController {
   }
 
   @Delete(':id')
+  @ApiOperation({ summary: 'Delete a session log', description: 'dm role required.' })
+  @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.sessions.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');

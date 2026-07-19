@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { QuestCreate, QuestUpdate } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -26,6 +26,9 @@ export class CampaignQuestsController {
   ) {}
 
   @Get()
+  @ApiOperation({ summary: 'List quests in a campaign (with objectives)', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
+  @ApiQuery({ name: 'status', required: false, enum: ['available', 'active', 'completed', 'failed'], description: 'Filter to a single quest status.' })
+  @ApiResponse({ status: 200, description: 'Quests, each with its objectives.' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('status') status: string | undefined,
@@ -36,6 +39,10 @@ export class CampaignQuestsController {
   }
 
   @Post()
+  @ApiOperation({ summary: 'Create a quest', description: 'dm role required, unless `?proposed=true` — then any member may submit it as a pending proposal.' })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
+  @ApiResponse({ status: 201, description: 'Created quest (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: QuestCreateDto,
@@ -66,6 +73,8 @@ export class QuestsController {
   ) {}
 
   @Get(':id')
+  @ApiOperation({ summary: 'Get a quest (with objectives)', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
+  @ApiResponse({ status: 200, description: 'Quest with objectives.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.quests.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -73,6 +82,10 @@ export class QuestsController {
   }
 
   @Patch(':id')
+  @ApiOperation({ summary: 'Update a quest', description: 'dm role required, unless `?proposed=true` — then any member may submit it as a pending proposal.' })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
+  @ApiResponse({ status: 200, description: 'Updated quest (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: QuestUpdateDto,
@@ -93,6 +106,8 @@ export class QuestsController {
   }
 
   @Delete(':id')
+  @ApiOperation({ summary: 'Delete a quest', description: 'dm role required.' })
+  @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.quests.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
@@ -100,6 +115,8 @@ export class QuestsController {
   }
 
   @Post(':id/status')
+  @ApiOperation({ summary: 'Set a quest\'s status', description: 'dm role required.' })
+  @ApiResponse({ status: 201, description: 'Updated quest.' })
   async setStatus(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: QuestStatusPatchDto,
@@ -111,6 +128,8 @@ export class QuestsController {
   }
 
   @Post(':id/objectives')
+  @ApiOperation({ summary: 'Add an objective to a quest', description: 'dm role required.' })
+  @ApiResponse({ status: 201, description: 'Created objective.' })
   async addObjective(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: ObjectiveCreateDto,
@@ -122,6 +141,9 @@ export class QuestsController {
   }
 
   @Patch(':id/objectives/:oid')
+  @ApiOperation({ summary: 'Update an objective', description: "player role required to toggle `done`; changing `text`/`sortOrder` requires dm." })
+  @ApiResponse({ status: 200, description: 'Updated objective.' })
+  @ApiResponse({ status: 403, description: 'Player attempting to change text/sortOrder (only `done` is player-writable).' })
   async patchObjective(
     @Param('id', ParseIntPipe) id: number,
     @Param('oid', ParseIntPipe) oid: number,
@@ -134,6 +156,8 @@ export class QuestsController {
   }
 
   @Delete(':id/objectives/:oid')
+  @ApiOperation({ summary: 'Remove an objective', description: 'dm role required.' })
+  @ApiResponse({ status: 200, description: 'Deleted.' })
   async removeObjective(
     @Param('id', ParseIntPipe) id: number,
     @Param('oid', ParseIntPipe) oid: number,

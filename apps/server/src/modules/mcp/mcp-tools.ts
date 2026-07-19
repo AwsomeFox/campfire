@@ -1,22 +1,33 @@
-import { BadRequestException, HttpException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException, Injectable } from '@nestjs/common';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
+  CampaignCreate,
+  CampaignUpdate,
+  CharacterCreate,
+  CharacterUpdate,
   CombatantCreate,
+  CombatantUpdate,
   DangerLevel,
   EntityType,
   Id,
   LocationCreate,
+  LocationStatus,
   LocationUpdate,
+  MemberCreate,
+  MemberUpdate,
   NoteVisibility,
   NpcCreate,
   NpcUpdate,
   QuestCreate,
   QuestStatus,
   QuestUpdate,
+  Role,
   RollRequest,
+  RulePackInstall,
   RuleEntryType,
   SessionCreate,
+  SessionUpdate,
 } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -27,10 +38,13 @@ import { LocationsService } from '../locations/locations.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
 import { NotesService } from '../notes/notes.service';
+import { MembersService } from '../membership/members.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { AuditService } from '../audit/audit.service';
+import { ExportService } from '../export/export.service';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -44,27 +58,73 @@ function ok(data: unknown): ToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
 }
 
+/**
+ * Structured error content: every isError result's text is a JSON object
+ * `{"error":{"status","code","message"}}` so a calling agent can branch on
+ * `status`/`code` programmatically instead of string-matching prose. `code`
+ * is a short machine-friendly slug derived from the HTTP status (or
+ * "validation_failed" for a raw ZodError, e.g. from `.strict()` rejecting an
+ * unknown arg key).
+ */
 function fail(err: unknown): ToolResult {
+  let status: number;
+  let code: string;
   let message: string;
   if (err instanceof HttpException) {
+    status = err.getStatus();
     const res = err.getResponse();
-    const detail = typeof res === 'string' ? res : JSON.stringify(res);
-    message = `${err.getStatus()}: ${detail}`;
+    if (typeof res === 'string') {
+      message = res;
+    } else {
+      const obj = res as { message?: unknown; error?: unknown };
+      message = typeof obj.message === 'string' ? obj.message : Array.isArray(obj.message) ? obj.message.join('; ') : JSON.stringify(res);
+    }
+    code =
+      status === 404
+        ? 'not_found'
+        : status === 403
+          ? 'forbidden'
+          : status === 400
+            ? 'bad_request'
+            : status === 409
+              ? 'conflict'
+              : status === 401
+                ? 'unauthorized'
+                : 'error';
   } else if (err instanceof z.ZodError) {
-    message = `400: validation failed — ${JSON.stringify(err.issues)}`;
+    status = 400;
+    code = 'validation_failed';
+    message = err.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
   } else if (err instanceof Error) {
+    status = 500;
+    code = 'internal_error';
     message = err.message;
   } else {
+    status = 500;
+    code = 'internal_error';
     message = String(err);
   }
-  return { isError: true, content: [{ type: 'text', text: message }] };
+  return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: { status, code, message } }) }] };
 }
 
-const CampaignIdArg = z.number().int().positive().describe('Campaign id');
+const CampaignIdArg = z.number().int().positive().describe('Campaign id — from list_campaigns or get_campaign_summary');
 const ProposeArg = z
   .boolean()
   .optional()
-  .describe('If true, submit as a proposal for DM approval instead of writing directly (quest/npc/location/session only)');
+  .describe(
+    'If true, submit as a proposal for DM approval instead of writing directly (quest/npc/location/session only). ' +
+      'Any member may propose; the returned {proposal} is pending until a dm calls approve_proposal/reject_proposal. ' +
+      'Ignored on tools with no REST proposal path (objectives, characters, notes, campaign status, members, encounters).',
+  );
+const LimitArg = (max: number, fallback: number) =>
+  z.number().int().positive().max(max).optional().describe(`Max rows to return (default ${fallback}, max ${max})`);
+const OffsetArg = z.number().int().nonnegative().optional().describe('Rows to skip, for paging (default 0)');
+
+function paginate<T>(rows: T[], limit: number | undefined, offset: number | undefined): T[] {
+  const start = offset ?? 0;
+  const sliced = rows.slice(start);
+  return limit !== undefined ? sliced.slice(0, limit) : sliced;
+}
 
 /**
  * Builds a per-request McpServer whose tools are bound to the authenticated
@@ -86,18 +146,45 @@ export class McpToolsService {
     private readonly sessions: SessionsService,
     private readonly characters: CharactersService,
     private readonly notes: NotesService,
+    private readonly members: MembersService,
     private readonly proposalRecords: ProposalRecordsService,
     private readonly proposals: ProposalsService,
     private readonly rules: RulesService,
     private readonly encounters: EncountersService,
+    private readonly audit: AuditService,
+    private readonly exportService: ExportService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
     const server = new McpServer(SERVER_INFO, {
       instructions:
-        'Campfire D&D campaign tracker. Read/write campaigns, quests, NPCs, locations, characters, session recaps, ' +
-        'notes and proposals. Writes on quest/npc/location/session accept propose:true to queue a DM-approval proposal ' +
-        'instead of writing directly.',
+        'Campfire is a D&D-style campaign tracker. This server exposes the full REST surface as tools so an agent ' +
+        'can run an entire campaign (world-building, session prep, and live combat) over MCP alone.\n\n' +
+        'BOOTSTRAP / ID DISCOVERY — ids are never guessable, always discover them:\n' +
+        '  1. list_campaigns -> pick a campaignId.\n' +
+        '  2. get_campaign_summary {campaignId} -> full dashboard: campaign, current location, quests (with ' +
+        'objectives), npcs, locations, characters, sessions, open inbox count. This is the cheapest way to learn ' +
+        'every entity id in a campaign in one call — prefer it over multiple list_* calls when starting fresh.\n' +
+        '  3. For anything not in the summary (encounters, notes, rule entries, members, proposals, audit log), ' +
+        'use the matching list_* tool first (e.g. list_encounters before get_encounter/update_combatant) to get ids.\n\n' +
+        'ROLES — every tool resolves the caller\'s EFFECTIVE role for the campaign in question: dm > player > viewer ' +
+        '(ranked; a higher role can do everything a lower one can). dm: full write access, secrets (dmSecret fields, ' +
+        'NPC/quest/location DM-only text), approve/reject proposals, install rule packs (server admin only), manage ' +
+        'members. player: create/update their own character, roll dice, check objectives, post notes/inbox items, ' +
+        'act on combatants linked to characters they own. viewer: read-only, plus dice rolls and notes/inbox (any ' +
+        'member may post). A PAT (personal access token) additionally CAPS the effective role to min(token scope, ' +
+        'real membership role) and, if the token is bound to one campaignId, 403s on every other campaign — this ' +
+        'applies even to server admins acting through a scoped token.\n\n' +
+        'PROPOSE-THEN-APPROVE — quest/npc/location/session create+update (and set_quest_status, which proposes a ' +
+        'quest update) accept propose:true: any member may submit a change as a pending Proposal instead of writing ' +
+        'directly; a dm later calls approve_proposal (applies it through the normal write path) or reject_proposal. ' +
+        'Use this when acting as a player-role agent proposing world changes for a human DM to review. propose is ' +
+        'not available on objectives, characters, notes, campaign status, members, or combat tools — those write ' +
+        'directly and are already gated by role.\n\n' +
+        'ERRORS — a failed call returns isError:true with JSON text {"error":{"status","code","message"}} (e.g. ' +
+        'status 404/code "not_found", status 403/code "forbidden", status 400/code "validation_failed"). Every ' +
+        'tool\'s argument object is strict — an unknown/misspelled key is a validation_failed error, not a silent ' +
+        'no-op, so check the message and retry with corrected keys rather than assuming the call succeeded.',
     });
     this.registerReadTools(server, user);
     this.registerWriteTools(server, user);
@@ -111,14 +198,21 @@ export class McpToolsService {
     shape: z.ZodRawShape,
     handler: (args: Record<string, unknown>) => Promise<unknown>,
   ): void {
-    // Cast away the SDK's deep conditional generics (TS2589 with a non-literal ZodRawShape);
-    // runtime behavior is unchanged — the SDK still validates args against `shape`.
+    // Every tool's args are validated against z.object(shape).strict() — an unknown/
+    // misnamed key (e.g. {hpCurrent} instead of {hpSet}) is a validation_failed error
+    // instead of being silently dropped by the SDK's default (non-strict) object parse.
+    // Cast away the SDK's deep conditional generics (TS2589 with a non-literal
+    // ZodRawShape); passing a prebuilt ZodObject instance (rather than the raw shape) is
+    // an officially supported `inputSchema` form and is what carries `.strict()` through
+    // to both `tools/list`'s JSON schema (additionalProperties:false) and the per-call
+    // validation the SDK runs before invoking our handler.
+    const strictShape = z.object(shape).strict();
     const register = server.registerTool.bind(server) as (
       name: string,
-      config: { description: string; inputSchema: z.ZodRawShape },
+      config: { description: string; inputSchema: z.ZodTypeAny },
       cb: (args: Record<string, unknown>) => Promise<ToolResult>,
     ) => void;
-    register(name, { description, inputSchema: shape }, async (args) => {
+    register(name, { description, inputSchema: strictShape }, async (args) => {
       try {
         return ok(await handler(args ?? {}));
       } catch (err) {
@@ -130,14 +224,15 @@ export class McpToolsService {
   // ---------- READ ----------
 
   private registerReadTools(server: McpServer, user: RequestUser): void {
-    this.tool(server, 'list_campaigns', 'List the campaigns this user (or token) can access.', {}, async () =>
+    this.tool(server, 'list_campaigns', 'List the campaigns this user (or token) can access. Start here.', {}, async () =>
       this.campaigns.listForUser(user),
     );
 
     this.tool(
       server,
       'get_campaign_summary',
-      'Full campaign dashboard: campaign, current location, quests (with objectives), NPCs, locations, characters, sessions, open inbox count.',
+      'Full campaign dashboard: campaign, current location, quests (with objectives), NPCs, locations, characters, ' +
+        'sessions, open inbox count. The cheapest single call to learn every core entity id in a campaign.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
@@ -148,7 +243,7 @@ export class McpToolsService {
     this.tool(
       server,
       'get_quest',
-      'Get a quest (with objectives) by id.',
+      'Get a quest (with objectives) by id. Ids come from list_quests or get_campaign_summary.',
       { questId: Id.describe('Quest id') },
       async ({ questId }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
@@ -160,7 +255,7 @@ export class McpToolsService {
     this.tool(
       server,
       'list_quests',
-      'List quests in a campaign, optionally filtered by status.',
+      'List quests in a campaign, optionally filtered by status. Quests may nest as subquests via parentId.',
       { campaignId: CampaignIdArg, status: QuestStatus.optional().describe('Filter by quest status') },
       async ({ campaignId, status }) => {
         const role = await this.access.requireMember(user, campaignId as number);
@@ -168,7 +263,7 @@ export class McpToolsService {
       },
     );
 
-    this.tool(server, 'get_npc', 'Get an NPC by id.', { npcId: Id.describe('NPC id') }, async ({ npcId }) => {
+    this.tool(server, 'get_npc', 'Get an NPC by id. Ids come from list_npcs or get_campaign_summary.', { npcId: Id.describe('NPC id') }, async ({ npcId }) => {
       const row = await this.npcs.getRowOrThrow(npcId as number);
       const role = await this.access.requireMember(user, row.campaignId);
       return this.npcs.getOrThrow(npcId as number, role);
@@ -182,7 +277,7 @@ export class McpToolsService {
     this.tool(
       server,
       'get_location',
-      'Get a location by id.',
+      'Get a location by id. Ids come from list_locations or get_campaign_summary.',
       { locationId: Id.describe('Location id') },
       async ({ locationId }) => {
         const row = await this.locations.getRowOrThrow(locationId as number);
@@ -205,7 +300,7 @@ export class McpToolsService {
     this.tool(
       server,
       'get_character',
-      'Get a character sheet by id.',
+      'Get a character sheet by id. Ids come from get_party or get_campaign_summary.',
       { characterId: Id.describe('Character id') },
       async ({ characterId }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
@@ -228,19 +323,31 @@ export class McpToolsService {
     this.tool(
       server,
       'get_session_recaps',
-      'List session recaps for a campaign, newest first. Optionally limit the count.',
-      { campaignId: CampaignIdArg, limit: z.number().int().positive().max(100).optional().describe('Max sessions to return') },
-      async ({ campaignId, limit }) => {
+      'List session recaps for a campaign, newest first.',
+      { campaignId: CampaignIdArg, limit: LimitArg(100, 100), offset: OffsetArg },
+      async ({ campaignId, limit, offset }) => {
         await this.access.requireMember(user, campaignId as number);
         const list = await this.sessions.listForCampaign(campaignId as number);
-        return limit !== undefined ? list.slice(0, limit as number) : list;
+        return paginate(list, limit as number | undefined, offset as number | undefined);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_session',
+      'Get a single session recap by id.',
+      { sessionId: Id.describe('Session id — from get_session_recaps') },
+      async ({ sessionId }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        await this.access.requireMember(user, row.campaignId);
+        return this.sessions.getOrThrow(sessionId as number);
       },
     );
 
     this.tool(
       server,
       'read_inbox',
-      'DM only: list open (unresolved) player inbox items for a campaign.',
+      'DM only: list open (unresolved) player inbox items for a campaign — messages players sent up via submit_inbox_item.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
@@ -273,13 +380,104 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'list_rule_packs',
+      'List installed rule packs (server-wide compendium sources, e.g. Open5e SRD).',
+      {},
+      async () => this.rules.listPacks(),
+    );
+
+    this.tool(
+      server,
+      'get_rule_entry',
+      'Get a single rule entry (spell/monster/item/condition/etc.) by id, including its full body and structured ' +
+        'dataJson (e.g. a monster statblock\'s ability scores/hp/AC). Ids come from lookup_rule.',
+      { entryId: Id.describe('Rule entry id — from lookup_rule') },
+      async ({ entryId }) => this.rules.getEntryOrThrow(entryId as number),
+    );
+
+    this.tool(
+      server,
       'get_encounter',
       'Get an encounter (combat tracker) by id, including its full combatant list sorted by turn order.',
-      { encounterId: Id.describe('Encounter id') },
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         await this.access.requireMember(user, row.campaignId);
         return this.encounters.getWithCombatantsOrThrow(encounterId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_encounters',
+      'List encounters in a campaign, optionally filtered by status (preparing|running|ended). Call this before ' +
+        'get_encounter/update_combatant/etc. to discover encounter ids.',
+      {
+        campaignId: CampaignIdArg,
+        status: z.enum(['preparing', 'running', 'ended']).optional().describe('Filter by encounter status'),
+      },
+      async ({ campaignId, status }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.encounters.listForCampaign(campaignId as number, status as 'preparing' | 'running' | 'ended' | undefined);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_members',
+      'List campaign members (user id, role, linked character).',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.members.listForCampaign(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_notes',
+      'List notes visible to the caller in a campaign: private (author only), dm_shared (author+dm), or ' +
+        'party_shared (everyone). Optionally filter by the entity the note is linked to, or to just the caller\'s own notes.',
+      {
+        campaignId: CampaignIdArg,
+        entityType: EntityType.optional().describe('Filter to notes linked to this entity type'),
+        entityId: Id.optional().describe('Filter to notes linked to this entity id (use with entityType)'),
+        mine: z.boolean().optional().describe('If true, only the caller\'s own notes'),
+        limit: LimitArg(200, 200),
+        offset: OffsetArg,
+      },
+      async ({ campaignId, entityType, entityId, mine, limit, offset }) => {
+        const role = await this.access.requireMember(user, campaignId as number);
+        const list = await this.notes.listForCampaign(campaignId as number, user, role, {
+          entityType: entityType as string | undefined,
+          entityId: entityId as number | undefined,
+          mine: mine as boolean | undefined,
+        });
+        return paginate(list, limit as number | undefined, offset as number | undefined);
+      },
+    );
+
+    this.tool(
+      server,
+      'read_audit_log',
+      'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven actions.',
+      { campaignId: CampaignIdArg, limit: LimitArg(500, 100) },
+      async ({ campaignId, limit }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.audit.listForCampaign(campaignId as number, (limit as number | undefined) ?? 100);
+      },
+    );
+
+    this.tool(
+      server,
+      'export_campaign',
+      'DM only: export the full campaign (campaign, quests, npcs, locations, sessions, characters, notes, members, ' +
+        'audit log, proposals, encounters incl. combatants) as JSON, with dmSecret fields included. Returned as text ' +
+        '— the caller may treat it as a JSON string to parse or archive.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.exportService.buildExport(campaignId as number, user);
       },
     );
   }
@@ -289,8 +487,34 @@ export class McpToolsService {
   private registerWriteTools(server: McpServer, user: RequestUser): void {
     this.tool(
       server,
+      'create_campaign',
+      'Create a new campaign. Any authenticated user may create one; the creator is auto-added as its dm.',
+      { name: z.string().min(1).max(120).describe('Campaign name'), description: z.string().max(10_000).optional().describe('Campaign description') },
+      async ({ name, description }) => {
+        const validated = CampaignCreate.parse({ name, ...(description !== undefined ? { description } : {}) });
+        return this.campaigns.create(validated, user);
+      },
+    );
+
+    this.tool(
+      server,
+      'delete_campaign',
+      'DM only: permanently delete a campaign and ALL of its data (quests, npcs, locations, characters, encounters, ' +
+        'notes, sessions, proposals, members, tokens, attachments). Irreversible.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.campaigns.remove(campaignId as number, user);
+        return { ok: true, campaignId };
+      },
+    );
+
+    this.tool(
+      server,
       'create_quest',
-      'Create a quest in a campaign (DM). With propose:true any member may submit it as a proposal instead.',
+      'Create a quest in a campaign (DM). With propose:true any member may submit it as a proposal instead. ' +
+        'Supports subquests via parentId (another quest\'s id in the same campaign), an optional giverNpcId, and a ' +
+        'dmSecret field (DM-only text, stripped from non-DM reads).',
       { campaignId: CampaignIdArg, propose: ProposeArg, ...QuestCreate.shape },
       async ({ campaignId, propose, ...fields }) => {
         const validated = QuestCreate.parse(fields);
@@ -307,7 +531,8 @@ export class McpToolsService {
     this.tool(
       server,
       'update_quest',
-      'Update a quest (DM). With propose:true any member may submit the change as a proposal instead.',
+      'Update a quest (DM). With propose:true any member may submit the change as a proposal instead. Supports ' +
+        'subquests via parentId, an optional giverNpcId, and a dmSecret field (DM-only text).',
       { questId: Id.describe('Quest id'), propose: ProposeArg, ...QuestUpdate.shape },
       async ({ questId, propose, ...fields }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
@@ -319,6 +544,19 @@ export class McpToolsService {
         }
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.quests.update(questId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'delete_quest',
+      'DM only: delete a quest. Any subquests (parentId pointing at this quest) are promoted to top-level rather than deleted.',
+      { questId: Id.describe('Quest id') },
+      async ({ questId }) => {
+        const row = await this.quests.getRowOrThrow(questId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.quests.remove(questId as number, user, role);
+        return { ok: true, questId };
       },
     );
 
@@ -354,6 +592,30 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'update_objective',
+      'Update a quest objective\'s text and/or done state. Any member (player+) may toggle `done`; changing `text` ' +
+        'requires dm. Use check_objective for a done-only toggle.',
+      {
+        questId: Id.describe('Quest id'),
+        objectiveId: Id.describe('Objective id'),
+        text: z.string().min(1).max(500).optional().describe('New objective text (dm only)'),
+        done: z.boolean().optional().describe('Done state'),
+      },
+      async ({ questId, objectiveId, text, done }) => {
+        const row = await this.quests.getRowOrThrow(questId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.quests.patchObjective(
+          questId as number,
+          objectiveId as number,
+          { ...(text !== undefined ? { text: text as string } : {}), ...(done !== undefined ? { done: done as boolean } : {}) },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.tool(
+      server,
       'check_objective',
       'Mark a quest objective done/undone (player or DM).',
       { questId: Id.describe('Quest id'), objectiveId: Id.describe('Objective id'), done: z.boolean().describe('Done state') },
@@ -366,8 +628,22 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'remove_objective',
+      'DM only: delete a quest objective.',
+      { questId: Id.describe('Quest id'), objectiveId: Id.describe('Objective id') },
+      async ({ questId, objectiveId }) => {
+        const row = await this.quests.getRowOrThrow(questId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.quests.removeObjective(questId as number, objectiveId as number, user, role);
+        return { ok: true, questId, objectiveId };
+      },
+    );
+
+    this.tool(
+      server,
       'upsert_npc',
-      'Create an NPC (omit npcId) or update one (pass npcId). DM; with propose:true any member may submit a proposal instead.',
+      'Create an NPC (omit npcId) or update one (pass npcId). DM; with propose:true any member may submit a ' +
+        'proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads) and an optional locationId.',
       {
         campaignId: CampaignIdArg,
         npcId: Id.optional().describe('Existing NPC id (update); omit to create'),
@@ -402,8 +678,23 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'delete_npc',
+      'DM only: delete an NPC.',
+      { npcId: Id.describe('NPC id') },
+      async ({ npcId }) => {
+        const row = await this.npcs.getRowOrThrow(npcId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.npcs.remove(npcId as number, user, role);
+        return { ok: true, npcId };
+      },
+    );
+
+    this.tool(
+      server,
       'upsert_location',
-      'Create a location (omit locationId) or update one (pass locationId). DM; with propose:true any member may submit a proposal instead.',
+      'Create a location (omit locationId) or update one (pass locationId). DM; with propose:true any member may ' +
+        'submit a proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads). Use ' +
+        'set_location_discovery to change `status` with the "current location" demotion side-effect.',
       {
         campaignId: CampaignIdArg,
         locationId: Id.optional().describe('Existing location id (update); omit to create'),
@@ -433,6 +724,32 @@ export class McpToolsService {
         }
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.locations.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'delete_location',
+      'DM only: delete a location.',
+      { locationId: Id.describe('Location id') },
+      async ({ locationId }) => {
+        const row = await this.locations.getRowOrThrow(locationId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.locations.remove(locationId as number, user, role);
+        return { ok: true, locationId };
+      },
+    );
+
+    this.tool(
+      server,
+      'set_location_discovery',
+      'DM only: set a location\'s status (unexplored|explored|current). Setting "current" demotes any other ' +
+        '"current" location in the campaign to "explored" and updates the campaign\'s currentLocationId.',
+      { locationId: Id.describe('Location id'), status: LocationStatus },
+      async ({ locationId, status }) => {
+        const row = await this.locations.getRowOrThrow(locationId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.locations.discover(locationId as number, status as z.infer<typeof LocationStatus>, user, role);
       },
     );
 
@@ -473,6 +790,60 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'update_session',
+      'Update a session recap\'s title, recap text, and/or playedAt date (DM). With propose:true any member may submit the change as a proposal instead.',
+      {
+        sessionId: Id.describe('Session id'),
+        title: z.string().max(200).optional().describe('Session title'),
+        recap: z.string().max(100_000).optional().describe('Session recap (markdown)'),
+        playedAt: z.string().nullable().optional().describe('ISO date the session was played'),
+        propose: ProposeArg,
+      },
+      async ({ sessionId, title, recap, playedAt, propose }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        const validated = SessionUpdate.parse({
+          ...(title !== undefined ? { title } : {}),
+          ...(recap !== undefined ? { recap } : {}),
+          ...(playedAt !== undefined ? { playedAt } : {}),
+        });
+        if (propose) {
+          const role = await this.access.requireMember(user, row.campaignId);
+          const proposal = await this.proposalRecords.create(row.campaignId, 'session', sessionId as number, 'update', validated, user, role);
+          return { proposal };
+        }
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.sessions.update(sessionId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'upsert_character',
+      'Create a character (omit characterId) or update one (pass characterId). player may create/update their own ' +
+        'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId.',
+      {
+        campaignId: CampaignIdArg,
+        characterId: Id.optional().describe('Existing character id (update); omit to create'),
+        ...CharacterUpdate.shape,
+      },
+      async ({ campaignId, characterId, ...fields }) => {
+        if (characterId !== undefined) {
+          const row = await this.characters.getRowOrThrow(characterId as number);
+          if (row.campaignId !== (campaignId as number)) {
+            throw new BadRequestException(`Character ${characterId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
+          }
+          const validated = CharacterUpdate.parse(fields);
+          const role = await this.access.requireRole(user, row.campaignId, 'player');
+          return this.characters.update(characterId as number, validated, user, role);
+        }
+        const validated = CharacterCreate.parse(fields); // name required on create
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.characters.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
       'update_character_hp',
       "Adjust a character's HP by delta, or set it absolutely (player owner or DM). Pass exactly one of delta | set.",
       {
@@ -488,6 +859,27 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const patch = delta !== undefined ? { delta: delta as number } : { set: set as number };
         return this.characters.patchHp(characterId as number, patch, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'set_character_conditions',
+      'Add and/or remove status conditions (e.g. "poisoned", "prone") on a character (player owner or DM).',
+      {
+        characterId: Id.describe('Character id'),
+        add: z.array(z.string().max(40)).optional().describe('Conditions to add'),
+        remove: z.array(z.string().max(40)).optional().describe('Conditions to remove'),
+      },
+      async ({ characterId, add, remove }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.characters.patchConditions(
+          characterId as number,
+          { ...(add !== undefined ? { add: add as string[] } : {}), ...(remove !== undefined ? { remove: remove as string[] } : {}) },
+          user,
+          role,
+        );
       },
     );
 
@@ -520,6 +912,52 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'update_note',
+      'Edit a note\'s body and/or visibility. Author only — dm may NOT edit another member\'s note.',
+      {
+        noteId: Id.describe('Note id'),
+        body: z.string().min(1).max(20_000).optional().describe('Note body (markdown)'),
+        visibility: NoteVisibility.optional().describe('private | dm_shared | party_shared'),
+      },
+      async ({ noteId, body, visibility }) => {
+        const row = await this.notes.getRowOrThrow(noteId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.notes.update(
+          noteId as number,
+          { ...(body !== undefined ? { body: body as string } : {}), ...(visibility !== undefined ? { visibility: visibility as z.infer<typeof NoteVisibility> } : {}) },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.tool(
+      server,
+      'delete_note',
+      'Delete a note. Author only — dm may NOT delete another member\'s note.',
+      { noteId: Id.describe('Note id') },
+      async ({ noteId }) => {
+        const row = await this.notes.getRowOrThrow(noteId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        await this.notes.remove(noteId as number, user, role);
+        return { ok: true, noteId };
+      },
+    );
+
+    this.tool(
+      server,
+      'submit_inbox_item',
+      'Any member may send a message up to the DM (e.g. a player asking a rules question, flagging something out ' +
+        'of character). Appears in read_inbox until a dm calls resolve_inbox_item.',
+      { campaignId: CampaignIdArg, body: z.string().min(1).max(20_000).describe('Message body') },
+      async ({ campaignId, body }) => {
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.notes.createInbox(campaignId as number, { authorName: user.name, body: body as string }, user, role);
+      },
+    );
+
+    this.tool(
+      server,
       'resolve_inbox_item',
       'DM only: resolve a player inbox item, optionally with a resolution note.',
       { noteId: Id.describe('Inbox note id'), resolvedNote: z.string().max(1000).optional().describe('Resolution note') },
@@ -533,19 +971,23 @@ export class McpToolsService {
     this.tool(
       server,
       'update_campaign_status',
-      'DM only: update campaign state — current location and/or danger level.',
+      'DM only: update campaign state — status (active|paused|completed), current location, and/or danger level. ' +
+        '(sessionCount is intentionally NOT settable here — it\'s a denormalized count auto-recomputed by ' +
+        'add_session_recap/session delete, not a free-form field.)',
       {
         campaignId: CampaignIdArg,
+        status: z.enum(['active', 'paused', 'completed']).optional().describe('Campaign status'),
         currentLocationId: Id.nullable().optional().describe('Current location id (null to clear)'),
         dangerLevel: DangerLevel.optional().describe('low | moderate | high | deadly'),
       },
-      async ({ campaignId, currentLocationId, dangerLevel }) => {
+      async ({ campaignId, status, currentLocationId, dangerLevel }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
-        const patch: { currentLocationId?: number | null; dangerLevel?: z.infer<typeof DangerLevel> } = {};
+        const patch: z.infer<typeof CampaignUpdate> = {};
+        if (status !== undefined) patch.status = status as z.infer<typeof CampaignUpdate>['status'];
         if (currentLocationId !== undefined) patch.currentLocationId = currentLocationId as number | null;
         if (dangerLevel !== undefined) patch.dangerLevel = dangerLevel as z.infer<typeof DangerLevel>;
         if (Object.keys(patch).length === 0) {
-          throw new BadRequestException('Pass at least one of currentLocationId or dangerLevel');
+          throw new BadRequestException('Pass at least one of status, currentLocationId, or dangerLevel');
         }
         return this.campaigns.update(campaignId as number, patch, user);
       },
@@ -577,6 +1019,61 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'add_member',
+      'DM only: add a campaign member by user id, with a role (dm|player|viewer) and optional linked characterId.',
+      { campaignId: CampaignIdArg, ...MemberCreate.shape },
+      async ({ campaignId, ...fields }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        const validated = MemberCreate.parse(fields);
+        return this.members.create(campaignId as number, validated, user);
+      },
+    );
+
+    this.tool(
+      server,
+      'update_member',
+      'DM only: update a campaign member\'s role and/or linked characterId. Cannot demote the campaign\'s last dm.',
+      { campaignId: CampaignIdArg, memberId: Id.describe('Member id — from list_members'), ...MemberUpdate.shape },
+      async ({ campaignId, memberId, ...fields }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        const validated = MemberUpdate.parse(fields);
+        return this.members.update(campaignId as number, memberId as number, validated, user);
+      },
+    );
+
+    this.tool(
+      server,
+      'remove_member',
+      'DM only: remove a campaign member. Cannot remove the campaign\'s last dm.',
+      { campaignId: CampaignIdArg, memberId: Id.describe('Member id — from list_members') },
+      async ({ campaignId, memberId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.members.remove(campaignId as number, memberId as number, user);
+        return { ok: true, memberId };
+      },
+    );
+
+    this.tool(
+      server,
+      'install_rule_pack',
+      'Server admin only: install (or incrementally update) the Open5e SRD rule pack — spells, monsters, items, ' +
+        'conditions — so lookup_rule/get_rule_entry and add_combatant\'s ruleEntryId can find them.',
+      { ...RulePackInstall.shape },
+      async ({ source, url, sections }) => {
+        if (user.serverRole !== 'admin') {
+          throw new ForbiddenException('Requires server admin');
+        }
+        const validated = RulePackInstall.parse({
+          source,
+          ...(url !== undefined ? { url } : {}),
+          ...(sections !== undefined ? { sections } : {}),
+        });
+        return this.rules.installFromOpen5e(validated, user);
+      },
+    );
+
+    this.tool(
+      server,
       'roll_dice',
       'Roll a dice expression, e.g. "1d20+3" or "2d6", in the context of a campaign. Any campaign member may use ' +
         'this; the roll is audited (action "dice.roll").',
@@ -602,14 +1099,43 @@ export class McpToolsService {
     this.tool(
       server,
       'add_combatant',
-      'DM only: add a combatant (monster or character) to an encounter. Pass ruleEntryId to pull name/hp from a ' +
-        'compendium monster statblock, or characterId to pull from a character sheet, when name/hpMax are omitted.',
-      { encounterId: Id.describe('Encounter id'), ...CombatantCreate.shape },
+      '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
+        'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
+        'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted.',
+      { encounterId: Id.describe('Encounter id — from list_encounters'), ...CombatantCreate.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         const validated = CombatantCreate.parse(fields);
         return this.encounters.addCombatant(encounterId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'update_combatant',
+      'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), ' +
+        'addConditions/removeConditions, and/or initiative (dm only). DM may modify any combatant; a player may only ' +
+        'touch hp/conditions on a combatant linked to a character they own.',
+      { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantUpdate.shape },
+      async ({ encounterId, combatantId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        const validated = CombatantUpdate.parse(fields);
+        return this.encounters.updateCombatant(encounterId as number, combatantId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'remove_combatant',
+      'DM only: remove a combatant from an encounter.',
+      { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter') },
+      async ({ encounterId, combatantId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.encounters.removeCombatant(encounterId as number, combatantId as number, user, role);
+        return { ok: true, encounterId, combatantId };
       },
     );
 

@@ -330,7 +330,7 @@ export function RegionMap({
           <span style={{ width: 8, height: 8, borderRadius: '50%', border: '1px dashed var(--color-neutral-600)' }} />
           {STATUS_GLYPH.unexplored} {STATUS_LABEL.unexplored}
         </span>
-        <span style={{ marginLeft: 'auto' }}>{isDm && mapImageUrl ? 'Drag a pin to move it' : 'Drag to pan · tap a pin'}</span>
+        <span style={{ marginLeft: 'auto' }}>{isDm && mapImageUrl ? 'Drag a pin to move it' : 'Tap a pin to open it'}</span>
       </div>
     </div>
   );

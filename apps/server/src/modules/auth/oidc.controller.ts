@@ -1,5 +1,5 @@
 import { Controller, ForbiddenException, Get, Query, Req, Res, ServiceUnavailableException } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { Public } from '../../common/decorators/public.decorator';
 import { OidcService } from './oidc.service';
@@ -46,6 +46,9 @@ export class OidcController {
 
   @Public()
   @Get('login')
+  @ApiOperation({ summary: 'Start OIDC SSO login', description: 'Redirects to the configured OIDC provider. Sets a short-lived flow cookie for the PKCE state/verifier round trip.' })
+  @ApiResponse({ status: 302, description: 'Redirect to the IdP authorization endpoint.' })
+  @ApiResponse({ status: 503, description: 'OIDC is not configured.' })
   async login(@Res() res: Response): Promise<void> {
     if (!this.oidc.isEnabled()) {
       throw new ServiceUnavailableException('OIDC is not configured');
@@ -57,6 +60,10 @@ export class OidcController {
 
   @Public()
   @Get('callback')
+  @ApiOperation({ summary: 'OIDC callback (redirect target)', description: "Provider redirects here with `code`/`state` query params after the user authenticates. Verifies the flow cookie + PKCE, provisions/updates the user, and sets the session cookie." })
+  @ApiResponse({ status: 302, description: 'Session cookie set; redirects to the app.' })
+  @ApiResponse({ status: 403, description: 'Account disabled.' })
+  @ApiResponse({ status: 503, description: 'OIDC not configured, or the login flow expired / was not started here.' })
   async callback(@Req() req: Request, @Query() _query: Record<string, string>, @Res() res: Response): Promise<void> {
     if (!this.oidc.isEnabled()) {
       throw new ServiceUnavailableException('OIDC is not configured');

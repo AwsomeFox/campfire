@@ -103,7 +103,9 @@ export default function LocationListPage() {
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
         <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2">🗺 Locations</h1>
+          <h1 className="font-bold text-white text-lg flex items-center gap-2">
+            🗺 World <span className="text-slate-500 font-normal text-sm">· Locations</span>
+          </h1>
           <Link to={`/c/${id}/npcs`} className="btn btn-ghost" style={{ fontSize: 12 }}>
             NPCs →
           </Link>

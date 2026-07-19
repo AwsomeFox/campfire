@@ -12,7 +12,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiConsumes, ApiTags } from '@nestjs/swagger';
+import { ApiConsumes, ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import type { Response } from 'express';
 import fs from 'node:fs';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -41,6 +41,10 @@ export class CampaignAttachmentsController {
    */
   @Post()
   @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload an attachment', description: "Multipart upload. `kind` in the form body selects the bucket and minimum role: player+ for 'portrait', dm-only for 'map'/'image'. Allowed mime types: image/png, image/jpeg, image/webp." })
+  @ApiResponse({ status: 201, description: 'Attachment created.' })
+  @ApiResponse({ status: 400, description: 'Missing file, or unsupported mime type.' })
+  @ApiResponse({ status: 413, description: 'File exceeds the max upload size.' })
   @UseInterceptors(
     FileInterceptor('file', {
       limits: { fileSize: MAX_UPLOAD_BYTES },
@@ -81,6 +85,8 @@ export class AttachmentsController {
 
   /** Streams the file bytes. Requires campaign membership — never a public URL. */
   @Get(':id/file')
+  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL.' })
+  @ApiResponse({ status: 200, description: 'Raw file bytes, with Content-Type/Content-Disposition set from the stored attachment.' })
   async getFile(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser, @Res() res: Response) {
     const row = await this.attachmentsService.getRowOrThrow(id);
     await this.access.requireMember(user, row.campaignId);
@@ -96,6 +102,8 @@ export class AttachmentsController {
   }
 
   @Delete(':id')
+  @ApiOperation({ summary: 'Delete an attachment', description: 'Requires campaign membership; the service layer further restricts to the uploader or a dm.' })
+  @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.attachmentsService.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);

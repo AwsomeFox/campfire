@@ -334,6 +334,28 @@ export type ApiToken = z.infer<typeof ApiToken>;
 export const ApiTokenCreate = z.object({ name: z.string().min(1).max(80), scope: TokenScope, campaignId: Id.nullable().optional() });
 export const ApiTokenCreated = z.object({ token: z.string(), apiToken: ApiToken });
 
+// Headless PAT bootstrap (POST /auth/token, @Public): verifies credentials in the
+// same call that mints the token, so an AI agent can go from nothing to a working
+// Bearer token in one round trip, no cookie/session dance required.
+export const AuthTokenRequest = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1).max(200), // same cap as LoginRequest.password — scrypt DoS guard on an unauthenticated path
+  tokenName: z.string().min(1).max(80),
+  scope: TokenScope.optional(), // default: 'viewer' (least privilege) — see TokensService.mintFor
+  campaignId: Id.nullable().optional(),
+});
+export type AuthTokenRequest = z.infer<typeof AuthTokenRequest>;
+
+// Admin provisioning (POST /users/:id/tokens, server-admin only): mint a PAT on
+// behalf of another user. No username/password — the admin's own session/PAT is
+// the credential; scope/campaignId are validated against the TARGET user's access.
+export const AdminTokenCreate = z.object({
+  tokenName: z.string().min(1).max(80),
+  scope: TokenScope.optional(), // default: 'viewer'
+  campaignId: Id.nullable().optional(),
+});
+export type AdminTokenCreate = z.infer<typeof AdminTokenCreate>;
+
 // ---------- proposals (AI/collab writes pending DM approval) ----------
 export const ProposalAction = z.enum(['create', 'update']);
 export const ProposalStatus = z.enum(['pending', 'approved', 'rejected']);

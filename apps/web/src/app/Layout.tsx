@@ -120,6 +120,7 @@ type NavItem = {
   label: string;
   to?: string;
   soon?: boolean;
+  badge?: number;
 };
 
 function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: boolean; onClick?: () => void }) {
@@ -130,6 +131,11 @@ function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: bo
         style={{ background: active ? 'var(--color-accent)' : 'transparent' }}
       />
       <span className="flex-1 truncate">{item.label}</span>
+      {!!item.badge && (
+        <span className="tag tag-accent" style={{ fontSize: 9 }}>
+          {item.badge}
+        </span>
+      )}
       {item.soon && (
         <span className="tag tag-neutral" style={{ fontSize: 9 }}>
           soon
@@ -179,6 +185,7 @@ export function Layout() {
   const [moreOpen, setMoreOpen] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [lostAccess, setLostAccess] = useState(false);
+  const [inboxCount, setInboxCount] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
   // Track WHICH campaign we've stale-checked, not a bare boolean — so navigating
   // to a different campaign re-checks (and clears a prior lock screen) instead of
@@ -188,6 +195,28 @@ export function Layout() {
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
   const roleLabel = role === 'dm' ? 'DM' : role === 'player' ? 'Player' : role === 'viewer' ? 'Viewer' : null;
+
+  // Scribe inbox badge count — dm-only endpoint, best-effort (a failed/empty fetch
+  // just means no badge, not a page error). Re-checks on campaign switch and when
+  // navigating in/out of the inbox itself (so resolving an item clears the badge).
+  useEffect(() => {
+    if (campaignId === undefined || !isDm) {
+      setInboxCount(0);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const items = await api.get<unknown[]>(`${API}/campaigns/${campaignId}/inbox`);
+        if (!cancelled) setInboxCount(items.length);
+      } catch {
+        if (!cancelled) setInboxCount(0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, isDm, location.pathname]);
 
   // me.memberships is fetched once at login, so it's stale the moment a DM changes
   // someone's access mid-session. Once the campaign list has loaded, if this campaign
@@ -240,6 +269,7 @@ export function Layout() {
         { key: 'dashboard', label: 'Dashboard', to: `/c/${campaignId}` },
         { key: 'quests', label: 'Quests', to: `/c/${campaignId}/quests` },
         { key: 'world', label: 'World', to: `/c/${campaignId}/locations` },
+        { key: 'npcs', label: 'NPCs', to: `/c/${campaignId}/npcs` },
         { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
         { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
         { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
@@ -251,7 +281,7 @@ export function Layout() {
   const dmNav: NavItem[] = campaignId !== undefined && isDm
     ? [
         { key: 'settings', label: 'Settings', to: `/c/${campaignId}/settings` },
-        { key: 'inbox', label: 'Scribe inbox', to: `/c/${campaignId}/inbox` },
+        { key: 'inbox', label: 'Scribe inbox', to: `/c/${campaignId}/inbox`, badge: inboxCount },
         { key: 'proposals', label: 'Proposals', to: `/c/${campaignId}/proposals` },
         { key: 'members', label: 'Members', to: `/c/${campaignId}/members` },
       ]
@@ -326,18 +356,18 @@ export function Layout() {
             </>
           )}
 
-          {isAdmin && (
-            <nav className="flex flex-col gap-0.5 mt-1">
+          <nav className="flex flex-col gap-0.5 mt-1">
+            {isAdmin && (
               <SidebarNavButton
                 item={{ key: 'admin', label: 'Admin', to: '/admin' }}
                 active={location.pathname === '/admin'}
               />
-              <SidebarNavButton
-                item={{ key: 'tokens', label: 'Tokens', to: '/tokens' }}
-                active={location.pathname === '/tokens'}
-              />
-            </nav>
-          )}
+            )}
+            <SidebarNavButton
+              item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }}
+              active={location.pathname === '/tokens'}
+            />
+          </nav>
 
           <div className="flex-1" />
           <div className="hr my-1" />
@@ -428,7 +458,7 @@ export function Layout() {
               </Link>
             )}
             <Link to="/tokens" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
-              Tokens
+              API tokens
             </Link>
             <span className="text-muted" style={{ fontSize: 12 }}>{displayName}</span>
             <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={onLogout}>
@@ -545,7 +575,12 @@ function MoreSheetItem({ item, onNavigate }: { item: NavItem; onNavigate: () => 
       className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md"
       style={{ fontSize: 14.5, color: 'var(--color-text)' }}
     >
-      {item.label}
+      <span className="flex-1 truncate">{item.label}</span>
+      {!!item.badge && (
+        <span className="tag tag-accent" style={{ fontSize: 9.5 }}>
+          {item.badge}
+        </span>
+      )}
     </Link>
   );
 }

@@ -227,6 +227,43 @@ describe('encounters (e2e)', () => {
       expect(res.body.hpCurrent).toBe(15);
     });
 
+    // Strict-validation (task P1 item 3): CombatantUpdateDto is now .strict() at
+    // the DTO layer — an unknown/misnamed key like `hpCurrent` (the real column
+    // name; CombatantUpdate's actual field is `hpDelta`/`hpSet`) previously
+    // validated fine (the global ZodValidationPipe just silently stripped it)
+    // and the PATCH would 200 with no effect. Now it 400s with a clear message
+    // instead of silently no-op'ing — exactly the failure mode an AI agent
+    // sending a slightly-wrong field name would otherwise hit invisibly.
+    it('unknown key in combatant PATCH body (e.g. hpCurrent instead of hpSet/hpDelta) -> 400, not a silent no-op', async () => {
+      const server = ctx.app.getHttpServer();
+      const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const ariaBefore = (before.body.combatants as Array<{ id: number; hpCurrent: number }>).find((c) => c.id === ariaCombatantId)!;
+
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ hpCurrent: 1 });
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toMatch(/hpCurrent/);
+
+      // Confirm it's truly a no-op, not a partial/silent apply.
+      const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const ariaAfter = (after.body.combatants as Array<{ id: number; hpCurrent: number }>).find((c) => c.id === ariaCombatantId)!;
+      expect(ariaAfter.hpCurrent).toBe(ariaBefore.hpCurrent);
+    });
+
+    it('a well-formed combatant PATCH (only recognized keys) still 200s as before', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ hpSet: 9 });
+      expect(res.status).toBe(200);
+      expect(res.body.hpCurrent).toBe(9);
+      // restore for subsequent tests in this block, which assume hpCurrent=15 post the earlier -5 delta test
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(dm).send({ hpSet: 15 });
+    });
+
     it('non-owning player gets 403 modifying someone else’s combatant', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server)

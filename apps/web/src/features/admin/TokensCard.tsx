@@ -19,6 +19,66 @@ const SCOPE_CHIP: Record<TokenScope, string> = {
   viewer: 'cf-chip-private',
 };
 const SCOPE_LABEL: Record<TokenScope, string> = { dm: 'DM', player: 'Player', viewer: 'Viewer' };
+const SCOPE_HELP: Record<TokenScope, string> = {
+  dm: 'DM — the AI writes directly (quests, NPCs, encounters, HP…) and can approve proposals.',
+  player: 'Player — writes are scoped to that player and become DM proposals, not direct changes.',
+  viewer: 'Viewer — read-only; writes are rejected outright.',
+};
+
+function mcpConnectCommand(origin: string, token?: string): string {
+  const authHeader = token ? `Bearer ${token}` : '<TOKEN>';
+  return `claude mcp add --transport http campfire ${origin}/mcp --header "Authorization: ${authHeader}"`;
+}
+
+function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable — user can still select the text */
+    }
+  }
+  return (
+    <Btn className="!min-h-0 !py-1.5 text-xs" onClick={copy}>
+      {copied ? 'Copied!' : label}
+    </Btn>
+  );
+}
+
+/**
+ * "Connect your AI" block — always-visible tokenless version (persistent on /tokens)
+ * unless `token` is supplied, in which case it shows the real command with the
+ * one-time secret baked in (only ever rendered inside the just-created reveal).
+ */
+function ConnectAiBlock({ token }: { token?: string }) {
+  const origin = window.location.origin;
+  const mcpUrl = `${origin}/mcp`;
+  const command = mcpConnectCommand(origin, token);
+  return (
+    <div className="cf-inset p-3.5 space-y-2">
+      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Connect your AI</p>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] text-slate-500">MCP endpoint</span>
+        <code className="text-xs text-slate-300 font-mono break-all flex-1 min-w-0">{mcpUrl}</code>
+        <CopyButton text={mcpUrl} />
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <code className="cf-inset px-3 py-2 text-xs text-slate-300 font-mono break-all flex-1 min-w-0">
+          {command}
+        </code>
+        <CopyButton text={command} />
+      </div>
+      <p className="text-[11px] text-slate-500">
+        {token
+          ? 'This command has your new token baked in — copy it now, it will not be shown again.'
+          : 'Swap <TOKEN> for a token created above (or use the one-time command shown right after creating one).'}
+      </p>
+    </div>
+  );
+}
 
 export function TokensCard() {
   const [tokens, setTokens] = useState<ApiToken[] | null>(null);
@@ -121,6 +181,8 @@ export function TokensCard() {
           onCancel={() => setConfirmRevoke(null)}
         />
       )}
+
+      <ConnectAiBlock />
     </Card>
   );
 }
@@ -212,6 +274,7 @@ function NewTokenForm({
           ))}
         </select>
       </div>
+      <p className="text-[11px] text-slate-500">{SCOPE_HELP[scope]}</p>
       <div className="flex gap-2 justify-end">
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
           Cancel
@@ -256,8 +319,9 @@ function NewTokenReveal({ created, onClose }: { created: ApiTokenCreated; onClos
         </Btn>
       </div>
       <p className="text-[11px] text-slate-400">
-        Shown once — this is what you give Claude (MCP url: <code className="text-slate-300">/mcp</code>).
+        Shown once — save it somewhere safe, or use the ready-to-run command below.
       </p>
+      <ConnectAiBlock token={created.token} />
     </div>
   );
 }

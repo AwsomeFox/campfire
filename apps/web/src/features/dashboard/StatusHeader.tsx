@@ -32,24 +32,14 @@ export function StatusHeader({
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(campaign.name);
   const [description, setDescription] = useState(campaign.description);
+  const [dangerLevel, setDangerLevel] = useState<DangerLevel>(campaign.dangerLevel);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  async function cycleDanger() {
-    if (!isDm) return;
-    const idx = DANGER_CYCLE.indexOf(campaign.dangerLevel);
-    const next = DANGER_CYCLE[(idx + 1) % DANGER_CYCLE.length];
-    try {
-      await api.patch(`${API}/campaigns/${campaignId}`, { dangerLevel: next });
-      onChange();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update danger level.");
-    }
-  }
 
   function startEdit() {
     setName(campaign.name);
     setDescription(campaign.description);
+    setDangerLevel(campaign.dangerLevel);
     setEditing(true);
   }
 
@@ -58,7 +48,7 @@ export function StatusHeader({
     setSaving(true);
     setError(null);
     try {
-      await api.patch(`${API}/campaigns/${campaignId}`, { name: name.trim(), description });
+      await api.patch(`${API}/campaigns/${campaignId}`, { name: name.trim(), description, dangerLevel });
       setEditing(false);
       onChange();
     } catch (err) {
@@ -79,6 +69,21 @@ export function StatusHeader({
           onChange={(e) => setDescription(e.target.value)}
           placeholder="Description"
         />
+        <div className="field" style={{ maxWidth: 200 }}>
+          <label htmlFor="status-danger">Danger level</label>
+          <select
+            id="status-danger"
+            className="input"
+            value={dangerLevel}
+            onChange={(e) => setDangerLevel(e.target.value as DangerLevel)}
+          >
+            {DANGER_CYCLE.map((level) => (
+              <option key={level} value={level}>
+                {DANGER_LABEL[level]}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="flex gap-2 justify-end">
           <Btn ghost onClick={() => setEditing(false)} disabled={saving}>
             Cancel
@@ -109,16 +114,9 @@ export function StatusHeader({
         <span className="tag tag-neutral" style={{ whiteSpace: 'nowrap' }}>
           Session {campaign.sessionCount}
         </span>
-        <button
-          type="button"
-          onClick={cycleDanger}
-          disabled={!isDm}
-          className="tag tag-accent"
-          style={{ whiteSpace: 'nowrap', border: 0, font: 'inherit', fontSize: 11, cursor: isDm ? 'pointer' : 'default' }}
-          title={isDm ? 'Click to cycle danger level' : undefined}
-        >
+        <span className="tag tag-accent" style={{ whiteSpace: 'nowrap' }}>
           {DANGER_LABEL[campaign.dangerLevel]} danger
-        </button>
+        </span>
         <span className="tag tag-outline" style={{ whiteSpace: 'nowrap' }}>
           {currentLocation ? (
             <Link

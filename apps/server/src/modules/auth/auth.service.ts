@@ -87,7 +87,21 @@ export class AuthService implements OnApplicationBootstrap {
   }
 
   async login(input: LoginInput): Promise<SessionIssueResult> {
-    const row = await this.usersService.getRowByUsername(input.username);
+    const row = await this.verifyCredentials(input.username, input.password);
+    return this.issueSession(row.id);
+  }
+
+  /**
+   * Shared credential-check path for both cookie login (login() above) and the
+   * headless PAT bootstrap (POST /auth/token — see AuthController.token() /
+   * TokensService.mintFor()). Same checks, same order, same exception types as
+   * login() so both entry points behave identically for a given username/password:
+   * unknown user or bad password -> 401 (generic, no user-enumeration signal);
+   * SSO-provisioned or disabled account -> 403; non-admin while local login is
+   * disabled -> 403. Returns the raw users row (never leaves the service layer).
+   */
+  async verifyCredentials(username: string, password: string) {
+    const row = await this.usersService.getRowByUsername(username);
     if (!row) {
       throw new UnauthorizedException('Invalid username or password');
     }
@@ -95,7 +109,7 @@ export class AuthService implements OnApplicationBootstrap {
       // SSO-provisioned user (OIDC) — no local password to check.
       throw new ForbiddenException('This account uses SSO');
     }
-    if (!verifyPassword(input.password, row.passwordHash)) {
+    if (!verifyPassword(password, row.passwordHash)) {
       throw new UnauthorizedException('Invalid username or password');
     }
     if (row.disabled) {
@@ -107,7 +121,7 @@ export class AuthService implements OnApplicationBootstrap {
         throw new ForbiddenException('Local login is currently disabled');
       }
     }
-    return this.issueSession(row.id);
+    return row;
   }
 
   /** Public entry point for other auth flows (e.g. OidcService) that need to mint a session after their own credential check. */
