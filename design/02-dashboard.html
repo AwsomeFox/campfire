@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard — Campfire</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="pb-20 md:pb-10">
+
+<!-- App bar -->
+<header class="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <div class="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
+    <a href="index.html" class="flex items-center gap-2 font-extrabold text-white shrink-0">🔥<span class="hidden sm:inline">Campfire</span></a>
+    <span class="text-slate-700 hidden sm:inline">/</span>
+    <button class="flex items-center gap-1.5 text-sm font-semibold text-slate-200 truncate">
+      Dragon of Icespire Peak <span class="text-slate-500 text-[10px]">▾</span>
+    </button>
+    <nav class="hidden md:flex items-center gap-5 ml-6 text-sm text-slate-400">
+      <a class="text-white font-semibold" href="02-dashboard.html">Dashboard</a>
+      <a class="hover:text-white" href="03-quest-detail.html">Quests</a>
+      <a class="hover:text-white" href="04-npc-detail.html">NPCs</a>
+      <a class="hover:text-white" href="05-location-detail.html">Locations</a>
+      <a class="hover:text-white" href="06-character-sheet.html">Party</a>
+      <a class="hover:text-white" href="07-sessions.html">Sessions</a>
+      <a class="hover:text-white" href="08-my-notes.html">Notes</a>
+    </nav>
+    <div class="ml-auto flex items-center gap-2.5 shrink-0">
+      <span class="cf-chip cf-chip-dm">DM</span>
+      <div class="h-8 w-8 rounded-full bg-amber-500/15 border border-amber-500/60 text-amber-400 text-xs font-bold flex items-center justify-center">TA</div>
+    </div>
+  </div>
+</header>
+
+<div class="max-w-7xl mx-auto px-4 mt-5 space-y-5">
+
+  <!-- Campaign status header -->
+  <section class="cf-card p-5 md:p-6 flex flex-col md:flex-row md:items-center gap-4">
+    <div class="space-y-1 flex-1 min-w-0">
+      <p class="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Active campaign</p>
+      <h1 class="text-2xl md:text-3xl font-extrabold text-white tracking-tight">Dragon of Icespire Peak</h1>
+      <p class="text-sm text-slate-400">Current location:
+        <a href="05-location-detail.html" class="text-emerald-400 font-semibold hover:underline">Dwarven Excavation</a>
+      </p>
+    </div>
+    <div class="flex gap-3">
+      <div class="cf-inset px-4 py-2 text-center">
+        <p class="text-[10px] text-slate-500 font-bold uppercase">Session</p>
+        <p class="text-lg font-bold text-white">2</p>
+      </div>
+      <div class="cf-inset px-4 py-2 text-center">
+        <p class="text-[10px] text-slate-500 font-bold uppercase">Danger</p>
+        <p class="text-lg font-bold text-rose-500">⚠️ Moderate</p>
+      </div>
+      <button class="cf-btn-ghost cf-btn hidden md:inline-flex" title="DM only">✎ Edit</button>
+    </div>
+  </section>
+
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+
+    <!-- LEFT: map, quests, npcs -->
+    <div class="lg:col-span-7 space-y-5">
+
+      <!-- Pin map -->
+      <section class="cf-card p-5 space-y-3">
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h2 class="font-bold text-white flex items-center gap-2"><span class="text-amber-500">🗺</span> Region</h2>
+          <a href="05-location-detail.html" class="text-xs text-slate-400 hover:text-white">All locations →</a>
+        </div>
+        <div class="relative cf-inset overflow-hidden h-56 md:h-64">
+          <div class="absolute inset-0 bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:16px_16px] opacity-35"></div>
+          <svg class="w-full h-full" viewBox="0 0 500 260" xmlns="http://www.w3.org/2000/svg">
+            <path d="M 250,90 Q 160,150 120,210" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6,4" opacity=".55"/>
+            <path d="M 250,90 L 250,195" fill="none" stroke="#10b981" stroke-width="2" stroke-dasharray="6,4" opacity=".55"/>
+            <path d="M 250,90 Q 340,150 375,215" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="6,4" opacity=".4"/>
+            <path d="M 375,42 Q 300,66 250,90" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="3,3" opacity=".7"/>
+            <g transform="translate(375, 42)">
+              <circle r="12" fill="#ef4444" fill-opacity=".15"><animate attributeName="r" values="10;15;10" dur="3s" repeatCount="indefinite"/></circle>
+              <circle r="6" fill="#ef4444"/>
+              <text x="-10" y="-14" font-size="11" fill="#f87171" font-weight="bold" text-anchor="end">Cryovain ✦</text>
+            </g>
+            <g transform="translate(250, 90)">
+              <circle r="9" fill="#3b82f6" fill-opacity=".2"/><circle r="4.5" fill="#3b82f6"/>
+              <text y="-13" font-size="11" fill="#60a5fa" font-weight="bold" text-anchor="middle">Phandalin</text>
+            </g>
+            <g transform="translate(250, 195)">
+              <circle r="9" fill="#10b981" fill-opacity=".2"/><circle r="4.5" fill="#10b981"/>
+              <text x="13" y="4" font-size="11" fill="#34d399">Umbrage Hill ✓</text>
+            </g>
+            <g transform="translate(120, 210)">
+              <circle r="12" fill="#f59e0b" fill-opacity=".25"><animate attributeName="fill-opacity" values=".25;.5;.25" dur="2s" repeatCount="indefinite"/></circle>
+              <circle r="5.5" fill="#f59e0b"/>
+              <text x="-12" y="-12" font-size="11" fill="#fbbf24" font-weight="bold" text-anchor="end">Dwarven Excavation 📍</text>
+            </g>
+            <g transform="translate(375, 215)">
+              <circle r="7" fill="#64748b" fill-opacity=".3"/><circle r="3.5" fill="#64748b"/>
+              <text x="12" y="4" font-size="11" fill="#94a3b8">Gnomengarde ?</text>
+            </g>
+          </svg>
+        </div>
+        <p class="text-[11px] text-slate-500">MVP: abstract pin canvas · P1: upload a map image, drag pins onto it.</p>
+      </section>
+
+      <!-- Quests -->
+      <section class="cf-card p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h2 class="font-bold text-white flex items-center gap-2"><span class="text-amber-500">📜</span> Quests</h2>
+          <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs">+ New quest</button>
+        </div>
+
+        <!-- Active quest w/ objectives + subquest -->
+        <a href="03-quest-detail.html" class="block cf-inset p-4 space-y-3 hover:border-amber-500/50">
+          <div class="flex items-start justify-between gap-3">
+            <div class="space-y-1">
+              <p class="font-bold text-white">Dwarven Excavation <span class="cf-chip cf-chip-active ml-1">Active</span></p>
+              <p class="text-xs text-slate-400">Warn the prospectors about the white dragon. Giver: Harbin Wester</p>
+            </div>
+            <span class="text-xs font-bold text-amber-500 whitespace-nowrap">50 GP</span>
+          </div>
+          <div class="space-y-1.5 text-sm">
+            <label class="flex items-center gap-2.5 text-slate-300"><input type="checkbox" checked class="h-4 w-4 rounded border-slate-600 bg-slate-800 text-amber-500"> <s class="opacity-60">Reach the excavation site</s></label>
+            <label class="flex items-center gap-2.5 text-slate-300"><input type="checkbox" class="h-4 w-4 rounded border-slate-600 bg-slate-800 text-amber-500"> Deliver Harbin's warning</label>
+          </div>
+          <div class="pl-4 border-l border-slate-700">
+            <p class="text-xs font-bold text-rose-400">↳ Sub-quest: Clear the Temple Ruins</p>
+            <p class="text-[11px] text-slate-400">Ochre jellies infest the ruins · Reward: <span class="text-emerald-400 font-semibold">Sending Stones</span></p>
+          </div>
+        </a>
+
+        <a href="03-quest-detail.html" class="block cf-inset p-4 flex items-start justify-between gap-3 hover:border-amber-500/50">
+          <div class="space-y-1">
+            <p class="font-bold text-slate-300">Gnomengarde <span class="cf-chip cf-chip-available ml-1">Available</span></p>
+            <p class="text-xs text-slate-500">Seek the rock gnomes' magic weapons for the dragon fight.</p>
+          </div>
+        </a>
+
+        <a href="03-quest-detail.html" class="block cf-inset p-4 flex items-start justify-between gap-3 opacity-60">
+          <div class="space-y-1">
+            <p class="font-bold text-emerald-400">Umbrage Hill <span class="cf-chip cf-chip-completed ml-1">Completed</span></p>
+            <p class="text-xs text-slate-400">Saved Adabra from the manticore · Reward: healing potions</p>
+          </div>
+        </a>
+      </section>
+
+      <!-- NPCs -->
+      <section class="cf-card p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h2 class="font-bold text-white flex items-center gap-2">🤝 NPCs</h2>
+          <a href="04-npc-detail.html" class="text-xs text-slate-400 hover:text-white">All NPCs →</a>
+        </div>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <a href="04-npc-detail.html" class="cf-inset p-3.5 space-y-1 hover:border-amber-500/50">
+            <div class="flex items-center justify-between">
+              <p class="font-bold text-slate-200 text-sm">Harbin Wester</p>
+              <span class="cf-chip cf-chip-available">Neutral</span>
+            </div>
+            <p class="text-[11px] text-slate-500">Townmaster · Phandalin</p>
+            <p class="text-xs text-slate-400">Cowardly employer; hiding from the dragon in his own house.</p>
+          </a>
+          <a href="04-npc-detail.html" class="cf-inset p-3.5 space-y-1 hover:border-amber-500/50">
+            <div class="flex items-center justify-between">
+              <p class="font-bold text-emerald-400 text-sm">Adabra Gwynn</p>
+              <span class="cf-chip cf-chip-completed">Friendly</span>
+            </div>
+            <p class="text-[11px] text-slate-500">Midwife · Umbrage Hill</p>
+            <p class="text-xs text-slate-400">Grateful rescue; sells healing potions to the party.</p>
+          </a>
+          <a href="04-npc-detail.html" class="cf-inset p-3.5 space-y-1 hover:border-amber-500/50">
+            <div class="flex items-center justify-between">
+              <p class="font-bold text-purple-400 text-sm">Dazlyn &amp; Norbus</p>
+              <span class="cf-chip cf-chip-active">Wary</span>
+            </div>
+            <p class="text-[11px] text-slate-500">Prospectors · Dwarven Excavation</p>
+            <p class="text-xs text-slate-400">Will trade Sending Stones for a jelly-free temple.</p>
+          </a>
+          <a href="04-npc-detail.html" class="cf-inset p-3.5 space-y-1 hover:border-amber-500/50">
+            <div class="flex items-center justify-between">
+              <p class="font-bold text-amber-400 text-sm">Grimlock</p>
+              <span class="cf-chip cf-chip-active">Ally?</span>
+            </div>
+            <p class="text-[11px] text-slate-500">"Dwarf" · with the party</p>
+            <p class="text-xs text-slate-400">Goblin in a bikini top &amp; sarong. Debt to Gimble: settled.</p>
+          </a>
+        </div>
+      </section>
+    </div>
+
+    <!-- RIGHT: party, sessions, my notes -->
+    <div class="lg:col-span-5 space-y-5">
+
+      <!-- Party -->
+      <section class="cf-card p-5 space-y-3">
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h2 class="font-bold text-white flex items-center gap-2">🛡 Party</h2>
+          <a href="06-character-sheet.html" class="text-xs text-slate-400 hover:text-white">Roster →</a>
+        </div>
+
+        <a href="06-character-sheet.html" class="cf-inset p-3.5 flex gap-3 items-center hover:border-purple-500/50">
+          <div class="h-10 w-10 rounded-lg bg-purple-500/15 border border-purple-500/60 flex items-center justify-center font-bold text-purple-400 text-xs shrink-0">GH</div>
+          <div class="flex-1 min-w-0 space-y-1">
+            <div class="flex items-center gap-2">
+              <p class="font-bold text-white text-sm truncate">Gimble Horcusporcus</p>
+              <span class="cf-chip" style="background:rgb(167 139 250/.15);color:#c4b5fd">Warlock 2</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="cf-hp flex-1"><div style="width:85%"></div></div>
+              <span class="text-[10px] text-slate-400 font-semibold">17/20</span>
+            </div>
+          </div>
+        </a>
+
+        <a href="06-character-sheet.html" class="cf-inset p-3.5 flex gap-3 items-center hover:border-emerald-500/50">
+          <div class="h-10 w-10 rounded-lg bg-emerald-500/15 border border-emerald-500/60 flex items-center justify-center font-bold text-emerald-400 text-xs shrink-0">EL</div>
+          <div class="flex-1 min-w-0 space-y-1">
+            <div class="flex items-center gap-2">
+              <p class="font-bold text-white text-sm truncate">Ellery Lockwill</p>
+              <span class="cf-chip cf-chip-completed">Rogue 2</span>
+              <span class="cf-chip cf-chip-failed">Blinded</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="cf-hp low flex-1"><div style="width:45%"></div></div>
+              <span class="text-[10px] text-slate-400 font-semibold">8/18</span>
+            </div>
+          </div>
+        </a>
+
+        <a href="06-character-sheet.html" class="cf-inset p-3.5 flex gap-3 items-center hover:border-amber-500/50">
+          <div class="h-10 w-10 rounded-lg bg-amber-500/15 border border-amber-500/60 flex items-center justify-center font-bold text-amber-400 text-xs shrink-0">GR</div>
+          <div class="flex-1 min-w-0 space-y-1">
+            <div class="flex items-center gap-2">
+              <p class="font-bold text-white text-sm truncate">Gruuk</p>
+              <span class="cf-chip cf-chip-active">Fighter 2</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="cf-hp flex-1"><div style="width:100%"></div></div>
+              <span class="text-[10px] text-slate-400 font-semibold">22/22</span>
+            </div>
+          </div>
+        </a>
+
+        <a href="06-character-sheet.html" class="cf-inset p-3.5 flex gap-3 items-center hover:border-rose-500/50">
+          <div class="h-10 w-10 rounded-lg bg-rose-500/15 border border-rose-500/60 flex items-center justify-center font-bold text-rose-400 text-xs shrink-0">RK</div>
+          <div class="flex-1 min-w-0 space-y-1">
+            <div class="flex items-center gap-2">
+              <p class="font-bold text-white text-sm truncate">Raging Kenshi</p>
+              <span class="cf-chip cf-chip-failed">Sorcerer 2</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="cf-hp crit flex-1"><div style="width:15%"></div></div>
+              <span class="text-[10px] text-rose-400 font-semibold">3/16 ⚠</span>
+            </div>
+          </div>
+        </a>
+      </section>
+
+      <!-- Session log -->
+      <section class="cf-card p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h2 class="font-bold text-white flex items-center gap-2">📓 Session log</h2>
+          <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs">+ Add recap</button>
+        </div>
+        <div class="space-y-4 max-h-72 overflow-y-auto pr-1">
+          <a href="07-sessions.html" class="block cf-timeline active space-y-1">
+            <div class="flex items-center justify-between">
+              <p class="font-bold text-white text-sm">S2 · Suspicious Glints</p>
+              <span class="cf-chip cf-chip-active">Latest</span>
+            </div>
+            <p class="text-xs text-slate-400 line-clamp-2">Un-looted gold in a temple of the god of greed feels like a trap waiting to spring…</p>
+          </a>
+          <a href="07-sessions.html" class="block cf-timeline space-y-1">
+            <p class="font-bold text-slate-300 text-sm">S2 · Temple Gold</p>
+            <p class="text-xs text-slate-500 line-clamp-2">Found the secret path; Grimlock +5 GP, Gruuk +10 GP. Ellery navigating blind.</p>
+          </a>
+          <a href="07-sessions.html" class="block cf-timeline space-y-1">
+            <p class="font-bold text-slate-300 text-sm">S1 · Gathering of the Chaos</p>
+            <p class="text-xs text-slate-500 line-clamp-2">Met Harbin, took the warning quests, "recruited" Grimlock, saw the dragon's work.</p>
+          </a>
+        </div>
+      </section>
+
+      <!-- My notes rail -->
+      <section class="cf-card p-5 space-y-3">
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h2 class="font-bold text-white flex items-center gap-2">📝 My notes</h2>
+          <a href="08-my-notes.html" class="text-xs text-slate-400 hover:text-white">All notes →</a>
+        </div>
+        <div class="cf-inset p-3 space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="cf-chip cf-chip-private">🔒 Private</span>
+            <span class="text-[10px] text-slate-600">2d ago</span>
+          </div>
+          <p class="text-xs text-slate-300">Don't trust the loose gold — Abbathor is the god of GREED. It's bait.</p>
+        </div>
+        <div class="cf-inset p-3 space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="cf-chip cf-chip-party">👥 Party</span>
+            <span class="text-[10px] text-slate-600">2d ago</span>
+          </div>
+          <p class="text-xs text-slate-300">Buy potions from Adabra before we go back into the temple.</p>
+        </div>
+        <form class="flex gap-2 pt-1">
+          <input class="cf-input !min-h-0 !py-2 text-sm" placeholder="Quick note… (private)">
+          <button class="cf-btn !min-h-0 !py-2 text-sm shrink-0">Save</button>
+        </form>
+      </section>
+    </div>
+  </div>
+
+  <p class="text-[11px] text-slate-600 pb-4">Role degradation: <b>player</b> sees no Edit/New buttons on canon, can tick objectives, edits own character; <b>viewer</b> is fully read-only and keeps only the "Leave a note" quick-capture.</p>
+</div>
+
+<!-- Mobile tab bar -->
+<nav class="cf-tabbar">
+  <a class="active" href="02-dashboard.html"><span class="ico">🏠</span>Home</a>
+  <a href="03-quest-detail.html"><span class="ico">📜</span>Quests</a>
+  <a href="06-character-sheet.html"><span class="ico">🛡</span>Party</a>
+  <a href="08-my-notes.html"><span class="ico">📝</span>Notes</a>
+  <a href="10-admin.html"><span class="ico">⋯</span>More</a>
+</nav>
+</body>
+</html>

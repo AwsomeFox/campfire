@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Location — Campfire</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="pb-20 md:pb-10">
+
+<header class="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <div class="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
+    <a href="index.html" class="flex items-center gap-2 font-extrabold text-white shrink-0">🔥<span class="hidden sm:inline">Campfire</span></a>
+    <span class="text-slate-700 hidden sm:inline">/</span>
+    <a href="02-dashboard.html" class="text-sm text-slate-400 hover:text-white truncate">Dragon of Icespire Peak</a>
+    <span class="text-slate-700">/</span><span class="text-sm text-slate-200 font-semibold">Locations</span>
+    <div class="ml-auto flex items-center gap-2.5"><span class="cf-chip cf-chip-dm">DM</span>
+      <div class="h-8 w-8 rounded-full bg-amber-500/15 border border-amber-500/60 text-amber-400 text-xs font-bold flex items-center justify-center">TA</div>
+    </div>
+  </div>
+</header>
+
+<div class="max-w-5xl mx-auto px-4 mt-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
+  <main class="lg:col-span-2 space-y-5">
+    <section class="cf-card p-5 md:p-6 space-y-5">
+      <div class="flex items-start justify-between gap-4">
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h1 class="text-2xl font-extrabold text-white">Dwarven Excavation</h1>
+            <span class="cf-chip cf-chip-active">📍 Current</span>
+          </div>
+          <p class="text-sm text-slate-400">Ruined temple · 15 mi SW of Phandalin</p>
+        </div>
+        <div class="flex gap-2 shrink-0">
+          <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs">✎ Edit</button>
+          <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs" title="DM: unexplored → explored → current">Status ▾</button>
+        </div>
+      </div>
+
+      <!-- Mini-map position -->
+      <div class="relative cf-inset overflow-hidden h-36">
+        <div class="absolute inset-0 bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:16px_16px] opacity-35"></div>
+        <svg class="w-full h-full" viewBox="0 0 500 140">
+          <path d="M 320,40 Q 220,80 150,105" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6,4" opacity=".5"/>
+          <g transform="translate(320,40)"><circle r="4" fill="#3b82f6"/><text x="10" y="4" font-size="10" fill="#60a5fa">Phandalin</text></g>
+          <g transform="translate(150,105)">
+            <circle r="11" fill="#f59e0b" fill-opacity=".25"><animate attributeName="fill-opacity" values=".25;.5;.25" dur="2s" repeatCount="indefinite"/></circle>
+            <circle r="5" fill="#f59e0b"/><text x="12" y="4" font-size="10" fill="#fbbf24" font-weight="bold">Dwarven Excavation</text>
+          </g>
+        </svg>
+        <button class="absolute bottom-2 right-2 cf-btn-ghost cf-btn !min-h-0 !py-1 text-[10px]">Move pin (DM)</button>
+      </div>
+
+      <div class="prose-sm text-slate-300 space-y-2">
+        <p>A sunken temple of Abbathor, the dwarven god of greed, half-buried by an ancient earthquake. Dazlyn and Norbus run a two-dwarf "preservation" operation out of the upper chambers. The lower halls crawl with ochre jellies — and glitter with suspiciously unattended gold.</p>
+      </div>
+
+      <div class="cf-dm-panel p-4 space-y-1.5">
+        <p class="text-[10px] font-bold text-amber-500 uppercase tracking-widest">🔒 DM only</p>
+        <p class="text-sm text-slate-300">Secret vault behind the altar (DC 15 Investigation). Contains the temple ledger — and the reason the gold is on the floor.</p>
+      </div>
+    </section>
+
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm">Here &amp; connected</h2>
+      <div class="grid sm:grid-cols-2 gap-3">
+        <a href="04-npc-detail.html" class="cf-inset p-3 hover:border-amber-500/50">
+          <p class="text-sm font-bold text-purple-400">🤝 Dazlyn &amp; Norbus</p>
+          <p class="text-xs text-slate-400">Prospectors · quest givers</p>
+        </a>
+        <a href="03-quest-detail.html" class="cf-inset p-3 hover:border-amber-500/50">
+          <p class="text-sm font-bold text-amber-400">📜 Clear the Temple Ruins</p>
+          <p class="text-xs text-slate-400">Active sub-quest · Sending Stones</p>
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <aside class="space-y-5">
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm">📝 My notes here</h2>
+      <div class="cf-inset p-3 space-y-1">
+        <span class="cf-chip cf-chip-party">👥 Party</span>
+        <p class="text-xs text-slate-300">Echo carries FAR in this canyon. No more yelling. Looking at you, Kenshi.</p>
+      </div>
+      <form class="space-y-2">
+        <textarea class="cf-textarea !min-h-[70px]" placeholder="Add a note…"></textarea>
+        <div class="flex items-center justify-between">
+          <select class="cf-select !w-auto !min-h-0 !py-1.5 text-xs"><option>🔒 Private</option><option>🎩 Share with DM</option><option>👥 Share with party</option></select>
+          <button class="cf-btn !min-h-0 !py-2 text-sm">Save</button>
+        </div>
+      </form>
+    </section>
+    <section class="cf-card p-5 space-y-2">
+      <h2 class="font-bold text-white text-sm">Discovery</h2>
+      <ol class="text-xs text-slate-400 space-y-1.5">
+        <li><span class="text-slate-600">S1:</span> heard of, unexplored</li>
+        <li><span class="text-slate-600">S2:</span> <span class="text-emerald-400">explored</span> — secret path found</li>
+        <li><span class="text-slate-600">Now:</span> <span class="text-amber-400">current location</span></li>
+      </ol>
+    </section>
+  </aside>
+</div>
+
+<nav class="cf-tabbar">
+  <a href="02-dashboard.html"><span class="ico">🏠</span>Home</a>
+  <a href="03-quest-detail.html"><span class="ico">📜</span>Quests</a>
+  <a href="06-character-sheet.html"><span class="ico">🛡</span>Party</a>
+  <a href="08-my-notes.html"><span class="ico">📝</span>Notes</a>
+  <a href="10-admin.html"><span class="ico">⋯</span>More</a>
+</nav>
+</body>
+</html>

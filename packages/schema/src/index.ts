@@ -1,0 +1,215 @@
+/**
+ * Campfire domain contract — single source of truth.
+ *
+ * Every API DTO, OpenAPI shape, and (later) MCP tool schema derives from these
+ * Zod schemas. Server and web import types from here; neither redefines domain shapes.
+ *
+ * Conventions:
+ *  - ids are integer PKs (SQLite rowid-friendly)
+ *  - timestamps are ISO strings set by the server
+ *  - `dmSecret` fields exist on canon entities and are STRIPPED server-side for non-DM
+ *  - Create/Update input schemas are derived from the entity schema
+ */
+import { z } from 'zod';
+
+// ---------- shared ----------
+export const Role = z.enum(['dm', 'player', 'viewer']);
+export type Role = z.infer<typeof Role>;
+
+export const Id = z.number().int().positive();
+export const IsoDate = z.string(); // ISO-8601, server-assigned
+
+const timestamps = {
+  createdAt: IsoDate,
+  updatedAt: IsoDate,
+};
+
+// ---------- campaign ----------
+export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
+
+export const Campaign = z.object({
+  id: Id,
+  name: z.string().min(1).max(120),
+  description: z.string().max(10_000).default(''),
+  status: z.enum(['active', 'paused', 'completed']).default('active'),
+  currentLocationId: Id.nullable().default(null),
+  dangerLevel: DangerLevel.default('low'),
+  sessionCount: z.number().int().nonnegative().default(0),
+  ...timestamps,
+});
+export type Campaign = z.infer<typeof Campaign>;
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true });
+export const CampaignUpdate = CampaignCreate.partial();
+
+// ---------- character ----------
+export const Character = z.object({
+  id: Id,
+  campaignId: Id,
+  ownerUserId: z.string().max(120).nullable().default(null), // OIDC sub; null = DM-managed
+  name: z.string().min(1).max(120),
+  species: z.string().max(80).default(''),
+  className: z.string().max(80).default(''),
+  level: z.number().int().min(1).max(20).default(1),
+  background: z.string().max(120).default(''),
+  stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
+  ac: z.number().int().nullable().default(null),
+  hpCurrent: z.number().int().default(10),
+  hpMax: z.number().int().min(1).default(10),
+  conditions: z.array(z.string().max(40)).default([]),
+  portraitUrl: z.string().max(500).nullable().default(null),
+  ddbId: z.string().max(40).nullable().default(null),
+  notes: z.string().max(20_000).default(''), // public character bio/story
+  ...timestamps,
+});
+export type Character = z.infer<typeof Character>;
+export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+export const CharacterUpdate = CharacterCreate.partial();
+export const HpPatch = z.union([
+  z.object({ delta: z.number().int() }),
+  z.object({ set: z.number().int().nonnegative() }),
+]);
+export const ConditionsPatch = z.object({
+  add: z.array(z.string().max(40)).optional(),
+  remove: z.array(z.string().max(40)).optional(),
+});
+
+// ---------- quest ----------
+export const QuestStatus = z.enum(['available', 'active', 'completed', 'failed']);
+
+export const QuestObjective = z.object({
+  id: Id,
+  questId: Id,
+  text: z.string().min(1).max(500),
+  done: z.boolean().default(false),
+  sortOrder: z.number().int().default(0),
+});
+export type QuestObjective = z.infer<typeof QuestObjective>;
+
+export const Quest = z.object({
+  id: Id,
+  campaignId: Id,
+  parentId: Id.nullable().default(null), // subquests
+  title: z.string().min(1).max(200),
+  body: z.string().max(50_000).default(''), // markdown
+  status: QuestStatus.default('available'),
+  giverNpcId: Id.nullable().default(null),
+  reward: z.string().max(500).default(''),
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
+  sortOrder: z.number().int().default(0),
+  ...timestamps,
+});
+export type Quest = z.infer<typeof Quest>;
+export const QuestCreate = Quest.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ title: true });
+export const QuestUpdate = QuestCreate.partial();
+export const QuestStatusPatch = z.object({ status: QuestStatus });
+export const ObjectiveCreate = z.object({ text: z.string().min(1).max(500), sortOrder: z.number().int().optional() });
+export const ObjectivePatch = z.object({ text: z.string().min(1).max(500).optional(), done: z.boolean().optional(), sortOrder: z.number().int().optional() });
+
+// ---------- npc ----------
+export const Npc = z.object({
+  id: Id,
+  campaignId: Id,
+  name: z.string().min(1).max(120),
+  role: z.string().max(120).default(''), // "Townmaster", "Midwife"…
+  disposition: z.string().max(40).default('neutral'),
+  locationId: Id.nullable().default(null),
+  body: z.string().max(50_000).default(''),
+  dmSecret: z.string().max(20_000).default(''),
+  ...timestamps,
+});
+export type Npc = z.infer<typeof Npc>;
+export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+export const NpcUpdate = NpcCreate.partial();
+
+// ---------- location ----------
+export const LocationStatus = z.enum(['unexplored', 'explored', 'current']);
+
+export const Location = z.object({
+  id: Id,
+  campaignId: Id,
+  name: z.string().min(1).max(120),
+  kind: z.string().max(80).default(''), // town, dungeon, region…
+  status: LocationStatus.default('unexplored'),
+  mapX: z.number().nullable().default(null), // 0..100 on the abstract pin canvas
+  mapY: z.number().nullable().default(null),
+  body: z.string().max(50_000).default(''),
+  dmSecret: z.string().max(20_000).default(''),
+  ...timestamps,
+});
+export type Location = z.infer<typeof Location>;
+export const LocationCreate = Location.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+export const LocationUpdate = LocationCreate.partial();
+
+// ---------- session ----------
+export const Session = z.object({
+  id: Id,
+  campaignId: Id,
+  number: z.number().int().positive(),
+  title: z.string().max(200).default(''),
+  playedAt: IsoDate.nullable().default(null),
+  recap: z.string().max(100_000).default(''), // markdown
+  ...timestamps,
+});
+export type Session = z.infer<typeof Session>;
+export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
+export const SessionUpdate = SessionCreate.partial();
+
+// ---------- notes ----------
+export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
+export const NoteKind = z.enum(['note', 'inbox']);
+export const EntityType = z.enum(['quest', 'npc', 'location', 'session', 'character', 'campaign']);
+
+export const Note = z.object({
+  id: Id,
+  campaignId: Id,
+  authorUserId: z.string().max(120), // OIDC sub or dev user
+  authorName: z.string().max(120).default(''),
+  kind: NoteKind.default('note'),
+  visibility: NoteVisibility.default('private'),
+  entityType: EntityType.nullable().default(null),
+  entityId: Id.nullable().default(null),
+  body: z.string().min(1).max(20_000),
+  resolved: z.boolean().default(false), // inbox items only
+  resolvedNote: z.string().max(1000).default(''),
+  ...timestamps,
+});
+export type Note = z.infer<typeof Note>;
+export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
+export const NoteUpdate = z.object({
+  body: z.string().min(1).max(20_000).optional(),
+  visibility: NoteVisibility.optional(),
+  entityType: EntityType.nullable().optional(),
+  entityId: Id.nullable().optional(),
+});
+export const InboxCreate = z.object({
+  authorName: z.string().max(120).default('someone'),
+  body: z.string().min(1).max(20_000),
+});
+export const InboxResolve = z.object({ resolvedNote: z.string().max(1000).default('') });
+
+// ---------- campaign summary (dashboard aggregate / AI primer) ----------
+export const CampaignSummary = z.object({
+  campaign: Campaign,
+  currentLocation: Location.nullable(),
+  quests: z.array(Quest.extend({ objectives: z.array(QuestObjective) })),
+  npcs: z.array(Npc),
+  locations: z.array(Location),
+  characters: z.array(Character),
+  sessions: z.array(Session),
+  openInboxCount: z.number().int().nonnegative(),
+});
+export type CampaignSummary = z.infer<typeof CampaignSummary>;
+
+// ---------- audit ----------
+export const AuditEntry = z.object({
+  id: Id,
+  campaignId: Id.nullable(),
+  actor: z.string().max(200), // user id or token name
+  actorRole: Role,
+  action: z.string().max(80), // e.g. quest.update
+  entityType: z.string().max(40).nullable(),
+  entityId: Id.nullable(),
+  detail: z.string().max(2000).default(''),
+  createdAt: IsoDate,
+});
+export type AuditEntry = z.infer<typeof AuditEntry>;

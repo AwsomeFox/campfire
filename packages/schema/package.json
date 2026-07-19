@@ -1,0 +1,16 @@
+{
+  "name": "@campfire/schema",
+  "version": "0.1.0",
+  "description": "Campfire domain contract: Zod schemas + inferred types (single source of truth for API DTOs, OpenAPI, and MCP tools)",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  }
+}
