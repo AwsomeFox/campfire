@@ -107,6 +107,18 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/proposals/ProposalsPage')),
           },
           {
+            path: '/c/:campaignId/compendium',
+            element: lazyPage(() => import('../features/compendium/CompendiumPage')),
+          },
+          {
+            path: '/c/:campaignId/compendium/:entryId',
+            element: lazyPage(() => import('../features/compendium/ReaderPage')),
+          },
+          {
+            path: '/c/:campaignId/settings',
+            element: lazyPage(() => import('../features/settings/CampaignSettingsPage')),
+          },
+          {
             path: '/admin',
             element: lazyPage(() => import('../features/admin/AdminPage')),
           },

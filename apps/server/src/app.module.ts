@@ -20,6 +20,7 @@ import { AuditModule } from './modules/audit/audit.module';
 import { TokensModule } from './modules/tokens/tokens.module';
 import { ProposalsModule } from './modules/proposals/proposals.module';
 import { ExportModule } from './modules/export/export.module';
+import { RulesModule } from './modules/rules/rules.module';
 import { McpModule } from './modules/mcp/mcp.module';
 
 @Module({
@@ -41,6 +42,7 @@ import { McpModule } from './modules/mcp/mcp.module';
     NotesModule,
     ProposalsModule,
     ExportModule,
+    RulesModule,
     McpModule,
   ],
   providers: [

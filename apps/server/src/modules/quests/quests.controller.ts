@@ -32,7 +32,7 @@ export class CampaignQuestsController {
     @CurrentUser() user: RequestUser,
   ) {
     const role = await this.access.requireMember(user, campaignId);
-    return this.quests.listForCampaignByStatus(campaignId, status, role);
+    return this.quests.listForCampaignByStatusWithObjectives(campaignId, status, role);
   }
 
   @Post()

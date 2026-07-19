@@ -114,4 +114,71 @@ describe('quests (e2e)', () => {
       .send({ body: 'I found a secret door!' });
     expect(inboxRes.status).toBe(201);
   });
+
+  it('GET /campaigns/:id/quests embeds objectives per quest', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Quest with objectives' });
+    const questId = createRes.body.id;
+
+    await request(server).post(`/api/v1/quests/${questId}/objectives`).set(dm).send({ text: 'Objective A' });
+    await request(server).post(`/api/v1/quests/${questId}/objectives`).set(dm).send({ text: 'Objective B' });
+
+    const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(dm);
+    expect(listRes.status).toBe(200);
+    const found = listRes.body.find((q: { id: number }) => q.id === questId);
+    expect(found).toBeDefined();
+    expect(Array.isArray(found.objectives)).toBe(true);
+    expect(found.objectives).toHaveLength(2);
+    expect(found.objectives.map((o: { text: string }) => o.text).sort()).toEqual(['Objective A', 'Objective B']);
+
+    // status filter still works alongside the embed
+    const filteredRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/quests`)
+      .query({ status: 'available' })
+      .set(dm);
+    expect(filteredRes.status).toBe(200);
+    expect(filteredRes.body.every((q: { status: string }) => q.status === 'available')).toBe(true);
+    expect(filteredRes.body.find((q: { id: number }) => q.id === questId).objectives).toHaveLength(2);
+  });
+
+  it('deleting a quest promotes its subquests to top level instead of orphaning them', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const parentRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Parent quest' });
+    const parentId = parentRes.body.id;
+
+    const childRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Child quest', parentId });
+    const childId = childRes.body.id;
+    expect(childRes.body.parentId).toBe(parentId);
+
+    const otherChildRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Other child quest', parentId });
+    const otherChildId = otherChildRes.body.id;
+
+    const deleteRes = await request(server).delete(`/api/v1/quests/${parentId}`).set(dm);
+    expect(deleteRes.status).toBe(200);
+
+    const childGet = await request(server).get(`/api/v1/quests/${childId}`).set(dm);
+    expect(childGet.status).toBe(200);
+    expect(childGet.body.parentId).toBeNull();
+
+    const otherChildGet = await request(server).get(`/api/v1/quests/${otherChildId}`).set(dm);
+    expect(otherChildGet.status).toBe(200);
+    expect(otherChildGet.body.parentId).toBeNull();
+
+    const parentGet = await request(server).get(`/api/v1/quests/${parentId}`).set(dm);
+    expect(parentGet.status).toBe(404);
+  });
 });

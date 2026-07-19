@@ -48,6 +48,32 @@ describe('campaigns (e2e)', () => {
     expect(getAfterDelete.status).toBe(404);
   });
 
+  it('ruleSystem defaults to empty string and passes through create + PATCH', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Rule System Test' });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.ruleSystem).toBe('');
+    const id = createRes.body.id;
+
+    const createWithRuleSystem = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Rule System Test 2', ruleSystem: 'dnd5e-srd' });
+    expect(createWithRuleSystem.status).toBe(201);
+    expect(createWithRuleSystem.body.ruleSystem).toBe('dnd5e-srd');
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${id}`)
+      .set(dm)
+      .send({ ruleSystem: 'dnd5e-srd' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.ruleSystem).toBe('dnd5e-srd');
+
+    const getRes = await request(server).get(`/api/v1/campaigns/${id}`).set(dm);
+    expect(getRes.body.ruleSystem).toBe('dnd5e-srd');
+  });
+
   it('GET /campaigns/:id/summary returns aggregate shape', async () => {
     const server = ctx.app.getHttpServer();
     const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Summary Test' });

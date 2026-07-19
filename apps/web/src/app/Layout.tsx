@@ -207,17 +207,19 @@ export function Layout() {
   const mainNav: NavItem[] = campaignId !== undefined
     ? [
         { key: 'dashboard', label: 'Dashboard', to: `/c/${campaignId}` },
-        { key: 'quests', label: 'Quests', to: `/c/${campaignId}#quests` },
+        { key: 'quests', label: 'Quests', to: `/c/${campaignId}/quests` },
         { key: 'world', label: 'World', soon: true },
         { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
         { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
-        { key: 'compendium', label: 'Compendium', soon: true },
+        { key: 'compendium', label: 'Compendium', to: `/c/${campaignId}/compendium` },
         { key: 'notes', label: 'My Notes', to: `/c/${campaignId}/notes` },
       ]
     : [];
 
   const dmNav: NavItem[] = campaignId !== undefined && isDm
     ? [
+        { key: 'settings', label: 'Settings', to: `/c/${campaignId}/settings` },
+        { key: 'settings', label: 'Settings', to: `/c/${campaignId}/settings` },
         { key: 'inbox', label: 'Scribe inbox', to: `/c/${campaignId}/inbox` },
         { key: 'proposals', label: 'Proposals', to: `/c/${campaignId}/proposals` },
         { key: 'members', label: 'Members', to: `/c/${campaignId}/members` },
