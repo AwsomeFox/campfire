@@ -52,3 +52,17 @@ api-docs:
 # Serve the design mockups on :8378
 design:
     cd design && python3 -m http.server 8378
+
+# Build the production single-image (server + built web SPA, single container)
+docker-build:
+    docker build -t campfire:local .
+
+# Run the production image locally on :8081 (host) -> :8080 (container), so it
+# doesn't collide with the :8080 dev server. Data persists in the named volume
+# `campfire-data` across restarts; `docker volume rm campfire-data` to reset it.
+docker-run:
+    docker run --rm -it \
+        --name campfire-local \
+        -p 8081:8080 \
+        -v campfire-data:/data \
+        campfire:local
