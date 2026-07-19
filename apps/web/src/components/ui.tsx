@@ -44,7 +44,7 @@ export function statusVariant(status: string): ChipVariant {
 export function Btn({ ghost, danger, className = '', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { ghost?: boolean; danger?: boolean }) {
   return (
     <button
-      className={`cf-btn ${ghost ? 'cf-btn-ghost' : ''} ${danger ? '!text-rose-400 !border-rose-500/40' : ''} ${className}`}
+      className={`cf-btn ${ghost ? 'cf-btn-ghost' : ''} ${danger ? '!text-rose-400 !border-rose-400/40' : ''} ${className}`}
       {...rest}
     />
   );
@@ -68,12 +68,12 @@ export function HpBar({ current, max }: { current: number; max: number }) {
   );
 }
 
-/** Amber DM-only panel. Render ONLY when the effective role is dm and content is non-empty. */
+/** Accent-tinted DM-only panel. Render ONLY when the effective role is dm and content is non-empty. */
 export function DmPanel({ children }: { children: ReactNode }) {
   return (
     <div className="cf-dm-panel p-4 space-y-1.5">
-      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">🔒 DM only</p>
-      <div className="text-sm text-slate-300">{children}</div>
+      <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-accent)]">🔒 DM only</p>
+      <div className="text-sm text-[var(--color-neutral-300)]">{children}</div>
     </div>
   );
 }
@@ -82,8 +82,8 @@ export function EmptyState({ icon = '🕯️', title, hint }: { icon?: string; t
   return (
     <div className="cf-inset border-dashed p-6 text-center space-y-1">
       <p className="text-2xl">{icon}</p>
-      <p className="text-sm text-slate-400 font-semibold">{title}</p>
-      {hint && <p className="text-xs text-slate-600">{hint}</p>}
+      <p className="text-sm font-semibold text-[var(--color-neutral-300)]">{title}</p>
+      {hint && <p className="text-xs text-[var(--color-neutral-600)]">{hint}</p>}
     </div>
   );
 }
@@ -92,7 +92,11 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
   return (
     <div className="space-y-2">
       {Array.from({ length: lines }, (_, i) => (
-        <div key={i} className="h-3 rounded bg-slate-700/60 animate-pulse" style={{ width: `${85 - i * 15}%` }} />
+        <div
+          key={i}
+          className="h-3 rounded animate-pulse bg-[var(--color-neutral-800)]"
+          style={{ width: `${85 - i * 15}%` }}
+        />
       ))}
     </div>
   );
@@ -100,7 +104,7 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
 
 export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div className="cf-inset p-3 text-sm text-slate-400">
+    <div className="cf-inset p-3 text-sm text-[var(--color-neutral-400)]">
       {message}{' '}
       {onRetry && (
         <button onClick={onRetry} className="font-semibold text-[var(--cf-accent)] hover:underline">

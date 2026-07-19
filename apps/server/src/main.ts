@@ -19,7 +19,7 @@ async function bootstrap() {
   });
 
   app.setGlobalPrefix('api/v1', {
-    exclude: ['healthz', 'api/docs', 'api/docs-json', 'api/openapi.json'],
+    exclude: ['healthz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
   });
 
   const config = new DocumentBuilder()

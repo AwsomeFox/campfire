@@ -1,7 +1,9 @@
 /**
- * Username + password login. Per design/01-login.html aesthetic, adapted for
- * local-auth (the mockup shows SSO-only; SSO is not yet built, so this form
- * covers local sign-in with a note that SSO is coming).
+ * Sign-in screen. Mirrors design/claude-design/Campfire.dc.html's "Login"
+ * screen: flame mark card on a radial-gradient ground, SSO-first when OIDC
+ * is configured (design shows Authentik-first), local username/password
+ * form always available — primary when OIDC is off, secondary/collapsible
+ * when it's on.
  */
 import { useState, type FormEvent } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
@@ -9,6 +11,80 @@ import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+
+function FlameMark() {
+  return (
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
+        stroke="var(--color-accent)"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M5 21l14-3M19 21L5 18"
+        stroke="var(--color-neutral-600)"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function LocalLoginForm({
+  submitting,
+  onSubmit,
+  username,
+  setUsername,
+  password,
+  setPassword,
+  error,
+  primary,
+}: {
+  submitting: boolean;
+  onSubmit: (e: FormEvent) => void;
+  username: string;
+  setUsername: (v: string) => void;
+  password: string;
+  setPassword: (v: string) => void;
+  error: string | null;
+  primary: boolean;
+}) {
+  return (
+    <form onSubmit={onSubmit} className="flex flex-col gap-3">
+      <div className="field">
+        <label htmlFor="username">Username</label>
+        <input
+          id="username"
+          className="input"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          autoComplete="username"
+          autoFocus={primary}
+          required
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="password">Password</label>
+        <input
+          id="password"
+          type="password"
+          className="input"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="current-password"
+          required
+        />
+      </div>
+
+      {error && <p className="text-sm text-rose-400">{error}</p>}
+
+      <button type="submit" className={`btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-block`} style={{ minHeight: 44 }} disabled={submitting}>
+        {submitting ? 'Signing in…' : 'Sign in'}
+      </button>
+    </form>
+  );
+}
 
 export function LoginPage() {
   const { status, loading } = useAuthStatus();
@@ -19,6 +95,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [showLocalForm, setShowLocalForm] = useState(false);
 
   if (!loading && status?.setupRequired) {
     return <Navigate to="/setup" replace />;
@@ -45,69 +122,105 @@ export function LoginPage() {
     }
   }
 
-  return (
-    <div className="min-h-screen flex items-center justify-center p-6 relative">
-      <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_top,rgba(245,158,11,.08),transparent_55%),radial-gradient(ellipse_at_bottom,rgba(56,189,248,.05),transparent_55%)] pointer-events-none" />
-      <div className="fixed inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px] opacity-30 pointer-events-none" />
+  const oidcEnabled = Boolean(status?.oidcEnabled);
+  const installHint = typeof window !== 'undefined'
+    && !window.matchMedia('(display-mode: standalone)').matches
+    && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-      <main className="relative w-full max-w-sm space-y-6">
-        <div className="text-center space-y-2">
-          <div className="text-5xl">🔥</div>
-          <h1 className="text-3xl font-extrabold text-white tracking-tight">Campfire</h1>
-          <p className="text-sm text-slate-400">The party's shared memory.</p>
+  return (
+    <div
+      className="min-h-screen grid place-items-center p-6"
+      style={{
+        background:
+          'radial-gradient(80% 60% at 50% 0%, var(--color-neutral-900) 0%, var(--color-bg) 70%)',
+      }}
+    >
+      <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
+        <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+          <FlameMark />
+          <div>
+            <h3 style={{ margin: 0 }}>Campfire</h3>
+            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
+              Self-hosted campaign server
+            </p>
+          </div>
+
+          {oidcEnabled ? (
+            <>
+              <a href="/api/v1/auth/oidc/login" className="btn btn-primary btn-block" style={{ minHeight: 44 }}>
+                Sign in with Authentik
+              </a>
+              <p className="text-muted" style={{ margin: '2px 0 0', fontSize: 11 }}>
+                One account for players, DM and viewers.
+                <br />
+                Roles come from your campaign groups.
+              </p>
+              {showLocalForm ? (
+                <div className="w-full flex flex-col gap-3" style={{ marginTop: 6 }}>
+                  <div className="hr" style={{ margin: 0 }} />
+                  <LocalLoginForm
+                    submitting={submitting}
+                    onSubmit={onSubmit}
+                    username={username}
+                    setUsername={setUsername}
+                    password={password}
+                    setPassword={setPassword}
+                    error={error}
+                    primary={false}
+                  />
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12.5, marginTop: 2 }}
+                  onClick={() => setShowLocalForm(true)}
+                >
+                  Sign in with username &amp; password instead
+                </button>
+              )}
+            </>
+          ) : (
+            <div className="w-full">
+              <LocalLoginForm
+                submitting={submitting}
+                onSubmit={onSubmit}
+                username={username}
+                setUsername={setUsername}
+                password={password}
+                setPassword={setPassword}
+                error={error}
+                primary
+              />
+            </div>
+          )}
         </div>
 
-        <form onSubmit={onSubmit} className="cf-card p-6 space-y-4">
-          <div className="space-y-1">
-            <label className="text-xs text-slate-400 font-semibold" htmlFor="username">
-              Username
-            </label>
-            <input
-              id="username"
-              className="cf-input"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username"
-              autoFocus
-              required
-            />
+        {installHint && (
+          <div
+            className="flex items-center gap-2.5 text-muted"
+            style={{
+              padding: '10px 14px',
+              border: '1px solid var(--color-divider)',
+              borderRadius: 'var(--radius-md)',
+              fontSize: 12,
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="shrink-0">
+              <path d="M12 15V4m0 0L8 8m4-4l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M5 14v5h14v-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span>
+              Installs like an app — open the browser menu and choose{' '}
+              <span style={{ color: 'var(--color-text)' }}>Add to Home Screen</span>.
+            </span>
           </div>
-          <div className="space-y-1">
-            <label className="text-xs text-slate-400 font-semibold" htmlFor="password">
-              Password
-            </label>
-            <input
-              id="password"
-              type="password"
-              className="cf-input"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              required
-            />
-          </div>
+        )}
 
-          {error && <p className="text-sm text-rose-400">{error}</p>}
-
-          <button type="submit" className="cf-btn w-full text-base" disabled={submitting}>
-            {submitting ? 'Signing in…' : 'Sign in'}
-          </button>
-
-          {status?.oidcEnabled && (
-            <a href="/api/v1/auth/oidc/login" className="cf-btn cf-btn-ghost w-full text-base">
-              Sign in with SSO
-            </a>
-          )}
-
-          <p className="text-[11px] text-slate-500 text-center leading-relaxed">
-            One account for the whole table — SSO (Authentik, Google &amp; Discord) is coming soon.
-          </p>
-        </form>
-
-        <p className="text-center text-[11px] text-slate-600">
-          Self-hosted with ❤️ · <span className="text-slate-500">campfire v0.1.0</span>
+        <p className="text-center text-muted" style={{ fontSize: 11 }}>
+          Self-hosted with ❤️ · campfire v0.1.0
         </p>
-      </main>
+      </div>
     </div>
   );
 }
