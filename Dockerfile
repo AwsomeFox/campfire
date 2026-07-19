@@ -11,7 +11,7 @@
 # prebuilt binary matches the image's libc/arch. Those tools are only ever installed in
 # the `deps`/`prod-deps` build stages — the final `runtime` stage stays slim.
 
-ARG NODE_IMAGE=node:22-slim
+ARG NODE_IMAGE=node:24-slim
 
 # ---------------------------------------------------------------------------
 # deps: full install (incl. devDependencies) used to build all three workspaces.
