@@ -9,8 +9,12 @@ default:
 setup:
     npm install
 
-# Run backend (:8080) + frontend (:5173) together, hot-reload
+# Run backend (:8080) + frontend (:5173) together, hot-reload.
+# Kills port squatters first — a half-dead watcher on 8080 serves stale code
+# while migrations silently don't run (learned the hard way).
 dev:
+    -lsof -ti :8080 | xargs kill -9 2>/dev/null
+    -lsof -ti :5173 | xargs kill -9 2>/dev/null
     npm run dev
 
 # Backend only
