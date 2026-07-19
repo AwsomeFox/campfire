@@ -33,13 +33,14 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **Single-image deploy** — multi-arch Docker image, one data volume, same-origin SPA serving, Traefik/Authentik ready
 - ✅ **Preferences** — per-user accent colour
 
-## In progress 🔨
+## AI operability ✅
 
-Landing in the current development wave:
+An AI agent can run an entire campaign over MCP alone — verified end-to-end:
 
-- 🔨 **Full MCP parity** — expanding the tool set so an AI can run a whole campaign over MCP alone (combat damage, character creation, campaign lifecycle, members, rule packs, deletes, read-back) plus structured errors and richer tool descriptions
-- 🔨 **Headless agent auth** — a credential→token endpoint and admin "mint a token for a user", so agents bootstrap without a browser
-- 🔨 **OpenAPI for agents** — response schemas across every endpoint so the REST API self-describes
+- ✅ **Full MCP parity — 64 tools** covering campaign lifecycle, characters, the whole combat loop (including dealing damage to combatants), members, rule packs, deletes, and read-back
+- ✅ **Strict schemas & structured errors** — unknown args are rejected with named keys; errors are machine-parseable `{status, code, message}` JSON
+- ✅ **Headless agent auth** — `POST /auth/token` (credentials → PAT) and an admin "mint a token for a user", so agents and whole tables bootstrap without a browser
+- ✅ **Self-describing REST** — OpenAPI annotations across every controller
 
 ## Admin ⁄ DM separation 🔨⬜
 
