@@ -255,6 +255,43 @@ export const Me = z.object({
 });
 export type Me = z.infer<typeof Me>;
 
+// ---------- API tokens (PATs — REST + MCP auth) ----------
+export const TokenScope = Role; // token caps the effective role; real role = min(scope, membership role)
+
+export const ApiToken = z.object({
+  id: Id,
+  userId: Id,
+  name: z.string().min(1).max(80),
+  scope: TokenScope,
+  campaignId: Id.nullable().default(null), // null = all campaigns the owner can access
+  tokenPrefix: z.string().max(12), // display only, e.g. cf_pat_9f2a
+  lastUsedAt: IsoDate.nullable().default(null),
+  ...timestamps,
+}); // raw token is returned ONCE at creation, stored hashed
+export type ApiToken = z.infer<typeof ApiToken>;
+export const ApiTokenCreate = z.object({ name: z.string().min(1).max(80), scope: TokenScope, campaignId: Id.nullable().optional() });
+export const ApiTokenCreated = z.object({ token: z.string(), apiToken: ApiToken });
+
+// ---------- proposals (AI/collab writes pending DM approval) ----------
+export const ProposalAction = z.enum(['create', 'update']);
+export const ProposalStatus = z.enum(['pending', 'approved', 'rejected']);
+
+export const Proposal = z.object({
+  id: Id,
+  campaignId: Id,
+  entityType: EntityType,
+  entityId: Id.nullable().default(null), // null for creates
+  action: ProposalAction,
+  payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
+  proposer: z.string().max(200), // user id or token name
+  status: ProposalStatus.default('pending'),
+  resolvedBy: z.string().max(200).default(''),
+  note: z.string().max(1000).default(''),
+  ...timestamps,
+});
+export type Proposal = z.infer<typeof Proposal>;
+export const ProposalResolve = z.object({ note: z.string().max(1000).optional() });
+
 // ---------- audit ----------
 export const AuditEntry = z.object({
   id: Id,
