@@ -8,6 +8,7 @@ import { Link } from 'react-router-dom';
 import type { CampaignSummary, QuestObjective, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { EmptyState } from '../../components/ui';
+import { Toggle } from '../../components/Toggle';
 
 type QuestWithObjectives = CampaignSummary['quests'][number];
 
@@ -103,27 +104,13 @@ export function QuestsCard({
           const done = localObjectives[obj.id] ?? obj.done;
           return (
             <div key={obj.id} style={{ display: 'flex', alignItems: 'center', gap: 9, paddingLeft: 27, minHeight: 26 }}>
-              <span
-                onClick={() => toggleObjective(obj)}
-                role={canTick ? 'button' : undefined}
-                aria-disabled={!canTick || pending[obj.id]}
-                style={{
-                  width: 15,
-                  height: 15,
-                  flex: 'none',
-                  borderRadius: 4,
-                  border: '1.5px solid var(--color-neutral-600)',
-                  display: 'grid',
-                  placeItems: 'center',
-                  fontSize: 10,
-                  color: 'var(--color-accent-100)',
-                  cursor: canTick ? 'pointer' : 'default',
-                  background: done ? 'var(--color-accent)' : 'transparent',
-                  borderColor: done ? 'var(--color-accent)' : 'var(--color-neutral-600)',
-                }}
-              >
-                {done ? '✓' : ''}
-              </span>
+              <Toggle
+                checked={done}
+                onChange={() => toggleObjective(obj)}
+                disabled={!canTick || pending[obj.id]}
+                label={done ? `Mark "${obj.text}" not done` : `Mark "${obj.text}" done`}
+                size={15}
+              />
               <span
                 style={{
                   fontSize: 13,

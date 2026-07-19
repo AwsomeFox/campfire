@@ -11,13 +11,24 @@ Design goals:
 - **AI-operable from day 1** — the same service layer is exposed as a REST API (OpenAPI) and an MCP server, so an AI assistant can maintain the campaign; AI writes can be routed through a DM-approved proposal queue
 - **Server-enforced secrecy** — DM-only fields and private notes are stripped in the API layer, never hidden client-side
 
-> Status: **early development.** The API core is functional; the real UI is in design (see [`design/`](design/) for the approved mockups — the current web app is a placeholder).
+> **Status: functional full-stack app**, still evolving. Both the API and the web
+> frontend are implemented end to end: local auth (setup/login/logout) plus
+> OIDC/SSO, campaigns with per-campaign membership roles (`dm`/`player`/`viewer`),
+> quests with objectives and subquests, NPCs, locations, characters, session
+> recaps, notes + the inbox, an encounter/combat tracker with initiative and dice
+> rolling, a compendium (rule packs imported from Open5e, searchable), a DM-approval
+> proposal queue for AI-suggested writes, and campaign export (JSON/Markdown zip).
+> The same service layer is exposed as a REST API (OpenAPI/Swagger) **and** an MCP
+> server with 36 tools, so any MCP-capable client (e.g. Claude, via `claude mcp add`)
+> can read and write a campaign directly — that's the "AI scribe" today: it works
+> through any MCP client already, there's no separate built-in automation/scheduler
+> yet. See [`design/`](design/) for the original approved mockups the UI was built from.
 
 ## Project layout
 
 ```
-apps/server      NestJS API — REST /api/v1, OpenAPI, SQLite via Drizzle
-apps/web         React (Vite) frontend — placeholder until design lands
+apps/server      NestJS API — REST /api/v1, OpenAPI, SQLite via Drizzle, MCP server
+apps/web         React (Vite) frontend — full app (see Status above)
 packages/schema  @campfire/schema — Zod domain contract (single source of truth)
 design/          Approved HTML design mockups + design tokens
 ```
@@ -50,13 +61,24 @@ just dev       # backend :8080 + frontend :5173, hot reload
 
 ### Dev auth
 
-Real OIDC isn't wired yet. In development the server trusts two headers (defaults: `dm` / `dev-user`):
+Real auth (local username/password, and optionally OIDC/SSO) is fully wired —
+see `apps/server/README.md`'s "Authentication & authorization" section. For quick
+local API poking without going through `/auth/setup`/`/auth/login`, the server
+also accepts two headers, but **only when the server is started with `DEV_AUTH=1`
+in its environment** (unset/`0` by default in `just dev`, and never set in a
+production deployment):
 
 ```bash
+DEV_AUTH=1 npm run dev -w apps/server   # or: DEV_AUTH=1 just dev-server
 curl -H 'x-dev-role: player' -H 'x-dev-user: alice' localhost:8080/api/v1/campaigns
 ```
 
-Role semantics: `dm` = full write incl. `dmSecret` fields · `player` = read canon, tick objectives, own character + own notes · `viewer` = read-only + inbox quick-capture.
+Without `DEV_AUTH=1` set on the server process, those headers are ignored and an
+unauthenticated request gets a normal 401 — this is also how every e2e test
+boots the app (`test/test-app.ts`'s `createTestApp()` sets it before `AppModule`
+compiles).
+
+Role semantics: `dm` = full write incl. `dmSecret` fields · `player` = read canon, tick objectives, own character + own notes · `viewer` = read-only + inbox quick-capture. Under real auth, campaign role is per-campaign membership (`GET/POST/PATCH/DELETE /campaigns/:id/members`), not a global header.
 
 ## Architecture notes
 
@@ -66,7 +88,7 @@ Role semantics: `dm` = full write incl. `dmSecret` fields · `player` = read can
 
 ## Roadmap
 
-MVP (now): entities + notes + OpenAPI → OIDC/roles → MCP server → media & maps → SRD rules search → D&D Beyond sync → AI scribe with proposal queue → AI co-DM. Full plan lives in the repo wiki.
+Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (36 tools), media & maps (attachments), SRD rules search (compendium), encounter/combat tracker, AI scribe via any MCP client with a DM-approval proposal queue. Ahead: D&D Beyond sync, built-in scheduled/automated AI scribe runs (today it's client-driven — connect an MCP client and ask it to act), AI co-DM. Full plan lives in the repo wiki.
 
 ## License
 

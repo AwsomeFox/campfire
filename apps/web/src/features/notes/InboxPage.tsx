@@ -9,7 +9,7 @@
  * so the "resolved" section is omitted — only open items are shown.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import type { Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -92,6 +92,10 @@ export default function InboxPage() {
       <h1 className="text-xl font-extrabold text-white m-0">Scribe inbox</h1>
       <p className="text-muted text-xs m-0">
         Raw notes from the table. Resolve each one into the entity it belongs to — or let Claude sweep them for you.
+      </p>
+      <p className="text-muted text-xs m-0">
+        &quot;Claude&quot; here means any MCP-capable assistant (like Claude) connected with an API token — set one
+        up in <Link to="/tokens" className="text-purple-400 hover:underline">API tokens</Link>.
       </p>
 
       {error && <ErrorNote message={error} onRetry={load} />}

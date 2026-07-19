@@ -491,9 +491,23 @@ function ConditionsRow({
         <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
           {cond}
           {canEdit && (
-            <span onClick={() => removeCondition(cond)} style={{ cursor: 'pointer', opacity: 0.7 }}>
+            <button
+              type="button"
+              aria-label={`Remove ${cond}`}
+              onClick={() => removeCondition(cond)}
+              disabled={busy}
+              style={{
+                cursor: busy ? 'default' : 'pointer',
+                opacity: 0.7,
+                background: 'transparent',
+                border: 0,
+                padding: 0,
+                font: 'inherit',
+                color: 'inherit',
+              }}
+            >
               ✕
-            </span>
+            </button>
           )}
         </span>
       ))}

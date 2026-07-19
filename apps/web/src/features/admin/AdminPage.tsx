@@ -9,6 +9,8 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { TokensCard } from './TokensCard';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { RulePacksCard } from './RulePacksCard';
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
@@ -79,6 +81,7 @@ export default function AdminPage() {
 
       <UsersCard users={users ?? []} onChange={load} />
       <SettingsCard settings={settings} onChange={load} />
+      <RulePacksCard />
       <TokensCard />
       <BackupCard />
     </div>
@@ -269,6 +272,8 @@ function UserRow({
   const [serverRole, setServerRole] = useState<ServerRole>(user.serverRole);
   const [disabled, setDisabled] = useState(user.disabled);
   const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   function startEdit() {
     setDisplayName(user.displayName);
@@ -296,13 +301,16 @@ function UserRow({
   }
 
   async function remove() {
-    if (!confirm(`Delete user "${user.username}"? This cannot be undone.`)) return;
+    setRemoving(true);
     onError(null);
     try {
       await api.delete(`${API}/users/${user.id}`);
+      setConfirmingDelete(false);
       onChange();
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't delete user.");
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -330,9 +338,19 @@ function UserRow({
           <button type="button" className="text-[11px] text-slate-500 hover:text-white mr-3" onClick={onReset}>
             reset password
           </button>
-          <button type="button" className="text-[11px] text-rose-500/80 hover:text-rose-400" onClick={remove}>
+          <button type="button" className="text-[11px] text-rose-500/80 hover:text-rose-400" onClick={() => setConfirmingDelete(true)}>
             delete
           </button>
+          {confirmingDelete && (
+            <ConfirmDialog
+              title={`Delete user "${user.username}"?`}
+              body="This cannot be undone."
+              confirmLabel={removing ? 'Deleting…' : 'Delete user'}
+              busy={removing}
+              onConfirm={remove}
+              onCancel={() => setConfirmingDelete(false)}
+            />
+          )}
         </td>
       </tr>
       {editing && (

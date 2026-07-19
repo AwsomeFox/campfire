@@ -71,6 +71,25 @@ describe('login/logout + wrong password (e2e)', () => {
     expect(res.status).toBe(401);
   });
 
+  it('oversized password (>200 chars) is rejected 400 by zod, before scrypt ever runs', async () => {
+    // Regression test for punch list item 5: LoginRequest.password previously had no .max(),
+    // so an unauthenticated caller could force the server to run scrypt (CPU-heavy) against
+    // an arbitrarily large password before verifyPassword() got a chance to reject it.
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post('/api/v1/auth/login')
+      .send({ username: 'admin', password: 'x'.repeat(300) });
+    expect(res.status).toBe(400);
+  });
+
+  it('password at the 200-char boundary is still a normal (wrong-password) 401, not a 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post('/api/v1/auth/login')
+      .send({ username: 'admin', password: 'y'.repeat(200) });
+    expect(res.status).toBe(401);
+  });
+
   it('correct login -> cookie -> me -> logout -> me 401', async () => {
     const server = ctx.app.getHttpServer();
     const agent = request.agent(server);

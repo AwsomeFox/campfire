@@ -13,6 +13,7 @@ import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -49,6 +50,7 @@ export default function NpcPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -117,7 +119,6 @@ export default function NpcPage() {
   }
 
   async function remove() {
-    if (!confirm(`Delete ${npc?.name}? This cannot be undone.`)) return;
     setDeleting(true);
     try {
       await api.delete(`${API}/npcs/${id}`);
@@ -293,7 +294,7 @@ export default function NpcPage() {
             <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
           </div>
           <div className="flex items-center justify-between gap-2">
-            <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={remove}>
+            <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
               {deleting ? 'Deleting…' : 'Delete NPC'}
             </Btn>
             <div className="flex gap-2">
@@ -306,6 +307,16 @@ export default function NpcPage() {
             </div>
           </div>
         </Card>
+      )}
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={`Delete ${npc?.name}?`}
+          body="This cannot be undone."
+          confirmLabel={deleting ? 'Deleting…' : 'Delete NPC'}
+          busy={deleting}
+          onConfirm={remove}
+          onCancel={() => setConfirmingDelete(false)}
+        />
       )}
     </div>
   );

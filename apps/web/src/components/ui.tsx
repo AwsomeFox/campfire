@@ -2,7 +2,7 @@
  * Campfire UI primitives — mirror the design package (design/tokens.html).
  * Feature screens compose these; do not restyle them locally.
  */
-import type { ReactNode, ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes } from 'react';
+import { forwardRef, type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <section className={`cf-card p-5 ${className}`}>{children}</section>;
@@ -41,14 +41,17 @@ export function statusVariant(status: string): ChipVariant {
   }
 }
 
-export function Btn({ ghost, danger, className = '', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { ghost?: boolean; danger?: boolean }) {
-  return (
-    <button
-      className={`cf-btn ${ghost ? 'cf-btn-ghost' : ''} ${danger ? '!text-rose-400 !border-rose-400/40' : ''} ${className}`}
-      {...rest}
-    />
-  );
-}
+export const Btn = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLButtonElement> & { ghost?: boolean; danger?: boolean }>(
+  function Btn({ ghost, danger, className = '', ...rest }, ref) {
+    return (
+      <button
+        ref={ref}
+        className={`cf-btn ${ghost ? 'cf-btn-ghost' : ''} ${danger ? '!text-rose-400 !border-rose-400/40' : ''} ${className}`}
+        {...rest}
+      />
+    );
+  },
+);
 
 export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input className="cf-input" {...props} />;

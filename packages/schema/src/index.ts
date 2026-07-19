@@ -268,7 +268,10 @@ export type User = z.infer<typeof User>;
 
 export const Password = z.string().min(8).max(200);
 export const SetupRequest = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional() });
-export const LoginRequest = z.object({ username: z.string().min(1), password: z.string().min(1) });
+// password capped at 200 (matches `Password` above) — an unbounded string on this
+// UNauthenticated path would let a caller force the server to run scrypt (CPU-heavy)
+// against an arbitrarily large input before verifyPassword() even gets to reject it.
+export const LoginRequest = z.object({ username: z.string().min(1), password: z.string().min(1).max(200) });
 export const UserCreate = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional(), serverRole: ServerRole.optional() });
 export const UserUpdate = z.object({ displayName: z.string().max(120).optional(), serverRole: ServerRole.optional(), disabled: z.boolean().optional() });
 export const PasswordChange = z.object({ currentPassword: z.string().optional(), newPassword: Password }); // current required for self-change; admin reset omits

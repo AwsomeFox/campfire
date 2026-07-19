@@ -268,6 +268,10 @@ function RuleSystemCard({
         Powers the compendium, character math, statblocks and AI rules lookups. Packs install server-wide from open
         sources; switching systems re-validates every sheet.
       </p>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Supported today: D&amp;D 5e SRD via Open5e. More systems are planned — Pathfinder needs a manual pack,
+        coming later.
+      </p>
       {packs && packs.length > 0 && (
         <div className="field" style={{ maxWidth: 320 }}>
           <label htmlFor="settings-rulesystem">Change rule system</label>
