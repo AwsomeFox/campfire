@@ -126,6 +126,10 @@ export const router = createBrowserRouter([
             path: '/tokens',
             element: lazyPage(() => import('../features/admin/TokensPage')),
           },
+          {
+            path: '/preferences',
+            element: lazyPage(() => import('../features/preferences/PreferencesPage')),
+          },
         ],
       },
     ],

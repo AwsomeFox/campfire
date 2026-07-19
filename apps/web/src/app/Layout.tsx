@@ -219,7 +219,6 @@ export function Layout() {
   const dmNav: NavItem[] = campaignId !== undefined && isDm
     ? [
         { key: 'settings', label: 'Settings', to: `/c/${campaignId}/settings` },
-        { key: 'settings', label: 'Settings', to: `/c/${campaignId}/settings` },
         { key: 'inbox', label: 'Scribe inbox', to: `/c/${campaignId}/inbox` },
         { key: 'proposals', label: 'Proposals', to: `/c/${campaignId}/proposals` },
         { key: 'members', label: 'Members', to: `/c/${campaignId}/members` },
@@ -297,6 +296,11 @@ export function Layout() {
           <div className="flex items-center justify-between px-2 text-[11px] text-muted">
             <span className="truncate">{displayName}</span>
             {roleLabel && <span className="tag tag-accent" style={{ fontSize: 9.5 }}>{roleLabel}</span>}
+          </div>
+          <div className="flex items-center gap-1.5 px-1">
+            <Link to="/preferences" className="btn btn-ghost flex-1 justify-start" style={{ fontSize: 12 }}>
+              Preferences
+            </Link>
           </div>
           <div className="flex items-center gap-1.5 px-1">
             <button
@@ -447,6 +451,7 @@ export function Layout() {
             )}
             <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={() => setMoreOpen(false)} />
             <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={() => setMoreOpen(false)} />
+            <MoreSheetItem item={{ key: 'preferences', label: 'Preferences', to: '/preferences' }} onNavigate={() => setMoreOpen(false)} />
             <button
               className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
               style={{ fontSize: 14.5, color: 'var(--color-text)' }}
@@ -523,6 +528,9 @@ function UserMenu({
       )}
       <Link to="/tokens" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
         API tokens
+      </Link>
+      <Link to="/preferences" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+        Preferences
       </Link>
       <button
         className="w-full text-left px-2 py-1.5 rounded-md"

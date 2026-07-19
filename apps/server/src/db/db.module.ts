@@ -101,6 +101,25 @@ function migrateCampaignsTableForRuleSystem(sqlite: Database.Database): void {
   sqlite.exec("ALTER TABLE campaigns ADD COLUMN rule_system TEXT NOT NULL DEFAULT ''");
 }
 
+/**
+ * Migration for DBs created before per-user accent colors: `users.accent_color`
+ * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same as
+ * migrateCampaignsTableForRuleSystem above. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateUsersTableForAccentColor(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasAccentColor = columns.some((c) => c.name === 'accent_color');
+  if (hasAccentColor) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN accent_color TEXT');
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -115,6 +134,7 @@ export function createDb(): DrizzleDb {
   sqlite.pragma('journal_mode = WAL');
   migrateUsersTableForOidc(sqlite);
   migrateCampaignsTableForRuleSystem(sqlite);
+  migrateUsersTableForAccentColor(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.

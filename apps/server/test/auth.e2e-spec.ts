@@ -221,3 +221,68 @@ describe('me/password (e2e)', () => {
     expect(newLogin.status).toBe(201);
   });
 });
+
+describe('me/preferences (e2e)', () => {
+  let ctx: TestAppContext;
+  let agent: ReturnType<typeof request.agent>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    agent = request.agent(ctx.app.getHttpServer());
+    await agent.post('/api/v1/auth/setup').send({ username: 'prefsuser', password: 'original-password-1' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('accentColor defaults to null on /me', async () => {
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.accentColor).toBeNull();
+  });
+
+  it('setting a valid accent color -> /me reflects it', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ accentColor: '#e0a458' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.accentColor).toBe('#e0a458');
+
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.accentColor).toBe('#e0a458');
+  });
+
+  it('invalid hex -> 400', async () => {
+    const res = await agent.patch('/api/v1/me/preferences').send({ accentColor: 'not-a-color' });
+    expect(res.status).toBe(400);
+  });
+
+  it('invalid hex (missing #) -> 400', async () => {
+    const res = await agent.patch('/api/v1/me/preferences').send({ accentColor: 'e0a458e0' });
+    expect(res.status).toBe(400);
+  });
+
+  it('displayName change is reflected on /me', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ displayName: 'Prefs User' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.displayName).toBe('Prefs User');
+
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.displayName).toBe('Prefs User');
+    // Previously-set accent color is untouched by an unrelated displayName-only update.
+    expect(meRes.body.user.accentColor).toBe('#e0a458');
+  });
+
+  it('setting accentColor back to null clears the override', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ accentColor: null });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.accentColor).toBeNull();
+  });
+
+  it('unauthenticated PATCH /me/preferences -> 401', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch('/api/v1/me/preferences').send({ displayName: 'Nope' });
+    expect(res.status).toBe(401);
+  });
+});

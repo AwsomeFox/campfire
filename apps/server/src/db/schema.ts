@@ -145,6 +145,9 @@ export const users = sqliteTable('users', {
   // Not compound-keyed on issuer: this app supports a single configured OIDC
   // issuer at a time (env-gated), so `sub` alone is enough to dedupe.
   oidcSub: text('oidc_sub'),
+  // Personal accent color override (#rrggbb), or null to follow the server default.
+  // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  accentColor: text('accent_color'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

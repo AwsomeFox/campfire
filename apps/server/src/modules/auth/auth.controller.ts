@@ -1,14 +1,16 @@
-import { BadRequestException, Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, Patch, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
-import type { AuthStatus, Me } from '@campfire/schema';
+import type { AuthStatus, Me, User } from '@campfire/schema';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { AuthService } from './auth.service';
 import { OidcService } from './oidc.service';
 import { SettingsService } from '../settings/settings.service';
+import { UsersService } from '../users/users.service';
 import { SetupRequestDto, LoginRequestDto, PasswordChangeDto } from './auth.dto';
+import { PreferencesUpdateDto } from '../users/users.dto';
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, VERSION } from './auth.constants';
 
 function cookieOptions() {
@@ -75,7 +77,10 @@ export class AuthController {
 @ApiTags('auth')
 @Controller('me')
 export class MeController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly usersService: UsersService,
+  ) {}
 
   @Get()
   async me(@CurrentUser() user: RequestUser): Promise<Me> {
@@ -88,6 +93,7 @@ export class MeController {
           displayName: user.name,
           serverRole: user.serverRole,
           disabled: false,
+          accentColor: null,
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },
@@ -113,5 +119,13 @@ export class MeController {
     const token = req.cookies?.[SESSION_COOKIE_NAME] as string | undefined;
     const currentTokenHash = token ? await this.auth.tokenHashFor(token) : '';
     await this.auth.changeOwnPassword(Number(user.id), body.currentPassword, body.newPassword, currentTokenHash);
+  }
+
+  @Patch('preferences')
+  async updatePreferences(@Body() body: PreferencesUpdateDto, @CurrentUser() user: RequestUser): Promise<User> {
+    if (user.id.startsWith('dev:')) {
+      throw new UnauthorizedException('Preferences are not available for dev-auth users');
+    }
+    return this.usersService.updatePreferences(Number(user.id), body);
   }
 }
