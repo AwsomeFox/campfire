@@ -1,4 +1,52 @@
-# Combat
+# Combat & the run-session screen
 
-!!! note "Documentation in progress"
-    This guide is being written. In the meantime, see the [Roadmap & status](../reference/roadmap.md) for what the feature does today.
+Campfire's combat tracker turns a fight into a shared, live screen: initiative
+order, whose turn it is, HP, and conditions — with damage syncing back to character
+sheets when it's over.
+
+## Create the encounter
+
+From a campaign, open **Encounters → New encounter** and name it. The moment it's
+created, **every party character is added as a combatant automatically**, with
+initiative modifiers derived from their DEX. The encounter starts in the
+**Preparing** state, so you can set it up before the table needs it.
+
+## Add monsters (and anyone else)
+
+On the run-session screen, **Add combatant** offers three tabs:
+
+- **Compendium** — search the installed rule pack (e.g. a Goblin); its HP and
+  initiative modifier come straight from the statblock.
+- **Manual** — type a name, HP, and init mod for a homebrew creature.
+- **Party** — add a late-joining character.
+
+## Run the round
+
+1. **Roll initiative** — fills initiative for everyone who doesn't have one yet
+   (d20 + modifier). You can also set values by hand.
+2. **Start** — sorts by initiative and begins round 1, highlighting the current turn.
+3. **Next turn** — advances the highlight; wrapping around bumps the round counter.
+4. **Deal damage / heal** — the ± buttons on each combatant adjust HP (clamped at 0
+   and max). As DM you can edit anyone; a **player can adjust only their own
+   character's** HP and conditions.
+5. **Conditions** — add and remove condition tags on any combatant.
+
+Rolls from the **dice widget** on the screen, and everyone's turn actions, keep the
+fight moving.
+
+## End the encounter — HP writes back
+
+Click **End**. The encounter closes and each **character combatant's current HP is
+written back to their sheet**, so the party carries their wounds out of the fight.
+Ending is guarded — you can't end a fight that isn't running, or revive an ended one.
+
+## At the table on a phone
+
+Players can pull the encounter up on their own devices; it refreshes every few
+seconds (and a manual **Refresh** is there too). The dice log is currently
+per-device, so at a voice/remote table announce big rolls as you would in person.
+
+!!! tip "Depth"
+    The tracker covers initiative, turns, HP, and condition tags. Mechanical
+    condition effects, concentration, and legendary/lair actions aren't modelled —
+    it's a tracker, not a rules engine. See the [roadmap](../reference/roadmap.md).
