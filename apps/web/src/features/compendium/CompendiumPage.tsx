@@ -10,7 +10,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { RuleEntry, RuleEntryType, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
-import { useCampaign } from '../../app/CampaignContext';
+import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 
 const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -34,7 +34,12 @@ export default function CompendiumPage() {
   const id = Number(campaignId);
   const navigate = useNavigate();
   const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
+  const { loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const campaignPack = campaign?.ruleSystem || '';
+  // The campaign record comes from the shared campaigns list; if that list failed
+  // to load we'd otherwise sit blank forever (the search effect waits for the
+  // campaign to resolve). Distinguish "still loading" from "couldn't load".
+  const campaignUnresolved = campaign === undefined && (campaignsLoading || campaignsError);
 
   const [query, setQuery] = useState('');
   const debouncedQuery = useDebounced(query, 300);
@@ -148,7 +153,15 @@ export default function CompendiumPage() {
       </div>
 
       <div className="flex flex-col gap-2">
-        {packsLoading ? (
+        {campaignUnresolved ? (
+          campaignsError ? (
+            <ErrorNote message="Couldn't load this campaign. Check your connection and retry." onRetry={refreshCampaigns} />
+          ) : (
+            <Card>
+              <Skeleton lines={4} />
+            </Card>
+          )
+        ) : packsLoading ? (
           <Card>
             <Skeleton lines={4} />
           </Card>
