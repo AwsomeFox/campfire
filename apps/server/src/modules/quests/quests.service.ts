@@ -96,7 +96,7 @@ export class QuestsService {
     return { ...quest, objectives };
   }
 
-  async create(campaignId: number, input: QuestCreateInput, user: RequestUser): Promise<Quest> {
+  async create(campaignId: number, input: QuestCreateInput, user: RequestUser, role: Role): Promise<Quest> {
     const ts = nowIso();
     const [row] = await this.db
       .insert(quests)
@@ -116,16 +116,16 @@ export class QuestsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'quest.create',
       entityType: 'quest',
       entityId: row.id,
       campaignId,
     });
-    return redactSecret(toDomain(row), user.role);
+    return redactSecret(toDomain(row), role);
   }
 
-  async update(id: number, input: QuestUpdateInput, user: RequestUser): Promise<Quest> {
+  async update(id: number, input: QuestUpdateInput, user: RequestUser, role: Role): Promise<Quest> {
     const existing = await this.getRowOrThrow(id);
     const [row] = await this.db
       .update(quests)
@@ -134,22 +134,22 @@ export class QuestsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'quest.update',
       entityType: 'quest',
       entityId: id,
       campaignId: existing.campaignId,
     });
-    return redactSecret(toDomain(row), user.role);
+    return redactSecret(toDomain(row), role);
   }
 
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(questObjectives).where(eq(questObjectives.questId, id));
     await this.db.delete(quests).where(eq(quests.id, id));
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'quest.delete',
       entityType: 'quest',
       entityId: id,
@@ -157,7 +157,7 @@ export class QuestsService {
     });
   }
 
-  async setStatus(id: number, patch: QuestStatusPatchInput, user: RequestUser): Promise<Quest> {
+  async setStatus(id: number, patch: QuestStatusPatchInput, user: RequestUser, role: Role): Promise<Quest> {
     const existing = await this.getRowOrThrow(id);
     const [row] = await this.db
       .update(quests)
@@ -166,17 +166,17 @@ export class QuestsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'quest.status',
       entityType: 'quest',
       entityId: id,
       campaignId: existing.campaignId,
       detail: patch.status,
     });
-    return redactSecret(toDomain(row), user.role);
+    return redactSecret(toDomain(row), role);
   }
 
-  async addObjective(questId: number, input: ObjectiveCreateInput, user: RequestUser): Promise<QuestObjective> {
+  async addObjective(questId: number, input: ObjectiveCreateInput, user: RequestUser, role: Role): Promise<QuestObjective> {
     const quest = await this.getRowOrThrow(questId);
     const [row] = await this.db
       .insert(questObjectives)
@@ -189,7 +189,7 @@ export class QuestsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'quest.objective.create',
       entityType: 'quest_objective',
       entityId: row.id,
@@ -203,6 +203,7 @@ export class QuestsService {
     objectiveId: number,
     patch: ObjectivePatchInput,
     user: RequestUser,
+    role: Role,
   ): Promise<QuestObjective> {
     const quest = await this.getRowOrThrow(questId);
     const [existing] = await this.db
@@ -214,7 +215,7 @@ export class QuestsService {
 
     // player+ may toggle `done`; only dm may change text/sortOrder
     const wantsTextOrOrder = patch.text !== undefined || patch.sortOrder !== undefined;
-    if (wantsTextOrOrder && user.role !== 'dm') {
+    if (wantsTextOrOrder && role !== 'dm') {
       throw new ForbiddenException('Only dm may change objective text/sortOrder');
     }
 
@@ -231,7 +232,7 @@ export class QuestsService {
 
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'quest.objective.update',
       entityType: 'quest_objective',
       entityId: objectiveId,
@@ -240,14 +241,14 @@ export class QuestsService {
     return objectiveToDomain(row);
   }
 
-  async removeObjective(questId: number, objectiveId: number, user: RequestUser): Promise<void> {
+  async removeObjective(questId: number, objectiveId: number, user: RequestUser, role: Role): Promise<void> {
     const quest = await this.getRowOrThrow(questId);
     await this.db
       .delete(questObjectives)
       .where(and(eq(questObjectives.id, objectiveId), eq(questObjectives.questId, questId)));
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'quest.objective.delete',
       entityType: 'quest_objective',
       entityId: objectiveId,

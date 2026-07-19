@@ -2,7 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { desc, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionCreate, SessionUpdate } from '@campfire/schema';
-import type { Session } from '@campfire/schema';
+import type { Session, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -63,7 +63,7 @@ export class SessionsService {
     }
   }
 
-  async create(campaignId: number, input: SessionCreateInput, user: RequestUser): Promise<Session> {
+  async create(campaignId: number, input: SessionCreateInput, user: RequestUser, role: Role): Promise<Session> {
     const ts = nowIso();
     const [row] = await this.db
       .insert(sessions)
@@ -82,7 +82,7 @@ export class SessionsService {
 
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'session.create',
       entityType: 'session',
       entityId: row.id,
@@ -91,7 +91,7 @@ export class SessionsService {
     return toDomain(row);
   }
 
-  async update(id: number, input: SessionUpdateInput, user: RequestUser): Promise<Session> {
+  async update(id: number, input: SessionUpdateInput, user: RequestUser, role: Role): Promise<Session> {
     const existing = await this.getRowOrThrow(id);
     const [row] = await this.db
       .update(sessions)
@@ -105,7 +105,7 @@ export class SessionsService {
 
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'session.update',
       entityType: 'session',
       entityId: id,
@@ -114,12 +114,12 @@ export class SessionsService {
     return toDomain(row);
   }
 
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(sessions).where(eq(sessions.id, id));
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'session.delete',
       entityType: 'session',
       entityId: id,

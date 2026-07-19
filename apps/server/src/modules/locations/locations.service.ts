@@ -52,7 +52,7 @@ export class LocationsService {
     return redactSecret(toDomain(row), role);
   }
 
-  async create(campaignId: number, input: LocationCreateInput, user: RequestUser): Promise<Location> {
+  async create(campaignId: number, input: LocationCreateInput, user: RequestUser, role: Role): Promise<Location> {
     const ts = nowIso();
     const [row] = await this.db
       .insert(locations)
@@ -71,16 +71,16 @@ export class LocationsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'location.create',
       entityType: 'location',
       entityId: row.id,
       campaignId,
     });
-    return redactSecret(toDomain(row), user.role);
+    return redactSecret(toDomain(row), role);
   }
 
-  async update(id: number, input: LocationUpdateInput, user: RequestUser): Promise<Location> {
+  async update(id: number, input: LocationUpdateInput, user: RequestUser, role: Role): Promise<Location> {
     const existing = await this.getRowOrThrow(id);
     const [row] = await this.db
       .update(locations)
@@ -89,21 +89,21 @@ export class LocationsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'location.update',
       entityType: 'location',
       entityId: id,
       campaignId: existing.campaignId,
     });
-    return redactSecret(toDomain(row), user.role);
+    return redactSecret(toDomain(row), role);
   }
 
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(locations).where(eq(locations.id, id));
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'location.delete',
       entityType: 'location',
       entityId: id,
@@ -116,7 +116,7 @@ export class LocationsService {
    * 'current' location in the same campaign to 'explored' and set
    * campaign.currentLocationId to this location.
    */
-  async discover(id: number, status: Location['status'], user: RequestUser): Promise<Location> {
+  async discover(id: number, status: Location['status'], user: RequestUser, role: Role): Promise<Location> {
     const existing = await this.getRowOrThrow(id);
 
     if (status === 'current') {
@@ -149,7 +149,7 @@ export class LocationsService {
 
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'location.discover',
       entityType: 'location',
       entityId: id,
@@ -157,6 +157,6 @@ export class LocationsService {
       detail: status,
     });
 
-    return redactSecret(toDomain(row), user.role);
+    return redactSecret(toDomain(row), role);
   }
 }

@@ -1,51 +1,62 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { Roles } from '../../common/decorators/roles.decorator';
 import type { RequestUser } from '../../common/user.types';
+import { CampaignAccessService } from '../membership/campaign-access.service';
 import { NpcsService } from './npcs.service';
 import { NpcCreateDto, NpcUpdateDto } from './npcs.dto';
 
 @ApiTags('npcs')
 @Controller('campaigns/:campaignId/npcs')
 export class CampaignNpcsController {
-  constructor(private readonly npcs: NpcsService) {}
+  constructor(
+    private readonly npcs: NpcsService,
+    private readonly access: CampaignAccessService,
+  ) {}
 
   @Get()
-  list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    return this.npcs.listForCampaign(campaignId, user.role);
+  async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, campaignId);
+    return this.npcs.listForCampaign(campaignId, role);
   }
 
   @Post()
-  @Roles('dm')
-  create(
+  async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: NpcCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    return this.npcs.create(campaignId, body, user);
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.npcs.create(campaignId, body, user, role);
   }
 }
 
 @ApiTags('npcs')
 @Controller('npcs')
 export class NpcsController {
-  constructor(private readonly npcs: NpcsService) {}
+  constructor(
+    private readonly npcs: NpcsService,
+    private readonly access: CampaignAccessService,
+  ) {}
 
   @Get(':id')
-  get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    return this.npcs.getOrThrow(id, user.role);
+  async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.npcs.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.npcs.getOrThrow(id, role);
   }
 
   @Patch(':id')
-  @Roles('dm')
-  update(@Param('id', ParseIntPipe) id: number, @Body() body: NpcUpdateDto, @CurrentUser() user: RequestUser) {
-    return this.npcs.update(id, body, user);
+  async update(@Param('id', ParseIntPipe) id: number, @Body() body: NpcUpdateDto, @CurrentUser() user: RequestUser) {
+    const row = await this.npcs.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.npcs.update(id, body, user, role);
   }
 
   @Delete(':id')
-  @Roles('dm')
-  remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    return this.npcs.remove(id, user);
+  async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.npcs.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.npcs.remove(id, user, role);
   }
 }

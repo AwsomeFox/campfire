@@ -125,6 +125,42 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  display_name TEXT NOT NULL DEFAULT '',
+  password_hash TEXT NOT NULL,
+  server_role TEXT NOT NULL DEFAULT 'user',
+  disabled INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,
+  user_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS campaign_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  character_id INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(campaign_id, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quest_objectives_quest ON quest_objectives(quest_id);
@@ -133,4 +169,7 @@ CREATE INDEX IF NOT EXISTS idx_locations_campaign ON locations(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_audit_campaign ON audit_log(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
 `;

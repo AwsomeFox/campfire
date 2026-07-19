@@ -51,7 +51,7 @@ export class NpcsService {
     return redactSecret(toDomain(row), role);
   }
 
-  async create(campaignId: number, input: NpcCreateInput, user: RequestUser): Promise<Npc> {
+  async create(campaignId: number, input: NpcCreateInput, user: RequestUser, role: Role): Promise<Npc> {
     const ts = nowIso();
     const [row] = await this.db
       .insert(npcs)
@@ -69,16 +69,16 @@ export class NpcsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'npc.create',
       entityType: 'npc',
       entityId: row.id,
       campaignId,
     });
-    return redactSecret(toDomain(row), user.role);
+    return redactSecret(toDomain(row), role);
   }
 
-  async update(id: number, input: NpcUpdateInput, user: RequestUser): Promise<Npc> {
+  async update(id: number, input: NpcUpdateInput, user: RequestUser, role: Role): Promise<Npc> {
     const existing = await this.getRowOrThrow(id);
     const [row] = await this.db
       .update(npcs)
@@ -87,21 +87,21 @@ export class NpcsService {
       .returning();
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'npc.update',
       entityType: 'npc',
       entityId: id,
       campaignId: existing.campaignId,
     });
-    return redactSecret(toDomain(row), user.role);
+    return redactSecret(toDomain(row), role);
   }
 
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(npcs).where(eq(npcs.id, id));
     await this.audit.log({
       actor: user.id,
-      actorRole: user.role,
+      actorRole: role,
       action: 'npc.delete',
       entityType: 'npc',
       entityId: id,
