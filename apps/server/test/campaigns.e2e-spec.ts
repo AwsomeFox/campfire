@@ -60,6 +60,28 @@ describe('campaigns (e2e)', () => {
     expect(getAfterDelete.status).toBe(404);
   });
 
+  // Strict-validation (task P1 item 3): CampaignCreateDto/CampaignUpdateDto are
+  // now .strict() at the DTO layer — an unrecognized key 400s with a clear
+  // message instead of the global ZodValidationPipe silently stripping it.
+  it('unknown key in campaign create/update body -> 400, not silently stripped', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Strict Test Campaign', notAField: 'oops' });
+    expect(createRes.status).toBe(400);
+
+    const okCreate = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Strict Test Campaign' });
+    expect(okCreate.status).toBe(201);
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${okCreate.body.id}`)
+      .set(dm)
+      .send({ nmae: 'Typo Field' }); // misnamed field, not `name`
+    expect(patchRes.status).toBe(400);
+  });
+
   it('ruleSystem defaults to empty string and passes through create + PATCH when it matches an installed pack', async () => {
     const server = ctx.app.getHttpServer();
 

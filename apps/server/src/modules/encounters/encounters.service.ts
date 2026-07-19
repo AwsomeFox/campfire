@@ -215,6 +215,15 @@ export class EncountersService {
       const data = fromJsonText<Record<string, unknown>>(entry.dataJson, {});
       const hp = data.hitPoints ?? data.hit_points ?? data.hp;
       if (hpMax === undefined && typeof hp === 'number' && hp > 0) hpMax = Math.round(hp);
+      // Monster statblocks (open5e-importer.mapCreature) store DEX under
+      // dataJson.abilityScores.dexterity — mirror the character path above and derive
+      // initMod from it when the caller didn't pass one explicitly, instead of silently
+      // leaving every monster combatant at initMod 0 regardless of its actual DEX.
+      if (input.initMod === undefined) {
+        const abilityScores = data.abilityScores as Record<string, unknown> | undefined;
+        const dex = abilityScores?.dexterity;
+        if (typeof dex === 'number') initMod = abilityMod(dex);
+      }
     }
 
     if (!name) {

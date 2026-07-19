@@ -193,6 +193,17 @@ free-text string, not a FK).
   (OIDC-provisioned), 403 if `serverRole !== 'admin'` and
   `settings.allowLocalLogin === false` (admins can **always** log in locally
   — lockout prevention).
+- `POST /auth/token` (public) — **headless PAT bootstrap**: `{username,
+  password, tokenName, scope?, campaignId?}` -> `ApiTokenCreated {token,
+  apiToken}`. Verifies credentials via the exact same checks as `POST
+  /auth/login` (`AuthService.verifyCredentials()`, shared by both — same 401
+  on bad creds, same 403s for disabled/SSO-only/local-login-disabled
+  accounts), then mints a PAT for that user in the **same call** — no cookie,
+  no second round trip. `scope`/`campaignId` are enforced exactly like
+  self-service `POST /tokens` (403 if the authenticating user has no real
+  access to `campaignId`); `scope` defaults to `'viewer'` if omitted. This is
+  the entry point AI agents/scripts use instead of `POST /auth/login` — see
+  "Driving Campfire as an AI agent" below.
 - `POST /auth/logout` — deletes the session row, clears the cookie, 204.
 - `GET /auth/oidc/login` (public) — 302 to the identity provider's
   authorization endpoint, or 503 if OIDC isn't configured or discovery
@@ -212,6 +223,16 @@ free-text string, not a FK).
   hatch; OIDC login keeps working either way).
 - `GET /users/lookup?query=` — any authenticated user, 2+ chars, max 10
   results — member-picker autocomplete.
+- `POST /users/:id/tokens` — admin only. **Provisions a PAT on behalf of
+  another user** — `{tokenName, scope?, campaignId?}` -> `ApiTokenCreated
+  {token, apiToken}` — without needing that user's password. Unlike a naive
+  implementation, `scope`/`campaignId` are validated against the **target**
+  user's own campaign access (via `TokensService.mintFor()`'s `caller` param
+  set to the target, not the admin), so an admin cannot mint a token scoped
+  to a campaign the target user has no relationship to, even though the
+  admin themself might have full access to it. Lets a DM/admin agent
+  provision an entire table's worth of tokens in one sweep — see "Driving
+  Campfire as an AI agent" below.
 - `GET /settings`, `PATCH /settings` — admin only.
 - `GET/POST/PATCH/DELETE /campaigns/:id/members[/:memberId]` — dm for
   writes, any member for read.
@@ -330,6 +351,17 @@ once, at creation (`POST /tokens` -> `ApiTokenCreated { token, apiToken }`).
 - Any authenticated **non-dev** user (`dev:*` header users 403 — they have no
   `users.id` row to own a token against).
 
+Two more entry points mint a PAT without going through this self-service
+`POST /tokens` route, both funneling through the same `TokensService.mintFor()`
+-> `TokensService.create()` access check so the invariant ("caller must have
+real base access to `campaignId` when scoped") is enforced identically
+everywhere a token can be minted:
+
+- `POST /auth/token` (public) — headless bootstrap, verifies credentials
+  first. See "Auth endpoints" above.
+- `POST /users/:id/tokens` (admin only) — provisions on behalf of another
+  user, checked against *that user's* access. See "Auth endpoints" above.
+
 See "PAT token scope cap" above for how `scope`/`campaignId` cap the
 effective role at request time; there's no separate token-auth code path in
 the domain controllers — `RoleResolver` does all the work.
@@ -420,37 +452,190 @@ claude mcp add --transport http campfire http://host:8080/mcp \
   --header "Authorization: Bearer cf_pat_..."
 ```
 
-**Tool catalog** (36 — `modules/mcp/mcp-tools.ts`; see `test/mcp.e2e-spec.ts`'s
-`ALL_TOOLS` for the exact, test-pinned list):
+**Tool catalog** (64 — `modules/mcp/mcp-tools.ts`; see `test/mcp.e2e-spec.ts`'s
+`ALL_TOOLS` for the exact, test-pinned list). This is full REST parity: an
+agent can run an entire campaign — world-building, session prep, and live
+combat — over MCP alone.
 
 - **Read:** `list_campaigns`, `get_campaign_summary`, `get_quest`,
   `list_quests`, `get_npc`, `list_npcs`, `get_location`, `list_locations`,
-  `get_character`, `get_party`, `get_session_recaps`, `read_inbox` (dm),
-  `list_proposals` (dm), `lookup_rule` (any authed — searches installed rule
-  packs; top match includes full body text for citation, the rest are
-  summary-only), `get_encounter`.
-- **Write:** `create_quest`, `update_quest`, `set_quest_status`,
-  `add_objective`, `check_objective` (player+), `upsert_npc`,
-  `upsert_location`, `add_session_recap` (`number` defaults to max+1),
-  `update_character_hp` (player owner/dm; exactly one of `delta`|`set`),
-  `add_note` (any member), `resolve_inbox_item` (dm),
-  `update_campaign_status` (dm), `approve_proposal` (dm),
-  `reject_proposal` (dm), `roll_dice`, `create_encounter`, `add_combatant`,
-  `roll_initiative`, `begin_encounter`, `next_turn`, `end_encounter`
-  (encounter/combat tracker — mirrors the REST `/encounters` state machine,
-  including its `preparing -> running -> ended` guards).
+  `get_character`, `get_party`, `get_session_recaps`, `get_session`,
+  `read_inbox` (dm), `list_proposals` (dm), `lookup_rule` (any authed —
+  searches installed rule packs; top match includes full body text for
+  citation, the rest are summary-only), `list_rule_packs`, `get_rule_entry`,
+  `get_encounter`, `list_encounters`, `list_members`, `list_notes`,
+  `read_audit_log` (dm), `export_campaign` (dm — full JSON dump incl.
+  dmSecret fields, audit log, proposals, encounters).
+- **Write — lifecycle:** `create_campaign`, `delete_campaign` (dm; cascades
+  every child row), `update_campaign_status` (dm — status/currentLocationId/
+  dangerLevel; `sessionCount` is intentionally NOT settable here, it's
+  recomputed from actual sessions).
+- **Write — quests:** `create_quest`, `update_quest`, `delete_quest`,
+  `set_quest_status`, `add_objective` (dm), `update_objective` (done:
+  player+, text: dm), `check_objective` (player+, done-only), `remove_objective` (dm).
+  Quests support subquests via `parentId`, a `giverNpcId` link, and a
+  DM-only `dmSecret` field (stripped from non-DM reads).
+- **Write — world:** `upsert_npc`, `delete_npc`, `upsert_location`,
+  `delete_location`, `set_location_discovery` (dm — status transition with
+  the "current location" demotion side-effect), `add_session_recap`
+  (`number` defaults to max+1), `update_session`.
+- **Write — characters:** `upsert_character` (player owner or dm),
+  `update_character_hp` (exactly one of `delta`|`set`),
+  `set_character_conditions` (add/remove).
+- **Write — notes & inbox:** `add_note`, `update_note`/`delete_note`
+  (author only — dm may NOT edit/delete another member's note),
+  `submit_inbox_item` (any member — the player -> DM message queue),
+  `resolve_inbox_item` (dm).
+- **Write — proposals & membership:** `approve_proposal` (dm),
+  `reject_proposal` (dm), `add_member`/`update_member`/`remove_member` (dm;
+  refuses to demote/remove the campaign's last dm).
+- **Write — compendium:** `install_rule_pack` (**server admin**, not just
+  campaign dm — checked via `user.serverRole`, matching the REST
+  `@ServerRoles('admin')` gate on `POST /rules/packs/install`).
+- **Write — combat:** `roll_dice` (any member), `create_encounter`,
+  `add_combatant` (`kind` required; `ruleEntryId` pulls a monster statblock's
+  name/hp/DEX-derived `initMod`, `characterId` pulls from a character
+  sheet), `update_combatant` (dm any combatant; player only hp/conditions on
+  a combatant linked to a character they own), `remove_combatant`,
+  `roll_initiative`, `begin_encounter`, `next_turn`, `end_encounter` — mirrors
+  the REST `/encounters` state machine, including its
+  `preparing -> running -> ended` guards.
 
-Write tools on proposable entities (quest/npc/location/session create+update,
-including `set_quest_status`, which proposes a quest update) accept
-`propose: true` to route through `ProposalRecordsService` — identical to the
-REST `?proposed=true` flow: any member may propose; a dm applies it later via
-`approve_proposal`. `propose` is ignored where REST has no proposal path
-(objectives, characters, notes, campaign status).
+**Agent workflow:**
 
-Tool args are validated against the same `@campfire/schema` zod shapes as the
-REST DTOs (`QuestCreate.shape` etc. spread into the MCP `inputSchema`).
-Results are JSON text content; domain errors (403/404/400) come back as
-`isError` content with the HTTP status and message, not protocol errors.
+1. **Bootstrap / id discovery.** `list_campaigns` -> pick a `campaignId` ->
+   `get_campaign_summary` for the full dashboard (campaign, current
+   location, quests+objectives, npcs, locations, characters, sessions, open
+   inbox count) in one call. For anything not in the summary (encounters,
+   notes, rule entries, members, proposals, audit log), call the matching
+   `list_*` tool first to discover ids — e.g. `list_encounters` before
+   `get_encounter`/`update_combatant`.
+2. **Roles.** Every tool resolves the caller's *effective* role for the
+   campaign in question via `CampaignAccessService`/`RoleResolver`:
+   `dm > player > viewer` (ranked). dm has full write access plus secrets
+   and member/proposal/rule-pack management (rule packs additionally require
+   server admin, since they're server-wide, not campaign-scoped); player can
+   manage their own character, roll dice, check objectives, and post
+   notes/inbox items; viewer is read-only plus dice/notes/inbox. A PAT
+   additionally *caps* the effective role to `min(token scope, real
+   membership role)` and, if bound to one `campaignId`, 403s on every other
+   campaign — even for server admins acting through a scoped token.
+3. **Propose-then-approve.** quest/npc/location/session create+update (incl.
+   `set_quest_status`) accept `propose: true`: any member may submit a
+   pending `Proposal` instead of writing directly; a dm later calls
+   `approve_proposal` (applies it through the normal write path) or
+   `reject_proposal`. Not available on objectives, characters, notes,
+   campaign status, members, or combat tools — those write directly and are
+   already role-gated.
+4. **A full campaign-running loop looks like:** `create_campaign` ->
+   `upsert_character` (party) -> `upsert_location`/`upsert_npc`/`create_quest`
+   (world) -> `create_encounter` -> `add_combatant` (monsters via
+   `ruleEntryId` from `lookup_rule`) -> `roll_initiative` ->
+   `begin_encounter` -> `update_combatant` (damage/conditions) ->
+   `next_turn` (repeat) -> `end_encounter` (writes hp back to characters) ->
+   `add_session_recap` -> `export_campaign` to archive.
+
+**Argument validation & errors:**
+
+- Every tool's argument object is `.strict()` — an unknown/misnamed key
+  (e.g. `{hpCurrent}` instead of `{hpSet}`) is a validation error, not a
+  silently-dropped no-op. This is enforced by passing a prebuilt
+  `z.object(shape).strict()` `ZodObject` as the tool's `inputSchema` (rather
+  than a raw shape) so the SDK's own arg-parsing uses it directly; a
+  strictness violation caught by the SDK surfaces as a protocol-level
+  `McpError -32602` (before our handler runs) — the MCP client SDK still
+  reports it as `{isError: true, content:[...]}` to the caller.
+- Errors raised *inside* a tool handler (403/404/400/409 from the domain
+  services) come back as `isError` content whose text is JSON
+  `{"error":{"status":<http status>,"code":<short slug>,"message":<detail>}}`
+  (`code` is one of `not_found`/`forbidden`/`bad_request`/`conflict`/
+  `unauthorized`/`validation_failed`/`internal_error`) — never a bare
+  protocol error, so a calling agent can branch on `status`/`code`
+  programmatically.
+- Tool args are otherwise validated against the same `@campfire/schema` zod
+  shapes as the REST DTOs (`QuestCreate.shape` etc. spread into the MCP
+  `inputSchema`). Results are JSON text content.
+- `list_*` read tools that can return unbounded rows (`get_session_recaps`,
+  `list_notes`, `read_audit_log`) accept `limit`/`offset` with sane default
+  caps.
+
+## Driving Campfire as an AI agent
+
+Everything below is the "how does an agent get from zero to a working
+session" path — headless credential bootstrap, MCP connect, and where to
+discover the rest of the API on its own.
+
+**1. Headless PAT bootstrap — one call, no cookie jar.**
+
+Interactive `POST /auth/login` gives you a session cookie, which is awkward
+for a script/agent (needs a cookie jar, doesn't work well as a long-lived
+credential). `POST /auth/token` (public) verifies credentials and mints a
+personal access token in the **same call**:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/auth/token \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "username": "my-agent-user",
+    "password": "the-password",
+    "tokenName": "agent-session-2026-07-19",
+    "scope": "dm",
+    "campaignId": null
+  }'
+# -> {"token":"cf_pat_<48 hex>","apiToken":{"id":1,"scope":"dm","campaignId":null,...}}
+```
+
+Use the returned `token` as `Authorization: Bearer cf_pat_...` on every
+subsequent REST call or the MCP endpoint — no cookie needed. `scope` caps the
+effective role (`dm`/`player`/`viewer`, defaults to `viewer` if omitted);
+`campaignId` optionally locks the token to one campaign (403 if the
+authenticating user has no real access to it). Credential checks are
+identical to `POST /auth/login` — same 401 on bad creds, same 403s for
+disabled/SSO-only accounts or local-login-disabled non-admins.
+
+**Admin provisioning, for a DM/orchestrator agent setting up a whole table:**
+a server admin can mint a token on behalf of *another* user without knowing
+their password, via `POST /users/:id/tokens` `{tokenName, scope?,
+campaignId?}` — access is checked against the **target** user, not the
+admin, so this can't be used to hand out access the target user doesn't
+already have.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/users/7/tokens \
+  -b admin-session-cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"tokenName": "player-bot", "scope": "player", "campaignId": 3}'
+```
+
+**2. Connect an MCP client (e.g. Claude Code):**
+
+```bash
+claude mcp add --transport http campfire https://<host>/mcp \
+  --header "Authorization: Bearer cf_pat_..."
+```
+
+Then `tools/list` over that connection enumerates the full tool catalog (see
+"MCP server" above for the complete list and the agent workflow walkthrough).
+
+**3. Discover the REST API from OpenAPI.** Every controller is tagged and
+every route carries a `summary`/`description` and documented response
+statuses, so `GET /api/openapi.json` is a complete, accurate machine-readable
+map of the REST surface — point any OpenAPI-aware tool/codegen at it
+directly, or browse the human-friendly rendering at `GET /api/docs`. Query
+params that filter list endpoints (`status`, `mine`, `entityType`,
+`entityId`, `format`, `proposed`) are documented with `@ApiQuery` so their
+accepted values are visible without reading source. Request/response bodies
+reference the same `@campfire/schema` Zod shapes used for runtime validation
+(via `nestjs-zod`'s `patchNestJsSwagger()`), so the documented schema and the
+enforced schema can never drift apart.
+
+**4. Expect strict validation on write bodies.** Combatant, character,
+campaign, and quest create/update bodies reject unknown keys with a 400
+(`{errors: [{code: 'unrecognized_keys', keys: [...]}]}`) instead of silently
+ignoring them — see "Validation approach" below for the full list and
+rationale. If a write 200s but nothing changed, that's a sign the *other*
+(not-yet-strict) DTOs are still in lenient mode; check the response body
+matches what you expected either way.
 
 ## Rule packs (Compendium backend)
 
@@ -639,6 +824,57 @@ works around this with a type/value declaration merge — `HpPatchDto` the
 statics the pipe and Swagger patch look for. Runtime behavior (validation,
 Swagger doc) is identical to any other `createZodDto` DTO.
 
+**Strict validation on the highest-risk write bodies.** By default a plain
+`z.object(...)` **silently strips unknown keys** rather than rejecting them —
+`schema.safeParse()` (what `nestjs-zod`'s `ZodValidationPipe` calls under the
+hood, see `node_modules/nestjs-zod/dist/index.js`'s `validate()`) just drops
+anything not in the shape. That's a bad failure mode for API clients
+(especially AI agents) sending a slightly-wrong field name: e.g. `PATCH
+/encounters/:id/combatants/:cid` with `{hpCurrent: 5}` (the real column name
+— `CombatantUpdate`'s actual field is `hpDelta`/`hpSet`) previously validated
+fine and 200'd having done **nothing**, with no signal that the field was
+ignored.
+
+Fix: `CombatantCreate`/`CombatantUpdate`, `CharacterCreate`/`CharacterUpdate`,
+`CampaignCreate`/`CampaignUpdate`, and `QuestCreate`/`QuestUpdate` are now
+wrapped with `.strict()` **at the DTO layer only** —
+e.g. `encounters.dto.ts`: `createZodDto(CombatantUpdate.strict())` — not on
+the shared schema exports themselves in `@campfire/schema`. An unrecognized
+key in one of these four entities' write bodies now 400s with a clear
+`{errors: [{code: 'unrecognized_keys', keys: [...], message: "Unrecognized
+key(s) in object: '...'"}]}` instead of silently no-op'ing.
+
+**Why DTO-layer, not a global pipe flip or a change to the shared schema
+package:** `CombatantCreate`/`CombatantUpdate`/`CharacterCreate`/etc. (the
+un-`.strict()`'d originals) are reused **directly** via `.parse()` well
+outside the DTO/pipe path — `modules/mcp/mcp-tools.ts` builds MCP tool
+schemas straight from `...CombatantCreate.shape` /
+`CombatantUpdate.parse(fields)`, and `modules/quests/quests.controller.ts`
+(and the equivalent npcs/locations/sessions controllers) re-`.parse()` the
+already-pipe-validated `body` a second time on the `?proposed=true` branch
+before storing it as a `Proposal` payload. Mutating the shared exports to add
+`.strict()` would ripple into both of those reuse sites (and — since the
+same schemas double as OpenAPI *response* shapes — into Swagger schema
+generation) well outside this task's scope. Wrapping only the `@Body()` DTO
+class's schema with `.strict()` confines the change to exactly the pipe's
+`transform()` call for that one route parameter; the redundant re-`.parse()`
+calls above are unaffected (and unreachable with an unknown key anyway, since
+the DTO layer already 400'd before the controller body runs), and MCP tool
+input schemas (owned by a different scope) are untouched.
+
+**Scope chosen, and why not broader:** only these four entities'
+create/update bodies (the ones explicitly called out as highest-risk —
+frequent agent-driven writes with several similarly-named numeric/enum
+fields) were made strict, not every DTO server-wide. A global flip (patching
+`ZodValidationPipe` itself, or `.strict()`-ing every `z.object` in
+`@campfire/schema`) was judged too risky to land in the same change as
+everything else here: some schemas are intentionally reused in non-DTO
+contexts (see above), and auditing every one of the ~25 remaining request
+schemas for a hidden reliance on lenient parsing was out of scope for this
+pass. Extending `.strict()` to the remaining write DTOs (npcs, locations,
+sessions, members, notes, settings, users) is a natural follow-up using the
+exact same one-line-per-DTO pattern.
+
 ## SQLite / drizzle
 
 - File: `${DATA_DIR:-apps/server/data}/campfire.db`, WAL journal mode.
@@ -697,6 +933,22 @@ with `/healthz`). Session-cookie auth is documented via `addCookieAuth`
 API-key-style header parameters (`addApiKey`), noted as DEV_AUTH-only. PAT
 bearer auth is documented via `addBearerAuth` (scheme id `bearer`,
 `cf_pat_<48 hex>` format).
+
+**Full decorator coverage, for agent self-discovery.** Every controller
+carries `@ApiTags(...)`; every route carries `@ApiOperation({summary,
+description})` plus `@ApiResponse({status, description})` for each status it
+can actually return (success and the meaningful error cases — 400/403/404/
+409 where applicable), so `/api/openapi.json` is self-describing without
+reading source. Every list-filtering query param (`status`, `mine`,
+`entityType`, `entityId`, `format`, `proposed`, `q`/`type`/`pack` on rule
+search) is documented with `@ApiQuery`, including its accepted enum values
+where the param is a closed set. `mcp.controller.ts` is `@ApiExcludeController()`
+(MCP has its own protocol-level tool schemas — see "MCP server" above — and
+was intentionally left out of the REST-facing OpenAPI doc). Request/response
+bodies are the same `@campfire/schema` Zod DTOs used for runtime validation
+(via `nestjs-zod`'s `patchNestJsSwagger()`), so the documented shape and the
+enforced shape can't drift apart. See "Driving Campfire as an AI agent"
+above for how this is meant to be consumed.
 
 ## Tests
 
@@ -850,3 +1102,59 @@ SQLite file — safe to parallelize later if it becomes a bottleneck.
   list — not wired to anything yet, so `GET /rules/search?type=class` simply
   returns an empty array today, correctly (no entries have that type, no
   error).
+- **MCP's `update_campaign_status` does not accept a `sessionNumber` field.**
+  `campaigns.sessionCount` is a denormalized `COUNT(*)` that
+  `SessionsService` recomputes on every session create/delete (see
+  `recomputeSessionCount`); it was never part of `CampaignUpdate` and letting
+  an agent set it directly would let it drift from the real session count.
+  The tool instead documents this in its description; `status`,
+  `currentLocationId`, and `dangerLevel` are all settable as intended.
+- **Monster combatants added via `add_combatant`'s `ruleEntryId` now get a
+  DEX-derived `initMod` instead of always defaulting to 0.** This was a real
+  gap in `EncountersService.addCombatant` (in `modules/encounters/`, not
+  `modules/mcp/`) found while wiring the MCP `add_combatant` tool: the
+  `characterId` resolution path already derived `initMod` from
+  `character.stats.DEX`, but the `ruleEntryId` (monster statblock) path left
+  `initMod` at whatever the caller passed (default 0) even though
+  `open5e-importer.ts`'s `mapCreature` stores the statblock's DEX at
+  `dataJson.abilityScores.dexterity`. Fixed by mirroring the same
+  `floor((DEX-10)/2)` derivation for that path when `initMod` isn't
+  explicitly supplied — covered by a new MCP e2e assertion (fake-open5e's
+  Goblin has DEX 14 -> initMod 2) and unaffected by the existing
+  `encounters.e2e-spec.ts` initMod assertions (which don't cover the
+  ruleEntryId path).
+- **Headless PAT bootstrap (`POST /auth/token`) and admin provisioning
+  (`POST /users/:id/tokens`) share `TokensService.create()`'s existing access
+  check instead of adding a new one.** `TokensService.mintFor(owner, ownerId,
+  input)` is a thin wrapper that maps `{tokenName, scope?, campaignId?}` ->
+  the existing `{name, scope, campaignId}` shape (defaulting `scope` to
+  `'viewer'`) and calls `create(ownerId, mapped, owner)` — the *same*
+  `caller` parameter self-service `POST /tokens` already passes as itself.
+  For the headless bootstrap, `owner` is the just-credential-verified user
+  (so it behaves exactly like that user calling `POST /tokens` themselves).
+  For admin provisioning, `owner` is deliberately the **target** user (not
+  the admin) — this was the one place a naive implementation could easily
+  get wrong (checking the admin's access instead of the target's), so it's
+  called out explicitly in both the controller doc comment and a dedicated
+  e2e test (`test/users-tokens.e2e-spec.ts`).
+- **Strict validation (unknown-key rejection) landed on 4 of the ~16 write-body
+  DTO modules (combatant, character, campaign, quest), not server-wide.** See
+  "Validation approach" above for the full rationale — the shared
+  `@campfire/schema` exports are reused verbatim by `modules/mcp/mcp-tools.ts`
+  and by the `?proposed=true` re-`.parse()` branches in
+  quests/npcs/locations/sessions controllers, so `.strict()` was applied at
+  the DTO layer (`createZodDto(X.strict())`) rather than mutating the shared
+  schema objects or flipping the global `ZodValidationPipe`. No existing test
+  broke from this change (confirmed via 2 consecutive full green runs before
+  and after) — nothing in the existing suite happened to rely on unknown keys
+  being silently accepted on these four entities' write bodies.
+- **`AuthService.login()` was refactored (not just added to) to extract
+  `verifyCredentials(username, password)`** so `POST /auth/token` can share
+  the *exact* same credential-check code path (same order of checks, same
+  exception types) as `POST /auth/login`, rather than duplicating that logic.
+  `login()`'s own behavior/tests are unchanged — it's a pure extract, verified
+  by the full existing `auth.e2e-spec.ts` suite still passing unmodified.
+- **`UsersModule` now imports `TokensModule`** (for `POST /users/:id/tokens`)
+  and **`AuthModule` now imports `TokensModule`** (for `POST /auth/token`).
+  Neither introduces a cycle: `TokensModule` (via `RoleAccessModule`) has no
+  dependency back on `UsersModule` or `AuthModule`.

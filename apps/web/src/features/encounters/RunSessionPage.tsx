@@ -323,6 +323,12 @@ export default function RunSessionPage() {
 
       {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
 
+      {isDm && encounter.status === 'preparing' && (
+        <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+          Add the party &amp; monsters below, roll initiative, then hit Start.
+        </p>
+      )}
+
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {sortedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>

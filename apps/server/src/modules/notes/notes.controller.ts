@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -15,6 +15,11 @@ export class CampaignNotesController {
   ) {}
 
   @Get('notes')
+  @ApiOperation({ summary: 'List notes in a campaign', description: 'Requires campaign membership. private notes are only visible to their author (or a dm); dm_shared only to dm; party_shared to all members.' })
+  @ApiQuery({ name: 'entityType', required: false, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign'], description: 'Filter to notes attached to this entity type.' })
+  @ApiQuery({ name: 'entityId', required: false, type: Number, description: 'Filter to notes attached to this specific entity id (used together with entityType).' })
+  @ApiQuery({ name: 'mine', required: false, type: Boolean, description: 'If true, only notes authored by the caller.' })
+  @ApiResponse({ status: 200, description: 'Notes visible to the caller, per the visibility rules above.' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
@@ -31,6 +36,8 @@ export class CampaignNotesController {
   }
 
   @Post('notes')
+  @ApiOperation({ summary: 'Create a note', description: 'Requires campaign membership. Optionally attached to an entity (entityType/entityId) with a visibility (private/dm_shared/party_shared).' })
+  @ApiResponse({ status: 201, description: 'Created note.' })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: NoteCreateDto,
@@ -41,6 +48,8 @@ export class CampaignNotesController {
   }
 
   @Post('inbox')
+  @ApiOperation({ summary: 'Submit an inbox item', description: 'Requires campaign membership. Inbox items are dm-facing suggestions/questions, distinct from regular notes.' })
+  @ApiResponse({ status: 201, description: 'Created inbox item.' })
   async createInbox(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: InboxCreateDto,
@@ -51,6 +60,8 @@ export class CampaignNotesController {
   }
 
   @Get('inbox')
+  @ApiOperation({ summary: 'List unresolved inbox items', description: 'dm role required.' })
+  @ApiResponse({ status: 200, description: 'Inbox items.' })
   async listInbox(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, campaignId, 'dm');
     return this.notes.listInbox(campaignId);
@@ -66,6 +77,8 @@ export class NotesController {
   ) {}
 
   @Get(':id')
+  @ApiOperation({ summary: 'Get a note', description: 'Requires campaign membership and note-visibility access.' })
+  @ApiResponse({ status: 200, description: 'Note.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -73,6 +86,8 @@ export class NotesController {
   }
 
   @Patch(':id')
+  @ApiOperation({ summary: 'Update a note', description: 'Requires campaign membership and note-visibility/ownership access.' })
+  @ApiResponse({ status: 200, description: 'Updated note.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: NoteUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -80,6 +95,8 @@ export class NotesController {
   }
 
   @Delete(':id')
+  @ApiOperation({ summary: 'Delete a note', description: 'Requires campaign membership and note-visibility/ownership access.' })
+  @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -87,6 +104,8 @@ export class NotesController {
   }
 
   @Post(':id/resolve')
+  @ApiOperation({ summary: 'Resolve an inbox item', description: 'dm role required.' })
+  @ApiResponse({ status: 201, description: 'Resolved inbox item.' })
   async resolve(@Param('id', ParseIntPipe) id: number, @Body() body: InboxResolveDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');

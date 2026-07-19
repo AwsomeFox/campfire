@@ -1,5 +1,5 @@
 import { Controller, Get, Param, ParseIntPipe, Query, Res } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -17,6 +17,9 @@ export class ExportController {
   ) {}
 
   @Get()
+  @ApiOperation({ summary: 'Export a campaign', description: 'dm role required. Bundles the full campaign (quests, npcs, locations, characters, sessions, notes) as a downloadable file.' })
+  @ApiQuery({ name: 'format', required: false, enum: ['json', 'mdzip'], description: "'mdzip' for a markdown-per-entity zip; omitted/anything else defaults to a single JSON document." })
+  @ApiResponse({ status: 200, description: 'File download (application/json or application/zip, with Content-Disposition attachment).' })
   async export(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('format') format: string | undefined,

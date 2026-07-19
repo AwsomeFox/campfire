@@ -1,4 +1,6 @@
 import request from 'supertest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 describe('auth setup/login/logout (e2e, real cookie sessions, DEV_AUTH unset)', () => {
@@ -303,5 +305,150 @@ describe('me/preferences (e2e)', () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).patch('/api/v1/me/preferences').send({ displayName: 'Nope' });
     expect(res.status).toBe(401);
+  });
+});
+
+/**
+ * P0: headless PAT bootstrap (POST /auth/token, @Public) — verifies credentials
+ * via the exact same path as POST /auth/login (AuthService.verifyCredentials(),
+ * shared by both) and mints a PAT in the SAME call, no cookie/session needed.
+ * See AuthController.token() / TokensService.mintFor().
+ */
+describe('POST /auth/token — headless PAT bootstrap (e2e)', () => {
+  let ctx: TestAppContext;
+  let baseUrl: string;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let otherCampaignId: number;
+  const mcpClients: Client[] = [];
+
+  async function mcpClient(token: string): Promise<Client> {
+    const client = new Client({ name: 'campfire-e2e', version: '0.0.1' });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    });
+    await client.connect(transport);
+    mcpClients.push(client);
+    return client;
+  }
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    await ctx.app.listen(0);
+    const address = ctx.app.getHttpServer().address() as { port: number };
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    dmAgent = request.agent(ctx.app.getHttpServer());
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'bootstrap-dm', password: 'dm-password-1' });
+
+    await dmAgent.post('/api/v1/users').send({ username: 'bootstrap-player', password: 'player-password-1', serverRole: 'user' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Bootstrap Campaign' });
+    campaignId = campRes.body.id;
+    const otherCampRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Other Bootstrap Campaign' });
+    otherCampaignId = otherCampRes.body.id;
+  });
+
+  afterAll(async () => {
+    for (const client of mcpClients) {
+      await client.close().catch(() => undefined);
+    }
+    await closeTestApp(ctx);
+  });
+
+  it('valid creds -> one call returns a working PAT, no cookie set', async () => {
+    const res = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-dm', password: 'dm-password-1', tokenName: 'agent-bootstrap', scope: 'dm' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.token).toMatch(/^cf_pat_[0-9a-f]{48}$/);
+    expect(res.body.apiToken.scope).toBe('dm');
+    expect(res.headers['set-cookie']).toBeUndefined();
+
+    const rawToken = res.body.token;
+
+    // Works as Bearer on a REST route.
+    const meRes = await request(baseUrl).get('/api/v1/me').set('Authorization', `Bearer ${rawToken}`);
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.username).toBe('bootstrap-dm');
+
+    // Works as Bearer on a campaign write.
+    const questRes = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set('Authorization', `Bearer ${rawToken}`)
+      .send({ title: 'Bootstrapped quest' });
+    expect(questRes.status).toBe(201);
+
+    // Works as Bearer on MCP.
+    const client = await mcpClient(rawToken);
+    const { tools } = await client.listTools();
+    expect(tools.length).toBeGreaterThan(0);
+  });
+
+  it('scope defaults to viewer when omitted', async () => {
+    const res = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-dm', password: 'dm-password-1', tokenName: 'agent-default-scope' });
+    expect(res.status).toBe(201);
+    expect(res.body.apiToken.scope).toBe('viewer');
+  });
+
+  it('bad password -> 401, no token minted', async () => {
+    const res = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-dm', password: 'wrong-password', tokenName: 'should-not-exist' });
+    expect(res.status).toBe(401);
+
+    const listRes = await dmAgent.get('/api/v1/tokens');
+    expect(listRes.body.some((t: { name: string }) => t.name === 'should-not-exist')).toBe(false);
+  });
+
+  it('unknown username -> 401 (generic, no user-enumeration signal)', async () => {
+    const res = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'no-such-user', password: 'whatever12', tokenName: 'nope' });
+    expect(res.status).toBe(401);
+  });
+
+  it('disabled account -> 403', async () => {
+    const createRes = await dmAgent.post('/api/v1/users').send({ username: 'bootstrap-disabled', password: 'disabled-password-1' });
+    await dmAgent.patch(`/api/v1/users/${createRes.body.id}`).send({ disabled: true });
+
+    const res = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-disabled', password: 'disabled-password-1', tokenName: 'nope' });
+    expect(res.status).toBe(403);
+  });
+
+  it('scoped to a campaign the user cannot access -> 403, no token minted', async () => {
+    // bootstrap-player is not a member of otherCampaignId (only campaignId, added below).
+    const res = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-player', password: 'player-password-1', tokenName: 'sneaky', scope: 'viewer', campaignId: otherCampaignId });
+    expect(res.status).toBe(403);
+  });
+
+  it('scoped to a campaign the user DOES have access to succeeds and caps the token', async () => {
+    const memberLookup = await dmAgent.get('/api/v1/users/lookup').query({ query: 'bootstrap-player' });
+    const playerId = memberLookup.body[0].id;
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+
+    const res = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-player', password: 'player-password-1', tokenName: 'player-scoped', scope: 'player', campaignId });
+    expect(res.status).toBe(201);
+    expect(res.body.apiToken.campaignId).toBe(campaignId);
+
+    const rawToken = res.body.token;
+    const otherRes = await request(baseUrl).get(`/api/v1/campaigns/${otherCampaignId}`).set('Authorization', `Bearer ${rawToken}`);
+    expect(otherRes.status).toBe(403);
+  });
+
+  it('oversized password (>200 chars) is rejected 400, before scrypt runs', async () => {
+    const res = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-dm', password: 'x'.repeat(300), tokenName: 'nope' });
+    expect(res.status).toBe(400);
   });
 });

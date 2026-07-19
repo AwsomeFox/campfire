@@ -70,6 +70,28 @@ describe('quests (e2e)', () => {
     expect(statusForbidden.status).toBe(403);
   });
 
+  // Strict-validation (task P1 item 3): QuestCreateDto/QuestUpdateDto are now
+  // .strict() at the DTO layer — an unrecognized key 400s instead of the global
+  // ZodValidationPipe silently stripping it and 200/201-ing as a no-op/partial-create.
+  it('unknown key in quest create/update body -> 400, not silently stripped', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Strict Quest', reard: 'typo, not reward' });
+    expect(createRes.status).toBe(400);
+
+    const okCreate = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Strict Quest' });
+    expect(okCreate.status).toBe(201);
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/quests/${okCreate.body.id}`)
+      .set(dm)
+      .send({ titel: 'Typo Field' });
+    expect(patchRes.status).toBe(400);
+  });
+
   it('dmSecret visible to dm but absent for player and viewer', async () => {
     const server = ctx.app.getHttpServer();
 

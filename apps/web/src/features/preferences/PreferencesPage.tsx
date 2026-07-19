@@ -4,10 +4,13 @@
  * (~L1156-1227): Theme card (accent swatches + free hex input, live preview)
  * and a display-name field. Only the fields with backing API (accentColor,
  * displayName — both on PreferencesUpdate) are wired up; the design's Text
- * size, AI scribe, and Notifications cards have no backing data yet, so they
- * render disabled with a "soon" tag rather than being silently dropped.
+ * size and Notifications cards have no backing data yet, so they render
+ * disabled with a "soon" tag rather than being silently dropped. The AI
+ * scribe card is live — MCP is a real, shipped API (see /tokens + apps/mcp) —
+ * so it links to token creation instead of claiming "not available".
  */
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import type { User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -30,6 +33,7 @@ const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 export default function PreferencesPage() {
   const { me, refresh } = useAuth();
   const user = me?.user ?? null;
+  const mcpUrl = `${window.location.origin}/mcp`;
 
   const [displayName, setDisplayName] = useState(user?.displayName ?? '');
   const [accentColor, setAccentColor] = useState<string | null>(user?.accentColor ?? null);
@@ -211,14 +215,27 @@ export default function PreferencesPage() {
         </div>
       </div>
 
-      <div className="card elev-sm" style={{ opacity: 0.6 }}>
+      <div className="card elev-sm">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="card-kicker" style={{ margin: 0 }}>AI scribe</span>
-          <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
+          <span className="card-kicker" style={{ margin: 0 }}>Connect an AI (MCP)</span>
+          <span className="tag tag-accent" style={{ fontSize: 9 }}>live</span>
         </div>
         <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-          Connect your own AI over MCP. Not available yet — no backing API on this server.
+          Point Claude (or any MCP client) at this server to read and write your campaigns — 36+ tools covering
+          quests, NPCs, characters, encounters, dice and more.
         </p>
+        <div className="cf-inset" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="text-muted" style={{ fontSize: 11 }}>MCP endpoint</span>
+          <code style={{ fontSize: 12, fontFamily: 'ui-monospace, monospace', flex: 1, minWidth: 0, wordBreak: 'break-all' }}>
+            {mcpUrl}
+          </code>
+        </div>
+        <div className="flex gap-2 items-center">
+          <Link to="/tokens" className="btn btn-primary" style={{ fontSize: 12.5 }}>
+            Create an API token
+          </Link>
+          <span className="text-muted" style={{ fontSize: 11.5 }}>then connect from the tokens page</span>
+        </div>
       </div>
 
       <div className="card elev-sm" style={{ opacity: 0.6 }}>

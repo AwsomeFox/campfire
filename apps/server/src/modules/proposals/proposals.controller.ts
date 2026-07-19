@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -15,6 +15,9 @@ export class CampaignProposalsController {
   ) {}
 
   @Get()
+  @ApiOperation({ summary: 'List proposals for a campaign', description: 'dm role required. Proposals are AI/collaborator writes (create/update) submitted via `?proposed=true` on the underlying entity route, pending dm approval.' })
+  @ApiQuery({ name: 'status', required: false, enum: ['pending', 'approved', 'rejected'], description: 'Filter to a single proposal status.' })
+  @ApiResponse({ status: 200, description: 'Proposals for the campaign.' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('status') status: string | undefined,
@@ -34,6 +37,8 @@ export class ProposalsController {
   ) {}
 
   @Post(':id/approve')
+  @ApiOperation({ summary: 'Approve a proposal', description: 'dm role required. Applies the pending create/update to the underlying entity.' })
+  @ApiResponse({ status: 201, description: 'Approved proposal (with the write applied).' })
   async approve(@Param('id', ParseIntPipe) id: number, @Body() body: ProposalResolveDto, @CurrentUser() user: RequestUser) {
     const row = await this.proposals.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
@@ -41,6 +46,8 @@ export class ProposalsController {
   }
 
   @Post(':id/reject')
+  @ApiOperation({ summary: 'Reject a proposal', description: 'dm role required. No write is applied.' })
+  @ApiResponse({ status: 201, description: 'Rejected proposal.' })
   async reject(@Param('id', ParseIntPipe) id: number, @Body() body: ProposalResolveDto, @CurrentUser() user: RequestUser) {
     const row = await this.proposals.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');

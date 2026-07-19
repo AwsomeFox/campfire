@@ -27,28 +27,56 @@ const ALL_TOOLS = [
   'get_character',
   'get_party',
   'get_session_recaps',
+  'get_session',
   'read_inbox',
   'list_proposals',
   'lookup_rule',
+  'list_rule_packs',
+  'get_rule_entry',
   'get_encounter',
+  'list_encounters',
+  'list_members',
+  'list_notes',
+  'read_audit_log',
+  'export_campaign',
   // write
+  'create_campaign',
+  'delete_campaign',
   'create_quest',
   'update_quest',
+  'delete_quest',
   'set_quest_status',
   'add_objective',
+  'update_objective',
   'check_objective',
+  'remove_objective',
   'upsert_npc',
+  'delete_npc',
   'upsert_location',
+  'delete_location',
+  'set_location_discovery',
   'add_session_recap',
+  'update_session',
+  'upsert_character',
   'update_character_hp',
+  'set_character_conditions',
   'add_note',
+  'update_note',
+  'delete_note',
+  'submit_inbox_item',
   'resolve_inbox_item',
   'update_campaign_status',
   'approve_proposal',
   'reject_proposal',
+  'add_member',
+  'update_member',
+  'remove_member',
+  'install_rule_pack',
   'roll_dice',
   'create_encounter',
   'add_combatant',
+  'update_combatant',
+  'remove_combatant',
   'roll_initiative',
   'begin_encounter',
   'next_turn',
@@ -115,7 +143,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(36);
+    expect(tools).toHaveLength(64);
   });
 
   it('get_campaign_summary works with a dm-scoped PAT', async () => {
@@ -307,6 +335,283 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // Sanity: the same token, same client, still works against ITS OWN campaign.
     const okResult = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
     expect(okResult.isError).toBeFalsy();
+  });
+
+  it('strict arg schemas reject unknown keys with a structured validation error (not a silent no-op)', async () => {
+    const client = await mcpClient(dmToken);
+    // {hpCurrent} is not a real update_combatant arg (the real keys are hpDelta/hpSet) —
+    // this must be a machine-actionable error, not a 200 that silently dropped the key.
+    const result = await client.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: 1, combatantId: 1, hpCurrent: 5 },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as TextContent[])[0].text;
+    expect(text).toContain('hpCurrent');
+  });
+
+  it('structured errors: isError content is JSON {"error":{status,code,message}}', async () => {
+    const client = await mcpClient(dmToken);
+    const result = await client.callTool({ name: 'get_quest', arguments: { questId: 999_999 } });
+    expect(result.isError).toBe(true);
+    const parsed = parseResult(result) as { error: { status: number; code: string; message: string } };
+    expect(parsed.error.status).toBe(404);
+    expect(parsed.error.code).toBe('not_found');
+    expect(parsed.error.message).toContain('999999');
+  });
+
+  it('create_campaign -> upsert_character -> update_campaign_status -> list_members -> delete_campaign', async () => {
+    const client = await mcpClient(dmToken);
+
+    const createResult = await client.callTool({
+      name: 'create_campaign',
+      arguments: { name: 'MCP Lifecycle Campaign', description: 'created over MCP' },
+    });
+    expect(createResult.isError).toBeFalsy();
+    const created = parseResult(createResult) as { id: number; name: string };
+    expect(created.name).toBe('MCP Lifecycle Campaign');
+    const newCampaignId = created.id;
+
+    const charResult = await client.callTool({
+      name: 'upsert_character',
+      arguments: { campaignId: newCampaignId, name: 'MCP Hero', hpMax: 12 },
+    });
+    expect(charResult.isError).toBeFalsy();
+    const character = parseResult(charResult) as { id: number; name: string; hpMax: number };
+    expect(character.name).toBe('MCP Hero');
+    expect(character.hpMax).toBe(12);
+
+    const updateCharResult = await client.callTool({
+      name: 'upsert_character',
+      arguments: { campaignId: newCampaignId, characterId: character.id, level: 3 },
+    });
+    expect(updateCharResult.isError).toBeFalsy();
+    expect((parseResult(updateCharResult) as { level: number }).level).toBe(3);
+
+    const condResult = await client.callTool({
+      name: 'set_character_conditions',
+      arguments: { characterId: character.id, add: ['poisoned'] },
+    });
+    expect(condResult.isError).toBeFalsy();
+    expect((parseResult(condResult) as { conditions: string[] }).conditions).toContain('poisoned');
+
+    const statusResult = await client.callTool({
+      name: 'update_campaign_status',
+      arguments: { campaignId: newCampaignId, status: 'paused', dangerLevel: 'high' },
+    });
+    expect(statusResult.isError).toBeFalsy();
+    const updated = parseResult(statusResult) as { status: string; dangerLevel: string };
+    expect(updated.status).toBe('paused');
+    expect(updated.dangerLevel).toBe('high');
+
+    const membersResult = await client.callTool({ name: 'list_members', arguments: { campaignId: newCampaignId } });
+    expect(membersResult.isError).toBeFalsy();
+    const members = parseResult(membersResult) as Array<{ role: string }>;
+    expect(members.some((m) => m.role === 'dm')).toBe(true);
+
+    const exportResult = await client.callTool({ name: 'export_campaign', arguments: { campaignId: newCampaignId } });
+    expect(exportResult.isError).toBeFalsy();
+    const exported = parseResult(exportResult) as { campaign: { name: string }; characters: unknown[] };
+    expect(exported.campaign.name).toBe('MCP Lifecycle Campaign');
+    expect(exported.characters).toHaveLength(1);
+
+    const auditResult = await client.callTool({ name: 'read_audit_log', arguments: { campaignId: newCampaignId, limit: 5 } });
+    expect(auditResult.isError).toBeFalsy();
+    expect((parseResult(auditResult) as unknown[]).length).toBeGreaterThan(0);
+
+    const deleteResult = await client.callTool({ name: 'delete_campaign', arguments: { campaignId: newCampaignId } });
+    expect(deleteResult.isError).toBeFalsy();
+
+    const listAfter = await dmAgent.get('/api/v1/campaigns');
+    expect(listAfter.body.some((c: { id: number }) => c.id === newCampaignId)).toBe(false);
+  });
+
+  it('quest objective update/remove and location discovery and note/session edit+delete round-trip over MCP', async () => {
+    const client = await mcpClient(dmToken);
+
+    const questResult = await client.callTool({
+      name: 'create_quest',
+      arguments: { campaignId, title: 'Objective quest', dmSecret: 'the twist' },
+    });
+    const quest = parseResult(questResult) as { id: number; dmSecret: string };
+    expect(quest.dmSecret).toBe('the twist');
+
+    const addObjResult = await client.callTool({ name: 'add_objective', arguments: { questId: quest.id, text: 'Find the key' } });
+    const objective = parseResult(addObjResult) as { id: number; text: string; done: boolean };
+    expect(objective.done).toBe(false);
+
+    const updateObjResult = await client.callTool({
+      name: 'update_objective',
+      arguments: { questId: quest.id, objectiveId: objective.id, text: 'Find the golden key', done: true },
+    });
+    expect(updateObjResult.isError).toBeFalsy();
+    const updatedObj = parseResult(updateObjResult) as { text: string; done: boolean };
+    expect(updatedObj.text).toBe('Find the golden key');
+    expect(updatedObj.done).toBe(true);
+
+    const removeObjResult = await client.callTool({ name: 'remove_objective', arguments: { questId: quest.id, objectiveId: objective.id } });
+    expect(removeObjResult.isError).toBeFalsy();
+
+    const deleteQuestResult = await client.callTool({ name: 'delete_quest', arguments: { questId: quest.id } });
+    expect(deleteQuestResult.isError).toBeFalsy();
+
+    const locResult = await client.callTool({ name: 'upsert_location', arguments: { campaignId, name: 'MCP Cave' } });
+    const location = parseResult(locResult) as { id: number; status: string };
+    expect(location.status).toBe('unexplored');
+
+    const discoverResult = await client.callTool({
+      name: 'set_location_discovery',
+      arguments: { locationId: location.id, status: 'current' },
+    });
+    expect(discoverResult.isError).toBeFalsy();
+    expect((parseResult(discoverResult) as { status: string }).status).toBe('current');
+
+    const deleteLocResult = await client.callTool({ name: 'delete_location', arguments: { locationId: location.id } });
+    expect(deleteLocResult.isError).toBeFalsy();
+
+    const npcResult = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'MCP Blacksmith' } });
+    const npc = parseResult(npcResult) as { id: number };
+    const deleteNpcResult = await client.callTool({ name: 'delete_npc', arguments: { npcId: npc.id } });
+    expect(deleteNpcResult.isError).toBeFalsy();
+
+    const sessionResult = await client.callTool({ name: 'add_session_recap', arguments: { campaignId, recap: 'Session one recap' } });
+    const session = parseResult(sessionResult) as { id: number; title: string };
+    const updateSessionResult = await client.callTool({
+      name: 'update_session',
+      arguments: { sessionId: session.id, title: 'The Beginning' },
+    });
+    expect(updateSessionResult.isError).toBeFalsy();
+    expect((parseResult(updateSessionResult) as { title: string }).title).toBe('The Beginning');
+
+    const getSessionResult = await client.callTool({ name: 'get_session', arguments: { sessionId: session.id } });
+    expect(getSessionResult.isError).toBeFalsy();
+    expect((parseResult(getSessionResult) as { title: string }).title).toBe('The Beginning');
+
+    const noteResult = await client.callTool({ name: 'add_note', arguments: { campaignId, body: 'A note to edit' } });
+    const note = parseResult(noteResult) as { id: number };
+    const updateNoteResult = await client.callTool({ name: 'update_note', arguments: { noteId: note.id, body: 'Edited note' } });
+    expect(updateNoteResult.isError).toBeFalsy();
+    expect((parseResult(updateNoteResult) as { body: string }).body).toBe('Edited note');
+
+    const listNotesResult = await client.callTool({ name: 'list_notes', arguments: { campaignId, mine: true } });
+    expect(listNotesResult.isError).toBeFalsy();
+    expect((parseResult(listNotesResult) as unknown[]).some((n) => (n as { id: number }).id === note.id)).toBe(true);
+
+    const deleteNoteResult = await client.callTool({ name: 'delete_note', arguments: { noteId: note.id } });
+    expect(deleteNoteResult.isError).toBeFalsy();
+  });
+
+  it('submit_inbox_item (player-role) is visible via read_inbox (dm-role)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const inboxResult = await dmClient.callTool({
+      name: 'submit_inbox_item',
+      arguments: { campaignId, body: 'Player question over MCP' },
+    });
+    expect(inboxResult.isError).toBeFalsy();
+    const item = parseResult(inboxResult) as { id: number; kind: string };
+    expect(item.kind).toBe('inbox');
+
+    const inboxList = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId } });
+    expect(inboxList.isError).toBeFalsy();
+    expect((parseResult(inboxList) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(true);
+
+    const resolveResult = await dmClient.callTool({ name: 'resolve_inbox_item', arguments: { noteId: item.id, resolvedNote: 'handled' } });
+    expect(resolveResult.isError).toBeFalsy();
+  });
+
+  it('add_member -> update_member -> remove_member round-trip (dm only)', async () => {
+    const client = await mcpClient(dmToken);
+    const newUserRes = await dmAgent.post('/api/v1/users').send({ username: 'mcp-added-member', password: 'member-password-1' });
+    expect(newUserRes.status).toBe(201);
+    const newUserId = newUserRes.body.id;
+
+    const addResult = await client.callTool({ name: 'add_member', arguments: { campaignId, userId: newUserId, role: 'player' } });
+    expect(addResult.isError).toBeFalsy();
+    const member = parseResult(addResult) as { id: number; role: string };
+    expect(member.role).toBe('player');
+
+    const updateResult = await client.callTool({
+      name: 'update_member',
+      arguments: { campaignId, memberId: member.id, role: 'viewer' },
+    });
+    expect(updateResult.isError).toBeFalsy();
+    expect((parseResult(updateResult) as { role: string }).role).toBe('viewer');
+
+    const removeResult = await client.callTool({ name: 'remove_member', arguments: { campaignId, memberId: member.id } });
+    expect(removeResult.isError).toBeFalsy();
+  });
+
+  it('list_rule_packs / get_rule_entry read tools work, and install_rule_pack requires server admin', async () => {
+    const dmClient = await mcpClient(dmToken); // mcp-dm is the server admin (see beforeAll)
+    const packsResult = await dmClient.callTool({ name: 'list_rule_packs', arguments: {} });
+    expect(packsResult.isError).toBeFalsy();
+    const packs = parseResult(packsResult) as Array<{ slug: string }>;
+    expect(packs.some((p) => p.slug === 'open5e-srd')).toBe(true);
+
+    const searchResult = await dmClient.callTool({ name: 'lookup_rule', arguments: { query: 'goblin', type: 'monster' } });
+    const [goblin] = parseResult(searchResult) as Array<{ id: number; name: string }>;
+    expect(goblin.name).toBe('Goblin');
+
+    const entryResult = await dmClient.callTool({ name: 'get_rule_entry', arguments: { entryId: goblin.id } });
+    expect(entryResult.isError).toBeFalsy();
+    expect((parseResult(entryResult) as { name: string }).name).toBe('Goblin');
+
+    // install_rule_pack: non-admin (viewer PAT belongs to the same admin user, but scope caps
+    // don't affect serverRole — use a real non-admin user instead, minted via the headless
+    // PAT-bootstrap endpoint (verifies credentials + mints a token in one call, no cookie jar).
+    const nonAdminUserRes = await dmAgent.post('/api/v1/users').send({ username: 'mcp-non-admin', password: 'non-admin-password-1' });
+    expect(nonAdminUserRes.status).toBe(201);
+    const nonAdminTokenRes = await request(ctx.app.getHttpServer())
+      .post('/api/v1/auth/token')
+      .send({ username: 'mcp-non-admin', password: 'non-admin-password-1', tokenName: 'mcp-non-admin-token', scope: 'dm' });
+    expect(nonAdminTokenRes.status).toBe(201);
+    const nonAdminClient = await mcpClient(nonAdminTokenRes.body.token);
+    const deniedInstall = await nonAdminClient.callTool({ name: 'install_rule_pack', arguments: { source: 'open5e' } });
+    expect(deniedInstall.isError).toBe(true);
+  });
+
+  it('list_encounters, monster combatant gets DEX-derived initMod from its statblock, update_combatant and remove_combatant', async () => {
+    const client = await mcpClient(dmToken);
+
+    const createResult = await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Ambush' } });
+    const encounter = parseResult(createResult) as { id: number };
+
+    const listResult = await client.callTool({ name: 'list_encounters', arguments: { campaignId, status: 'preparing' } });
+    expect(listResult.isError).toBeFalsy();
+    expect((parseResult(listResult) as Array<{ id: number }>).some((e) => e.id === encounter.id)).toBe(true);
+
+    // fake-open5e's Goblin has ability_scores.dexterity=14 -> initMod floor((14-10)/2)=2
+    const searchResult = await client.callTool({ name: 'lookup_rule', arguments: { query: 'goblin', type: 'monster' } });
+    const [goblinEntry] = parseResult(searchResult) as Array<{ id: number }>;
+
+    const addResult = await client.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: encounter.id, kind: 'monster', ruleEntryId: goblinEntry.id },
+    });
+    expect(addResult.isError).toBeFalsy();
+    const goblinCombatant = parseResult(addResult) as { id: number; name: string; initMod: number; hpMax: number };
+    expect(goblinCombatant.name).toBe('Goblin');
+    expect(goblinCombatant.initMod).toBe(2);
+    expect(goblinCombatant.hpMax).toBe(7);
+
+    const damageResult = await client.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id, hpDelta: -3, addConditions: ['prone'] },
+    });
+    expect(damageResult.isError).toBeFalsy();
+    const damaged = parseResult(damageResult) as { hpCurrent: number; conditions: string[] };
+    expect(damaged.hpCurrent).toBe(4);
+    expect(damaged.conditions).toContain('prone');
+
+    const removeResult = await client.callTool({
+      name: 'remove_combatant',
+      arguments: { encounterId: encounter.id, combatantId: goblinCombatant.id },
+    });
+    expect(removeResult.isError).toBeFalsy();
+
+    const getAfter = await client.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } });
+    const afterRemoval = parseResult(getAfter) as { combatants: Array<{ id: number }> };
+    expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(false);
   });
 
   it('request without Authorization gets 401; GET gets 405', async () => {

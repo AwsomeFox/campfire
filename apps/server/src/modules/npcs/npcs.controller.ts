@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { NpcCreate, NpcUpdate } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -20,12 +20,18 @@ export class CampaignNpcsController {
   ) {}
 
   @Get()
+  @ApiOperation({ summary: 'List NPCs in a campaign', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
+  @ApiResponse({ status: 200, description: 'NPCs in the campaign.' })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireMember(user, campaignId);
     return this.npcs.listForCampaign(campaignId, role);
   }
 
   @Post()
+  @ApiOperation({ summary: 'Create an NPC', description: 'dm role required, unless `?proposed=true` — then any member may submit it as a pending proposal.' })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
+  @ApiResponse({ status: 201, description: 'Created NPC (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: NpcCreateDto,
@@ -56,6 +62,8 @@ export class NpcsController {
   ) {}
 
   @Get(':id')
+  @ApiOperation({ summary: 'Get an NPC', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
+  @ApiResponse({ status: 200, description: 'NPC.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.npcs.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -63,6 +71,10 @@ export class NpcsController {
   }
 
   @Patch(':id')
+  @ApiOperation({ summary: 'Update an NPC', description: 'dm role required, unless `?proposed=true` — then any member may submit it as a pending proposal.' })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
+  @ApiResponse({ status: 200, description: 'Updated NPC (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: NpcUpdateDto,
@@ -83,6 +95,8 @@ export class NpcsController {
   }
 
   @Delete(':id')
+  @ApiOperation({ summary: 'Delete an NPC', description: 'dm role required.' })
+  @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.npcs.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');

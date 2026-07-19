@@ -31,5 +31,6 @@ import { ExportController } from './export.controller';
   ],
   controllers: [ExportController],
   providers: [ExportService],
+  exports: [ExportService],
 })
 export class ExportModule {}

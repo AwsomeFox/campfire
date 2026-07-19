@@ -96,6 +96,7 @@ export default function CampaignSettingsPage() {
             isAdmin={isAdmin}
             onSaved={(c) => setCampaign(c)}
           />
+          <ExportCard campaignId={id} />
           <DangerZoneCard
             campaign={campaign}
             onDeleted={() => {
@@ -298,6 +299,25 @@ function RuleSystemCard({
         </p>
       )}
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+    </div>
+  );
+}
+
+function ExportCard({ campaignId }: { campaignId: number }) {
+  return (
+    <div className="card elev-sm">
+      <span className="card-kicker">Export campaign</span>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Take everything with you — no lock-in. Includes quests, NPCs, locations, characters, sessions and notes.
+      </p>
+      <div className="flex gap-2 flex-wrap">
+        <a className="btn btn-secondary" style={{ fontSize: 12.5 }} href={`${API}/campaigns/${campaignId}/export?format=json`}>
+          ⬇ JSON export
+        </a>
+        <a className="btn btn-secondary" style={{ fontSize: 12.5 }} href={`${API}/campaigns/${campaignId}/export?format=mdzip`}>
+          ⬇ Markdown zip
+        </a>
+      </div>
     </div>
   );
 }
