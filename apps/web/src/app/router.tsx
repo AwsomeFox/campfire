@@ -1,0 +1,109 @@
+/**
+ * App router. Feature pages beyond auth/home are owned by other devs and
+ * imported lazily so a missing/broken module only breaks its own route
+ * (caught by RouteErrorBoundary) rather than the whole app at build time.
+ */
+import { lazy, Suspense, type ReactNode } from 'react';
+import { createBrowserRouter } from 'react-router-dom';
+import { Layout } from './Layout';
+import { AuthedLayout } from './AuthedLayout';
+import { RouteErrorBoundary } from './RouteErrorBoundary';
+import { Skeleton } from '../components/ui';
+import { SetupPage } from '../features/auth/SetupPage';
+import { LoginPage } from '../features/auth/LoginPage';
+import { HomePage } from '../features/home/HomePage';
+
+function lazyPage(loader: Parameters<typeof lazy>[0]) {
+  const LazyComponent = lazy(loader);
+  return (
+    <RouteErrorBoundary>
+      <Suspense
+        fallback={
+          <div className="max-w-4xl mx-auto px-4 mt-8">
+            <Skeleton lines={5} />
+          </div>
+        }
+      >
+        <LazyComponent />
+      </Suspense>
+    </RouteErrorBoundary>
+  );
+}
+
+function page(element: ReactNode) {
+  return <RouteErrorBoundary>{element}</RouteErrorBoundary>;
+}
+
+export const router = createBrowserRouter([
+  {
+    path: '/setup',
+    element: page(<SetupPage />),
+  },
+  {
+    path: '/login',
+    element: page(<LoginPage />),
+  },
+  {
+    element: <AuthedLayout />,
+    children: [
+      {
+        element: <Layout />,
+        children: [
+          { path: '/', element: page(<HomePage />) },
+          {
+            path: '/c/:campaignId',
+            element: lazyPage(() => import('../features/dashboard/DashboardPage')),
+          },
+          {
+            path: '/c/:campaignId/quests/:questId',
+            element: lazyPage(() => import('../features/quests/QuestPage')),
+          },
+          {
+            path: '/c/:campaignId/npcs',
+            element: lazyPage(() => import('../features/npcs/NpcListPage')),
+          },
+          {
+            path: '/c/:campaignId/npcs/:npcId',
+            element: lazyPage(() => import('../features/npcs/NpcPage')),
+          },
+          {
+            path: '/c/:campaignId/locations',
+            element: lazyPage(() => import('../features/locations/LocationListPage')),
+          },
+          {
+            path: '/c/:campaignId/locations/:locationId',
+            element: lazyPage(() => import('../features/locations/LocationPage')),
+          },
+          {
+            path: '/c/:campaignId/party',
+            element: lazyPage(() => import('../features/characters/PartyPage')),
+          },
+          {
+            path: '/c/:campaignId/characters/:characterId',
+            element: lazyPage(() => import('../features/characters/CharacterPage')),
+          },
+          {
+            path: '/c/:campaignId/sessions',
+            element: lazyPage(() => import('../features/sessions/SessionsPage')),
+          },
+          {
+            path: '/c/:campaignId/notes',
+            element: lazyPage(() => import('../features/notes/MyNotesPage')),
+          },
+          {
+            path: '/c/:campaignId/inbox',
+            element: lazyPage(() => import('../features/notes/InboxPage')),
+          },
+          {
+            path: '/c/:campaignId/members',
+            element: lazyPage(() => import('../features/admin/MembersPage')),
+          },
+          {
+            path: '/admin',
+            element: lazyPage(() => import('../features/admin/AdminPage')),
+          },
+        ],
+      },
+    ],
+  },
+]);
