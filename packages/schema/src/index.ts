@@ -200,6 +200,61 @@ export const CampaignSummary = z.object({
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;
 
+// ---------- auth, users, settings, membership ----------
+export const ServerRole = z.enum(['admin', 'user']);
+export type ServerRole = z.infer<typeof ServerRole>;
+
+export const User = z.object({
+  id: Id,
+  username: z.string().min(2).max(60).regex(/^[a-z0-9_.-]+$/i, 'letters, numbers, _ . - only'),
+  displayName: z.string().max(120).default(''),
+  serverRole: ServerRole.default('user'),
+  disabled: z.boolean().default(false),
+  ...timestamps,
+}); // passwordHash never leaves the server
+export type User = z.infer<typeof User>;
+
+export const Password = z.string().min(8).max(200);
+export const SetupRequest = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional() });
+export const LoginRequest = z.object({ username: z.string().min(1), password: z.string().min(1) });
+export const UserCreate = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional(), serverRole: ServerRole.optional() });
+export const UserUpdate = z.object({ displayName: z.string().max(120).optional(), serverRole: ServerRole.optional(), disabled: z.boolean().optional() });
+export const PasswordChange = z.object({ currentPassword: z.string().optional(), newPassword: Password }); // current required for self-change; admin reset omits
+
+export const AuthStatus = z.object({
+  setupRequired: z.boolean(), // true until the first (admin) user exists
+  localLoginEnabled: z.boolean(), // for non-admin users (admins can always log in locally)
+  oidcEnabled: z.boolean(), // future
+  version: z.string(),
+});
+export type AuthStatus = z.infer<typeof AuthStatus>;
+
+export const ServerSettings = z.object({
+  allowLocalLogin: z.boolean().default(true), // gate for non-admin local login
+});
+export type ServerSettings = z.infer<typeof ServerSettings>;
+export const SettingsUpdate = ServerSettings.partial();
+
+export const CampaignMember = z.object({
+  id: Id,
+  campaignId: Id,
+  userId: Id,
+  role: Role, // dm | player | viewer — per campaign
+  characterId: Id.nullable().default(null),
+  username: z.string().default(''), // denormalized for display
+  displayName: z.string().default(''),
+  ...timestamps,
+});
+export type CampaignMember = z.infer<typeof CampaignMember>;
+export const MemberCreate = z.object({ userId: Id, role: Role, characterId: Id.nullable().optional() });
+export const MemberUpdate = z.object({ role: Role.optional(), characterId: Id.nullable().optional() });
+
+export const Me = z.object({
+  user: User,
+  memberships: z.array(z.object({ campaignId: Id, role: Role, characterId: Id.nullable() })),
+});
+export type Me = z.infer<typeof Me>;
+
 // ---------- audit ----------
 export const AuditEntry = z.object({
   id: Id,
