@@ -108,6 +108,22 @@ body {
   background: rgb(100 116 139 / 0.2);
   color: #cbd5e1;
 }
+.cf-chip-private {
+  background: rgb(100 116 139 / 0.2);
+  color: #cbd5e1;
+}
+.cf-chip-dm {
+  background: rgb(245 158 11 / 0.15);
+  color: #fbbf24;
+}
+.cf-chip-party {
+  background: rgb(16 185 129 / 0.15);
+  color: #34d399;
+}
+.cf-chip-proposal {
+  background: rgb(167 139 250 / 0.15);
+  color: #c4b5fd;
+}
 
 .cf-btn {
   display: inline-flex;
@@ -159,4 +175,99 @@ body {
 }
 .cf-input::placeholder {
   color: var(--cf-faint);
+}
+
+.cf-textarea,
+.cf-select {
+  width: 100%;
+  background: var(--cf-surface);
+  color: var(--cf-ink);
+  border: 1px solid var(--cf-border);
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  font-size: 0.95rem;
+  min-height: 44px;
+}
+.cf-textarea {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+.cf-textarea:focus,
+.cf-select:focus {
+  outline: 2px solid var(--cf-accent);
+  outline-offset: -1px;
+}
+
+/* DM-only panel — always amber, always labeled */
+.cf-dm-panel {
+  background: rgb(245 158 11 / 0.06);
+  border: 1px solid rgb(245 158 11 / 0.35);
+  border-radius: 0.75rem;
+}
+
+/* HP bar */
+.cf-hp {
+  height: 6px;
+  border-radius: 9999px;
+  background: #334155;
+  overflow: hidden;
+}
+.cf-hp > div {
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--cf-success);
+}
+.cf-hp.low > div {
+  background: var(--cf-accent);
+}
+.cf-hp.crit > div {
+  background: var(--cf-danger);
+}
+
+/* Session timeline entry */
+.cf-timeline {
+  border-left: 2px solid var(--cf-border);
+  padding-left: 1rem;
+}
+.cf-timeline.active {
+  border-color: var(--cf-accent);
+}
+
+/* Mobile bottom tab bar */
+.cf-tabbar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  background: rgb(15 23 42 / 0.92);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid var(--cf-border);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+}
+.cf-tabbar a {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 0.5rem 0 max(0.5rem, env(safe-area-inset-bottom));
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--cf-faint);
+  text-decoration: none;
+  min-height: 48px;
+}
+.cf-tabbar a.active {
+  color: var(--cf-accent);
+}
+.cf-tabbar .ico {
+  font-size: 18px;
+  line-height: 1;
+}
+@media (min-width: 768px) {
+  .cf-tabbar {
+    display: none;
+  }
 }

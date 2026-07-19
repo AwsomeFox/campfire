@@ -4,13 +4,22 @@
   "description": "Campfire domain contract: Zod schemas + inferred types (single source of truth for API DTOs, OpenAPI, and MCP tools)",
   "license": "MIT",
   "type": "commonjs",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/cjs/index.js",
+  "types": "dist/types/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json && tsc -p tsconfig.esm.json && printf '{\"type\":\"module\"}' > dist/esm/package.json",
     "dev": "tsc -p tsconfig.json --watch"
   },
   "dependencies": {
     "zod": "^3.24.1"
-  }
+  },
+  "module": "dist/esm/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "sideEffects": false
 }
