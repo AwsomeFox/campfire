@@ -10,23 +10,33 @@ import { api, API } from '../lib/api';
 interface CampaignContextValue {
   campaigns: Campaign[];
   loading: boolean;
+  /** True when the last refresh() failed — lets consumers tell "API down" apart from "no campaigns yet". */
+  error: boolean;
   refresh(): Promise<void>;
 }
 
 const CampaignContext = createContext<CampaignContextValue>({
   campaigns: [],
   loading: true,
+  error: false,
   refresh: async () => {},
 });
 
 export function CampaignProvider({ children }: { children: ReactNode }) {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   const refresh = async () => {
     try {
       const list = await api.get<Campaign[]>(`${API}/campaigns`);
       setCampaigns(list);
+      setError(false);
+    } catch {
+      // Without this catch, an API outage left `campaigns` at its initial [] and
+      // HomePage rendered the "No campaigns yet" empty state — indistinguishable
+      // from a real new user. Surface it as an error instead.
+      setError(true);
     } finally {
       setLoading(false);
     }
@@ -37,7 +47,7 @@ export function CampaignProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <CampaignContext.Provider value={{ campaigns, loading, refresh }}>
+    <CampaignContext.Provider value={{ campaigns, loading, error, refresh }}>
       {children}
     </CampaignContext.Provider>
   );

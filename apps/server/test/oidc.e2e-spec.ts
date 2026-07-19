@@ -230,6 +230,20 @@ class CookieAgent {
     this.absorb(res);
     return res;
   }
+
+  async patchJson(pathname: string, body: unknown): Promise<Response> {
+    const cookie = this.cookieHeader();
+    const res = await fetch(`${this.baseUrl}${pathname}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    this.absorb(res);
+    return res;
+  }
 }
 
 /** Fetches a path against a base URL with no cookie jar and no redirect-follow — used for the one-off IdP hop. */
@@ -451,6 +465,65 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       const body = await res.json();
       expect(res.status).toBe(403);
       expect(body.message).toMatch(/SSO/i);
+    });
+  });
+
+  // P3 fix pinning test — the OIDC callback must deny a disabled user a session, matching
+  // local login's 403 (see AuthService.login's `row.disabled` check). Before this fix,
+  // OidcController.callback minted a working session cookie for a disabled account with
+  // no disabled check at all — a silent bypass of the disable feature via SSO.
+  describe('disabled user is denied a session via OIDC callback (dedicated app instance)', () => {
+    let app: AppProcess;
+
+    beforeAll(async () => {
+      app = await spawnApp(oidcEnvFor(idp, { OIDC_ADMIN_GROUP: 'campfire-admins' }));
+    });
+
+    afterAll(async () => {
+      await app.kill();
+    });
+
+    it('disabled OIDC user gets 403 with a clear message on callback, and no session cookie is set', async () => {
+      // First login as an admin (via the admin-group claim) so we have someone who can disable users.
+      idp.setNextUser({ sub: 'sub-disable-admin', preferred_username: 'disableadmin', email: 'disableadmin@example.com', name: 'Disable Admin', groups: ['campfire-admins'] });
+      const adminAgent = new CookieAgent(app.baseUrl);
+      await performOidcLogin(adminAgent);
+      const adminMe = await adminAgent.get('/api/v1/me');
+      const adminMeBody = await adminMe.json();
+      expect(adminMeBody.user.serverRole).toBe('admin');
+
+      // Provision a second, regular OIDC user.
+      idp.setNextUser({ sub: 'sub-to-disable', preferred_username: 'todisable', email: 'todisable@example.com', name: 'To Disable' });
+      const targetAgent = new CookieAgent(app.baseUrl);
+      const firstLogin = await performOidcLogin(targetAgent);
+      expect(firstLogin.status).toBe(302);
+      const targetMe = await targetAgent.get('/api/v1/me');
+      const targetMeBody = await targetMe.json();
+      expect(targetMeBody.user.serverRole).toBe('user');
+      const targetUserId = targetMeBody.user.id;
+
+      // Admin disables the target user.
+      const patchRes = await adminAgent.patchJson(`/api/v1/users/${targetUserId}`, { disabled: true });
+      expect(patchRes.status).toBe(200);
+      const patchBody = await patchRes.json();
+      expect(patchBody.disabled).toBe(true);
+
+      // Now the disabled user attempts an OIDC login again -> denied at the callback.
+      idp.setNextUser({ sub: 'sub-to-disable', preferred_username: 'todisable', email: 'todisable@example.com', name: 'To Disable' });
+      const retryAgent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(retryAgent);
+      expect(callbackRes.status).toBe(403);
+      const callbackBody = await callbackRes.json();
+      expect(callbackBody.message).toMatch(/disabled/i);
+
+      // No session cookie (campfire_session) was issued to the disabled user — only the
+      // OIDC flow cookie gets cleared (expected on every callback, success or failure).
+      const headers = callbackRes.headers as Headers & { getSetCookie?: () => string[] };
+      const setCookies = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : [];
+      expect(setCookies.some((c) => c.startsWith('campfire_session='))).toBe(false);
+
+      const meAfterDenied = await retryAgent.get('/api/v1/me');
+      expect(meAfterDenied.status).toBe(401);
     });
   });
 

@@ -10,6 +10,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { RuleEntry, RuleEntryType, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
+import { useCampaign } from '../../app/CampaignContext';
 
 const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -32,6 +33,8 @@ export default function CompendiumPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
+  const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
+  const campaignPack = campaign?.ruleSystem || '';
 
   const [query, setQuery] = useState('');
   const debouncedQuery = useDebounced(query, 300);
@@ -61,10 +64,13 @@ export default function CompendiumPage() {
     };
   }, []);
 
+  // The campaign's chosen rule system, not just "some pack is installed server-wide",
+  // decides whether the compendium has anything to show for THIS campaign.
+  const noRuleSystemChosen = campaign !== undefined && !campaignPack;
   const noPacksInstalled = packs !== null && packs.length === 0;
 
   useEffect(() => {
-    if (noPacksInstalled) {
+    if (noRuleSystemChosen || noPacksInstalled) {
       setResults([]);
       return;
     }
@@ -76,6 +82,7 @@ export default function CompendiumPage() {
         const params = new URLSearchParams();
         if (debouncedQuery.trim()) params.set('q', debouncedQuery.trim());
         if (type !== 'all') params.set('type', type);
+        if (campaignPack) params.set('pack', campaignPack);
         const list = await api.get<RuleEntry[]>(`${API}/rules/search?${params.toString()}`);
         if (!cancelled) setResults(list);
       } catch (err) {
@@ -90,7 +97,7 @@ export default function CompendiumPage() {
     return () => {
       cancelled = true;
     };
-  }, [debouncedQuery, type, noPacksInstalled]);
+  }, [debouncedQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack]);
 
   const chips = useMemo(() => TYPE_CHIPS, []);
 
@@ -141,6 +148,15 @@ export default function CompendiumPage() {
           <Card>
             <Skeleton lines={4} />
           </Card>
+        ) : noRuleSystemChosen ? (
+          <div className="card items-center text-center" style={{ padding: 24 }}>
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
+              No rule system chosen for this campaign.
+            </p>
+            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
+              Pick one in Settings, or ask an admin to install a pack.
+            </p>
+          </div>
         ) : noPacksInstalled ? (
           <div className="card items-center text-center" style={{ padding: 24 }}>
             <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>

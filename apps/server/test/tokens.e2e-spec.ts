@@ -117,4 +117,49 @@ describe('api tokens (e2e, real cookie sessions)', () => {
     const delRes = await otherAgent.delete(`/api/v1/tokens/${tokenId}`);
     expect(delRes.status).toBe(404);
   });
+
+  // P1 fix pinning test — see role-resolver.service.ts (accessibleCampaignIds) and
+  // tokens.service.ts (create). Reproduces the exact adversarial-review repro: a user
+  // who is a member of NO campaign must not be able to mint a token scoped to a campaign
+  // they can't access, and (belt-and-suspenders) GET /campaigns must never reveal a
+  // campaign via a token's self-reported campaignId alone.
+  describe('P1: campaign-scoped token minting requires real access to that campaign', () => {
+    it('non-member cannot mint a token scoped to a campaign they are not a member of -> 403', async () => {
+      // otherAgent ("token-other") is not a member of `campaignId` (only dmAgent is).
+      const mintRes = await otherAgent.post('/api/v1/tokens').send({ name: 'sneaky-scoped', scope: 'viewer', campaignId });
+      expect(mintRes.status).toBe(403);
+
+      // No token row should have been created.
+      const listRes = await otherAgent.get('/api/v1/tokens');
+      expect(listRes.body.some((t: { name: string }) => t.name === 'sneaky-scoped')).toBe(false);
+    });
+
+    it('exact repro: user member of nothing, token for a campaign they cannot access, GET /campaigns must not reveal it', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Fresh user with zero campaign memberships anywhere.
+      await dmAgent.post('/api/v1/users').send({ username: 'token-nomember', password: 'nomember-password-1', serverRole: 'user' });
+      const nomemberAgent = request.agent(server);
+      await nomemberAgent.post('/api/v1/auth/login').send({ username: 'token-nomember', password: 'nomember-password-1' });
+
+      // Secret campaign this user has no relationship to.
+      const secretRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Secret Campaign' });
+      const secretCampaignId = secretRes.body.id;
+
+      // Attempting to mint a token scoped to it is rejected outright.
+      const mintRes = await nomemberAgent.post('/api/v1/tokens').send({ name: 'nomember-scoped', scope: 'viewer', campaignId: secretCampaignId });
+      expect(mintRes.status).toBe(403);
+
+      // GET /campaigns for this user never reveals the secret campaign.
+      const listRes = await nomemberAgent.get('/api/v1/campaigns');
+      expect(listRes.status).toBe(200);
+      expect(listRes.body.some((c: { id: number }) => c.id === secretCampaignId)).toBe(false);
+    });
+
+    it('member CAN mint a campaign-scoped token for a campaign they belong to', async () => {
+      const createRes = await dmAgent.post('/api/v1/tokens').send({ name: 'legit-scoped', scope: 'dm', campaignId });
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.apiToken.campaignId).toBe(campaignId);
+    });
+  });
 });

@@ -1,10 +1,10 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { MemberCreate, MemberUpdate } from '@campfire/schema';
 import type { CampaignMember } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, users } from '../../db/schema';
+import { campaignMembers, users, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -77,6 +77,21 @@ export class MembersService {
       .onConflictDoNothing();
   }
 
+  /**
+   * characterId is an FK-shaped field that previously accepted any integer with no
+   * existence/campaign check — a nonexistent id, or another campaign's character id,
+   * would silently pass through and get denormalized-joined against on listForCampaign.
+   */
+  private async validateCharacterRef(characterId: number | null | undefined, campaignId: number): Promise<void> {
+    if (characterId == null) return;
+    const [row] = await this.db
+      .select({ id: characters.id })
+      .from(characters)
+      .where(and(eq(characters.id, characterId), eq(characters.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
+  }
+
   async create(campaignId: number, input: MemberCreateInput, actor: RequestUser): Promise<CampaignMember> {
     const [existing] = await this.db
       .select()
@@ -84,6 +99,7 @@ export class MembersService {
       .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, input.userId)))
       .limit(1);
     if (existing) throw new ConflictException('User is already a member of this campaign');
+    await this.validateCharacterRef(input.characterId, campaignId);
 
     const ts = nowIso();
     const [row] = await this.db
@@ -122,6 +138,7 @@ export class MembersService {
         throw new ConflictException('Cannot demote the last dm of this campaign');
       }
     }
+    await this.validateCharacterRef(input.characterId, campaignId);
 
     const update: Partial<typeof campaignMembers.$inferInsert> = { updatedAt: nowIso() };
     if (input.role !== undefined) update.role = input.role;

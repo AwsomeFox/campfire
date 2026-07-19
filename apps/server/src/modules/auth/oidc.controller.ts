@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Req, Res, ServiceUnavailableException } from '@nestjs/common';
+import { Controller, ForbiddenException, Get, Query, Req, Res, ServiceUnavailableException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { Public } from '../../common/decorators/public.decorator';
@@ -74,6 +74,13 @@ export class OidcController {
     const currentUrl = currentUrlFromRequest(req, env.redirectUri);
     const claims = await this.oidc.handleCallback(currentUrl, state, codeVerifier);
     const user = await this.oidc.provisionOrUpdateUser(claims);
+    // Mirror local login's 403 (see AuthService.login) — a disabled account must never
+    // get a session, whether it authenticates via password or SSO. Without this check,
+    // OIDC was a silent bypass: local login denies disabled users with a clear 403, but
+    // the OIDC callback still happily minted a working session cookie for the same user.
+    if (user.disabled) {
+      throw new ForbiddenException('This account is disabled');
+    }
     const { token } = await this.auth.issueSessionFor(user.id);
 
     res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());

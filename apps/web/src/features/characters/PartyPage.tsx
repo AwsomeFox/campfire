@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import type { Character } from '@campfire/schema';
+import type { Character, CampaignMember } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -19,6 +19,7 @@ export default function PartyPage() {
   const isDm = role === 'dm';
 
   const [characters, setCharacters] = useState<Character[]>([]);
+  const [members, setMembers] = useState<CampaignMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -26,8 +27,14 @@ export default function PartyPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const data = await api.get<Character[]>(`${API}/campaigns/${id}/characters`);
-      setCharacters(data);
+      const [chars, memberList] = await Promise.all([
+        api.get<Character[]>(`${API}/campaigns/${id}/characters`),
+        // Members list is available to every campaign role (not DM-only) — used
+        // only to resolve a character's ownerUserId to a human-readable name below.
+        api.get<CampaignMember[]>(`${API}/campaigns/${id}/members`).catch(() => [] as CampaignMember[]),
+      ]);
+      setCharacters(chars);
+      setMembers(memberList);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load the party.");
     } finally {
@@ -38,6 +45,12 @@ export default function PartyPage() {
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  function ownerLabel(ownerUserId: string | null): string | null {
+    if (!ownerUserId) return null;
+    const member = members.find((m) => String(m.userId) === ownerUserId);
+    return member?.displayName || member?.username || null;
+  }
 
   if (!Number.isFinite(id)) {
     return (
@@ -74,7 +87,7 @@ export default function PartyPage() {
       ) : (
         <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
           {characters.map((c, i) => (
-            <CharacterCard key={c.id} campaignId={id} character={c} index={i} />
+            <CharacterCard key={c.id} campaignId={id} character={c} index={i} ownerLabel={ownerLabel(c.ownerUserId)} />
           ))}
         </div>
       )}
@@ -86,7 +99,17 @@ export default function PartyPage() {
   );
 }
 
-function CharacterCard({ campaignId, character, index }: { campaignId: number; character: Character; index: number }) {
+function CharacterCard({
+  campaignId,
+  character,
+  index,
+  ownerLabel,
+}: {
+  campaignId: number;
+  character: Character;
+  index: number;
+  ownerLabel: string | null;
+}) {
   const tone = avatarTone(index);
   const hpPct = character.hpMax > 0 ? Math.max(0, Math.min(100, (character.hpCurrent / character.hpMax) * 100)) : 0;
   return (
@@ -104,7 +127,7 @@ function CharacterCard({ campaignId, character, index }: { campaignId: number; c
           <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
           <p className="text-[11.5px] text-slate-500 truncate">
             {character.className || 'Unknown class'} · Lv {character.level}
-            {character.ownerUserId && ` · ${character.ownerUserId}`}
+            {ownerLabel && ` · ${ownerLabel}`}
           </p>
         </div>
       </div>

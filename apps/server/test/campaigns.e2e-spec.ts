@@ -151,6 +151,101 @@ describe('campaigns (e2e)', () => {
     expect(res.status).toBe(400);
     expect(res.body.statusCode).toBe(400);
   });
+
+  // P2 fix pinning tests — FK-shaped fields (currentLocationId, mapAttachmentId) must
+  // resolve to a real row IN THE SAME campaign, or 400.
+  describe('FK validation: currentLocationId / mapAttachmentId', () => {
+    it('POST rejects a non-null currentLocationId/mapAttachmentId outright (no locations/attachments exist yet on a brand-new campaign)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Bad FK Create', currentLocationId: 999999 });
+      expect(res.status).toBe(400);
+    });
+
+    it('PATCH currentLocationId with a nonexistent id -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'FK Loc Campaign' });
+      const id = createRes.body.id;
+
+      const res = await request(server).patch(`/api/v1/campaigns/${id}`).set(dm).send({ currentLocationId: 999999 });
+      expect(res.status).toBe(400);
+    });
+
+    it('PATCH currentLocationId with a cross-campaign location id -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const campA = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'FK Loc Campaign A' });
+      const campB = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'FK Loc Campaign B' });
+
+      const locRes = await request(server)
+        .post(`/api/v1/campaigns/${campB.body.id}/locations`)
+        .set(dm)
+        .send({ name: 'Location in B' });
+      expect(locRes.status).toBe(201);
+
+      const res = await request(server)
+        .patch(`/api/v1/campaigns/${campA.body.id}`)
+        .set(dm)
+        .send({ currentLocationId: locRes.body.id });
+      expect(res.status).toBe(400);
+    });
+
+    it('PATCH currentLocationId with a valid same-campaign location id -> 200', async () => {
+      const server = ctx.app.getHttpServer();
+      const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'FK Loc Campaign Valid' });
+      const id = createRes.body.id;
+
+      const locRes = await request(server).post(`/api/v1/campaigns/${id}/locations`).set(dm).send({ name: 'Valid Location' });
+      expect(locRes.status).toBe(201);
+
+      const res = await request(server).patch(`/api/v1/campaigns/${id}`).set(dm).send({ currentLocationId: locRes.body.id });
+      expect(res.status).toBe(200);
+      expect(res.body.currentLocationId).toBe(locRes.body.id);
+    });
+
+    it('PATCH mapAttachmentId with a nonexistent id -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'FK Attach Campaign' });
+      const id = createRes.body.id;
+
+      const res = await request(server).patch(`/api/v1/campaigns/${id}`).set(dm).send({ mapAttachmentId: 999999 });
+      expect(res.status).toBe(400);
+    });
+
+    it('PATCH mapAttachmentId with a cross-campaign attachment id -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const campA = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'FK Attach Campaign A' });
+      const campB = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'FK Attach Campaign B' });
+
+      const uploadRes = await request(server)
+        .post(`/api/v1/campaigns/${campB.body.id}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'map.png', contentType: 'image/png' });
+      expect(uploadRes.status).toBe(201);
+
+      const res = await request(server)
+        .patch(`/api/v1/campaigns/${campA.body.id}`)
+        .set(dm)
+        .send({ mapAttachmentId: uploadRes.body.id });
+      expect(res.status).toBe(400);
+    });
+
+    it('PATCH mapAttachmentId with a valid same-campaign attachment id -> 200', async () => {
+      const server = ctx.app.getHttpServer();
+      const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'FK Attach Campaign Valid' });
+      const id = createRes.body.id;
+
+      const uploadRes = await request(server)
+        .post(`/api/v1/campaigns/${id}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'map.png', contentType: 'image/png' });
+      expect(uploadRes.status).toBe(201);
+
+      const res = await request(server).patch(`/api/v1/campaigns/${id}`).set(dm).send({ mapAttachmentId: uploadRes.body.id });
+      expect(res.status).toBe(200);
+      expect(res.body.mapAttachmentId).toBe(uploadRes.body.id);
+    });
+  });
 });
 
 // Minimal valid 1x1 PNG (smallest possible real PNG payload) — same fixture as attachments.e2e-spec.ts.

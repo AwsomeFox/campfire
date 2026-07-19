@@ -30,7 +30,6 @@ export function NotesQuickRail({
   role: Role | null;
 }) {
   const isDm = role === 'dm';
-  const isViewer = role === 'viewer';
   const [notes, setNotes] = useState<Note[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [quickNote, setQuickNote] = useState('');
@@ -38,29 +37,31 @@ export function NotesQuickRail({
   const [saved, setSaved] = useState(false);
 
   const load = useCallback(async () => {
-    if (isViewer) return; // viewers have no personal notes access — just the quick capture box
+    // Server allows private notes for every role, including viewers.
     setError(null);
     try {
       setNotes(await api.get<Note[]>(`${API}/campaigns/${campaignId}/notes`));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load notes.");
     }
-  }, [campaignId, isViewer]);
+  }, [campaignId]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  async function leaveNote(e: React.FormEvent) {
+  async function saveQuickNote(e: React.FormEvent) {
     e.preventDefault();
     if (!quickNote.trim()) return;
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
-      await api.post(`${API}/campaigns/${campaignId}/inbox`, { authorName: 'me', body: quickNote.trim() });
+      // Personal quick capture — a private note, same as MyNotesPage's quickCapture.
+      await api.post(`${API}/campaigns/${campaignId}/notes`, { body: quickNote.trim(), visibility: 'private' });
       setQuickNote('');
       setSaved(true);
+      await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't save the note.");
     } finally {
@@ -85,42 +86,35 @@ export function NotesQuickRail({
         )}
       </div>
 
-      {error && <ErrorNote message={error} onRetry={isViewer ? undefined : load} />}
+      {error && <ErrorNote message={error} onRetry={load} />}
 
-      {!isViewer &&
-        (notes.length === 0 ? (
-          <EmptyState icon="📝" title="No notes yet" hint="Jot your first thought below." />
-        ) : (
-          notes.slice(0, 5).map((n) => (
-            <div
-              key={n.id}
-              style={{
-                padding: '7px 0',
-                background:
-                  'linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent) no-repeat top / 100% 1px',
-              }}
-            >
-              <div style={{ fontSize: 13, color: 'var(--color-neutral-200)' }}>{n.body}</div>
-              <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center' }}>
-                <Chip variant={visMeta[n.visibility].chip}>{visMeta[n.visibility].label}</Chip>
-                <span className="text-muted" style={{ fontSize: 10.5 }}>
-                  {timeAgo(n.updatedAt)}
-                </span>
-              </div>
+      {notes.length === 0 ? (
+        <EmptyState icon="📝" title="No notes yet" hint="Jot your first thought below." />
+      ) : (
+        notes.slice(0, 5).map((n) => (
+          <div
+            key={n.id}
+            style={{
+              padding: '7px 0',
+              background:
+                'linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent) no-repeat top / 100% 1px',
+            }}
+          >
+            <div style={{ fontSize: 13, color: 'var(--color-neutral-200)' }}>{n.body}</div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center' }}>
+              <Chip variant={visMeta[n.visibility].chip}>{visMeta[n.visibility].label}</Chip>
+              <span className="text-muted" style={{ fontSize: 10.5 }}>
+                {timeAgo(n.updatedAt)}
+              </span>
             </div>
-          ))
-        ))}
-
-      {isViewer && (
-        <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
-          Notes need a player seat — viewers can still leave a note for the DM.
-        </p>
+          </div>
+        ))
       )}
 
-      <form className="flex gap-2 pt-1" onSubmit={leaveNote}>
+      <form className="flex gap-2 pt-1" onSubmit={saveQuickNote}>
         <TextInput
           style={{ minHeight: 0, paddingTop: 8, paddingBottom: 8 }}
-          placeholder="Quick note… (private)"
+          placeholder="Quick note… (private, just for you)"
           value={quickNote}
           onChange={(e) => {
             setQuickNote(e.target.value);
@@ -131,7 +125,12 @@ export function NotesQuickRail({
           Save
         </Btn>
       </form>
-      {saved && <p className="text-[11px] text-emerald-400">Sent to the DM&apos;s inbox.</p>}
+      {saved && <p className="text-[11px] text-emerald-400">Saved to your notes.</p>}
+      {!isDm && (
+        <Link to={`/c/${campaignId}/notes`} className="text-[11px]" style={{ color: 'var(--color-accent-300)' }}>
+          Want the DM to see something? Open My Notes → share a note with the DM →
+        </Link>
+      )}
     </div>
   );
 }

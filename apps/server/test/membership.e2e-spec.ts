@@ -106,6 +106,68 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
     expect(bList.body.some((c: { id: number }) => c.id === campaignId)).toBe(true);
     expect(bList.body.some((c: { id: number }) => c.id === otherCampaign.body.id)).toBe(false);
   });
+
+  // P2 fix pinning tests — member.characterId must resolve to a real character IN THE
+  // SAME campaign, or 400.
+  describe('FK validation: member.characterId', () => {
+    it('POST member with a nonexistent characterId -> 400', async () => {
+      await adminAgent.post('/api/v1/users').send({ username: 'user-c1', password: 'password-c1-1', serverRole: 'user' });
+      const meRes = await adminAgent.get('/api/v1/users');
+      const userC = meRes.body.find((u: { username: string }) => u.username === 'user-c1');
+
+      const res = await userA.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: userC.id, role: 'player', characterId: 999999 });
+      expect(res.status).toBe(400);
+    });
+
+    it('POST member with a cross-campaign characterId -> 400', async () => {
+      const otherCampRes = await userA.post('/api/v1/campaigns').send({ name: 'Member FK Other Campaign' });
+      const otherCampaignId = otherCampRes.body.id;
+      const charRes = await userA
+        .post(`/api/v1/campaigns/${otherCampaignId}/characters`)
+        .send({ name: 'Character in other campaign' });
+      expect(charRes.status).toBe(201);
+
+      await adminAgent.post('/api/v1/users').send({ username: 'user-c2', password: 'password-c2-1', serverRole: 'user' });
+      const usersRes = await adminAgent.get('/api/v1/users');
+      const userC2 = usersRes.body.find((u: { username: string }) => u.username === 'user-c2');
+
+      const res = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: userC2.id, role: 'player', characterId: charRes.body.id });
+      expect(res.status).toBe(400);
+    });
+
+    it('POST/PATCH member with a valid same-campaign characterId -> 200/201', async () => {
+      const charRes = await userA.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Valid Member Character' });
+      expect(charRes.status).toBe(201);
+
+      await adminAgent.post('/api/v1/users').send({ username: 'user-c3', password: 'password-c3-1', serverRole: 'user' });
+      const usersRes = await adminAgent.get('/api/v1/users');
+      const userC3 = usersRes.body.find((u: { username: string }) => u.username === 'user-c3');
+
+      const addRes = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: userC3.id, role: 'player', characterId: charRes.body.id });
+      expect(addRes.status).toBe(201);
+      expect(addRes.body.characterId).toBe(charRes.body.id);
+
+      const otherCharRes = await userA.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Second Valid Character' });
+      const patchRes = await userA
+        .patch(`/api/v1/campaigns/${campaignId}/members/${addRes.body.id}`)
+        .send({ characterId: otherCharRes.body.id });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.characterId).toBe(otherCharRes.body.id);
+    });
+
+    it('PATCH member with a nonexistent characterId -> 400', async () => {
+      const membersRes = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      const playerMember = membersRes.body.find((m: { role: string }) => m.role === 'player');
+      expect(playerMember).toBeDefined();
+
+      const res = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${playerMember.id}`).send({ characterId: 999999 });
+      expect(res.status).toBe(400);
+    });
+  });
 });
 
 /**

@@ -1,10 +1,10 @@
-import { Inject, Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch } from '@campfire/schema';
 import type { Quest, QuestObjective, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { quests, questObjectives } from '../../db/schema';
+import { quests, questObjectives, npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
@@ -109,7 +109,38 @@ export class QuestsService {
     return { ...quest, objectives };
   }
 
+  /**
+   * parentId (self-referencing quests.id) and giverNpcId (npcs.id) are FK-shaped fields
+   * that previously accepted any integer with no existence/campaign check — a nonexistent
+   * id, or another campaign's quest/npc id, would silently pass through. `excludeQuestId`
+   * (update only) additionally rejects a quest naming itself as its own parent.
+   */
+  private async validateParentRef(parentId: number | null | undefined, campaignId: number, excludeQuestId?: number): Promise<void> {
+    if (parentId == null) return;
+    if (excludeQuestId != null && parentId === excludeQuestId) {
+      throw new BadRequestException('A quest cannot be its own parent');
+    }
+    const [row] = await this.db
+      .select({ id: quests.id })
+      .from(quests)
+      .where(and(eq(quests.id, parentId), eq(quests.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`parentId ${parentId} does not exist in this campaign`);
+  }
+
+  private async validateGiverNpcRef(giverNpcId: number | null | undefined, campaignId: number): Promise<void> {
+    if (giverNpcId == null) return;
+    const [row] = await this.db
+      .select({ id: npcs.id })
+      .from(npcs)
+      .where(and(eq(npcs.id, giverNpcId), eq(npcs.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`giverNpcId ${giverNpcId} does not exist in this campaign`);
+  }
+
   async create(campaignId: number, input: QuestCreateInput, user: RequestUser, role: Role): Promise<Quest> {
+    await this.validateParentRef(input.parentId, campaignId);
+    await this.validateGiverNpcRef(input.giverNpcId, campaignId);
     const ts = nowIso();
     const [row] = await this.db
       .insert(quests)
@@ -140,6 +171,8 @@ export class QuestsService {
 
   async update(id: number, input: QuestUpdateInput, user: RequestUser, role: Role): Promise<Quest> {
     const existing = await this.getRowOrThrow(id);
+    await this.validateParentRef(input.parentId, existing.campaignId, id);
+    await this.validateGiverNpcRef(input.giverNpcId, existing.campaignId);
     const [row] = await this.db
       .update(quests)
       .set({ ...input, updatedAt: nowIso() })

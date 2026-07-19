@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { Attachment, Character } from '@campfire/schema';
+import type { Attachment, Character, CampaignMember } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
@@ -37,6 +37,7 @@ export default function CharacterPage() {
   const isDm = role === 'dm';
 
   const [character, setCharacter] = useState<Character | null>(null);
+  const [members, setMembers] = useState<CampaignMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -57,6 +58,30 @@ export default function CharacterPage() {
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  // Members list to resolve ownerUserId (a raw userId string) to a display name;
+  // available to every campaign role, not just the DM.
+  useEffect(() => {
+    if (!Number.isFinite(cid)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`);
+        if (!cancelled) setMembers(list);
+      } catch {
+        if (!cancelled) setMembers([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cid]);
+
+  function ownerLabel(ownerUserId: string | null): string {
+    if (!ownerUserId) return 'DM-managed';
+    const member = members.find((m) => String(m.userId) === ownerUserId);
+    return member?.displayName || member?.username || 'Unknown player';
+  }
 
   if (!Number.isFinite(cid) || !Number.isFinite(id)) {
     return (
@@ -104,7 +129,7 @@ export default function CharacterPage() {
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
       <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/characters`)}>
+        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/party`)}>
           ← Back
         </Btn>
       </div>
@@ -119,7 +144,7 @@ export default function CharacterPage() {
           <h1 className="text-2xl font-extrabold text-white leading-tight">{character.name}</h1>
           <p className="text-sm text-slate-400">
             {character.className || 'Unknown class'} · Level {character.level} · played by{' '}
-            {character.ownerUserId ?? 'DM'}
+            {character.ownerUserId ? ownerLabel(character.ownerUserId) : 'DM'}
           </p>
         </div>
         {isOwner && <Chip variant="dm">You can edit</Chip>}
@@ -275,7 +300,7 @@ export default function CharacterPage() {
             <div className="space-y-1.5 text-[13px]">
               <div className="flex justify-between">
                 <span className="text-muted">Owner</span>
-                <span>{character.ownerUserId ?? 'DM-managed'}</span>
+                <span>{ownerLabel(character.ownerUserId)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">D&amp;D Beyond</span>

@@ -10,6 +10,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote, type ChipVariant } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
@@ -53,6 +54,7 @@ export default function MyNotesPage() {
   const cid = Number(campaignId);
   const { me } = useAuth();
   const myUserId = me ? String(me.user.id) : null;
+  const { lostAccess, handle: handleAccessError } = useCampaignAccessError();
 
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,7 +75,9 @@ export default function MyNotesPage() {
       const list = await api.get<Note[]>(`${API}/campaigns/${cid}/notes`);
       setNotes(list);
     } catch (e) {
-      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+      if (handleAccessError(e)) {
+        // handled: lostAccess flag drives the UI
+      } else if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
       } else {
         setError("Couldn't load notes.");
@@ -81,7 +85,7 @@ export default function MyNotesPage() {
     } finally {
       setLoading(false);
     }
-  }, [cid]);
+  }, [cid, handleAccessError]);
 
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
@@ -147,6 +151,20 @@ export default function MyNotesPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <ErrorNote message="No campaign selected." />
+      </div>
+    );
+  }
+
+  if (lostAccess) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 mt-5">
+        <Card className="text-center space-y-2">
+          <p className="text-2xl">🔒</p>
+          <p className="font-bold text-white">You no longer have access to this campaign</p>
+          <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
+            Back to your campaigns
+          </Link>
+        </Card>
       </div>
     );
   }
@@ -244,8 +262,8 @@ export default function MyNotesPage() {
           {filtered.length === 0 && (
             <EmptyState
               icon="🕯️"
-              title="Viewers don't have a notebook"
-              hint="But you can still leave a note for the DM above."
+              title="No notes yet"
+              hint="Jot your first thought above."
             />
           )}
         </div>

@@ -7,9 +7,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from './auth';
-import { useCampaign } from './CampaignContext';
+import { useCampaign, useCampaigns } from './CampaignContext';
 import { api, ApiError, API } from '../lib/api';
-import { Btn, TextInput } from '../components/ui';
+import { Btn, Card, TextInput } from '../components/ui';
 
 function initials(name: string): string {
   const trimmed = name.trim();
@@ -168,20 +168,41 @@ function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: bo
 }
 
 export function Layout() {
-  const { me, isAdmin, roleIn, logout } = useAuth();
+  const { me, isAdmin, roleIn, refresh: refreshAuth, logout } = useAuth();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
   const campaign = useCampaign(campaignId);
+  const { campaigns, loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const navigate = useNavigate();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [lostAccess, setLostAccess] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const staleCheckedRef = useRef(false);
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
   const roleLabel = role === 'dm' ? 'DM' : role === 'player' ? 'Player' : role === 'viewer' ? 'Viewer' : null;
+
+  // me.memberships is fetched once at login, so it's stale the moment a DM changes
+  // someone's access mid-session. Once the campaign list has loaded, if this campaign
+  // isn't in it (removed, or never was — for a non-admin) treat it as lost access:
+  // refresh both auth + campaigns once (covers the "promoted" case too, since a
+  // promoted player's next campaign entry will now show DM nav) and bounce home.
+  useEffect(() => {
+    // Don't fire on a load failure (API outage) — an empty/errored list isn't proof
+    // of lost access, just that we couldn't check.
+    if (campaignId === undefined || campaignsLoading || campaignsError || staleCheckedRef.current) return;
+    staleCheckedRef.current = true;
+    const stillHasAccess = isAdmin || campaigns.some((c) => c.id === campaignId);
+    if (!stillHasAccess) {
+      setLostAccess(true);
+      void refreshAuth();
+      void refreshCampaigns();
+    }
+  }, [campaignId, campaignsLoading, campaignsError, campaigns, isAdmin, refreshAuth, refreshCampaigns]);
 
   useEffect(() => {
     function onClick(e: MouseEvent) {
@@ -208,7 +229,7 @@ export function Layout() {
     ? [
         { key: 'dashboard', label: 'Dashboard', to: `/c/${campaignId}` },
         { key: 'quests', label: 'Quests', to: `/c/${campaignId}/quests` },
-        { key: 'world', label: 'World', soon: true },
+        { key: 'world', label: 'World', to: `/c/${campaignId}/locations` },
         { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
         { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
         { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
@@ -234,6 +255,22 @@ export function Layout() {
     }
     return location.pathname.startsWith(path);
   };
+
+  if (lostAccess) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4" style={{ background: 'var(--color-bg)' }}>
+        <div style={{ maxWidth: 380, width: '100%' }}>
+          <Card className="text-center space-y-2">
+            <p className="text-2xl">🔒</p>
+            <p className="font-bold text-white">You no longer have access to this campaign</p>
+            <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
+              Back to your campaigns
+            </Link>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
@@ -401,7 +438,7 @@ export function Layout() {
           <NavLink to={`/c/${campaignId}`} end className={({ isActive }) => (isActive ? 'active' : '')}>
             <span className="ico">🏠</span>Home
           </NavLink>
-          <NavLink to={`/c/${campaignId}#quests`} className="">
+          <NavLink to={`/c/${campaignId}/quests`} className={({ isActive }) => (isActive ? 'active' : '')}>
             <span className="ico">📜</span>Quests
           </NavLink>
           <NavLink to={`/c/${campaignId}/party`} className={({ isActive }) => (isActive ? 'active' : '')}>

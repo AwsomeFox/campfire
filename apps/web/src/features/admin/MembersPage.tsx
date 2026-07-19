@@ -109,10 +109,10 @@ export default function MembersPage() {
   if (!isDm) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-        <h1 className="text-xl font-extrabold text-white">Players</h1>
+        <h1 className="text-xl font-extrabold text-white">Members</h1>
         {error && <ErrorNote message={error} onRetry={load} />}
         <Card className="space-y-3">
-          <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Party</h2>
+          <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Members</h2>
           <ReadOnlyMemberTable members={members ?? []} />
         </Card>
       </div>
@@ -121,7 +121,7 @@ export default function MembersPage() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
-      <h1 className="text-xl font-extrabold text-white m-0">Players</h1>
+      <h1 className="text-xl font-extrabold text-white m-0">Members</h1>
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <InviteCard />

@@ -120,8 +120,16 @@ export class CharactersService {
     if (input.background !== undefined) update.background = input.background;
     if (input.stats !== undefined) update.stats = toJsonText(input.stats);
     if (input.ac !== undefined) update.ac = input.ac;
-    if (input.hpCurrent !== undefined) update.hpCurrent = input.hpCurrent;
     if (input.hpMax !== undefined) update.hpMax = input.hpMax;
+    // Clamp to [0, finalHpMax] whenever either hp field is touched — mirrors patchHp's
+    // clamp (and the combatant equivalent). Without this, PATCHing hpMax below the
+    // standing hpCurrent (or hpCurrent above hpMax) would write an out-of-range value
+    // verbatim, unlike every other HP-writing path in the app.
+    if (input.hpCurrent !== undefined || input.hpMax !== undefined) {
+      const finalHpMax = input.hpMax !== undefined ? input.hpMax : existing.hpMax;
+      const rawHpCurrent = input.hpCurrent !== undefined ? input.hpCurrent : existing.hpCurrent;
+      update.hpCurrent = Math.max(0, Math.min(finalHpMax, rawHpCurrent));
+    }
     if (input.conditions !== undefined) update.conditions = toJsonText(input.conditions);
     if (input.portraitUrl !== undefined) update.portraitUrl = input.portraitUrl;
     if (input.ddbId !== undefined) update.ddbId = input.ddbId;

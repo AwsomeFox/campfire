@@ -20,7 +20,7 @@ export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] 
         <span className="card-kicker">NPCs</span>
         <div style={{ flex: 1 }} />
         <Link to={`/c/${campaignId}/npcs`} className="btn btn-ghost" style={{ fontSize: 12 }}>
-          World →
+          NPCs →
         </Link>
       </div>
       {npcs.length === 0 ? (
