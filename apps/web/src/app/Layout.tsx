@@ -180,7 +180,10 @@ export function Layout() {
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [lostAccess, setLostAccess] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const staleCheckedRef = useRef(false);
+  // Track WHICH campaign we've stale-checked, not a bare boolean — so navigating
+  // to a different campaign re-checks (and clears a prior lock screen) instead of
+  // trusting a once-per-session flag.
+  const staleCheckedIdRef = useRef<number | undefined>(undefined);
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
@@ -192,17 +195,24 @@ export function Layout() {
   // refresh both auth + campaigns once (covers the "promoted" case too, since a
   // promoted player's next campaign entry will now show DM nav) and bounce home.
   useEffect(() => {
+    // Leaving campaign scope (or switching campaigns) clears any prior lock screen
+    // so "Back to your campaigns" and normal navigation actually escape it.
+    if (campaignId === undefined) {
+      if (lostAccess) setLostAccess(false);
+      staleCheckedIdRef.current = undefined;
+      return;
+    }
     // Don't fire on a load failure (API outage) — an empty/errored list isn't proof
-    // of lost access, just that we couldn't check.
-    if (campaignId === undefined || campaignsLoading || campaignsError || staleCheckedRef.current) return;
-    staleCheckedRef.current = true;
+    // of lost access, just that we couldn't check. Re-check per distinct campaignId.
+    if (campaignsLoading || campaignsError || staleCheckedIdRef.current === campaignId) return;
+    staleCheckedIdRef.current = campaignId;
     const stillHasAccess = isAdmin || campaigns.some((c) => c.id === campaignId);
+    setLostAccess(!stillHasAccess);
     if (!stillHasAccess) {
-      setLostAccess(true);
       void refreshAuth();
       void refreshCampaigns();
     }
-  }, [campaignId, campaignsLoading, campaignsError, campaigns, isAdmin, refreshAuth, refreshCampaigns]);
+  }, [campaignId, campaignsLoading, campaignsError, campaigns, isAdmin, lostAccess, refreshAuth, refreshCampaigns]);
 
   useEffect(() => {
     function onClick(e: MouseEvent) {

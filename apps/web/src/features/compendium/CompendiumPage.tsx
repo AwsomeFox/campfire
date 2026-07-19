@@ -70,6 +70,10 @@ export default function CompendiumPage() {
   const noPacksInstalled = packs !== null && packs.length === 0;
 
   useEffect(() => {
+    // Wait for the campaign record to resolve from context before searching —
+    // otherwise campaignPack is transiently '' and we'd fire an UNSCOPED search
+    // that flashes entries from outside this campaign's rule system.
+    if (campaign === undefined) return;
     if (noRuleSystemChosen || noPacksInstalled) {
       setResults([]);
       return;
@@ -97,7 +101,7 @@ export default function CompendiumPage() {
     return () => {
       cancelled = true;
     };
-  }, [debouncedQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack]);
+  }, [debouncedQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack, campaign]);
 
   const chips = useMemo(() => TYPE_CHIPS, []);
 

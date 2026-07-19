@@ -3,7 +3,7 @@
  * name (and full record) for the current /c/:campaignId subtree so Layout and
  * feature pages don't each re-fetch the campaign list.
  */
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { Campaign } from '@campfire/schema';
 import { api, API } from '../lib/api';
 
@@ -27,7 +27,11 @@ export function CampaignProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
-  const refresh = async () => {
+  // Stable identity (useCallback): consumers list refresh() in effect deps, and a
+  // per-render identity caused an infinite fetch loop (page load → refresh() →
+  // setCampaigns → new refresh identity → effect refires → …). setState updaters
+  // keep this dependency-free.
+  const refresh = useCallback(async () => {
     try {
       const list = await api.get<Campaign[]>(`${API}/campaigns`);
       setCampaigns(list);
@@ -40,11 +44,11 @@ export function CampaignProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void refresh();
-  }, []);
+  }, [refresh]);
 
   return (
     <CampaignContext.Provider value={{ campaigns, loading, error, refresh }}>
