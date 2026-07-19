@@ -5,6 +5,14 @@
  * uninstall an existing one (DELETE /api/v1/rules/packs/:id).
  * Mirrors AdminPage's existing card/section conventions (Card, cf-inset,
  * cf-chip, table layout) — see UsersCard/TokensCard in AdminPage.tsx.
+ *
+ * Install is incremental: POSTing /rules/packs/install for a slug that's
+ * already installed ADDS any sections not yet present (200, body has
+ * {added, skippedExisting}) instead of failing outright. A 409 can still
+ * happen (e.g. a concurrent install racing on the same slug/section) — the
+ * server's error message is surfaced as-is rather than a generic string.
+ * Large sections (spells, monsters) can take 30s+ to import, so the button
+ * locks for the duration and the copy sets that expectation.
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { RulePack, RulePackInstall } from '@campfire/schema';
@@ -14,12 +22,27 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 type Section = NonNullable<RulePackInstall['sections']>[number];
 
+// Response shape from POST /rules/packs/install. `added`/`skippedExisting` are only
+// meaningful when installing into an already-installed pack (incremental add); on a
+// fresh install they'll typically just list every requested section under `added`.
+interface RulePackInstallResult extends RulePack {
+  added?: Section[];
+  skippedExisting?: Section[];
+}
+
 const SECTION_OPTIONS: { value: Section; label: string }[] = [
   { value: 'spells', label: 'Spells' },
   { value: 'monsters', label: 'Monsters' },
   { value: 'items', label: 'Items' },
   { value: 'conditions', label: 'Conditions' },
 ];
+
+const SECTION_LABEL: Record<Section, string> = {
+  spells: 'Spells',
+  monsters: 'Monsters',
+  items: 'Items',
+  conditions: 'Conditions',
+};
 
 export function RulePacksCard() {
   const [packs, setPacks] = useState<RulePack[] | null>(null);
@@ -79,6 +102,7 @@ export function RulePacksCard() {
       )}
 
       <InstallPanel
+        packs={packs ?? []}
         installing={installing}
         onInstallingChange={setInstalling}
         onInstalled={() => {
@@ -147,16 +171,19 @@ function PackRow({ pack, onChange, installing }: { pack: RulePack; onChange: () 
 }
 
 function InstallPanel({
+  packs,
   installing,
   onInstallingChange,
   onInstalled,
   onError,
 }: {
+  packs: RulePack[];
   installing: boolean;
   onInstallingChange: (v: boolean) => void;
   onInstalled: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const hasExistingPack = packs.length > 0;
   const [sections, setSections] = useState<Set<Section>>(new Set(SECTION_OPTIONS.map((s) => s.value)));
   const [done, setDone] = useState<string | null>(null);
 
@@ -171,19 +198,30 @@ function InstallPanel({
   }
 
   async function install() {
-    // Guard against double-fire: installs can take 1-2 minutes for large sections
-    // (Open5e import is a slow paginated fetch), so the button must not be
-    // clickable again until the request settles.
+    // Guard against double-fire: installs can take 30s+ for large sections
+    // (Open5e import is a slow paginated fetch with retries), so the button must
+    // not be clickable again until the request settles.
     if (installing || sections.size === 0) return;
     onInstallingChange(true);
     setDone(null);
     onError(null);
     try {
       const body: RulePackInstall = { source: 'open5e', sections: Array.from(sections) };
-      await api.post<RulePack>(`${API}/rules/packs/install`, body);
-      setDone('Installed.');
+      const result = await api.post<RulePackInstallResult>(`${API}/rules/packs/install`, body);
+      const added = result.added ?? [];
+      const skipped = result.skippedExisting ?? [];
+      if (added.length || skipped.length) {
+        const parts: string[] = [];
+        if (added.length) parts.push(`added ${added.map((s) => SECTION_LABEL[s]).join(', ')}`);
+        if (skipped.length) parts.push(`already had ${skipped.map((s) => SECTION_LABEL[s]).join(', ')}`);
+        setDone(`Done — ${parts.join('; ')}.`);
+      } else {
+        setDone('Installed.');
+      }
       onInstalled();
     } catch (err) {
+      // Surface the server's own message on 409 (e.g. a concurrent install racing
+      // on the same section) instead of a generic string — it's the actionable one.
       onError(err instanceof ApiError ? err.message : "Couldn't install the rule pack.");
     } finally {
       onInstallingChange(false);
@@ -192,7 +230,9 @@ function InstallPanel({
 
   return (
     <div className="cf-inset border-amber-500/30 p-3.5 space-y-2.5">
-      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Install from Open5e</p>
+      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
+        {hasExistingPack ? 'Add sections from Open5e' : 'Install from Open5e'}
+      </p>
       <div className="flex gap-3 flex-wrap">
         {SECTION_OPTIONS.map((opt) => (
           <label key={opt.value} className="flex items-center gap-1.5 text-sm text-slate-300">
@@ -207,15 +247,19 @@ function InstallPanel({
         ))}
       </div>
       <p className="text-[11px] text-slate-500">
-        Pulls the D&amp;D 5e SRD content from the open Open5e API (OGL-licensed). Large sections (spells, monsters)
-        can take <strong>1-2 minutes</strong> — the button locks while the import runs, so it&apos;s safe to wait
-        rather than re-click.
+        {hasExistingPack
+          ? 'Adds any selected sections not already installed — sections you already have are left untouched.'
+          : 'Pulls the D&D 5e SRD content from the open Open5e API (OGL-licensed).'}{' '}
+        Large sections (spells, monsters) can take <strong>a couple of minutes</strong> — the button locks while the
+        import runs, so it&apos;s safe to wait rather than re-click.
       </p>
-      {installing && <p className="text-[11px] text-amber-300">Installing… this can take a minute or two.</p>}
+      {installing && (
+        <p className="text-[11px] text-amber-300">Installing… large sections can take a couple of minutes.</p>
+      )}
       {done && !installing && <p className="text-[11px] text-emerald-400">{done}</p>}
       <div className="flex justify-end">
         <Btn className="!min-h-0 !py-1.5 text-xs" onClick={install} disabled={installing || sections.size === 0}>
-          {installing ? 'Installing…' : 'Install pack'}
+          {installing ? 'Installing…' : hasExistingPack ? 'Add sections' : 'Install pack'}
         </Btn>
       </div>
     </div>

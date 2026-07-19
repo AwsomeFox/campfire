@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpStatus, Param, ParseIntPipe, Post, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags } from '@nestjs/swagger';
 import type { RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -24,10 +25,18 @@ export class RulesController {
     return this.rules.listPacks();
   }
 
+  /**
+   * 201 for a fresh install; 200 when the pack already existed and this call added
+   * (possibly zero) new entries incrementally — see RulesService.installFromOpen5e.
+   * The response body always distinguishes the two: incremental responses carry
+   * `added`/`skippedExisting`, a fresh install's body doesn't.
+   */
   @Post('packs/install')
   @ServerRoles('admin')
-  install(@Body() body: RulePackInstallDto, @CurrentUser() user: RequestUser) {
-    return this.rules.installFromOpen5e(body, user);
+  async install(@Body() body: RulePackInstallDto, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
+    const result = await this.rules.installFromOpen5e(body, user);
+    res.status('added' in result ? HttpStatus.OK : HttpStatus.CREATED);
+    return result;
   }
 
   @Delete('packs/:id')

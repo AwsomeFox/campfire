@@ -319,6 +319,27 @@ describe('encounters (e2e)', () => {
       expect(res.status).toBe(400);
     });
 
+    it('characterId belonging to a different campaign is rejected 404 (round-2 finding #5)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // A second campaign with its own character — not a member of `campaignId`.
+      const otherCampRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Campaign' });
+      const otherCampaignId = otherCampRes.body.id;
+      const otherCharRes = await request(server)
+        .post(`/api/v1/campaigns/${otherCampaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Foreign Character', stats: { DEX: 10 }, hpCurrent: 5, hpMax: 5 });
+      expect(otherCharRes.status).toBe(201);
+      const otherCharacterId = otherCharRes.body.id;
+
+      // encounterId belongs to `campaignId` — the foreign character must not be addable.
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'character', characterId: otherCharacterId });
+      expect(res.status).toBe(404);
+    });
+
     it('/next-turn on a non-running encounter is rejected 400 (state machine, verify existing guard)', async () => {
       // `encounterId` is currently 'running' at this point in the suite (started earlier) —
       // exercise the guard against a fresh 'preparing' encounter instead.

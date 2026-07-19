@@ -187,6 +187,13 @@ export class EncountersService {
     if (input.kind === 'character' && input.characterId !== undefined) {
       const [character] = await this.db.select().from(characters).where(eq(characters.id, input.characterId)).limit(1);
       if (!character) throw new BadRequestException(`Character ${input.characterId} not found`);
+      // A characterId from a DIFFERENT campaign than this encounter's is not just an
+      // invalid input (400) — it's a resource that doesn't exist from this encounter's
+      // point of view, so 404, matching how a cross-campaign id 404s elsewhere (e.g.
+      // CampaignAccessService's member checks).
+      if (character.campaignId !== encounterRow.campaignId) {
+        throw new NotFoundException(`Character ${input.characterId} not found in campaign ${encounterRow.campaignId}`);
+      }
       characterId = character.id;
       name = name ?? character.name;
       hpMax = hpMax ?? character.hpMax;

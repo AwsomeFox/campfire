@@ -308,6 +308,7 @@ function SheetEditForm({
   const [background, setBackground] = useState(character.background);
   const [level, setLevel] = useState(String(character.level));
   const [ac, setAc] = useState(character.ac != null ? String(character.ac) : '');
+  const [hpMax, setHpMax] = useState(String(character.hpMax));
   const [stats, setStats] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
     for (const k of ABILITY_KEYS) init[k] = String(character.stats[k] ?? 10);
@@ -329,6 +330,7 @@ function SheetEditForm({
         background: background.trim(),
         level: Math.max(1, Math.min(20, Number(level) || 1)),
         ac: ac.trim() === '' ? null : Number(ac),
+        hpMax: Math.max(1, Number(hpMax) || 1),
         stats: statNums,
       });
       onSaved();
@@ -350,6 +352,18 @@ function SheetEditForm({
         <TextInput value={background} onChange={(e) => setBackground(e.target.value)} placeholder="Background" />
         <TextInput type="number" min={1} max={20} value={level} onChange={(e) => setLevel(e.target.value)} placeholder="Level" />
         <TextInput type="number" value={ac} onChange={(e) => setAc(e.target.value)} placeholder="AC" />
+      </div>
+      <div className="grid grid-cols-3 gap-2.5">
+        <div className="space-y-1">
+          <TextInput
+            type="number"
+            min={1}
+            value={hpMax}
+            onChange={(e) => setHpMax(e.target.value)}
+            placeholder="Max HP"
+            title="Current HP is clamped to the new max automatically."
+          />
+        </div>
       </div>
       <div className="grid grid-cols-3 gap-2.5">
         {ABILITY_KEYS.map((k) => (

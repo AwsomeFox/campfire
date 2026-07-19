@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CampaignCreate, CampaignUpdate } from '@campfire/schema';
@@ -20,6 +20,7 @@ import {
   campaignMembers,
   apiTokens,
   attachments,
+  rulePacks,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
@@ -87,8 +88,24 @@ export class CampaignsService {
     return toDomain(row);
   }
 
+  /**
+   * A non-empty ruleSystem must name an installed rule pack (rule_packs.slug) — otherwise
+   * a campaign could point at a system that doesn't exist, silently breaking anything
+   * downstream (Compendium lookups scoped by pack slug) that assumes it resolves.
+   * Empty string ('' — "no rule system picked") is always allowed, both on create and
+   * when clearing it back via PATCH.
+   */
+  private async validateRuleSystem(ruleSystem: string | undefined): Promise<void> {
+    if (!ruleSystem) return;
+    const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
+    if (!pack) {
+      throw new BadRequestException(`ruleSystem "${ruleSystem}" does not match any installed rule pack`);
+    }
+  }
+
   /** Any authenticated user may create a campaign; creator is auto-inserted as 'dm' (skipped for dev:* users). */
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
+    await this.validateRuleSystem(input.ruleSystem);
     const ts = nowIso();
     const [row] = await this.db
       .insert(campaigns)
@@ -126,6 +143,7 @@ export class CampaignsService {
 
   async update(id: number, input: CampaignUpdateInput, user: RequestUser): Promise<Campaign> {
     await this.getOrThrow(id);
+    await this.validateRuleSystem(input.ruleSystem);
     const [row] = await this.db
       .update(campaigns)
       .set({ ...input, updatedAt: nowIso() })

@@ -233,12 +233,10 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     }
   }
 
-  // NOTE ON DELETE BEHAVIOR: the design treats "promote subquests" as the expected
-  // outcome of deleting a parent quest, but QuestsService.remove() (apps/server/src/
-  // modules/quests/quests.service.ts) does NOT reparent or cascade-delete subquests —
-  // it deletes the quest + its own objectives row only, leaving any subquests with a
-  // parentId pointing at a now-missing quest. The confirm copy below reflects that
-  // reality instead of the design's assumption; see report deviations.
+  // NOTE ON DELETE BEHAVIOR: QuestsService.remove() (apps/server/src/modules/quests/
+  // quests.service.ts) promotes any subquests to top-level (parentId=null) and deletes
+  // this quest's own objectives, all in a single transaction — subquests are never
+  // orphaned or cascade-deleted. The confirm copy below reflects that.
   async function deleteQuest() {
     if (!quest) return;
     setDeleting(true);
@@ -558,7 +556,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             <>
               This permanently deletes the quest and its objectives.
               {hasSubs
-                ? ` It will NOT promote its ${subquests.length} sub-quest${subquests.length === 1 ? '' : 's'} — they will be orphaned (kept, but pointing at a deleted parent) until you reassign them.`
+                ? ` Subquests will be promoted to top-level quests.`
                 : ''}{' '}
               This can&apos;t be undone.
             </>

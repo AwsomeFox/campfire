@@ -1,6 +1,13 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { startFakeOpen5e, startFakeOpen5eWithBadPagination, type FakeOpen5e, type FakeOpen5eWithBadPagination } from './fake-open5e';
+import {
+  startFakeOpen5e,
+  startFakeOpen5eWithBadPagination,
+  startFakeOpen5eFlaky,
+  type FakeOpen5e,
+  type FakeOpen5eWithBadPagination,
+  type FakeOpen5eFlaky,
+} from './fake-open5e';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' }; // dev-header users always carry serverRole 'admin'
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -57,12 +64,16 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(listRes.body).toHaveLength(1);
     expect(listRes.body[0].id).toBe(packId);
 
-    // re-installing the same slug without uninstalling first is rejected
+    // re-installing the same slug+sections is now an incremental no-op (round-2 finding
+    // #2): 200 with added:0 (everything already present) rather than a 409.
     const reinstallRes = await request(server)
       .post('/api/v1/rules/packs/install')
       .set(dm)
       .send({ source: 'open5e', url: fake.baseUrl });
-    expect(reinstallRes.status).toBe(409);
+    expect(reinstallRes.status).toBe(200);
+    expect(reinstallRes.body.added).toBe(0);
+    expect(reinstallRes.body.skippedExisting).toBe(2 + 2 + 1 + 2);
+    expect(reinstallRes.body.entryCount).toBe(2 + 2 + 1 + 2); // unchanged
 
     // search: free text finds the fireball spell
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
@@ -283,5 +294,158 @@ describe('rules / rule packs — Open5e importer hardening (e2e, fake server wit
     await request(server)
       .delete(`/api/v1/rules/packs/${installRes.body.id}`)
       .set({ 'x-dev-role': 'dm', 'x-dev-user': 'importer-hardening-dm' });
+  });
+});
+
+/**
+ * Round-2 finding #1: FETCH_TIMEOUT_MS was 10s but real Open5e pages have been observed
+ * taking 6-11s; the importer must also retry a page on timeout/5xx (2 retries, 1s/3s
+ * backoff) rather than failing the whole import on one transient blip.
+ */
+describe('rules / rule packs — Open5e importer retry on transient failure (e2e, flaky fake server)', () => {
+  let ctx: TestAppContext;
+  let fake: FakeOpen5eFlaky;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    fake = await startFakeOpen5eFlaky();
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+  });
+
+  it('retries a page that 503s twice, then succeeds on the third attempt', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const installRes = await request(server)
+      .post('/api/v1/rules/packs/install')
+      .set({ 'x-dev-role': 'dm', 'x-dev-user': 'retry-dm' })
+      .send({ source: 'open5e', url: fake.baseUrl, sections: ['spells'] });
+    expect(installRes.status).toBe(201);
+    // Both spells made it in despite the first two requests failing.
+    expect(installRes.body.entryCount).toBe(2);
+    expect(fake.spellsRequestCount()).toBe(3);
+
+    const searchRes = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'fireball' })
+      .set({ 'x-dev-role': 'dm', 'x-dev-user': 'retry-dm' });
+    expect(searchRes.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+
+    await request(server).delete(`/api/v1/rules/packs/${installRes.body.id}`).set({ 'x-dev-role': 'dm', 'x-dev-user': 'retry-dm' });
+  }, 20_000); // backoff sleeps (1s + 3s) push this past jest's default 5s timeout
+});
+
+/**
+ * Round-2 finding #2: installing a pack that already exists must incrementally add
+ * whatever requested-section entries aren't present yet (dedupe by slug+type), updating
+ * entryCount/version, and return 200 with {added, skippedExisting} — never a hard 409.
+ */
+describe('rules / rule packs — incremental install (e2e, fake Open5e server)', () => {
+  let ctx: TestAppContext;
+  let fake: FakeOpen5e;
+  const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'incremental-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    fake = await startFakeOpen5e();
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+  });
+
+  it('install conditions -> install spells (adds) -> reinstall conditions (added:0, 200)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const conditionsRes = await request(server)
+      .post('/api/v1/rules/packs/install')
+      .set(dmHeaders)
+      .send({ source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
+    expect(conditionsRes.status).toBe(201);
+    expect(conditionsRes.body.entryCount).toBe(2);
+    const packId = conditionsRes.body.id;
+
+    // Installing spells on top: the pack already exists, so this is incremental — 200,
+    // not 201, and `added` reflects the two new spell entries.
+    const spellsRes = await request(server)
+      .post('/api/v1/rules/packs/install')
+      .set(dmHeaders)
+      .send({ source: 'open5e', url: fake.baseUrl, sections: ['spells'] });
+    expect(spellsRes.status).toBe(200);
+    expect(spellsRes.body.added).toBe(2);
+    expect(spellsRes.body.skippedExisting).toBe(0);
+    expect(spellsRes.body.entryCount).toBe(2 + 2); // conditions + spells
+    expect(spellsRes.body.id).toBe(packId); // same pack, not a new row
+
+    // Search now finds both the earlier conditions and the newly-added spells.
+    const searchConditions = await request(server).get('/api/v1/rules/search').query({ q: 'prone' }).set(dmHeaders);
+    expect(searchConditions.body.some((e: { name: string }) => e.name === 'Prone')).toBe(true);
+    const searchSpells = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dmHeaders);
+    expect(searchSpells.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+
+    // Reinstalling conditions again: everything requested is already present -> 200,
+    // added:0, skippedExisting matches the conditions count. NOT a 409 (chosen UX per
+    // round-2 finding #2: simpler for callers than forcing a pre-check).
+    const reinstallConditions = await request(server)
+      .post('/api/v1/rules/packs/install')
+      .set(dmHeaders)
+      .send({ source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
+    expect(reinstallConditions.status).toBe(200);
+    expect(reinstallConditions.body.added).toBe(0);
+    expect(reinstallConditions.body.skippedExisting).toBe(2);
+    expect(reinstallConditions.body.entryCount).toBe(4); // unchanged by the no-op reinstall
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+  });
+});
+
+/**
+ * Round-2 finding #3: concurrent installs racing the same slug must never surface a raw
+ * 500 from the UNIQUE constraint on rule_packs.slug — exactly one wins the fresh insert
+ * (201) and the rest resolve cleanly via the incremental path (200, possibly added:0).
+ */
+describe('rules / rule packs — concurrent install race (e2e, fake Open5e server)', () => {
+  let ctx: TestAppContext;
+  let fake: FakeOpen5e;
+  const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'concurrency-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    fake = await startFakeOpen5e();
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+  });
+
+  it('4 concurrent installs: one 201, the rest clean 200s, never a 500', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        request(server).post('/api/v1/rules/packs/install').set(dmHeaders).send({ source: 'open5e', url: fake.baseUrl }),
+      ),
+    );
+
+    for (const res of results) {
+      expect([200, 201]).toContain(res.status);
+    }
+    expect(results.filter((r) => r.status === 201)).toHaveLength(1);
+    expect(results.filter((r) => r.status === 200)).toHaveLength(3);
+
+    // All four resolved against the SAME pack id — no duplicate rows.
+    const packIds = new Set(results.map((r) => r.body.id));
+    expect(packIds.size).toBe(1);
+
+    const listRes = await request(server).get('/api/v1/rules/packs').set(dmHeaders);
+    expect(listRes.body).toHaveLength(1);
+    expect(listRes.body[0].entryCount).toBe(2 + 2 + 1 + 2);
+
+    await request(server).delete(`/api/v1/rules/packs/${[...packIds][0]}`).set(dmHeaders);
   });
 });

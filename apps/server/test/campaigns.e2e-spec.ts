@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { rulePacks } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 
@@ -10,6 +12,14 @@ describe('campaigns (e2e)', () => {
 
   beforeAll(async () => {
     ctx = await createTestApp();
+
+    // Seed an installed rule pack directly via the DB (mirrors encounters.e2e-spec.ts) so
+    // ruleSystem validation (round-2 finding #4) has a real slug to accept.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    await db
+      .insert(rulePacks)
+      .values({ slug: 'dnd5e-srd', name: 'D&D 5e SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 });
   });
 
   afterAll(async () => {
@@ -50,7 +60,7 @@ describe('campaigns (e2e)', () => {
     expect(getAfterDelete.status).toBe(404);
   });
 
-  it('ruleSystem defaults to empty string and passes through create + PATCH', async () => {
+  it('ruleSystem defaults to empty string and passes through create + PATCH when it matches an installed pack', async () => {
     const server = ctx.app.getHttpServer();
 
     const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Rule System Test' });
@@ -74,6 +84,35 @@ describe('campaigns (e2e)', () => {
 
     const getRes = await request(server).get(`/api/v1/campaigns/${id}`).set(dm);
     expect(getRes.body.ruleSystem).toBe('dnd5e-srd');
+
+    // clearing back to '' is always allowed, even though '' isn't an installed pack slug
+    const clearRes = await request(server).patch(`/api/v1/campaigns/${id}`).set(dm).send({ ruleSystem: '' });
+    expect(clearRes.status).toBe(200);
+    expect(clearRes.body.ruleSystem).toBe('');
+  });
+
+  it('ruleSystem rejects a slug that is not an installed rule pack (round-2 finding #4)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Bad Rule System Create', ruleSystem: 'not-a-real-pack' });
+    expect(createRes.status).toBe(400);
+
+    const okCreate = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Patch Target For Bad ruleSystem' });
+    expect(okCreate.status).toBe(201);
+    const id = okCreate.body.id;
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${id}`)
+      .set(dm)
+      .send({ ruleSystem: 'still-not-a-real-pack' });
+    expect(patchRes.status).toBe(400);
+
+    // campaign is unchanged after the rejected PATCH
+    const getRes = await request(server).get(`/api/v1/campaigns/${id}`).set(dm);
+    expect(getRes.body.ruleSystem).toBe('');
   });
 
   it('GET /campaigns/:id/summary returns aggregate shape', async () => {
