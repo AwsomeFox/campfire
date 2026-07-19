@@ -1,15 +1,6 @@
 import express from 'express';
 import type { Server } from 'node:http';
-import type * as jose from 'jose';
-
-// `jose` ships ESM-only; under this project's CommonJS ts-jest setup a
-// static import (or TS-downleveled dynamic import, which becomes a
-// `require()`) fails to load it. Same runtime-import workaround as
-// src/modules/auth/oidc.service.ts's `dynamicImport` — see comment there.
-const dynamicImport: (specifier: string) => Promise<typeof jose> = new Function(
-  'specifier',
-  'return import(specifier)',
-) as (specifier: string) => Promise<typeof jose>;
+import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 
 /**
  * Minimal fake OIDC identity provider for e2e tests, run in-process on an
@@ -17,11 +8,15 @@ const dynamicImport: (specifier: string) => Promise<typeof jose> = new Function(
  * discovery + authorization_code + PKCE flow to succeed against it:
  *   GET /.well-known/openid-configuration
  *   GET /authorize   (immediately redirects back to redirect_uri with ?code&state — no real login UI)
- *   POST /token       (returns a real RS256-signed id_token via jose, matching /jwks)
+ *   POST /token       (returns a real RS256-signed id_token, matching /jwks)
  *   GET /jwks
  *
  * openid-client validates the id_token signature against the issuer's JWKS,
- * so tokens must be real JWTs (alg=none is rejected) — hence jose for RS256 signing.
+ * so tokens must be real RS256 JWTs. This file deliberately uses ONLY
+ * node:crypto (no `jose`): a dynamic ESM import here raced Jest's
+ * environment teardown under --experimental-vm-modules ("Test environment
+ * has been torn down"), consistently on CI runners. Node's crypto can
+ * generate the keypair, export the JWK, and sign RS256 natively.
  */
 export interface FakeIdpUser {
   sub: string;
@@ -39,11 +34,25 @@ export interface FakeIdp {
   close(): Promise<void>;
 }
 
+const b64url = (input: Buffer | string): string =>
+  (typeof input === 'string' ? Buffer.from(input) : input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+function signRs256Jwt(payload: Record<string, unknown>, privateKey: KeyObject, kid: string): string {
+  const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid }));
+  const body = b64url(JSON.stringify(payload));
+  const signer = createSign('RSA-SHA256');
+  signer.update(`${header}.${body}`);
+  return `${header}.${body}.${b64url(signer.sign(privateKey))}`;
+}
+
 export async function startFakeIdp(): Promise<FakeIdp> {
-  const { generateKeyPair, exportJWK, SignJWT } = await dynamicImport('jose');
-  const { privateKey, publicKey } = await generateKeyPair('RS256');
-  const jwk = await exportJWK(publicKey);
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const kid = 'test-key-1';
+  const jwk = publicKey.export({ format: 'jwk' }); // { kty, n, e }
   const publicJwks = { keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] };
 
   let nextUser: FakeIdpUser = { sub: 'default-sub', preferred_username: 'defaultuser', email: 'default@example.com', name: 'Default User' };
@@ -86,7 +95,7 @@ export async function startFakeIdp(): Promise<FakeIdp> {
     res.redirect(url.toString());
   });
 
-  app.post('/token', async (req, res) => {
+  app.post('/token', (req, res) => {
     const { code } = req.body as Record<string, string>;
     const user = pendingCodes.get(code);
     if (!user) {
@@ -96,21 +105,21 @@ export async function startFakeIdp(): Promise<FakeIdp> {
     pendingCodes.delete(code);
 
     const now = Math.floor(Date.now() / 1000);
-    const idToken = await new SignJWT({
-      sub: user.sub,
-      preferred_username: user.preferred_username,
-      email: user.email,
-      name: user.name,
-      groups: user.groups ?? [],
-      iat: now,
-      exp: now + 300,
-    })
-      .setProtectedHeader({ alg: 'RS256', kid })
-      .setIssuedAt(now)
-      .setIssuer(issuer)
-      .setAudience((req.body as Record<string, string>).client_id ?? 'test-client')
-      .setExpirationTime(now + 300)
-      .sign(privateKey);
+    const idToken = signRs256Jwt(
+      {
+        iss: issuer,
+        aud: (req.body as Record<string, string>).client_id ?? 'test-client',
+        sub: user.sub,
+        preferred_username: user.preferred_username,
+        email: user.email,
+        name: user.name,
+        groups: user.groups ?? [],
+        iat: now,
+        exp: now + 300,
+      },
+      privateKey,
+      kid,
+    );
 
     res.json({
       access_token: `access-${Math.random().toString(36).slice(2)}`,
