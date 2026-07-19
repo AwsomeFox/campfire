@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Character — Campfire</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="pb-20 md:pb-10">
+
+<header class="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <div class="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
+    <a href="index.html" class="flex items-center gap-2 font-extrabold text-white shrink-0">🔥<span class="hidden sm:inline">Campfire</span></a>
+    <span class="text-slate-700 hidden sm:inline">/</span>
+    <a href="02-dashboard.html" class="text-sm text-slate-400 hover:text-white truncate">Dragon of Icespire Peak</a>
+    <span class="text-slate-700">/</span><span class="text-sm text-slate-200 font-semibold">Party</span>
+    <div class="ml-auto flex items-center gap-2.5">
+      <span class="cf-chip cf-chip-party">Player</span>
+      <div class="h-8 w-8 rounded-full bg-purple-500/15 border border-purple-500/60 text-purple-400 text-xs font-bold flex items-center justify-center">AL</div>
+    </div>
+  </div>
+</header>
+<!-- NOTE: rendered as PLAYER (Alice, owner of Gimble) to show owner-edit affordances -->
+
+<div class="max-w-5xl mx-auto px-4 mt-5 space-y-5">
+
+  <section class="cf-card p-5 md:p-6">
+    <div class="flex flex-col sm:flex-row gap-5">
+      <!-- Portrait slot -->
+      <div class="h-28 w-28 rounded-2xl bg-purple-500/10 border-2 border-dashed border-purple-500/50 flex flex-col items-center justify-center text-purple-400 shrink-0 mx-auto sm:mx-0">
+        <span class="text-3xl font-extrabold">GH</span>
+        <span class="text-[9px] font-semibold text-purple-500/80">P1: upload portrait</span>
+      </div>
+      <div class="flex-1 space-y-3">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h1 class="text-2xl font-extrabold text-white">Gimble Horcusporcus</h1>
+            <p class="text-sm text-slate-400">Forest Gnome · <span class="text-purple-400 font-semibold">Warlock 2</span> · Sage
+              <span class="cf-chip cf-chip-party ml-2">yours</span>
+            </p>
+          </div>
+          <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs shrink-0">✎ Edit sheet</button>
+        </div>
+
+        <!-- HP editor (owner/DM) -->
+        <div class="cf-inset p-3.5 flex items-center gap-4">
+          <div class="flex-1 space-y-1.5">
+            <div class="flex items-center justify-between">
+              <p class="text-[10px] font-bold text-slate-500 uppercase">Hit points</p>
+              <p class="text-sm font-bold text-white">17 <span class="text-slate-500 font-normal">/ 20</span></p>
+            </div>
+            <div class="cf-hp"><div style="width:85%"></div></div>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <button class="h-11 w-11 rounded-xl bg-rose-500/15 border border-rose-500/50 text-rose-400 font-bold text-lg">−</button>
+            <button class="h-11 w-11 rounded-xl bg-emerald-500/15 border border-emerald-500/50 text-emerald-400 font-bold text-lg">+</button>
+          </div>
+        </div>
+
+        <!-- Conditions -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-[10px] font-bold text-slate-500 uppercase">Conditions</span>
+          <span class="cf-chip cf-chip-failed">Frightened ✕</span>
+          <button class="cf-chip cf-chip-available">+ add</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+    <!-- Stats -->
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm border-b border-slate-700 pb-2">Ability scores</h2>
+      <div class="grid grid-cols-3 gap-2.5">
+        <div class="cf-inset p-3 text-center"><p class="text-[10px] font-bold text-slate-500">STR</p><p class="text-xl font-extrabold text-white">8</p><p class="text-[10px] text-slate-500">−1</p></div>
+        <div class="cf-inset p-3 text-center"><p class="text-[10px] font-bold text-slate-500">DEX</p><p class="text-xl font-extrabold text-white">14</p><p class="text-[10px] text-slate-500">+2</p></div>
+        <div class="cf-inset p-3 text-center"><p class="text-[10px] font-bold text-slate-500">CON</p><p class="text-xl font-extrabold text-white">12</p><p class="text-[10px] text-slate-500">+1</p></div>
+        <div class="cf-inset p-3 text-center"><p class="text-[10px] font-bold text-slate-500">INT</p><p class="text-xl font-extrabold text-white">13</p><p class="text-[10px] text-slate-500">+1</p></div>
+        <div class="cf-inset p-3 text-center"><p class="text-[10px] font-bold text-slate-500">WIS</p><p class="text-xl font-extrabold text-white">10</p><p class="text-[10px] text-slate-500">+0</p></div>
+        <div class="cf-inset p-3 text-center border-purple-500/50"><p class="text-[10px] font-bold text-purple-400">CHA</p><p class="text-xl font-extrabold text-purple-300">16</p><p class="text-[10px] text-purple-400">+3</p></div>
+      </div>
+      <div class="grid grid-cols-3 gap-2.5 pt-1">
+        <div class="cf-inset p-2.5 text-center"><p class="text-[9px] font-bold text-slate-500 uppercase">AC</p><p class="font-bold text-white">13</p></div>
+        <div class="cf-inset p-2.5 text-center"><p class="text-[9px] font-bold text-slate-500 uppercase">Speed</p><p class="font-bold text-white">25</p></div>
+        <div class="cf-inset p-2.5 text-center"><p class="text-[9px] font-bold text-slate-500 uppercase">Prof</p><p class="font-bold text-white">+2</p></div>
+      </div>
+      <p class="text-[10px] text-slate-600">P3: “Sync from D&amp;D Beyond” button appears here for linked characters.</p>
+    </section>
+
+    <!-- Story -->
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm border-b border-slate-700 pb-2">Story &amp; gear</h2>
+      <div class="text-sm text-slate-300 space-y-2">
+        <p><b class="text-slate-200">Goal:</b> preserve all book knowledge (has a charity for it).</p>
+        <p><b class="text-slate-200">Signature items:</b> a "priceless relic" (jagged colored glass, 2 GP), pact focus.</p>
+        <p><b class="text-slate-200">Threads:</b> obsessed with the temple ledger; owes nobody anything <em>(debt to Grimlock settled — keep it that way)</em>.</p>
+      </div>
+      <div class="space-y-1.5 pt-1">
+        <p class="text-[10px] font-bold text-slate-500 uppercase">My private notes on my character</p>
+        <textarea class="cf-textarea !min-h-[64px]" placeholder="Only you see this…">Ask DM if the relic glass fits the temple mosaic gap…</textarea>
+        <div class="text-right"><button class="cf-btn !min-h-0 !py-2 text-sm">Save</button></div>
+      </div>
+    </section>
+  </div>
+
+  <p class="text-[11px] text-slate-600 pb-2">Permissions: owner &amp; DM edit everything above; other players/viewers see a read-only sheet without the private notes block. HP +/− writes are one-tap (at-table speed).</p>
+</div>
+
+<nav class="cf-tabbar">
+  <a href="02-dashboard.html"><span class="ico">🏠</span>Home</a>
+  <a href="03-quest-detail.html"><span class="ico">📜</span>Quests</a>
+  <a class="active" href="06-character-sheet.html"><span class="ico">🛡</span>Party</a>
+  <a href="08-my-notes.html"><span class="ico">📝</span>Notes</a>
+  <a href="10-admin.html"><span class="ico">⋯</span>More</a>
+</nav>
+</body>
+</html>

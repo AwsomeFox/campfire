@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quest — Campfire</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="pb-20 md:pb-10">
+
+<header class="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <div class="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
+    <a href="index.html" class="flex items-center gap-2 font-extrabold text-white shrink-0">🔥<span class="hidden sm:inline">Campfire</span></a>
+    <span class="text-slate-700 hidden sm:inline">/</span>
+    <a href="02-dashboard.html" class="text-sm text-slate-400 hover:text-white truncate">Dragon of Icespire Peak</a>
+    <span class="text-slate-700">/</span><span class="text-sm text-slate-200 font-semibold">Quests</span>
+    <div class="ml-auto flex items-center gap-2.5"><span class="cf-chip cf-chip-dm">DM</span>
+      <div class="h-8 w-8 rounded-full bg-amber-500/15 border border-amber-500/60 text-amber-400 text-xs font-bold flex items-center justify-center">TA</div>
+    </div>
+  </div>
+</header>
+
+<div class="max-w-5xl mx-auto px-4 mt-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
+
+  <!-- Main column -->
+  <main class="lg:col-span-2 space-y-5">
+    <section class="cf-card p-5 md:p-6 space-y-5">
+      <div class="flex items-start justify-between gap-4">
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h1 class="text-2xl font-extrabold text-white">Dwarven Excavation</h1>
+            <span class="cf-chip cf-chip-active">Active</span>
+          </div>
+          <p class="text-sm text-slate-400">
+            Given by <a href="04-npc-detail.html" class="text-amber-400 hover:underline">Harbin Wester</a>
+            · at <a href="05-location-detail.html" class="text-sky-400 hover:underline">Phandalin</a>
+            · Reward <span class="text-amber-400 font-bold">50 GP</span>
+          </p>
+        </div>
+        <div class="flex gap-2 shrink-0">
+          <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs">✎ Edit</button>
+          <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs">Status ▾</button>
+        </div>
+      </div>
+
+      <!-- Rendered markdown body -->
+      <div class="prose-sm text-slate-300 space-y-2 border-t border-slate-700 pt-4">
+        <p>Deliver Harbin's warning about the white dragon to the dwarf prospectors in the mountains southwest of town. The excavation sits in the ruins of a temple of <em class="text-purple-300">Abbathor</em>, dwarven god of greed.</p>
+      </div>
+
+      <!-- Objectives -->
+      <div class="space-y-2">
+        <p class="text-xs font-bold text-slate-500 uppercase tracking-wide">Objectives <span class="font-normal normal-case">(players can tick)</span></p>
+        <label class="cf-inset flex items-center gap-3 p-3 cursor-pointer">
+          <input type="checkbox" checked class="h-4 w-4 rounded border-slate-600 bg-slate-800 text-amber-500">
+          <s class="text-sm text-slate-400">Reach the excavation site</s>
+        </label>
+        <label class="cf-inset flex items-center gap-3 p-3 cursor-pointer">
+          <input type="checkbox" class="h-4 w-4 rounded border-slate-600 bg-slate-800 text-amber-500">
+          <span class="text-sm text-slate-200">Deliver the warning to Dazlyn &amp; Norbus</span>
+        </label>
+        <button class="text-xs text-slate-500 hover:text-slate-300 pl-1">+ objective (DM)</button>
+      </div>
+
+      <!-- Subquests -->
+      <div class="space-y-2">
+        <p class="text-xs font-bold text-slate-500 uppercase tracking-wide">Sub-quests</p>
+        <a href="#" class="cf-inset block p-3.5 space-y-1 hover:border-rose-500/50">
+          <div class="flex items-center justify-between">
+            <p class="font-bold text-rose-400 text-sm">⚔️ Clear the Temple Ruins</p>
+            <span class="cf-chip cf-chip-active">Active</span>
+          </div>
+          <p class="text-xs text-slate-400">Ochre jellies infest the lower halls. Reward: <span class="text-emerald-400 font-semibold">Sending Stones</span></p>
+        </a>
+      </div>
+
+      <!-- DM secret panel -->
+      <div class="cf-dm-panel p-4 space-y-1.5">
+        <p class="text-[10px] font-bold text-amber-500 uppercase tracking-widest">🔒 DM only — stripped from API for players/viewers</p>
+        <p class="text-sm text-slate-300">The loose gold is cursed by Abbathor: anyone who pockets it is targeted first by the jellies (disadvantage on stealth in the temple). Grimlock took 5, Gruuk took 10.</p>
+      </div>
+    </section>
+
+    <!-- Lore hits (linked entities) -->
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm">Connected</h2>
+      <div class="flex flex-wrap gap-2">
+        <a href="04-npc-detail.html" class="cf-chip cf-chip-active">🤝 Dazlyn &amp; Norbus</a>
+        <a href="05-location-detail.html" class="cf-chip cf-chip-available">🗺 Dwarven Excavation</a>
+        <a href="07-sessions.html" class="cf-chip cf-chip-proposal">📓 S2 · Temple Gold</a>
+      </div>
+    </section>
+  </main>
+
+  <!-- Notes rail -->
+  <aside class="space-y-5">
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm flex items-center gap-2">📝 My notes on this quest</h2>
+      <div class="cf-inset p-3 space-y-1">
+        <div class="flex items-center justify-between">
+          <span class="cf-chip cf-chip-private">🔒 Private</span>
+          <button class="text-[10px] text-slate-500 hover:text-slate-300">share ▾</button>
+        </div>
+        <p class="text-xs text-slate-300">The gold is 100% a mimic situation. Do NOT let Gruuk go back for more.</p>
+      </div>
+      <form class="space-y-2">
+        <textarea class="cf-textarea !min-h-[70px]" placeholder="Add a note… (private by default)"></textarea>
+        <div class="flex items-center justify-between">
+          <select class="cf-select !w-auto !min-h-0 !py-1.5 text-xs"><option>🔒 Private</option><option>🎩 Share with DM</option><option>👥 Share with party</option></select>
+          <button class="cf-btn !min-h-0 !py-2 text-sm">Save</button>
+        </div>
+      </form>
+    </section>
+    <section class="cf-card p-5 space-y-2">
+      <h2 class="font-bold text-white text-sm">👥 Shared with party</h2>
+      <div class="cf-inset p-3 space-y-1">
+        <p class="text-[10px] text-slate-500 font-semibold">Ellery</p>
+        <p class="text-xs text-slate-300">I can't see anything down there — someone stay next to me with darkvision.</p>
+      </div>
+    </section>
+  </aside>
+</div>
+
+<nav class="cf-tabbar">
+  <a href="02-dashboard.html"><span class="ico">🏠</span>Home</a>
+  <a class="active" href="03-quest-detail.html"><span class="ico">📜</span>Quests</a>
+  <a href="06-character-sheet.html"><span class="ico">🛡</span>Party</a>
+  <a href="08-my-notes.html"><span class="ico">📝</span>Notes</a>
+  <a href="10-admin.html"><span class="ico">⋯</span>More</a>
+</nav>
+</body>
+</html>

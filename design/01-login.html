@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login — Campfire</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="min-h-screen flex items-center justify-center p-6">
+  <!-- Ambient campaign artwork placeholder -->
+  <div class="fixed inset-0 bg-[radial-gradient(ellipse_at_top,rgba(245,158,11,.08),transparent_55%),radial-gradient(ellipse_at_bottom,rgba(56,189,248,.05),transparent_55%)]"></div>
+  <div class="fixed inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px] opacity-30"></div>
+
+  <main class="relative w-full max-w-sm space-y-6">
+    <div class="text-center space-y-2">
+      <div class="text-5xl">🔥</div>
+      <h1 class="text-3xl font-extrabold text-white tracking-tight">Campfire</h1>
+      <p class="text-sm text-slate-400">The party's shared memory.</p>
+    </div>
+
+    <div class="cf-card p-6 space-y-4">
+      <button class="cf-btn w-full text-base">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 1a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V6a5 5 0 0 0-5-5Zm-3 8V6a3 3 0 1 1 6 0v3H9Z"/></svg>
+        Sign in with Authentik
+      </button>
+      <p class="text-[11px] text-slate-500 text-center leading-relaxed">
+        One account for the whole table — Google &amp; Discord logins arrive through the same door.
+      </p>
+    </div>
+
+    <p class="text-center text-[11px] text-slate-600">
+      Self-hosted with ❤️ · <span class="text-slate-500">campfire v0.1.0</span>
+    </p>
+
+    <!-- Design note: no local passwords, no register link. Auth errors render here as a rose banner above the card. -->
+  </main>
+</body>
+</html>

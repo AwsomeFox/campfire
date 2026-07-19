@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sessions — Campfire</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="pb-20 md:pb-10">
+
+<header class="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <div class="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
+    <a href="index.html" class="flex items-center gap-2 font-extrabold text-white shrink-0">🔥<span class="hidden sm:inline">Campfire</span></a>
+    <span class="text-slate-700 hidden sm:inline">/</span>
+    <a href="02-dashboard.html" class="text-sm text-slate-400 hover:text-white truncate">Dragon of Icespire Peak</a>
+    <span class="text-slate-700">/</span><span class="text-sm text-slate-200 font-semibold">Sessions</span>
+    <div class="ml-auto flex items-center gap-2.5"><span class="cf-chip cf-chip-dm">DM</span>
+      <div class="h-8 w-8 rounded-full bg-amber-500/15 border border-amber-500/60 text-amber-400 text-xs font-bold flex items-center justify-center">TA</div>
+    </div>
+  </div>
+</header>
+
+<div class="max-w-5xl mx-auto px-4 mt-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
+
+  <!-- Timeline list -->
+  <aside class="space-y-3">
+    <div class="flex items-center justify-between">
+      <h1 class="font-bold text-white">Session log</h1>
+      <button class="cf-btn !min-h-0 !py-1.5 text-xs">+ Add recap</button>
+    </div>
+    <a href="#" class="cf-card block p-4 border-amber-500/50 space-y-1">
+      <div class="flex items-center justify-between">
+        <p class="font-bold text-white text-sm">Session 2</p>
+        <span class="text-[10px] text-slate-500">Jul 12, 2026</span>
+      </div>
+      <p class="text-xs text-amber-400 font-semibold">Suspicious Glints</p>
+      <p class="text-xs text-slate-500">7 parts · 3 quest updates · 2 new NPCs</p>
+    </a>
+    <a href="#" class="cf-card block p-4 space-y-1 hover:border-slate-500">
+      <div class="flex items-center justify-between">
+        <p class="font-bold text-slate-300 text-sm">Session 1</p>
+        <span class="text-[10px] text-slate-500">Jun 28, 2026</span>
+      </div>
+      <p class="text-xs text-slate-400 font-semibold">Gathering of the Chaos</p>
+      <p class="text-xs text-slate-600">4 quests accepted · 5 new NPCs</p>
+    </a>
+    <div class="cf-inset border-dashed p-4 text-center text-xs text-slate-600">
+      Empty state: “No sessions yet — add your first recap, or ask your AI scribe to write one from the inbox.”
+    </div>
+  </aside>
+
+  <!-- Recap detail -->
+  <main class="lg:col-span-2 space-y-5">
+    <section class="cf-card p-5 md:p-6 space-y-5">
+      <div class="flex items-start justify-between gap-3 border-b border-slate-700 pb-4">
+        <div class="space-y-1">
+          <p class="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Session 2 · Jul 12, 2026</p>
+          <h2 class="text-2xl font-extrabold text-white">Suspicious Glints</h2>
+          <p class="text-xs text-slate-500">Present: Gimble, Ellery, Gruuk, Kenshi · Recap by <span class="text-purple-400">AI scribe ✨</span>, edited by DM</p>
+        </div>
+        <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs shrink-0">✎ Edit</button>
+      </div>
+
+      <div class="space-y-4">
+        <div class="cf-timeline active space-y-1">
+          <p class="font-bold text-white text-sm">Part 7 — Suspicious Glints</p>
+          <p class="text-sm text-slate-300">The gold scattered across the temple floor is starting to feel incredibly suspicious. In a temple dedicated to Abbathor, finding un-looted gold in the open feels like a trap waiting to spring.</p>
+        </div>
+        <div class="cf-timeline space-y-1">
+          <p class="font-bold text-slate-300 text-sm">Part 6 — Temple Gold</p>
+          <p class="text-sm text-slate-400">Found a secret path and glints of gold. Grimlock picked up 5 GP — debt with Gimble declared even. Gruuk grabbed 10 GP of his own.</p>
+        </div>
+        <div class="cf-timeline space-y-1">
+          <p class="font-bold text-slate-300 text-sm">Part 5 — Relic Purchase</p>
+          <p class="text-sm text-slate-400">Gimble bought a "priceless relic" (jagged colored glass) from the prospectors for 2 borrowed GP.</p>
+        </div>
+        <button class="text-xs text-slate-500 hover:text-slate-300">Show 4 earlier parts ▾</button>
+      </div>
+
+      <!-- What changed this session (auto-generated cross-links) -->
+      <div class="cf-inset p-4 space-y-2">
+        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Changed this session</p>
+        <div class="flex flex-wrap gap-2">
+          <a href="03-quest-detail.html" class="cf-chip cf-chip-active">📜 Dwarven Excavation → objective ✓</a>
+          <a href="04-npc-detail.html" class="cf-chip cf-chip-proposal">🤝 Dazlyn &amp; Norbus added</a>
+          <a href="05-location-detail.html" class="cf-chip cf-chip-completed">🗺 Excavation → current</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Add recap flow (DM) -->
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm">+ Add recap (DM or AI scribe)</h2>
+      <input class="cf-input" placeholder="Title, e.g. “The Dragon’s Shadow”">
+      <textarea class="cf-textarea !min-h-[100px]" placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."></textarea>
+      <div class="flex items-center justify-between">
+        <p class="text-[11px] text-slate-500">Tip: or just say <em>“sweep the inbox”</em> to your AI scribe.</p>
+        <button class="cf-btn !min-h-0 !py-2 text-sm">Publish recap</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<nav class="cf-tabbar">
+  <a href="02-dashboard.html"><span class="ico">🏠</span>Home</a>
+  <a href="03-quest-detail.html"><span class="ico">📜</span>Quests</a>
+  <a href="06-character-sheet.html"><span class="ico">🛡</span>Party</a>
+  <a href="08-my-notes.html"><span class="ico">📝</span>Notes</a>
+  <a href="10-admin.html"><span class="ico">⋯</span>More</a>
+</nav>
+</body>
+</html>

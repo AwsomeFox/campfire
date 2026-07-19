@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tokens & Components — Campfire</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="p-6 md:p-10">
+<div class="max-w-4xl mx-auto space-y-8">
+  <header>
+    <a href="index.html" class="text-xs text-slate-500 hover:text-white">← Design package</a>
+    <h1 class="text-3xl font-extrabold text-white mt-2">🎨 Tokens &amp; components</h1>
+  </header>
+
+  <!-- Colors -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">Color tokens</h2>
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px]">
+      <div class="cf-card p-3 space-y-2"><div class="h-10 rounded-lg" style="background:var(--cf-bg);border:1px solid #334155"></div><p class="font-mono text-slate-400">--cf-bg #020617</p><p class="text-slate-500">page background</p></div>
+      <div class="cf-card p-3 space-y-2"><div class="h-10 rounded-lg" style="background:var(--cf-surface)"></div><p class="font-mono text-slate-400">--cf-surface #0f172a</p><p class="text-slate-500">insets, inputs</p></div>
+      <div class="cf-card p-3 space-y-2"><div class="h-10 rounded-lg" style="background:var(--cf-card)"></div><p class="font-mono text-slate-400">--cf-card #1e293b</p><p class="text-slate-500">cards</p></div>
+      <div class="cf-card p-3 space-y-2"><div class="h-10 rounded-lg" style="background:var(--cf-border)"></div><p class="font-mono text-slate-400">--cf-border #334155</p><p class="text-slate-500">borders</p></div>
+      <div class="cf-card p-3 space-y-2"><div class="h-10 rounded-lg" style="background:var(--cf-accent)"></div><p class="font-mono text-slate-400">--cf-accent #f59e0b</p><p class="text-slate-500">primary · active · DM</p></div>
+      <div class="cf-card p-3 space-y-2"><div class="h-10 rounded-lg" style="background:var(--cf-success)"></div><p class="font-mono text-slate-400">--cf-success #10b981</p><p class="text-slate-500">done · explored · healthy</p></div>
+      <div class="cf-card p-3 space-y-2"><div class="h-10 rounded-lg" style="background:var(--cf-danger)"></div><p class="font-mono text-slate-400">--cf-danger #f43f5e</p><p class="text-slate-500">danger · failed · low HP</p></div>
+      <div class="cf-card p-3 space-y-2"><div class="h-10 rounded-lg" style="background:var(--cf-arcane)"></div><p class="font-mono text-slate-400">--cf-arcane #a78bfa</p><p class="text-slate-500">lore · AI · proposals</p></div>
+    </div>
+    <p class="text-xs text-slate-500">Plus <span class="font-mono">--cf-threat #38bdf8</span> (sky) for roaming threats/routes. Ink: <span class="font-mono">#e2e8f0</span> body / <span class="font-mono">#94a3b8</span> dim / <span class="font-mono">#64748b</span> faint.</p>
+  </section>
+
+  <!-- Type & spacing -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">Type &amp; spacing</h2>
+    <div class="cf-card p-5 space-y-3">
+      <p class="text-3xl font-extrabold text-white">Inter 800 — page titles (30/36px)</p>
+      <p class="text-xl font-bold text-white">Inter 700 — section heads (20px)</p>
+      <p class="text-sm text-slate-300">Inter 400 — body 14–15px, line-height 1.6</p>
+      <p class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Inter 700 caps 10px — metadata labels</p>
+      <p class="font-mono text-sm text-slate-400">ui-monospace — markdown editing &amp; diffs</p>
+      <div class="border-t border-slate-700 pt-3 text-xs text-slate-500">
+        Radius: cards 16px (<span class="font-mono">rounded-2xl</span>), insets/inputs 12px, chips full. Card padding 20–24px, grid gap 20px. Max content width 80rem (dashboard) / 64rem (detail).
+      </div>
+    </div>
+  </section>
+
+  <!-- Component inventory -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">Component inventory</h2>
+    <div class="cf-card p-5 space-y-5">
+
+      <div class="space-y-2">
+        <p class="text-[10px] font-bold uppercase text-slate-500">Status chips</p>
+        <div class="flex flex-wrap gap-2">
+          <span class="cf-chip cf-chip-active">Active</span>
+          <span class="cf-chip cf-chip-available">Available</span>
+          <span class="cf-chip cf-chip-completed">Completed</span>
+          <span class="cf-chip cf-chip-failed">Failed</span>
+          <span class="cf-chip cf-chip-private">🔒 Private</span>
+          <span class="cf-chip cf-chip-dm">🎩 DM</span>
+          <span class="cf-chip cf-chip-party">👥 Party</span>
+          <span class="cf-chip cf-chip-proposal">🔮 Proposal</span>
+        </div>
+      </div>
+
+      <div class="space-y-2">
+        <p class="text-[10px] font-bold uppercase text-slate-500">Buttons (44px min tap target)</p>
+        <div class="flex flex-wrap gap-2 items-center">
+          <button class="cf-btn">Primary</button>
+          <button class="cf-btn cf-btn-ghost">Ghost</button>
+          <button class="cf-btn cf-btn-ghost !text-rose-400 !border-rose-500/40">Destructive</button>
+          <button class="cf-btn opacity-50 cursor-not-allowed">Disabled</button>
+        </div>
+      </div>
+
+      <div class="space-y-2">
+        <p class="text-[10px] font-bold uppercase text-slate-500">HP bars</p>
+        <div class="grid sm:grid-cols-3 gap-3">
+          <div><div class="cf-hp"><div style="width:85%"></div></div><p class="text-[10px] text-slate-500 mt-1">healthy &gt;50%</p></div>
+          <div><div class="cf-hp low"><div style="width:40%"></div></div><p class="text-[10px] text-slate-500 mt-1">low 25–50%</p></div>
+          <div><div class="cf-hp crit"><div style="width:12%"></div></div><p class="text-[10px] text-slate-500 mt-1">critical &lt;25%</p></div>
+        </div>
+      </div>
+
+      <div class="space-y-2">
+        <p class="text-[10px] font-bold uppercase text-slate-500">Inputs · visibility toggle · DM panel</p>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <input class="cf-input" placeholder="Text input">
+          <select class="cf-select"><option>Select</option></select>
+        </div>
+        <textarea class="cf-textarea !min-h-[64px]" placeholder="Markdown textarea (mono) — plain text is always valid"></textarea>
+        <div class="flex rounded-lg overflow-hidden border border-slate-700 text-[11px] font-semibold w-fit">
+          <button class="px-2.5 py-1.5 bg-slate-700 text-white">🔒 Private</button>
+          <button class="px-2.5 py-1.5 text-slate-400">🎩 DM</button>
+          <button class="px-2.5 py-1.5 text-slate-400">👥 Party</button>
+        </div>
+        <div class="cf-dm-panel p-3">
+          <p class="text-[10px] font-bold text-amber-500 uppercase tracking-widest">🔒 DM only</p>
+          <p class="text-sm text-slate-300">Amber panel = never rendered for non-DM (API strips it).</p>
+        </div>
+      </div>
+
+      <div class="space-y-2">
+        <p class="text-[10px] font-bold uppercase text-slate-500">Empty · loading states</p>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div class="cf-inset border-dashed p-5 text-center">
+            <p class="text-xl">🕯️</p>
+            <p class="text-xs text-slate-500 mt-1">Empty: icon + one warm sentence + primary action</p>
+          </div>
+          <div class="cf-inset p-5 space-y-2">
+            <div class="h-3 rounded bg-slate-700/60 animate-pulse w-3/4"></div>
+            <div class="h-3 rounded bg-slate-700/60 animate-pulse w-1/2"></div>
+            <p class="text-[10px] text-slate-600">Loading: skeleton pulse, no spinners</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interaction notes -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">Interaction notes</h2>
+    <div class="cf-card p-5 text-sm text-slate-300 space-y-2">
+      <p>• <b>Mobile nav:</b> fixed bottom tab bar (Home/Quests/Party/Notes/More), safe-area padded; top bar collapses to logo + campaign + avatar.</p>
+      <p>• <b>Tap targets:</b> ≥44px on all interactive elements; HP ± buttons 44×44.</p>
+      <p>• <b>Editing:</b> every markdown body = rendered view → "✎ Edit" → plain textarea + Save/Cancel. No WYSIWYG in MVP; plain text always valid.</p>
+      <p>• <b>Role degradation:</b> player = no canon edit buttons, can tick objectives + edit own character; viewer = read-only + quick-capture note only. Enforced by API, mirrored by UI.</p>
+      <p>• <b>Color semantics are load-bearing:</b> amber=active/DM, emerald=done/positive, rose=danger, violet=AI/lore, sky=threat — consistent across chips, borders, text.</p>
+      <p>• <b>Keyboard:</b> `/` focuses search (P1), `n` = new note on any page.</p>
+    </div>
+  </section>
+</div>
+</body>
+</html>

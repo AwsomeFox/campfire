@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Campfire — Design Package</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="p-6 md:p-10">
+<div class="max-w-5xl mx-auto space-y-8">
+  <header class="space-y-2">
+    <p class="text-xs font-bold text-amber-500 uppercase tracking-widest">Design package · v1 · for approval</p>
+    <h1 class="text-4xl font-extrabold text-white">🔥 Campfire</h1>
+    <p class="text-slate-400 max-w-2xl">Self-hosted campaign tracker. Every screen below is a responsive HTML mockup — resize to 390px to review mobile. Demo data: <em>Dragon of Icespire Peak</em>. Approved mockups become the component spec for the MVP build.</p>
+  </header>
+
+  <section class="space-y-3">
+    <h2 class="text-lg font-bold text-white">Foundation</h2>
+    <div class="grid sm:grid-cols-2 gap-4">
+      <a href="tokens.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">🎨 Design tokens & components</p>
+        <p class="text-sm text-slate-400 mt-1">Colors, type, spacing, chips, buttons, HP bars, empty/loading states, interaction notes.</p>
+      </a>
+      <a href="01-login.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">🚪 Login</p>
+        <p class="text-sm text-slate-400 mt-1">Single OIDC sign-in via Authentik.</p>
+      </a>
+    </div>
+  </section>
+
+  <section class="space-y-3">
+    <h2 class="text-lg font-bold text-white">Core screens</h2>
+    <div class="grid sm:grid-cols-2 gap-4">
+      <a href="02-dashboard.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">🏠 Campaign dashboard</p>
+        <p class="text-sm text-slate-400 mt-1">Status header, pin map, quest tree, NPCs, party w/ HP, session timeline, quick note.</p>
+      </a>
+      <a href="03-quest-detail.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">📜 Quest detail</p>
+        <p class="text-sm text-slate-400 mt-1">Objectives, subquests, giver, reward, DM-secret panel, anchored notes rail.</p>
+      </a>
+      <a href="04-npc-detail.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">🤝 NPC detail</p>
+        <p class="text-sm text-slate-400 mt-1">Disposition, location, relationships, secrets (DM), notes rail.</p>
+      </a>
+      <a href="05-location-detail.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">🗺 Location detail</p>
+        <p class="text-sm text-slate-400 mt-1">Status, connected quests/NPCs, map position, discovery flow.</p>
+      </a>
+      <a href="06-character-sheet.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">🛡 Character sheet</p>
+        <p class="text-sm text-slate-400 mt-1">Stats, HP/conditions editor (owner-editable), portrait slot.</p>
+      </a>
+      <a href="07-sessions.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">📓 Session log</p>
+        <p class="text-sm text-slate-400 mt-1">Timeline list + recap detail + add-recap flow.</p>
+      </a>
+    </div>
+  </section>
+
+  <section class="space-y-3">
+    <h2 class="text-lg font-bold text-white">Notes & DM tools</h2>
+    <div class="grid sm:grid-cols-2 gap-4">
+      <a href="08-my-notes.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">📝 My notes</p>
+        <p class="text-sm text-slate-400 mt-1">Private by default, visibility badges, share toggle.</p>
+      </a>
+      <a href="09-scribe-inbox.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">✉️ Scribe inbox (DM)</p>
+        <p class="text-sm text-slate-400 mt-1">Raw table notes → resolve into canon entities.</p>
+      </a>
+      <a href="10-admin.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">⚙️ Admin</p>
+        <p class="text-sm text-slate-400 mt-1">Members & roles, API tokens w/ scopes, audit log, export.</p>
+      </a>
+      <a href="11-proposal-review.html" class="cf-card p-5 block hover:border-amber-500/60">
+        <p class="font-bold text-white">🔮 Proposal review</p>
+        <p class="text-sm text-slate-400 mt-1">AI-suggested change diff with approve/reject — the AI-DM guardrail.</p>
+      </a>
+    </div>
+  </section>
+
+  <footer class="text-xs text-slate-600 pt-4 border-t border-slate-800">
+    Campfire design package · roles shown: most screens render as DM; viewer/player degradation noted inline on each screen.
+  </footer>
+</div>
+</body>
+</html>

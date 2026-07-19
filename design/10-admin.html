@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — Campfire</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/campfire.css">
+</head>
+<body class="pb-20 md:pb-10">
+
+<header class="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <div class="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
+    <a href="index.html" class="flex items-center gap-2 font-extrabold text-white shrink-0">🔥<span class="hidden sm:inline">Campfire</span></a>
+    <span class="text-slate-700 hidden sm:inline">/</span>
+    <a href="02-dashboard.html" class="text-sm text-slate-400 hover:text-white truncate">Dragon of Icespire Peak</a>
+    <span class="text-slate-700">/</span><span class="text-sm text-slate-200 font-semibold">Admin</span>
+    <div class="ml-auto flex items-center gap-2.5"><span class="cf-chip cf-chip-dm">DM</span>
+      <div class="h-8 w-8 rounded-full bg-amber-500/15 border border-amber-500/60 text-amber-400 text-xs font-bold flex items-center justify-center">TA</div>
+    </div>
+  </div>
+</header>
+
+<div class="max-w-4xl mx-auto px-4 mt-5 space-y-5">
+  <h1 class="text-xl font-extrabold text-white">⚙️ Campaign admin</h1>
+
+  <!-- Members & roles -->
+  <section class="cf-card p-5 space-y-3">
+    <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+      <h2 class="font-bold text-white text-sm">Members &amp; roles</h2>
+      <p class="text-[11px] text-slate-500">Roles come from Authentik groups · overrides per campaign</p>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead><tr class="text-[10px] uppercase text-slate-500 text-left">
+          <th class="py-2 pr-4 font-bold">User</th><th class="pr-4 font-bold">Authentik group</th><th class="pr-4 font-bold">Role</th><th class="pr-4 font-bold">Character</th><th></th>
+        </tr></thead>
+        <tbody class="divide-y divide-slate-800">
+          <tr>
+            <td class="py-2.5 pr-4"><span class="font-semibold text-white">Tony</span> <span class="text-slate-600">tonyanderson526@…</span></td>
+            <td class="pr-4 text-slate-400">campaign-dm</td>
+            <td class="pr-4"><span class="cf-chip cf-chip-dm">DM</span></td>
+            <td class="pr-4 text-slate-500">—</td><td></td>
+          </tr>
+          <tr>
+            <td class="py-2.5 pr-4"><span class="font-semibold text-white">Alice</span></td>
+            <td class="pr-4 text-slate-400">campaign-players</td>
+            <td class="pr-4"><span class="cf-chip cf-chip-party">Player</span></td>
+            <td class="pr-4"><a href="06-character-sheet.html" class="text-purple-400 hover:underline">Gimble</a></td>
+            <td class="text-right"><button class="text-[11px] text-slate-500 hover:text-white">edit ▾</button></td>
+          </tr>
+          <tr>
+            <td class="py-2.5 pr-4"><span class="font-semibold text-white">Dave</span></td>
+            <td class="pr-4 text-slate-400">campaign-players</td>
+            <td class="pr-4"><span class="cf-chip cf-chip-party">Player</span></td>
+            <td class="pr-4 text-amber-400 text-xs">unlinked — assign ▾</td>
+            <td class="text-right"><button class="text-[11px] text-slate-500 hover:text-white">edit ▾</button></td>
+          </tr>
+          <tr>
+            <td class="py-2.5 pr-4"><span class="font-semibold text-white">Grandma Jo</span></td>
+            <td class="pr-4 text-slate-400">campaign-viewers</td>
+            <td class="pr-4"><span class="cf-chip cf-chip-private">Viewer</span></td>
+            <td class="pr-4 text-slate-500">—</td><td></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-[11px] text-slate-500">➕ Invite flow: create the user in Authentik (enrollment invite) → they appear here on first login.</p>
+  </section>
+
+  <!-- API tokens -->
+  <section class="cf-card p-5 space-y-3">
+    <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+      <h2 class="font-bold text-white text-sm">API tokens <span class="text-slate-500 font-normal">(REST + MCP)</span></h2>
+      <button class="cf-btn !min-h-0 !py-1.5 text-xs">+ New token</button>
+    </div>
+    <div class="space-y-2">
+      <div class="cf-inset p-3.5 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <p class="text-sm font-semibold text-white">claude-scribe <span class="cf-chip cf-chip-dm ml-1">dm scope</span></p>
+          <p class="text-[11px] text-slate-500">cf_pat_9f2•••• · created Jul 18 · last used 10m ago via MCP</p>
+        </div>
+        <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs !text-rose-400 !border-rose-500/40">Revoke</button>
+      </div>
+      <div class="cf-inset p-3.5 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <p class="text-sm font-semibold text-white">dave-sheet-bot <span class="cf-chip cf-chip-party ml-1">player: Gruuk</span></p>
+          <p class="text-[11px] text-slate-500">cf_pat_a41•••• · created Jul 02 · last used 3d ago</p>
+        </div>
+        <button class="cf-btn-ghost cf-btn !min-h-0 !py-1.5 text-xs !text-rose-400 !border-rose-500/40">Revoke</button>
+      </div>
+      <!-- New-token modal spec (inline) -->
+      <div class="cf-inset border-amber-500/30 p-3.5 space-y-2">
+        <p class="text-[10px] font-bold text-amber-500 uppercase tracking-widest">New token (modal)</p>
+        <div class="grid sm:grid-cols-3 gap-2">
+          <input class="cf-input !min-h-0 !py-2 text-sm sm:col-span-2" placeholder="Name, e.g. claude-scribe">
+          <select class="cf-select !min-h-0 !py-2 text-sm"><option>Scope: DM</option><option>Scope: Player (pick character)</option><option>Scope: Viewer</option></select>
+        </div>
+        <p class="text-[11px] text-slate-500">Token shown once on creation · MCP URL: <code class="text-slate-400">https://campfire.awsomefox.com/mcp</code></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Audit + export -->
+  <div class="grid md:grid-cols-2 gap-5">
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm border-b border-slate-700 pb-2">Audit log</h2>
+      <ul class="text-xs space-y-2 text-slate-400">
+        <li><span class="text-slate-600">10m</span> ✨ <b class="text-slate-300">claude-scribe</b> proposed quest update <span class="text-purple-400">(pending)</span></li>
+        <li><span class="text-slate-600">2h</span> 👤 <b class="text-slate-300">Dave</b> added inbox note</li>
+        <li><span class="text-slate-600">2d</span> 👤 <b class="text-slate-300">Alice</b> set Gimble HP 20→17</li>
+        <li><span class="text-slate-600">2d</span> 🎩 <b class="text-slate-300">Tony</b> completed objective "Reach the excavation"</li>
+      </ul>
+      <button class="text-xs text-slate-500 hover:text-white">Full log →</button>
+    </section>
+    <section class="cf-card p-5 space-y-3">
+      <h2 class="font-bold text-white text-sm border-b border-slate-700 pb-2">Backup &amp; export</h2>
+      <p class="text-xs text-slate-400">Take everything with you — no lock-in.</p>
+      <div class="flex gap-2">
+        <button class="cf-btn-ghost cf-btn !min-h-0 !py-2 text-xs">⬇ JSON export</button>
+        <button class="cf-btn-ghost cf-btn !min-h-0 !py-2 text-xs">⬇ Markdown zip</button>
+      </div>
+      <p class="text-[11px] text-slate-600">Server backup = copy <code>/data</code>. Import accepts the markdown zip (vault migration).</p>
+    </section>
+  </div>
+</div>
+
+<nav class="cf-tabbar">
+  <a href="02-dashboard.html"><span class="ico">🏠</span>Home</a>
+  <a href="03-quest-detail.html"><span class="ico">📜</span>Quests</a>
+  <a href="06-character-sheet.html"><span class="ico">🛡</span>Party</a>
+  <a href="08-my-notes.html"><span class="ico">📝</span>Notes</a>
+  <a class="active" href="10-admin.html"><span class="ico">⋯</span>More</a>
+</nav>
+</body>
+</html>
