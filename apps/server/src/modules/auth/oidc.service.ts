@@ -50,12 +50,19 @@ const dynamicImport: (specifier: string) => Promise<typeof client> = new Functio
   'return import(specifier)',
 ) as (specifier: string) => Promise<typeof client>;
 
-let clientModulePromise: Promise<typeof client> | null = null;
+// Cache on `process`, not module scope: under jest (--experimental-vm-modules),
+// each test file gets a fresh module registry, so a module-scoped cache re-runs
+// the dynamic import per suite — and an import() evaluated in one test file's vm
+// context can resolve after that context is torn down ("Test environment has
+// been torn down", consistently on CI's slower runners). `process` is shared
+// across all test files in a worker, so the import truly happens once.
+type ProcessWithEsmCache = NodeJS.Process & { __campfireOpenidClient?: Promise<typeof client> };
 function loadClient(): Promise<typeof client> {
-  if (!clientModulePromise) {
-    clientModulePromise = dynamicImport('openid-client');
+  const proc = process as ProcessWithEsmCache;
+  if (!proc.__campfireOpenidClient) {
+    proc.__campfireOpenidClient = dynamicImport('openid-client');
   }
-  return clientModulePromise;
+  return proc.__campfireOpenidClient;
 }
 
 /**
