@@ -43,6 +43,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'api_tokens')).toContain('admin_enabled');
       expect(columnNames(sqlite, 'proposals')).toContain('snapshot');
       expect(columnNames(sqlite, 'encounters')).toContain('current_combatant_id');
+      expect(columnNames(sqlite, 'combatants')).toEqual(
+        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures']),
+      );
       expect(columnNames(sqlite, 'attachments')).toContain('hidden');
     } finally {
       sqlite.close();
@@ -75,8 +78,14 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect((sqlite.prepare('SELECT admin_enabled FROM api_tokens WHERE id = 1').get() as { admin_enabled: number }).admin_enabled).toBe(0);
       expect((sqlite.prepare('SELECT snapshot FROM proposals WHERE id = 1').get() as { snapshot: unknown }).snapshot).toBeNull();
 
+      // Combatant HP-model backfill (issue #57): defaults applied to the pre-existing row.
+      const combatant = sqlite.prepare('SELECT * FROM combatants WHERE id = 1').get() as Record<string, unknown>;
+      expect(combatant).toMatchObject({ name: 'Legacy Goblin', hp_current: 5, hp_max: 7, hp_temp: 0, death_state: 'none' });
+      expect(combatant.death_save_successes).toBe(0);
+      expect(combatant.death_save_failures).toBe(0);
+
       // Every seeded table kept exactly its one row (nothing dropped by the rebuild).
-      for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'proposals', 'encounters', 'attachments']) {
+      for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'proposals', 'encounters', 'combatants', 'attachments']) {
         expect(countRows(sqlite, table)).toBe(1);
       }
     } finally {

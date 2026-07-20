@@ -70,6 +70,31 @@ export const CampaignClone = z.object({
   mode: CampaignCloneMode.default('full'),
 });
 
+// Import input — POST /campaigns/import (issue #120). The body is a Campfire JSON
+// export (the shape ExportService.buildExport produces): make the one-way export
+// round-trippable by re-creating the campaign from it. Validated permissively —
+// only `campaign.name` is truly required, and unknown/extra keys (attachmentsNote,
+// members, audit, proposals, …) are tolerated via .passthrough() so a real export
+// document is accepted verbatim. All entity ids in the document are treated as
+// source ids and remapped to fresh ids on import; the entities themselves are read
+// defensively field-by-field in the service, so a loose object[] is enough here.
+const ImportedEntity = z.object({}).passthrough();
+export const CampaignImport = z
+  .object({
+    // Optional override for the imported campaign's name (defaults to the export's own).
+    name: z.string().min(1).max(120).optional(),
+    campaign: z.object({ name: z.string().min(1).max(120) }).passthrough(),
+    locations: z.array(ImportedEntity).optional(),
+    npcs: z.array(ImportedEntity).optional(),
+    quests: z.array(ImportedEntity).optional(),
+    characters: z.array(ImportedEntity).optional(),
+    sessions: z.array(ImportedEntity).optional(),
+    notes: z.array(ImportedEntity).optional(),
+    encounters: z.array(ImportedEntity).optional(),
+  })
+  .passthrough();
+export type CampaignImport = z.infer<typeof CampaignImport>;
+
 // ---------- character ----------
 // characters.ownerUserId is stored as TEXT (it must also hold 'dev:<name>' dev-auth ids)
 // while users.id / CampaignMember.userId are integers — the historical type mismatch of
@@ -154,6 +179,28 @@ export const Character = z.object({
 export type Character = z.infer<typeof Character>;
 export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
 export const CharacterUpdate = CharacterCreate.partial();
+
+/**
+ * Request body for importing a character from a PUBLIC D&D Beyond sheet (issue #18).
+ * The importer is unofficial and read-only — it reads the public character-service
+ * JSON that D&D Beyond exposes for characters whose privacy is set to Public. Callers
+ * pass either the raw numeric character id (`ddbId`) or a share/character URL (`url`,
+ * e.g. https://www.dndbeyond.com/characters/12345678); at least one is required. `url`
+ * (base-URL override, mainly for tests pointing at a fake server) is separate from the
+ * `url` that carries a character link — the server derives the id from whichever of
+ * ddbId/url is present.
+ */
+export const DdbCharacterImport = z
+  .object({
+    ddbId: z.string().max(200).optional(),
+    url: z.string().max(500).optional(),
+  })
+  .strict()
+  .refine((v) => Boolean(v.ddbId?.trim() || v.url?.trim()), {
+    message: 'Provide a D&D Beyond character id (ddbId) or a character URL (url)',
+  });
+export type DdbCharacterImport = z.infer<typeof DdbCharacterImport>;
+
 export const HpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
@@ -443,6 +490,29 @@ export type SessionListItem = z.infer<typeof SessionListItem>;
 export const RECAP_HEADINGS = ['Recap', 'Loot', 'NPCs met', 'Cliffhanger'] as const;
 export const RECAP_TEMPLATE = RECAP_HEADINGS.map((h) => `## ${h}\n\n`).join('').trimEnd() + '\n';
 
+// ---------- session attendance (issue #121) ----------
+// Which characters played a given session. A session is otherwise all-or-nothing:
+// West Marches / rotating-cast tables (a big rostered party, only 4-6 of whom show
+// up each outing) need a per-session "who was there" record so recaps, per-attendee
+// context and "you weren't there" all become possible. One row per (session,
+// character); the set is REPLACED on write (PUT /sessions/:id/attendance), not
+// accumulated. characterName is denormalized for display.
+export const SessionAttendee = z.object({
+  id: Id,
+  sessionId: Id,
+  characterId: Id,
+  characterName: z.string().max(200).default(''),
+  createdAt: IsoDate,
+});
+export type SessionAttendee = z.infer<typeof SessionAttendee>;
+// Replace a session's attendance with exactly this set of characters. Each id must
+// be a character in the session's own campaign (else 400) — the honest analogue of
+// "only campaign members are valid attendees". Empty array clears attendance.
+export const SessionAttendanceSet = z.object({
+  characterIds: z.array(Id).max(500),
+});
+export type SessionAttendanceSet = z.infer<typeof SessionAttendanceSet>;
+
 // ---------- session share links (public read-only recap access) ----------
 // A DM-minted, unguessable capability URL for one session recap — viewable
 // without an account (absent players). The raw token is returned ONCE at
@@ -575,6 +645,44 @@ export const TimelineCalendarUpdate = z.object({
   note: z.string().max(4000).optional(),
 });
 export type TimelineCalendarUpdate = z.infer<typeof TimelineCalendarUpdate>;
+
+// ---------- session zero / table charter (safety tools & expectations) — issue #122 ----------
+// Session zero is where a table agrees on the content it will and won't play through
+// and the tools it will use to steer in the moment. Before this, none of that had a
+// home — a campaign carried only name/description/status/danger/ruleSystem, so lines &
+// veils lived (if anywhere) in a markdown blob players might never open. This is a
+// first-class, structured, per-campaign record: ONE row per campaign, DM-authored,
+// readable by the whole table (no dmSecret — a safety charter everyone must see). It's
+// also exposed read-only over MCP so a connected AI (and the roadmap's AI DM) is bound
+// by the same lines & veils the humans agreed to.
+export const SessionZero = z.object({
+  campaignId: Id,
+  // Hard limits ("lines") — content that never appears at the table, full stop.
+  lines: z.array(z.string().min(1).max(500)).max(200).default([]),
+  // Soft limits ("veils") — content that may exist in the fiction but stays off-screen
+  // (fade to black), never described in detail.
+  veils: z.array(z.string().min(1).max(500)).max(200).default([]),
+  // Safety tools this table has agreed to use — X-Card, Open Door, Script Change, etc.
+  // Free text (every table names them differently), one agreed tool per entry.
+  safetyTools: z.array(z.string().min(1).max(200)).max(50).default([]),
+  // House rules — table conventions and rules-as-written deviations (markdown).
+  houseRules: z.string().max(20_000).default(''),
+  // Tone & content expectations — the register the table is playing in: gritty vs.
+  // heroic, comedic vs. serious, expected spotlight/PvP norms, etc. (markdown).
+  toneAndExpectations: z.string().max(20_000).default(''),
+  ...timestamps,
+});
+export type SessionZero = z.infer<typeof SessionZero>;
+// Update is a partial patch: every field optional so the DM can revise one section
+// without resending the whole charter (the single-row-per-campaign upsert convention).
+export const SessionZeroUpdate = z.object({
+  lines: z.array(z.string().min(1).max(500)).max(200).optional(),
+  veils: z.array(z.string().min(1).max(500)).max(200).optional(),
+  safetyTools: z.array(z.string().min(1).max(200)).max(50).optional(),
+  houseRules: z.string().max(20_000).optional(),
+  toneAndExpectations: z.string().max(20_000).optional(),
+});
+export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 
 // ---------- notes ----------
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
@@ -1281,6 +1389,19 @@ export type CombatantKind = z.infer<typeof CombatantKind>;
 export const HpBand = z.enum(['healthy', 'bloodied', 'critical', 'down']);
 export type HpBand = z.infer<typeof HpBand>;
 
+/**
+ * 5e death-save lifecycle for a combatant at 0 HP (issue #57).
+ * - `none`: alive (hp > 0), or a monster (monsters don't roll death saves — 0 HP
+ *   is simply "down"); death-save counters are held at 0.
+ * - `dying`: a character at 0 HP, rolling death saves (successes/failures 0–2).
+ * - `stable`: a character at 0 HP that reached 3 successes (or was stabilized) —
+ *   unconscious but no longer rolling. Any further damage flips back to `dying`.
+ * - `dead`: 3 death-save failures, OR instant death from massive damage
+ *   (a single hit whose overflow past 0 HP is >= hpMax).
+ */
+export const DeathState = z.enum(['none', 'dying', 'stable', 'dead']);
+export type DeathState = z.infer<typeof DeathState>;
+
 export const Combatant = z.object({
   id: Id,
   encounterId: Id,
@@ -1293,7 +1414,17 @@ export const Combatant = z.object({
   // (issue #43); `hpBand` then carries the coarse status instead.
   hpCurrent: z.number().int().nullable().default(10),
   hpMax: z.number().int().min(1).nullable().default(10),
+  // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
+  // does not stack (taking the higher of the two), and is not bounded by hpMax.
+  // Nullable so it's redacted alongside exact HP for non-DM monster viewers (#43).
+  hpTemp: z.number().int().min(0).nullable().default(0),
   hpBand: HpBand.nullable().default(null),
+  // Death-save subsystem (issue #57). successes/failures are 0–3; `deathState`
+  // is the derived lifecycle band (see DeathState). Monsters keep these at
+  // none/0/0 — they simply go "down" at 0 HP.
+  deathState: DeathState.default('none'),
+  deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
+  deathSaveFailures: z.number().int().min(0).max(3).default(0),
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
@@ -1307,13 +1438,29 @@ export const CombatantCreate = z.object({
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  // Add N identical combatants in one call (issue #114). When >1 the names are
+  // auto-suffixed "Goblin 1".."Goblin N" so duplicate monsters are distinguishable.
+  // Ignored (single add, no suffix) for character/characterId adds — a PC is unique.
+  count: z.number().int().min(1).max(50).optional(),
 });
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
   hpSet: z.number().int().nonnegative().optional(),
+  // Temp HP absolute set (issue #57). 0 clears it.
+  hpTemp: z.number().int().min(0).optional(),
+  // Death-save counters, absolute set 0–3 (issue #57). Reaching 3 failures -> dead;
+  // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
+  deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
+  deathSaveFailures: z.number().int().min(0).max(3).optional(),
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   initiative: z.number().int().optional(), // dm only, enforced server-side
+  // Combatant identity edits (issue #114) — dm only, enforced server-side. Let a DM
+  // rename a duplicate ("Goblin" -> "Goblin (archer)") or fix a mistyped hpMax/initMod
+  // at add-time without a delete + re-add.
+  name: z.string().min(1).max(120).optional(),
+  hpMax: z.number().int().min(1).optional(),
+  initMod: z.number().int().optional(),
 });
 
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
