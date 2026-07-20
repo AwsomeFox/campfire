@@ -5,7 +5,9 @@ import {
   turnIndexFor,
   advanceTurn,
   hpBandFor,
+  applyCombatantHp,
 } from '../../src/modules/encounters/encounters.logic';
+import type { CombatantHpState } from '../../src/modules/encounters/encounters.logic';
 
 /**
  * Unit tests for the pure combat-order / turn / HP-band math extracted from
@@ -177,5 +179,133 @@ describe('encounters — hpBandFor (issue #43)', () => {
     expect(hpBandFor(0, 0)).toBe('down');
     // current>0 with max 0 -> pct 0 -> critical (never divides by zero)
     expect(hpBandFor(5, 0)).toBe('critical');
+  });
+});
+
+describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
+  function charState(over: Partial<CombatantHpState> = {}): CombatantHpState {
+    return {
+      kind: 'character',
+      hpCurrent: 20,
+      hpMax: 20,
+      hpTemp: 0,
+      deathState: 'none',
+      deathSaveSuccesses: 0,
+      deathSaveFailures: 0,
+      ...over,
+    };
+  }
+
+  describe('temp HP', () => {
+    it('absorbs damage before real HP and does not stack past what is set', () => {
+      const r = applyCombatantHp(charState({ hpTemp: 5 }), { hpDelta: -3 });
+      expect(r.hpTemp).toBe(2); // 3 soaked from the 5 temp pool
+      expect(r.hpCurrent).toBe(20); // real HP untouched
+    });
+
+    it('spills over into real HP once the temp pool is exhausted', () => {
+      const r = applyCombatantHp(charState({ hpTemp: 5 }), { hpDelta: -8 });
+      expect(r.hpTemp).toBe(0);
+      expect(r.hpCurrent).toBe(17); // 5 to temp, remaining 3 to real HP
+    });
+
+    it('an explicit hpTemp set can exceed nothing/is independent of hpMax', () => {
+      const r = applyCombatantHp(charState({ hpMax: 10, hpCurrent: 10 }), { hpTemp: 25 });
+      expect(r.hpTemp).toBe(25);
+      expect(r.hpCurrent).toBe(10);
+    });
+
+    it('healing does not touch the temp pool', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 10, hpTemp: 4 }), { hpDelta: 5 });
+      expect(r.hpCurrent).toBe(15);
+      expect(r.hpTemp).toBe(4);
+    });
+  });
+
+  describe('death saves + dying/stable/dead transitions', () => {
+    it('a character reduced to exactly 0 begins dying with a clean slate', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 });
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('dying');
+      expect(r.deathSaveSuccesses).toBe(0);
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('taking damage while already at 0 is an automatic death-save failure', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying' }), { hpDelta: -3 });
+      expect(r.deathState).toBe('dying');
+      expect(r.deathSaveFailures).toBe(1);
+    });
+
+    it('three recorded failures = dead', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying', deathSaveFailures: 2 }), { deathSaveFailures: 3 });
+      expect(r.deathState).toBe('dead');
+    });
+
+    it('three recorded successes = stable', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 2 }), { deathSaveSuccesses: 3 });
+      expect(r.deathState).toBe('stable');
+    });
+
+    it('a stable creature that takes damage drops back to dying with a failure', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'stable', deathSaveSuccesses: 3 }), { hpDelta: -2 });
+      expect(r.deathState).toBe('dying');
+      expect(r.deathSaveFailures).toBe(1);
+    });
+
+    it('healing any amount revives a dying character and clears the death-save slate', () => {
+      const r = applyCombatantHp(
+        charState({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 1, deathSaveFailures: 2 }),
+        { hpDelta: 4 },
+      );
+      expect(r.hpCurrent).toBe(4);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveSuccesses).toBe(0);
+      expect(r.deathSaveFailures).toBe(0);
+    });
+  });
+
+  describe('overkill / massive-damage instant death', () => {
+    it('a single hit whose overflow past 0 >= hpMax kills a character outright', () => {
+      // 20/20 character, 45 damage: 25 overflow >= 20 hpMax -> instant death.
+      const r = applyCombatantHp(charState({ hpCurrent: 20, hpMax: 20 }), { hpDelta: -45 });
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('dead');
+    });
+
+    it('overflow below hpMax merely downs the character (dying, not dead)', () => {
+      // 20/20 character, 30 damage: 10 overflow < 20 hpMax -> dying.
+      const r = applyCombatantHp(charState({ hpCurrent: 20, hpMax: 20 }), { hpDelta: -30 });
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('dying');
+    });
+
+    it('temp HP counts first, so it can save a character from instant death', () => {
+      // 20/20 with 10 temp, 45 damage: 10 soaked, 35 to real HP, overflow 15 < 20 -> dying.
+      const r = applyCombatantHp(charState({ hpCurrent: 20, hpMax: 20, hpTemp: 10 }), { hpDelta: -45 });
+      expect(r.hpCurrent).toBe(0);
+      expect(r.hpTemp).toBe(0);
+      expect(r.deathState).toBe('dying');
+    });
+  });
+
+  describe('monsters never track death saves', () => {
+    it('a monster at 0 HP stays deathState none (goes "down", not dying)', () => {
+      const r = applyCombatantHp(charState({ kind: 'monster', hpCurrent: 5 }), { hpDelta: -999 });
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveSuccesses).toBe(0);
+      expect(r.deathSaveFailures).toBe(0);
+    });
+  });
+
+  describe('clamping', () => {
+    it('healing never exceeds hpMax', () => {
+      expect(applyCombatantHp(charState({ hpCurrent: 18 }), { hpDelta: 100 }).hpCurrent).toBe(20);
+    });
+    it('hpSet is clamped to [0, hpMax]', () => {
+      expect(applyCombatantHp(charState(), { hpSet: 999 }).hpCurrent).toBe(20);
+      expect(applyCombatantHp(charState(), { hpSet: 0 }).deathState).toBe('dying');
+    });
   });
 });
