@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import type { z } from 'zod';
 import {
   QuestCreate,
@@ -94,11 +94,23 @@ export class ProposalsService {
     }
   }
 
-  /** Applies the proposal's payload through the SAME service create/update path used by the direct write endpoints, so invariants hold. */
+  /**
+   * Applies the proposal's payload through the SAME service create/update path
+   * used by the direct write endpoints, so invariants hold.
+   *
+   * Concurrency (issue #85): the status transition is the point of
+   * serialization. We validate first, then *claim* the proposal with an atomic
+   * compare-and-set (`pending -> approved`, only if still pending). Only one of
+   * N concurrent approves — or an approve racing a reject — can win that claim;
+   * the losers get a 409 and never touch the entity, so the payload applies at
+   * most once. The entity write happens only after a successful claim; if it
+   * throws, we revert the claim to `pending` so nothing is left `approved` with
+   * no write applied (the proposal stays re-approvable).
+   */
   async approve(id: number, input: ProposalResolveInput, user: RequestUser, role: Role): Promise<Proposal> {
     const existing = await this.records.getRowOrThrow(id);
     if (existing.status !== 'pending') {
-      throw new ForbiddenException(`Proposal ${id} is already ${existing.status}`);
+      throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
     }
     if (!isProposableEntityType(existing.entityType)) {
       throw new BadRequestException(`Unsupported proposal entityType: ${existing.entityType}`);
@@ -106,21 +118,37 @@ export class ProposalsService {
 
     const payload = fromJsonText<Record<string, unknown>>(existing.payload, {});
     const action = existing.action as ProposalAction;
+    // Validate BEFORE claiming so an invalid payload doesn't consume the
+    // one-and-only pending->approved transition (it would leave the proposal
+    // stuck approved-but-unapplied).
     const validated = this.validatePayload(existing.entityType, action, payload);
+    if (action === 'update' && existing.entityId === null) {
+      throw new BadRequestException('update proposal missing entityId');
+    }
     const service = this.serviceFor(existing.entityType);
 
-    if (action === 'create') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (service as any).create(existing.campaignId, validated, user, role);
-    } else {
-      if (existing.entityId === null) {
-        throw new BadRequestException('update proposal missing entityId');
-      }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (service as any).update(existing.entityId, validated, user, role);
+    // Atomically claim the proposal. A null return means it was already resolved
+    // or a concurrent request won the race — either way, do not apply the write.
+    const resolved = await this.records.markResolved(id, 'approved', input.note ?? '', user);
+    if (!resolved) {
+      const current = await this.records.getRowOrThrow(id);
+      throw new ConflictException(`Proposal ${id} is already ${current.status}`);
     }
 
-    const resolved = await this.records.markResolved(id, 'approved', input.note ?? '', user);
+    try {
+      if (action === 'create') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (service as any).create(existing.campaignId, validated, user, role);
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (service as any).update(existing.entityId, validated, user, role);
+      }
+    } catch (err) {
+      // The entity write failed — undo the claim so the proposal returns to
+      // pending rather than being stranded as approved with no write applied.
+      await this.records.revertToPending(id);
+      throw err;
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -137,10 +165,16 @@ export class ProposalsService {
   async reject(id: number, input: ProposalResolveInput, user: RequestUser, role: Role): Promise<Proposal> {
     const existing = await this.records.getRowOrThrow(id);
     if (existing.status !== 'pending') {
-      throw new ForbiddenException(`Proposal ${id} is already ${existing.status}`);
+      throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
     }
 
+    // Same atomic claim as approve: a null return means a concurrent approve or
+    // reject already resolved this proposal, so this reject is a no-op 409.
     const resolved = await this.records.markResolved(id, 'rejected', input.note ?? '', user);
+    if (!resolved) {
+      const current = await this.records.getRowOrThrow(id);
+      throw new ConflictException(`Proposal ${id} is already ${current.status}`);
+    }
 
     await this.audit.log({
       actor: auditActor(user),
