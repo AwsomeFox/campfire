@@ -62,7 +62,7 @@ export class OidcController {
   @Get('callback')
   @ApiOperation({ summary: 'OIDC callback (redirect target)', description: "Provider redirects here with `code`/`state` query params after the user authenticates. Verifies the flow cookie + PKCE, provisions/updates the user, and sets the session cookie." })
   @ApiResponse({ status: 302, description: 'Session cookie set; redirects to the app.' })
-  @ApiResponse({ status: 403, description: 'Account disabled.' })
+  @ApiResponse({ status: 403, description: 'Account disabled, or not a member of the required sign-in group (OIDC_ALLOWED_GROUP).' })
   @ApiResponse({ status: 503, description: 'OIDC not configured, or the login flow expired / was not started here.' })
   async callback(@Req() req: Request, @Query() _query: Record<string, string>, @Res() res: Response): Promise<void> {
     if (!this.oidc.isEnabled()) {

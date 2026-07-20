@@ -269,6 +269,7 @@ configure in the DB or admin UI. Implemented with `openid-client` v6
 | `OIDC_SCOPE` | no | `openid profile email` | Add `groups` (or your provider's scope name) here too if group membership isn't included by default. |
 | `OIDC_GROUPS_CLAIM` | no | `groups` | Name of the ID-token claim holding the user's group list. |
 | `OIDC_ADMIN_GROUP` | no | — (admin sync disabled) | Group name that grants `serverRole: 'admin'`. Applied on **every** login, both directions — added to the group -> promoted, removed -> demoted — except the last enabled admin is never demoted (a warn is logged and the role left as-is). |
+| `OIDC_ALLOWED_GROUP` | no | — (any authenticated IdP user may sign in) | Group name required to sign in at all. Checked on **every** login: without it the callback 403s, no account is auto-provisioned, and existing accounts get no session (removing the group at the IdP locks the user out on their next login). Members of `OIDC_ADMIN_GROUP` always have access, so setting only the admin group can't lock admins out. |
 | `APP_URL` | no | `http://localhost:8080` | Only used to build the default `OIDC_REDIRECT_URI`. |
 
 \* All three of `OIDC_ISSUER`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` must be

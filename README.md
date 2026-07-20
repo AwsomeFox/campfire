@@ -128,6 +128,7 @@ running on 8080 — maps to the container's internal 8080).
 | `OIDC_SCOPE` | `openid profile email` | OIDC scopes requested |
 | `OIDC_GROUPS_CLAIM` | `groups` | Claim in the ID token holding the user's group memberships |
 | `OIDC_ADMIN_GROUP` | *(unset)* | Group name that grants the Campfire **server admin** role (campaign roles dm/player/viewer are per-campaign memberships managed in-app) |
+| `OIDC_ALLOWED_GROUP` | *(unset)* | Group name required to **sign in at all** — users outside it get a 403 and no account is provisioned. Unset = any authenticated IdP user may sign in. Members of `OIDC_ADMIN_GROUP` always have access |
 | `OIDC_ALLOW_INSECURE` | *(unset)* | Set to allow OIDC over plain HTTP — dev/testing only, never in production |
 | `TZ` | *(unset, UTC)* | Container timezone, e.g. `America/Denver` — affects displayed session/log timestamps |
 
