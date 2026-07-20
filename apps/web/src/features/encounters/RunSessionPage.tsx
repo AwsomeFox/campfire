@@ -101,6 +101,7 @@ export default function RunSessionPage() {
   const busyRef = useRef(false);
 
   const [confirmEnd, setConfirmEnd] = useState(false);
+  const [confirmReopen, setConfirmReopen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
 
@@ -212,6 +213,14 @@ export default function RunSessionPage() {
     await withBusy(async () => {
       await api.post(`${API}/encounters/${eid}/end`);
       setConfirmEnd(false);
+      await load();
+    });
+  }
+
+  async function reopenEncounter() {
+    await withBusy(async () => {
+      await api.post(`${API}/encounters/${eid}/reopen`);
+      setConfirmReopen(false);
       await load();
     });
   }
@@ -341,6 +350,11 @@ export default function RunSessionPage() {
                 End
               </Btn>
             )}
+            {encounter.status === 'ended' && (
+              <Btn ghost disabled={busy} onClick={() => setConfirmReopen(true)}>
+                Reopen
+              </Btn>
+            )}
             {(encounter.status === 'ended' || encounter.status === 'preparing') && (
               <Btn ghost danger disabled={busy} onClick={() => setConfirmDelete(true)}>
                 Delete
@@ -404,6 +418,16 @@ export default function RunSessionPage() {
           busy={busy}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
+        />
+      )}
+      {confirmReopen && (
+        <ConfirmDialog
+          title="Reopen this encounter?"
+          body="It returns to Running where combat left off. HP was written back to character sheets when it ended; it will write back again the next time you End."
+          confirmLabel={busy ? 'Reopening…' : 'Reopen encounter'}
+          busy={busy}
+          onConfirm={reopenEncounter}
+          onCancel={() => setConfirmReopen(false)}
         />
       )}
       {confirmDelete && (
@@ -474,6 +498,12 @@ function CombatantRow({
 
   const edgeColor = isCurrentTurn ? 'var(--color-accent)' : 'transparent';
   const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : 'tag tag-neutral';
+  // Issue #107: a combatant at 0 HP got no visual treatment mid-fight — the row
+  // looked identical bar an empty HP bar, so a "dead" creature was invisible in the
+  // order (the end-of-combat summary already counted it as Fallen). Dim + desaturate
+  // the whole row and skull/strike-through the name. `isDown` works off the HP band
+  // too, so a redacted monster (exact HP hidden, band 'down') gets the same treatment.
+  const down = isDown(combatant);
 
   return (
     <div
@@ -486,6 +516,8 @@ function CombatantRow({
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
         boxShadow: isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+        opacity: down ? 0.55 : 1,
+        filter: down ? 'grayscale(0.75)' : 'none',
       }}
     >
       {canSetInitiative ? (
@@ -537,10 +569,18 @@ function CombatantRow({
       )}
       <div style={{ flex: 1, minWidth: 160 }}>
         <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-          {combatant.name}
+          <span style={down ? { textDecoration: 'line-through' } : undefined}>
+            {down && <span aria-hidden="true" style={{ marginRight: 5 }}>💀</span>}
+            {combatant.name}
+          </span>
           <span className={kindTagClass} style={{ fontSize: 9 }}>
             {combatant.kind}
           </span>
+          {down && (
+            <span className="tag tag-outline" style={{ fontSize: 9 }}>
+              Down
+            </span>
+          )}
         </div>
         {combatant.conditions.length > 0 && (
           <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>

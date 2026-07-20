@@ -172,4 +172,14 @@ export class EncountersController {
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.encounters.end(id, user, role);
   }
+
+  @Post(':id/reopen')
+  @ApiOperation({ summary: 'Reopen an ended encounter', description: "dm role required. Flips an 'ended' encounter back to 'running', preserving round/turn state — recovers an accidental End. HP was already written back on End; the same write-back caveat applies on the next End." })
+  @ApiResponse({ status: 201, description: 'Reopened (running) encounter.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not ended.' })
+  async reopen(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.reopen(id, user, role);
+  }
 }
