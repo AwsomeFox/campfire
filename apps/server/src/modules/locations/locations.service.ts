@@ -14,7 +14,7 @@ import type { RequestUser } from '../../common/user.types';
 type LocationCreateInput = z.infer<typeof LocationCreate>;
 type LocationUpdateInput = z.infer<typeof LocationUpdate>;
 
-function toDomain(row: typeof locations.$inferSelect): Location {
+export function toDomain(row: typeof locations.$inferSelect): Location {
   return {
     id: row.id,
     campaignId: row.campaignId,

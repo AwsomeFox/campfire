@@ -210,6 +210,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   entity_id INTEGER,
   action TEXT NOT NULL,
   payload TEXT NOT NULL DEFAULT '{}',
+  snapshot TEXT,
   proposer TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   resolved_by TEXT NOT NULL DEFAULT '',

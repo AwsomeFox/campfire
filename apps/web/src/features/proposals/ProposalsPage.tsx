@@ -223,7 +223,7 @@ function ProposalCard({
         {' '}· {timeAgo(proposal.createdAt)}
       </p>
 
-      <DiffView payload={proposal.payload} />
+      <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
 
       {expanded && (
         <TextInput
@@ -249,31 +249,46 @@ function ProposalCard({
   );
 }
 
-function DiffView({ payload }: { payload: Record<string, unknown> }) {
+function DiffView({ payload, snapshot }: { payload: Record<string, unknown>; snapshot: Record<string, unknown> | null }) {
   const entries = Object.entries(payload);
   if (entries.length === 0) {
     return <p className="text-xs text-slate-500">No fields in this proposal.</p>;
   }
-  // Note: Proposal.payload only carries the proposed values — the server doesn't snapshot
-  // the entity's prior state, so there's no "old" value to show struck through as the design
-  // depicts. We show field -> new value, which is the best-effort mapping without inventing
-  // a diff-tracking API.
+  // `snapshot` is the entity's state captured at propose time (update proposals only —
+  // null for creates and for proposals recorded before the server grew snapshots), so
+  // changed fields render as "field: old -> new" with the old value struck through, as
+  // the design depicts. Without a snapshot we fall back to field -> proposed value.
   return (
     <div className="border border-[var(--color-divider)] rounded-[var(--radius-md)] overflow-hidden">
-      {entries.map(([key, value], i) => (
-        <div
-          key={key}
-          className="flex gap-2.5 px-3 py-2 text-[12.5px] items-baseline"
-          style={i > 0 ? { borderTop: '1px solid var(--color-divider)' } : undefined}
-        >
-          <span className="text-muted w-[86px] shrink-0 text-[11px]">{key}</span>
-          <span style={{ color: 'var(--color-accent-300)' }} className="whitespace-pre-wrap break-all">
-            → {formatValue(value)}
-          </span>
-        </div>
-      ))}
+      {entries.map(([key, value], i) => {
+        const hasBefore = snapshot !== null && key in snapshot;
+        const unchanged = hasBefore && sameValue(snapshot[key], value);
+        return (
+          <div
+            key={key}
+            className="flex gap-2.5 px-3 py-2 text-[12.5px] items-baseline"
+            style={i > 0 ? { borderTop: '1px solid var(--color-divider)' } : undefined}
+          >
+            <span className="text-muted w-[86px] shrink-0 text-[11px]">{key}</span>
+            {hasBefore && !unchanged && (
+              <span className="line-through text-slate-500 whitespace-pre-wrap break-all shrink-0 max-w-[45%]">
+                {formatValue(snapshot[key])}
+              </span>
+            )}
+            <span style={{ color: 'var(--color-accent-300)' }} className="whitespace-pre-wrap break-all">
+              {unchanged ? formatValue(value) : `→ ${formatValue(value)}`}
+            </span>
+            {unchanged && <span className="text-[10px] text-slate-600 shrink-0">unchanged</span>}
+          </div>
+        );
+      })}
     </div>
   );
+}
+
+/** Structural equality for diff purposes — payload/snapshot values are plain JSON. */
+function sameValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
 function formatValue(value: unknown): string {
