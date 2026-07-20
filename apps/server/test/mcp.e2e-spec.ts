@@ -370,6 +370,90 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(after.body.some((q: { title: string }) => q.title === 'Proposed quest')).toBe(true);
   });
 
+  // Issue #125: add_session_recap must NOT freeze the session number into a proposed
+  // recap's payload. If it did, a session logged between propose and approve would
+  // collide on that frozen number and every approve would 409, trapping the draft.
+  it('a proposed session recap (no number) approves cleanly even after another session is logged in between', async () => {
+    // fresh campaign so the numbering is deterministic (no sessions yet -> next is 1)
+    const recapCampRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Recap Numbering #125' });
+    const recapCampaignId = recapCampRes.body.id as number;
+    const dmClient = await mcpClient(dmToken);
+
+    // 1. Draft a recap as a proposal WITHOUT an explicit number. The stored payload
+    //    must not carry a number — it's assigned at approval time.
+    const proposeResult = await dmClient.callTool({
+      name: 'add_session_recap',
+      arguments: { campaignId: recapCampaignId, recap: 'The party crossed the bridge.', propose: true },
+    });
+    expect(proposeResult.isError).toBeFalsy();
+    const { proposal } = parseResult(proposeResult) as {
+      proposal: { id: number; status: string; payload: Record<string, unknown> };
+    };
+    expect(proposal.status).toBe('pending');
+    expect(proposal.payload.number).toBeUndefined();
+
+    // 2. Meanwhile the DM logs a session directly — it takes number 1 (the value the
+    //    old code would have frozen into the proposal above).
+    const directResult = await dmClient.callTool({
+      name: 'add_session_recap',
+      arguments: { campaignId: recapCampaignId, recap: 'A different night.' },
+    });
+    expect(directResult.isError).toBeFalsy();
+    const directSession = parseResult(directResult) as { id: number; number: number };
+    expect(directSession.number).toBe(1);
+
+    // 3. Approving the proposal now must succeed (no 409) and get the next number (2).
+    const approveResult = await dmClient.callTool({
+      name: 'approve_proposal',
+      arguments: { proposalId: proposal.id },
+    });
+    expect(approveResult.isError).toBeFalsy();
+    const approved = parseResult(approveResult) as { status: string };
+    expect(approved.status).toBe('approved');
+
+    const list = await dmAgent.get(`/api/v1/campaigns/${recapCampaignId}/sessions`);
+    expect(list.body).toHaveLength(2);
+    const numbers = (list.body as Array<{ number: number }>).map((s) => s.number).sort();
+    expect(numbers).toEqual([1, 2]);
+  });
+
+  // Issue #160: the default-number path used to precompute max+1 in the tool, so the
+  // campaign-unique guard never saw a duplicate — a retried identical call created a
+  // SECOND canonical session. It must now be retry-safe (dedupe, not duplicate).
+  it('identical add_session_recap (no number) twice does not create two canonical sessions', async () => {
+    const dupCampRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Recap Retry #160' });
+    const dupCampaignId = dupCampRes.body.id as number;
+    const dmClient = await mcpClient(dmToken);
+
+    const recap = 'Session recap that gets submitted twice after a timeout.';
+    const first = await dmClient.callTool({ name: 'add_session_recap', arguments: { campaignId: dupCampaignId, recap } });
+    expect(first.isError).toBeFalsy();
+    const firstSession = parseResult(first) as { id: number; number: number };
+
+    const second = await dmClient.callTool({ name: 'add_session_recap', arguments: { campaignId: dupCampaignId, recap } });
+    expect(second.isError).toBeFalsy();
+    const secondSession = parseResult(second) as { id: number; number: number };
+
+    // The retry is a no-op: same row, same number — not a phantom second session.
+    expect(secondSession.id).toBe(firstSession.id);
+    expect(secondSession.number).toBe(firstSession.number);
+
+    const list = await dmAgent.get(`/api/v1/campaigns/${dupCampaignId}/sessions`);
+    expect(list.body).toHaveLength(1);
+
+    const campRes = await dmAgent.get(`/api/v1/campaigns/${dupCampaignId}`);
+    expect(campRes.body.sessionCount).toBe(1);
+
+    // A genuinely different recap with no number still appends a new session (number 2).
+    const distinct = await dmClient.callTool({
+      name: 'add_session_recap',
+      arguments: { campaignId: dupCampaignId, recap: 'A genuinely different recap.' },
+    });
+    expect(distinct.isError).toBeFalsy();
+    const distinctSession = parseResult(distinct) as { number: number };
+    expect(distinctSession.number).toBe(2);
+  });
+
   it('create_encounter -> add_combatant -> roll_initiative -> begin_encounter -> next_turn -> end_encounter via dm PAT', async () => {
     const client = await mcpClient(dmToken);
 
