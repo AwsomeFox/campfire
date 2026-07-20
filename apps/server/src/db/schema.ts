@@ -26,6 +26,10 @@ export const campaigns = sqliteTable('campaigns', {
   // the feed URL can be re-displayed to members — see modules/sessions/scheduling.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   icsToken: text('ics_token'),
+  // Per-campaign upload quota in bytes, or NULL for no limit (issue #24). Admin-set
+  // via the storage console; enforced on attachment upload. Nullable in older DBs
+  // pre-migration; see db/db.module.ts ALTER TABLE note.
+  storageQuotaBytes: integer('storage_quota_bytes'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
