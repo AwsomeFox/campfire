@@ -1,7 +1,9 @@
 /**
  * Party roster — mirrors design/claude-design/Campfire.dc.html "Party roster" (~701-717):
  * a card grid, avatar + name/class/level/owner, HP bar, condition tags. Links to the sheet.
- * "+ New character" is offered to players without a character yet, and always to the DM.
+ * "+ New character" is offered to every player and the DM. Players may own more than one
+ * character (backup PC, familiar, companion) — the API allows it, so the UI no longer
+ * silently caps a player at a single owned character (issue #129).
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useParams, Link } from 'react-router-dom';
@@ -67,8 +69,9 @@ export default function PartyPage() {
   }
 
   const myUserId = me?.user.id;
-  const hasOwnCharacter = characters.some((c) => c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId));
-  const canCreate = isDm || (role === 'player' && !hasOwnCharacter);
+  // A player may own multiple characters (backup PC, familiar, companion) — the API
+  // allows it, so don't cap the button at one owned character (issue #129).
+  const canCreate = isDm || role === 'player';
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">

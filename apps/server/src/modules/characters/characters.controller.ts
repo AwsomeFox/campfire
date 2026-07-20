@@ -139,11 +139,13 @@ export class CharactersController {
   @Delete(':id')
   @ApiOperation({
     summary: 'Delete a character',
-    description: 'dm role required, unless `?proposed=true` — then any member may submit a deletion as a pending proposal.',
+    description:
+      'dm or the owning player may delete (mirrors PATCH) — a player may remove their own character (e.g. a backup PC or companion they created); other players get 403. With `?proposed=true` any member may submit a deletion as a pending proposal instead.',
   })
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending delete proposal instead of deleting directly.' })
   @ApiResponse({ status: 200, description: 'Deleted (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending delete proposal created (proposed=true).' })
+  @ApiResponse({ status: 403, description: 'Not the dm or owning player.' })
   async remove(
     @Param('id', ParseIntPipe) id: number,
     @Query('proposed') proposed: string | undefined,
@@ -157,7 +159,9 @@ export class CharactersController {
       res.status(202);
       return { proposal };
     }
-    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    // Player-level membership gate at the controller; the service's assertCanWrite
+    // narrows to dm-or-owner (same two-step pattern as PATCH / hp / conditions).
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.remove(id, user, role);
   }
 

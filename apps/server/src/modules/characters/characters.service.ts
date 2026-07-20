@@ -282,7 +282,10 @@ export class CharactersService {
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    // Deletion is a canon write -> dm only, enforced at controller.
+    // dm or the owning player may delete (issue #129) — mirrors update/patch so a player
+    // can remove a character they created (backup PC, familiar) instead of it being stuck
+    // until a dm intervenes; a non-owner player still gets 403 here.
+    this.assertCanWrite(existing, user, role);
     // Unlink inbound references in the same transaction as the delete so nothing dangles
     // on a deleted character: the member's characterId link (campaignMembers.characterId,
     // whose denormalized join would otherwise point at a ghost) and any combatant row
