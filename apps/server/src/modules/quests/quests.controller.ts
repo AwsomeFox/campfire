@@ -107,10 +107,26 @@ export class QuestsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a quest', description: 'dm role required.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
-  async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  @ApiOperation({
+    summary: 'Delete a quest',
+    description: 'dm role required, unless `?proposed=true` — then any member may submit a deletion as a pending proposal.',
+  })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending delete proposal instead of deleting directly.' })
+  @ApiResponse({ status: 200, description: 'Deleted (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending delete proposal created (proposed=true).' })
+  async remove(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('proposed') proposed: string | undefined,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const row = await this.quests.getRowOrThrow(id);
+    if (isProposed(proposed)) {
+      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const proposal = await this.proposals.create(row.campaignId, 'quest', id, 'delete', {}, user, role);
+      res.status(202);
+      return { proposal };
+    }
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.quests.remove(id, user, role);
   }

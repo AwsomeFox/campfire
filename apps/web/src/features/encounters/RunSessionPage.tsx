@@ -28,6 +28,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { useAnnounce } from '../../components/Announcer';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -88,6 +89,7 @@ export default function RunSessionPage() {
   const role = roleIn(cid);
   const isDm = role === 'dm';
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
+  const announce = useAnnounce();
 
   const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -163,6 +165,39 @@ export default function RunSessionPage() {
     // The stream was down for a while — refetch to catch anything missed.
     onReconnect: useCallback(() => void load(), [load]),
   });
+
+  // Announce turn/round changes and HP mutations for screen readers (issue #93).
+  // Diffing the encounter (rather than hooking each action) covers every source —
+  // own edits, other members' edits, and SSE-pushed updates — with one code path.
+  const prevAnnounceRef = useRef<{ hp: Map<number, number | null>; turnKey: string } | null>(null);
+  useEffect(() => {
+    if (!encounter) return;
+    const currentId = encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
+    const turnKey =
+      encounter.status === 'running' ? `${encounter.round}:${currentId}` : encounter.status;
+    const hp = new Map(encounter.combatants.map((c) => [c.id, c.hpCurrent]));
+    const prev = prevAnnounceRef.current;
+
+    if (prev) {
+      if (turnKey !== prev.turnKey) {
+        if (encounter.status === 'running') {
+          const current = encounter.combatants.find((c) => c.id === currentId);
+          announce(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
+        } else if (encounter.status === 'ended') {
+          announce('Encounter ended');
+        }
+      }
+      for (const c of encounter.combatants) {
+        const before = prev.hp.get(c.id);
+        // Only announce concrete HP changes — skip when either value is null
+        // (a monster whose exact HP is redacted from this viewer, issue #43).
+        if (before != null && c.hpCurrent != null && before !== c.hpCurrent) {
+          announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
+        }
+      }
+    }
+    prevAnnounceRef.current = { hp, turnKey };
+  }, [encounter, announce]);
 
   const myUserId = me?.user.id;
   const ownedCharacterIds = useMemo(
@@ -307,7 +342,7 @@ export default function RunSessionPage() {
       )}
 
       <div className="flex items-center gap-2.5 flex-wrap">
-        <h1 className="text-2xl font-extrabold text-white m-0">{encounter.name}</h1>
+        <h1 className="text-2xl font-extrabold text-white m-0 min-w-0 break-words">{encounter.name}</h1>
         <span className={STATUS_TAG_CLASS[encounter.status]} style={{ fontSize: 10 }}>
           {STATUS_LABEL[encounter.status]}
         </span>
@@ -645,6 +680,7 @@ function CombatantRow({
             className="btn btn-icon btn-secondary"
             style={{ width: 44, height: 44, fontSize: 16 }}
             disabled={busy}
+            aria-label={`Reduce ${combatant.name}'s HP by 1 (currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
             onClick={() => onHpDelta(-1)}
           >
             −
@@ -653,6 +689,7 @@ function CombatantRow({
             className="btn btn-icon btn-secondary"
             style={{ width: 44, height: 44, fontSize: 16 }}
             disabled={busy}
+            aria-label={`Increase ${combatant.name}'s HP by 1 (currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
             onClick={() => onHpDelta(1)}
           >
             +
@@ -837,21 +874,21 @@ function AddCombatantPanel({
         ))}
       </div>
 
-      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
 
       {tab === 'manual' && (
         <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
           <div className="field" style={{ flex: 1, minWidth: 140 }}>
-            <label>Name</label>
-            <TextInput placeholder="Ashen cultist" value={name} onChange={(e) => setName(e.target.value)} />
+            <label htmlFor="add-combatant-name">Name</label>
+            <TextInput id="add-combatant-name" placeholder="Ashen cultist" value={name} onChange={(e) => setName(e.target.value)} />
           </div>
           <div className="field" style={{ width: 80 }}>
-            <label>HP</label>
-            <TextInput placeholder="22" value={hpMax} onChange={(e) => setHpMax(e.target.value)} />
+            <label htmlFor="add-combatant-hp">HP</label>
+            <TextInput id="add-combatant-hp" aria-label="Max HP" placeholder="22" value={hpMax} onChange={(e) => setHpMax(e.target.value)} />
           </div>
           <div className="field" style={{ width: 80 }}>
-            <label>Init mod</label>
-            <TextInput placeholder="2" value={initMod} onChange={(e) => setInitMod(e.target.value)} />
+            <label htmlFor="add-combatant-init">Init mod</label>
+            <TextInput id="add-combatant-init" aria-label="Initiative modifier" placeholder="2" value={initMod} onChange={(e) => setInitMod(e.target.value)} />
           </div>
           <Btn type="submit" disabled={saving || !name.trim()}>
             {saving ? 'Adding…' : 'Add'}
@@ -862,6 +899,7 @@ function AddCombatantPanel({
       {tab === 'compendium' && (
         <div className="space-y-2">
           <TextInput
+            aria-label="Search monsters in the compendium"
             placeholder="Search monsters…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
