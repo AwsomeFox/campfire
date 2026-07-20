@@ -206,6 +206,28 @@ function migrateProposalsTableForSnapshot(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE proposals ADD COLUMN snapshot TEXT');
 }
 
+/**
+ * Migration for DBs created before character-sheet depth (issue #1):
+ * `characters.save_proficiencies` / `skills` / `actions` / `spell_slots`
+ * didn't exist. Plain defaulted ADD COLUMNs — no table rebuild needed, same
+ * as migrateCampaignsTableForRuleSystem above. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateCharactersTableForSheetDepth(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+
+  if (!has('save_proficiencies')) sqlite.exec("ALTER TABLE characters ADD COLUMN save_proficiencies TEXT NOT NULL DEFAULT '[]'");
+  if (!has('skills')) sqlite.exec("ALTER TABLE characters ADD COLUMN skills TEXT NOT NULL DEFAULT '{}'");
+  if (!has('actions')) sqlite.exec("ALTER TABLE characters ADD COLUMN actions TEXT NOT NULL DEFAULT '[]'");
+  if (!has('spell_slots')) sqlite.exec("ALTER TABLE characters ADD COLUMN spell_slots TEXT NOT NULL DEFAULT '{}'");
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -225,6 +247,7 @@ export function createDb(): DrizzleDb {
   migrateCampaignsTableForMapAttachment(sqlite);
   migrateApiTokensTableForAdminEnabled(sqlite);
   migrateProposalsTableForSnapshot(sqlite);
+  migrateCharactersTableForSheetDepth(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.
