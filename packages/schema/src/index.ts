@@ -623,9 +623,20 @@ export const InviteAccept = z.object({
 });
 export type InviteAccept = z.infer<typeof InviteAccept>;
 
+export const MeTokenContext = z.object({
+  name: z.string(),
+  scope: Role,
+  campaignId: Id.nullable(),
+  adminEnabled: z.boolean(),
+});
+export type MeTokenContext = z.infer<typeof MeTokenContext>;
+
 export const Me = z.object({
   user: User,
   memberships: z.array(z.object({ campaignId: Id, role: Role, characterId: Id.nullable() })),
+  // Present only when this request authenticated through a PAT. This makes the
+  // token's role cap visible without exposing its id, hash, or raw secret.
+  tokenContext: MeTokenContext.optional(),
 });
 export type Me = z.infer<typeof Me>;
 

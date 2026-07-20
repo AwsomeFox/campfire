@@ -77,6 +77,16 @@ describe('api tokens (e2e, real cookie sessions)', () => {
     // but reading is fine (viewer can read)
     const getRes = await request(server).get(`/api/v1/campaigns/${campaignId}`).set('Authorization', `Bearer ${rawToken}`);
     expect(getRes.status).toBe(200);
+
+    const meRes = await request(server).get('/api/v1/me').set('Authorization', `Bearer ${rawToken}`);
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.memberships).toContainEqual(expect.objectContaining({ campaignId, role: 'dm' }));
+    expect(meRes.body.tokenContext).toEqual({
+      name: 'viewer-scoped',
+      scope: 'viewer',
+      campaignId: null,
+      adminEnabled: false,
+    });
   });
 
   it('campaign-bound token 403 on other campaign', async () => {
