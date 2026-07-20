@@ -834,3 +834,172 @@ describe('encounters — issue #50: character/combatant HP stay in sync (e2e)', 
     expect((await combatantHp()).hpCurrent).toBe(before.hpCurrent); // unchanged — ended encounter is a snapshot
   });
 });
+
+describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let monsterId: number;
+  let ariaCombatantId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Secret HP' })).body.id;
+    // A party character (owned by p-1) so we can prove character HP stays exact for everyone.
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Aria', hpCurrent: 20, hpMax: 30, ownerUserId: 'dev:p-1' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Boss Fight' });
+    encounterId = encRes.body.id;
+    ariaCombatantId = encRes.body.combatants[0].id;
+
+    // A monster at 30/100 -> 30% -> 'bloodied'.
+    monsterId = (
+      await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Boss', hpMax: 100 })
+    ).body.id;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${monsterId}`).set(dm).send({ hpSet: 30 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('DM sees exact monster HP (no band)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(res.status).toBe(200);
+    const boss = (res.body.combatants as Array<{ id: number; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>).find(
+      (c) => c.id === monsterId,
+    )!;
+    expect(boss.hpCurrent).toBe(30);
+    expect(boss.hpMax).toBe(100);
+    expect(boss.hpBand).toBeNull();
+  });
+
+  for (const [label, headers] of [
+    ['player', player],
+    ['viewer', viewer],
+  ] as const) {
+    it(`${label} sees a banded monster HP, never exact numbers`, async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
+      expect(res.status).toBe(200);
+      const boss = (res.body.combatants as Array<{ id: number; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>).find(
+        (c) => c.id === monsterId,
+      )!;
+      // Exact HP redacted...
+      expect(boss.hpCurrent).toBeNull();
+      expect(boss.hpMax).toBeNull();
+      // ...replaced by a coarse band (30/100 = 30% -> bloodied).
+      expect(boss.hpBand).toBe('bloodied');
+      // And the raw serialized body must not leak the exact numbers for this monster.
+      expect(JSON.stringify(boss)).not.toMatch(/"hpCurrent":\s*30/);
+    });
+  }
+
+  it('character combatant HP stays exact for a non-DM viewer (party HP is shared)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const aria = (res.body.combatants as Array<{ id: number; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>).find(
+      (c) => c.id === ariaCombatantId,
+    )!;
+    expect(aria.hpCurrent).toBe(20);
+    expect(aria.hpMax).toBe(30);
+    expect(aria.hpBand).toBeNull();
+  });
+
+  it('a downed monster (0 HP) bands to "down" for a player', async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${monsterId}`).set(dm).send({ hpSet: 0 });
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const boss = (res.body.combatants as Array<{ id: number; hpBand: string | null }>).find((c) => c.id === monsterId)!;
+    expect(boss.hpBand).toBe('down');
+  });
+});
+
+describe('encounters — issue #86: concurrent HP updates are not lost (e2e)', () => {
+  let ctx: TestAppContext;
+  // The app under test is only `.init()`-ed (not listening). supertest opens an
+  // ephemeral port per `request(server)` call, which races/ECONNRESETs when many
+  // requests fire concurrently — so we bind the server to a real port ONCE here
+  // and let every request reuse it. That's exactly the concurrency this issue is
+  // about, so it must be exercised against a genuinely-listening server.
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let campaignId: number;
+  let encounterId: number;
+  let ariaCombatantId: number;
+  let charId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Race Conditions' })).body.id;
+    charId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Aria', hpCurrent: 100, hpMax: 100, ownerUserId: 'dev:p-1' })
+    ).body.id;
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    encounterId = encRes.body.id;
+    ariaCombatantId = encRes.body.combatants[0].id;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await closeTestApp(ctx);
+  });
+
+  it('20 concurrent hpDelta requests (DM + owning player) all apply — no lost update', async () => {
+    // Mirrors the issue scenario: the DM and the owning player both apply damage
+    // near-simultaneously. Each request is authorized; with a read-modify-write
+    // across awaits, some deltas would be silently lost (last write wins).
+    const dmDeltas = Array.from({ length: 10 }, () =>
+      request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(dm).send({ hpDelta: -5 }),
+    );
+    const playerDeltas = Array.from({ length: 10 }, () =>
+      request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(player).send({ hpDelta: -3 }),
+    );
+    const results = await Promise.all([...dmDeltas, ...playerDeltas]);
+    for (const r of results) expect(r.status).toBe(200);
+
+    // 100 - (10*5 + 10*3) = 20. Every delta must have composed.
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const aria = (getRes.body.combatants as CombatantShape[]).find((c) => c.id === ariaCombatantId)!;
+    expect(aria.hpCurrent).toBe(20);
+
+    // The linked character mirror (issue #50) must match — the paired write is
+    // now inside one transaction, so it can't drift from the combatant.
+    const charRes = await request(server).get(`/api/v1/characters/${charId}`).set(dm);
+    expect(charRes.body.hpCurrent).toBe(20);
+  });
+
+  it('concurrent hpDelta is clamped at 0, never negative', async () => {
+    // Aria is at 20. Fire 10 concurrent -5 deltas (total -50): clamped to 0, not -30.
+    const deltas = Array.from({ length: 10 }, () =>
+      request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(dm).send({ hpDelta: -5 }),
+    );
+    const results = await Promise.all(deltas);
+    for (const r of results) expect(r.status).toBe(200);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const aria = (getRes.body.combatants as CombatantShape[]).find((c) => c.id === ariaCombatantId)!;
+    expect(aria.hpCurrent).toBe(0);
+  });
+
+  it('concurrent addCombatant calls get distinct sortOrders (no collision)', async () => {
+    const adds = Array.from({ length: 6 }, (_, i) =>
+      request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: `Add${i}`, hpMax: 10 }),
+    );
+    const results = await Promise.all(adds);
+    for (const r of results) expect(r.status).toBe(201);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const sortOrders = (getRes.body.combatants as Array<{ sortOrder: number }>).map((c) => c.sortOrder);
+    // All sortOrders are unique.
+    expect(new Set(sortOrders).size).toBe(sortOrders.length);
+  });
+});
