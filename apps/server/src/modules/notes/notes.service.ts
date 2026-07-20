@@ -287,7 +287,7 @@ export class NotesService {
       .from(notes)
       .where(and(eq(notes.campaignId, campaignId), eq(notes.kind, 'inbox'), eq(notes.resolved, resolved)));
     if (resolved) rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    return rows.map(toDomain);
+    return rows.map((r) => toDomain(r));
   }
 
   /**
