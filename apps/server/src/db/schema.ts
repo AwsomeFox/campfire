@@ -167,6 +167,22 @@ export const userSessions = sqliteTable('user_sessions', {
   lastSeenAt: text('last_seen_at').notNull(),
 });
 
+// Forgot-password flow (admin-approved, no mail transport needed): a @Public
+// request creates a 'pending' row; an admin approving it sets codeHash (sha256
+// of the one-time reset code — raw code shown to the admin ONCE) + expiresAt
+// and flips status to 'approved'; redeeming the code deletes the row. See
+// modules/auth/password-reset.service.ts.
+export const passwordResetRequests = sqliteTable('password_reset_requests', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  status: text('status').notNull().default('pending'), // 'pending' | 'approved'
+  codeHash: text('code_hash').unique(), // set when approved; never the raw code
+  requestedAt: text('requested_at').notNull(),
+  approvedAt: text('approved_at'),
+  approvedBy: text('approved_by').notNull().default(''), // admin display name, audit only
+  expiresAt: text('expires_at'), // set when approved
+});
+
 export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
