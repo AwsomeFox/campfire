@@ -1,5 +1,5 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { desc, eq, isNull, lt } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, lt } from 'drizzle-orm';
 import type { Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog } from '../../db/schema';
@@ -62,11 +62,34 @@ export class AuditService implements OnApplicationBootstrap {
     });
   }
 
-  async listForCampaign(campaignId: number, limit = 100, offset = 0) {
+  /**
+   * #161: a real delta channel for "what changed since last session". Beyond the
+   * newest-first `limit`/`offset` window, an optional `filters` narrows the result:
+   *   - `sinceId`  — only rows with id > sinceId (a monotonic autoincrement cursor:
+   *                  read once, keep max(id), pass it back next time to fetch only
+   *                  what's new — no client-side re-filtering of the whole log).
+   *   - `sinceTs`  — only rows created strictly after this ISO timestamp (a wall-clock
+   *                  cursor, e.g. a player's last-visit time; ISO-8601 sorts lexically).
+   *   - `action`   — exact action match (e.g. 'npc.update').
+   *   - `entityType` — exact entityType match (e.g. 'quest').
+   * Still ordered newest-first so the freshest change is row 0; the caller takes the
+   * first row's id as the next cursor. All filters compose (AND).
+   */
+  async listForCampaign(
+    campaignId: number,
+    limit = 100,
+    offset = 0,
+    filters: { sinceId?: number; sinceTs?: string; action?: string; entityType?: string } = {},
+  ) {
+    const conditions = [eq(auditLog.campaignId, campaignId)];
+    if (filters.sinceId != null) conditions.push(gt(auditLog.id, filters.sinceId));
+    if (filters.sinceTs != null && filters.sinceTs !== '') conditions.push(gt(auditLog.createdAt, filters.sinceTs));
+    if (filters.action != null && filters.action !== '') conditions.push(eq(auditLog.action, filters.action));
+    if (filters.entityType != null && filters.entityType !== '') conditions.push(eq(auditLog.entityType, filters.entityType));
     return this.db
       .select()
       .from(auditLog)
-      .where(eq(auditLog.campaignId, campaignId))
+      .where(and(...conditions))
       .orderBy(desc(auditLog.id))
       .limit(limit)
       .offset(offset);
