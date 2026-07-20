@@ -1,24 +1,33 @@
-import { Body, Controller, Delete, Get, HttpStatus, Param, ParseIntPipe, Post, Query, Res } from '@nestjs/common';
-import type { Response } from 'express';
+import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
-import type { RequestUser } from '../../common/user.types';
+import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
+import { RoleResolver } from '../membership/role-resolver.service';
 import { RulesService } from './rules.service';
-import { RulePackInstallDto } from './rules.dto';
+import { RulePackInstallDto, RulePackUploadDto } from './rules.dto';
 
 /**
- * Rule packs (Compendium backend). Reads (list packs, search, entry fetch)
- * are open to any authenticated user — the Compendium screen is available to
- * players and DMs alike. Install/uninstall are server-admin only: packs are
- * server-wide, not per-campaign, so only a server admin can add/remove them
- * (mirrors the "Server admin → Rule systems" design screen).
+ * Rule packs (Compendium backend). Reads (list packs, search, entry fetch, install-job
+ * status) are open to any authenticated user — the Compendium screen is available to
+ * players and DMs alike.
+ *
+ * Install (Open5e import or generic upload) is allowed for a server admin OR a DM of any
+ * campaign (issue #20): packs are server-wide, and a DM setting up their table needs to be
+ * able to add content without a server-admin round-trip. Install runs as a non-blocking
+ * background job — POST returns 202 with a job the UI polls (issue #20).
+ *
+ * Uninstall stays server-admin only: removing a server-wide pack affects every campaign
+ * that selected it, so it remains an operator action rather than something one DM can do.
  */
 @ApiTags('rules')
 @Controller('rules')
 export class RulesController {
-  constructor(private readonly rules: RulesService) {}
+  constructor(
+    private readonly rules: RulesService,
+    private readonly roles: RoleResolver,
+  ) {}
 
   @Get('packs')
   @ApiOperation({ summary: 'List installed rule packs', description: 'Any authenticated user.' })
@@ -28,20 +37,41 @@ export class RulesController {
   }
 
   /**
-   * 201 for a fresh install; 200 when the pack already existed and this call added
-   * (possibly zero) new entries incrementally — see RulesService.installFromOpen5e.
-   * The response body always distinguishes the two: incremental responses carry
-   * `added`/`skippedExisting`, a fresh install's body doesn't.
+   * Kicks off an Open5e import as a background job and returns 202 with the job (issue #20).
+   * The UI polls GET packs/install-jobs/:id for per-section progress and the final result;
+   * `outcome` on the completed job is 'created' (fresh) or 'updated' (incremental add, with
+   * `added`/`skippedExisting` counts).
    */
   @Post('packs/install')
-  @ServerRoles('admin')
-  @ApiOperation({ summary: 'Install (or incrementally update) a rule pack from Open5e', description: 'Server-admin only. Fetches spells/monsters/items/conditions from the Open5e API (or an override `url`, mainly for tests) and stores them as rule entries.' })
-  @ApiResponse({ status: 201, description: 'Fresh install.' })
-  @ApiResponse({ status: 200, description: 'Pack already existed; body reports `added`/`skippedExisting` entry counts.' })
-  async install(@Body() body: RulePackInstallDto, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
-    const result = await this.rules.installFromOpen5e(body, user);
-    res.status('added' in result ? HttpStatus.OK : HttpStatus.CREATED);
-    return result;
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Install a rule pack from Open5e (background job)', description: 'Server admin or DM of any campaign. Returns 202 with an install job to poll.' })
+  @ApiResponse({ status: 202, description: 'Install job accepted; poll packs/install-jobs/:id.' })
+  async install(@Body() body: RulePackInstallDto, @CurrentUser() user: RequestUser) {
+    await this.assertCanInstall(user);
+    return this.rules.enqueueOpen5eInstall(body, user);
+  }
+
+  /**
+   * Generic open-licensed dataset upload (issue #19): install a JSON rule pack for any
+   * system (not just Open5e). Runs as the same kind of background job as Open5e install.
+   * A non-open license is rejected synchronously with 400 before the job is enqueued.
+   */
+  @Post('packs/upload')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Upload a generic open-licensed rule pack (background job)', description: 'Server admin or DM of any campaign. The pack must carry an open license (OGL/ORC/CC/public domain). Returns 202 with an install job to poll.' })
+  @ApiResponse({ status: 202, description: 'Install job accepted; poll packs/install-jobs/:id.' })
+  @ApiResponse({ status: 400, description: 'Rejected — not an open license, or malformed payload.' })
+  async upload(@Body() body: RulePackUploadDto, @CurrentUser() user: RequestUser) {
+    await this.assertCanInstall(user);
+    return this.rules.enqueueUploadInstall(body, user);
+  }
+
+  @Get('packs/install-jobs/:id')
+  @ApiOperation({ summary: 'Get install-job status', description: 'Any authenticated user. Poll for per-section progress and the final result of an install/upload.' })
+  @ApiResponse({ status: 200, description: 'Install job status.' })
+  @ApiResponse({ status: 404, description: 'No such job (or it was pruned after completion).' })
+  getJob(@Param('id') id: string) {
+    return this.rules.getJobOrThrow(id);
   }
 
   @Delete('packs/:id')
@@ -72,5 +102,16 @@ export class RulesController {
   @ApiResponse({ status: 200, description: 'Rule entry.' })
   getEntry(@Param('id', ParseIntPipe) id: number) {
     return this.rules.getEntryOrThrow(id);
+  }
+
+  /**
+   * Install/upload gate (issue #20): server-admin power OR DM of at least one campaign.
+   * hasServerAdminPower (not a raw serverRole check) so a scope-capped PAT can't inherit
+   * server-admin power; isDmOfAnyCampaign honours token scope/campaign binding too.
+   */
+  private async assertCanInstall(user: RequestUser): Promise<void> {
+    if (hasServerAdminPower(user)) return;
+    if (await this.roles.isDmOfAnyCampaign(user)) return;
+    throw new ForbiddenException('Installing rule packs requires server admin, or being the DM of a campaign.');
   }
 }
