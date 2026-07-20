@@ -84,6 +84,21 @@ export function buildRecapDraft(source: RecapDraftSource): string {
   return draft;
 }
 
+/**
+ * #161: shape a session update patch for the audit `detail` payload. The recap
+ * body can be ~100KB, so instead of stringifying it into every audit row (which
+ * would reopen the #74 audit-growth problem), we substitute a compact
+ * `{ recapChars }` marker — the delta reader learns the recap changed and its
+ * size, then fetches the session itself for the text. Every other field is
+ * recorded verbatim.
+ */
+function auditableSessionPatch(input: SessionUpdateInput): Record<string, unknown> {
+  const { recap, ...rest } = input;
+  const patch: Record<string, unknown> = { ...rest };
+  if (recap !== undefined) patch.recapChars = recap.length;
+  return patch;
+}
+
 @Injectable()
 export class SessionsService {
   constructor(
@@ -196,21 +211,69 @@ export class SessionsService {
   }
 
   async create(campaignId: number, input: SessionCreateInput, user: RequestUser, role: Role): Promise<Session> {
-    await this.assertNumberAvailable(campaignId, input.number);
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(sessions)
-      .values({
-        campaignId,
-        number: input.number,
-        title: input.title ?? '',
-        playedAt: input.playedAt ?? null,
-        recap: input.recap ?? '',
-        dmSecret: input.dmSecret ?? '',
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
+    const recap = input.recap ?? '';
+
+    // Number assignment and the insert happen in one synchronous better-sqlite3
+    // transaction so the campaign-unique guard is airtight:
+    //  - explicit number → guard it (409 on a duplicate), same as before;
+    //  - omitted number  → assign max(number)+1 *inside* the transaction, so the
+    //    number is never precomputed by (and frozen into) the caller. This is what
+    //    lets a proposed recap approve cleanly even if other sessions were logged
+    //    in between (#125) and keeps two racing auto-numbered creates off the same
+    //    number.
+    // Retry-safety (#160): an auto-numbered create whose recap is byte-identical to
+    // the newest session is treated as a duplicate retry — we return the existing
+    // row instead of appending a second canonical session (which the pre-tool
+    // max+1 numbering would have sidestepped the guard to do).
+    const result = this.db.transaction((tx) => {
+      if (input.number === undefined || input.number === null) {
+        const [newest] = tx
+          .select()
+          .from(sessions)
+          .where(eq(sessions.campaignId, campaignId))
+          .orderBy(desc(sessions.number))
+          .limit(1)
+          .all();
+        if (newest && recap.trim() !== '' && newest.recap === recap) {
+          return { row: newest, deduped: true };
+        }
+        const [{ max }] = tx
+          .select({ max: sql<number>`coalesce(max(${sessions.number}), 0)` })
+          .from(sessions)
+          .where(eq(sessions.campaignId, campaignId))
+          .all();
+        const number = max + 1;
+        const [inserted] = tx
+          .insert(sessions)
+          .values({ campaignId, number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', createdAt: ts, updatedAt: ts })
+          .returning()
+          .all();
+        return { row: inserted, deduped: false };
+      }
+      // Explicit number: enforce campaign-uniqueness inside the same transaction.
+      const [conflict] = tx
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(and(eq(sessions.campaignId, campaignId), eq(sessions.number, input.number)))
+        .limit(1)
+        .all();
+      if (conflict) throw new ConflictException(`Session number ${input.number} already exists in this campaign`);
+      const [inserted] = tx
+        .insert(sessions)
+        .values({ campaignId, number: input.number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+      return { row: inserted, deduped: false };
+    });
+
+    const row = result.row;
+
+    // A deduped retry is a no-op: the row (and its recap_posted notification and
+    // audit entry) already exists from the first call — return it untouched.
+    if (result.deduped) {
+      return redactSecret(toDomain(row), role);
+    }
 
     await this.recomputeSessionCount(campaignId);
 
@@ -263,6 +326,11 @@ export class SessionsService {
       entityType: 'session',
       entityId: id,
       campaignId: existing.campaignId,
+      // #161: record which fields changed so the audit log is a real delta channel
+      // (empty detail before). Matches the characters/encounters/members convention.
+      // The recap body can be large, so log its length instead of the full text —
+      // the delta reader only needs to know recap changed, then fetch the session.
+      detail: JSON.stringify(auditableSessionPatch(input)),
     });
 
     // recap_posted fires only on the empty -> non-empty transition (posting the

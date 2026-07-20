@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react
 import { Link, useParams } from 'react-router-dom';
 import type { Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote, type ChipVariant } from '../../components/ui';
@@ -95,6 +96,10 @@ export default function MyNotesPage() {
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
   }, [cid, load]);
+
+  // Keep the notes list live at the table (issue #113): poll ~5s while visible.
+  // Only the fetched `notes` are replaced — the compose draft is separate state.
+  usePollWhileVisible(() => void load(), 5000, Number.isFinite(cid));
 
   async function quickCapture(e: FormEvent) {
     e.preventDefault();

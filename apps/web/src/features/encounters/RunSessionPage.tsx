@@ -841,6 +841,13 @@ function AddCombatantPanel({
   async function addManual(e: FormEvent) {
     e.preventDefault();
     if (!name.trim()) return;
+    // A manual combatant has no rule-entry/character to derive HP from, so the server requires
+    // hpMax explicitly. Mirror that here with a readable message instead of the round-trip's
+    // dev-jargon "Unable to resolve hpMax…" (issue #146).
+    if (!hpMax.trim() || !Number.isFinite(Number(hpMax)) || Number(hpMax) < 1) {
+      setError('Enter max HP (a number of 1 or more) for a manual combatant.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -927,7 +934,7 @@ function AddCombatantPanel({
         <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
           <div className="field" style={{ flex: 1, minWidth: 140 }}>
             <label htmlFor="add-combatant-name">Name</label>
-            <TextInput id="add-combatant-name" placeholder="Ashen cultist" value={name} onChange={(e) => setName(e.target.value)} />
+            <TextInput id="add-combatant-name" placeholder="Ashen cultist" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} />
           </div>
           <div className="field" style={{ width: 80 }}>
             <label htmlFor="add-combatant-hp">HP</label>

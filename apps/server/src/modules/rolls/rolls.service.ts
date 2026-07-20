@@ -14,6 +14,7 @@ export const MAX_ROLLS_PER_CAMPAIGN = 200;
 export const DEFAULT_ROLL_LIST_LIMIT = 50;
 
 function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
+  const kept = row.kept != null ? fromJsonText<number[]>(row.kept, []) : undefined;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -21,7 +22,11 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
     rollerName: row.rollerName,
     expr: row.expr,
     rolls: fromJsonText<number[]>(row.rolls, []),
+    ...(kept !== undefined ? { kept } : {}),
     total: row.total,
+    ...(row.label ? { label: row.label } : {}),
+    // success is derived, not stored — it's always total >= dc when a dc is set.
+    ...(row.dc != null ? { dc: row.dc, success: row.total >= row.dc } : {}),
     createdAt: row.createdAt,
   };
 }
@@ -47,7 +52,10 @@ export class RollsService {
         rollerName: user.name,
         expr: result.expr,
         rolls: toJsonText(result.rolls),
+        kept: result.kept !== undefined ? toJsonText(result.kept) : null,
         total: result.total,
+        label: result.label ?? null,
+        dc: result.dc ?? null,
         createdAt: nowIso(),
       })
       .returning();

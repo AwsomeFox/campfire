@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { NpcCreate, NpcUpdate } from '@campfire/schema';
 import type { Npc, Role } from '@campfire/schema';
@@ -46,6 +46,24 @@ export class NpcsService {
   async getRowOrThrow(id: number) {
     const [row] = await this.db.select().from(npcs).where(eq(npcs.id, id)).limit(1);
     if (!row) throw new NotFoundException(`NPC ${id} not found`);
+    return row;
+  }
+
+  /**
+   * #159: case-insensitive name lookup within one campaign — the basis for real
+   * upsert semantics. `upsert_npc` with no id looks here first; a hit updates the
+   * existing NPC instead of creating a duplicate, so a scribe's identical re-run
+   * (timeout-after-commit, or a re-issued prompt) is idempotent. Scoped to the
+   * campaign, so same-named NPCs in different campaigns never collide. Returns the
+   * oldest match (lowest id) for a stable target if legacy duplicates already exist.
+   */
+  async findRowByName(campaignId: number, name: string) {
+    const [row] = await this.db
+      .select()
+      .from(npcs)
+      .where(and(eq(npcs.campaignId, campaignId), sql`lower(${npcs.name}) = lower(${name})`))
+      .orderBy(npcs.id)
+      .limit(1);
     return row;
   }
 
@@ -117,6 +135,9 @@ export class NpcsService {
       entityType: 'npc',
       entityId: id,
       campaignId: existing.campaignId,
+      // #161: record the changed fields so the audit log is a real delta channel
+      // (empty detail before). Matches the characters/encounters/members convention.
+      detail: JSON.stringify(input),
     });
     return redactSecret(toDomain(row), role);
   }

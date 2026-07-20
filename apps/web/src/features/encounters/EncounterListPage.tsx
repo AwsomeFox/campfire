@@ -154,6 +154,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
           placeholder="Ambush at the ford"
           value={name}
           onChange={(e) => setName(e.target.value)}
+          maxLength={120}
           autoFocus
         />
         <div className="flex gap-2 justify-end">

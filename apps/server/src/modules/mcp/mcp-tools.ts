@@ -642,15 +642,34 @@ export class McpToolsService {
     this.tool(
       server,
       'read_audit_log',
-      'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven actions.',
-      { campaignId: CampaignIdArg, limit: LimitArg(500, 100), offset: OffsetArg },
-      async ({ campaignId, limit, offset }) => {
+      'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven ' +
+        'actions. For a "what changed since last session" delta, pass `sinceId` (the highest id you saw last time) ' +
+        'to get only newer entries — one call, no client-side re-filtering — then keep the first row\'s id as the ' +
+        'next cursor. `sinceTs` (ISO timestamp) is a wall-clock alternative. Narrow with `action` (e.g. "npc.update") ' +
+        'or `entityType` (e.g. "quest"). Update entries carry the changed fields in `detail`.',
+      {
+        campaignId: CampaignIdArg,
+        limit: LimitArg(500, 100),
+        offset: OffsetArg,
+        sinceId: z.number().int().positive().optional().describe('Delta cursor: only entries with id greater than this (highest id from your last read)'),
+        sinceTs: z.string().min(1).optional().describe('Only entries created strictly after this ISO-8601 timestamp'),
+        action: z.string().min(1).optional().describe('Filter to a single action, e.g. "npc.update" or "quest.status"'),
+        entityType: z.string().min(1).optional().describe('Filter to a single entity type, e.g. "npc", "quest", "session"'),
+      },
+      async ({ campaignId, limit, offset, sinceId, sinceTs, action, entityType }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         // issue #71: offset pages back through history the cap-100 previously hid.
+        // issue #161: sinceId/sinceTs + action/entityType turn this into a real delta channel.
         return this.audit.listForCampaign(
           campaignId as number,
           (limit as number | undefined) ?? 100,
           (offset as number | undefined) ?? 0,
+          {
+            sinceId: sinceId as number | undefined,
+            sinceTs: sinceTs as string | undefined,
+            action: action as string | undefined,
+            entityType: entityType as string | undefined,
+          },
         );
       },
     );
@@ -995,9 +1014,11 @@ export class McpToolsService {
     this.tool(
       server,
       'upsert_npc',
-      'Create an NPC (omit npcId) or update one (pass npcId). DM; with propose:true any member may submit a ' +
-        'proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads), an optional ' +
-        'locationId, and a hidden flag (true = excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
+      'Create or update an NPC. Pass npcId to update a specific NPC; omit it and an existing NPC with the same ' +
+        'name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical re-run is ' +
+        'idempotent rather than duplicating. A genuinely new name creates a new NPC. DM; with propose:true any ' +
+        'member may submit a proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads), ' +
+        'an optional locationId, and a hidden flag (true = excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
       {
         campaignId: CampaignIdArg,
         npcId: Id.optional().describe('Existing NPC id (update); omit to create'),
@@ -1020,6 +1041,20 @@ export class McpToolsService {
           return this.npcs.update(npcId as number, validated, user, role);
         }
         const validated = NpcCreate.parse(fields); // name required on create
+        // #159: real upsert. With no npcId, match an existing NPC by (campaignId, name)
+        // case-insensitively and UPDATE it instead of creating a duplicate — so an AI
+        // scribe's identical re-run (timeout-after-commit, or a re-issued prompt) is
+        // idempotent. A genuinely different name still creates a new NPC.
+        const existingByName = await this.npcs.findRowByName(campaignId as number, validated.name);
+        if (existingByName) {
+          if (propose) {
+            const role = await this.access.requireMember(user, existingByName.campaignId, { write: true });
+            const proposal = await this.proposalRecords.create(existingByName.campaignId, 'npc', existingByName.id, 'update', validated, user, role);
+            return { proposal };
+          }
+          const role = await this.access.requireRole(user, existingByName.campaignId, 'dm');
+          return this.npcs.update(existingByName.id, validated, user, role);
+        }
         if (propose) {
           const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'npc', null, 'create', validated, user, role);
@@ -1051,9 +1086,11 @@ export class McpToolsService {
     this.tool(
       server,
       'upsert_location',
-      'Create a location (omit locationId) or update one (pass locationId). DM; with propose:true any member may ' +
-        'submit a proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads). Use ' +
-        'set_location_discovery to change `status` with the "current location" demotion side-effect.',
+      'Create or update a location. Pass locationId to update a specific location; omit it and an existing location ' +
+        'with the same name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical ' +
+        're-run is idempotent rather than duplicating. A genuinely new name creates a new location. DM; with ' +
+        'propose:true any member may submit a proposal instead. Supports a dmSecret field (DM-only text, stripped ' +
+        'from non-DM reads). Use set_location_discovery to change `status` with the "current location" demotion side-effect.',
       {
         campaignId: CampaignIdArg,
         locationId: Id.optional().describe('Existing location id (update); omit to create'),
@@ -1076,6 +1113,20 @@ export class McpToolsService {
           return this.locations.update(locationId as number, validated, user, role);
         }
         const validated = LocationCreate.parse(fields); // name required on create
+        // #159: real upsert. With no locationId, match an existing location by
+        // (campaignId, name) case-insensitively and UPDATE it instead of creating a
+        // duplicate — so an AI scribe's identical re-run is idempotent. A genuinely
+        // different name still creates a new location.
+        const existingByName = await this.locations.findRowByName(campaignId as number, validated.name);
+        if (existingByName) {
+          if (propose) {
+            const role = await this.access.requireMember(user, existingByName.campaignId, { write: true });
+            const proposal = await this.proposalRecords.create(existingByName.campaignId, 'location', existingByName.id, 'update', validated, user, role);
+            return { proposal };
+          }
+          const role = await this.access.requireRole(user, existingByName.campaignId, 'dm');
+          return this.locations.update(existingByName.id, validated, user, role);
+        }
         if (propose) {
           const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'location', null, 'create', validated, user, role);
@@ -1120,11 +1171,14 @@ export class McpToolsService {
     this.tool(
       server,
       'add_session_recap',
-      'Add a session recap (DM). number defaults to max existing session number + 1. Supports a dmSecret field ' +
-        '(DM-only prep notes, stripped from non-DM reads). With propose:true any member may submit a proposal instead.',
+      'Add a session recap (DM). Omit number and the server assigns the next available session number at write time ' +
+        '(for propose:true, at APPROVAL time) — so a drafted recap still approves cleanly if other sessions were logged ' +
+        'in between, and re-running without a number is retry-safe (an identical recap is deduped, not duplicated). ' +
+        'Supports a dmSecret field (DM-only prep notes, stripped from non-DM reads). With propose:true any member may ' +
+        'submit a proposal instead.',
       {
         campaignId: CampaignIdArg,
-        number: z.number().int().positive().optional().describe('Session number; defaults to max + 1'),
+        number: z.number().int().positive().optional().describe('Session number; omit to auto-assign next available (max + 1) at write/approval time'),
         title: z.string().max(200).optional().describe('Session title'),
         recap: z.string().max(100_000).describe('Session recap (markdown)'),
         playedAt: z.string().optional().describe('ISO date the session was played'),
@@ -1132,15 +1186,14 @@ export class McpToolsService {
         propose: ProposeArg,
       },
       async ({ campaignId, number, title, recap, playedAt, dmSecret, propose }) => {
-        // Membership is required even to compute the default number.
+        // Do NOT precompute the number here: freezing max+1 into the payload stranded
+        // proposals on a stale number (#125) and let retries sidestep the campaign-unique
+        // guard (#160). We pass number through only when the caller was explicit; otherwise
+        // SessionsService.create assigns it atomically at write time (or the proposal apply
+        // path does, at approval time).
         const memberRole = await this.access.requireMember(user, campaignId as number, { write: true });
-        let sessionNumber = number as number | undefined;
-        if (sessionNumber === undefined) {
-          const existing = await this.sessions.listForCampaign(campaignId as number, memberRole);
-          sessionNumber = existing.reduce((max, s) => Math.max(max, s.number), 0) + 1;
-        }
         const validated = SessionCreate.parse({
-          number: sessionNumber,
+          ...(number !== undefined ? { number } : {}),
           ...(title !== undefined ? { title } : {}),
           ...(playedAt !== undefined ? { playedAt } : {}),
           ...(dmSecret !== undefined ? { dmSecret } : {}),
@@ -1521,12 +1574,24 @@ export class McpToolsService {
     this.tool(
       server,
       'roll_dice',
-      'Roll a dice expression, e.g. "1d20+3" or "2d6", in the context of a campaign. Any campaign member may use ' +
-        'this; the roll is audited (action "dice.roll") and appears in the campaign-shared dice log.',
-      { campaignId: CampaignIdArg, expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3"') },
-      async ({ campaignId, expr }) => {
+      'Roll a dice expression in the context of a campaign, e.g. "1d20+3", "2d6", or with keep/drop for ' +
+        'advantage/disadvantage/stat-gen: "2d20kh1" (advantage), "2d20kl1" (disadvantage), "4d6dl1" (drop lowest). ' +
+        'Optionally pass a label and dc to record a check (success = total >= dc). Any campaign member may use this; ' +
+        'the roll is audited (action "dice.roll") and appears in the campaign-shared dice log.',
+      {
+        campaignId: CampaignIdArg,
+        expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3" or "2d20kh1"'),
+        label: RollRequest.shape.label.describe('Optional check label, e.g. "DEX save"'),
+        dc: RollRequest.shape.dc.describe('Optional difficulty class; success is computed as total >= dc'),
+      },
+      async ({ campaignId, expr, label, dc }) => {
         const role = await this.access.requireMember(user, campaignId as number, { write: true });
-        return this.encounters.rollDiceForCampaign(campaignId as number, { expr: expr as string }, user, role);
+        return this.encounters.rollDiceForCampaign(
+          campaignId as number,
+          { expr: expr as string, label: label as string | undefined, dc: dc as number | undefined },
+          user,
+          role,
+        );
       },
     );
 
