@@ -91,14 +91,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const isAdmin = me?.user.serverRole === 'admin';
 
+  // Campaign role comes ONLY from an actual membership — server admins get no
+  // implicit dm (admin ≠ auto-DM, issue #9), matching the API's RoleResolver.
   const roleIn = useCallback(
     (campaignId: number): Role | null => {
       if (!me) return null;
-      if (isAdmin) return 'dm';
       const membership = me.memberships.find((m) => m.campaignId === campaignId);
       return membership?.role ?? null;
     },
-    [me, isAdmin],
+    [me],
   );
 
   const value = useMemo<AuthState>(
