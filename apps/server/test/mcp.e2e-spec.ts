@@ -32,6 +32,8 @@ const ALL_TOOLS = [
   'get_party',
   'get_session_recaps',
   'get_session',
+  'get_session_attendance',
+  'set_session_attendance',
   'draft_session_recap',
   'read_inbox',
   'list_proposals',
@@ -83,6 +85,7 @@ const ALL_TOOLS = [
   'level_up_character',
   'set_character_conditions',
   'add_note',
+  'whisper_to_player',
   'update_note',
   'delete_note',
   'submit_inbox_item',
@@ -182,7 +185,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(90);
+    expect(tools).toHaveLength(93);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -776,6 +779,20 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(getSessionResult.isError).toBeFalsy();
     expect((parseResult(getSessionResult) as { title: string }).title).toBe('The Beginning');
 
+    // Attendance (issue #121): set then get round-trips over MCP (the AI-scribe path).
+    const attendeeChar = parseResult(
+      await client.callTool({ name: 'upsert_character', arguments: { campaignId, name: 'Scribe Recorded' } }),
+    ) as { id: number };
+    const setAttendanceResult = await client.callTool({
+      name: 'set_session_attendance',
+      arguments: { sessionId: session.id, characterIds: [attendeeChar.id] },
+    });
+    expect(setAttendanceResult.isError).toBeFalsy();
+    expect((parseResult(setAttendanceResult) as { characterId: number }[]).map((a) => a.characterId)).toEqual([attendeeChar.id]);
+    const getAttendanceResult = await client.callTool({ name: 'get_session_attendance', arguments: { sessionId: session.id } });
+    expect(getAttendanceResult.isError).toBeFalsy();
+    expect((parseResult(getAttendanceResult) as { characterName: string }[])[0].characterName).toBe('Scribe Recorded');
+
     const noteResult = await client.callTool({ name: 'add_note', arguments: { campaignId, body: 'A note to edit' } });
     const note = parseResult(noteResult) as { id: number };
     const updateNoteResult = await client.callTool({ name: 'update_note', arguments: { noteId: note.id, body: 'Edited note' } });
@@ -929,6 +946,49 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       arguments: { noteId: secondItem.id, entityType: 'quest' },
     });
     expect(badResolve.isError).toBe(true);
+  });
+
+  it('whisper_to_player: over MCP, only the target lists the whisper — a non-target member never does (issue #127)', async () => {
+    const dmClient = await mcpClient(dmToken);
+
+    // Two real members: the whisper target and an unrelated non-target.
+    const targetRes = await dmAgent
+      .post('/api/v1/users')
+      .send({ username: 'mcp-whisper-target', password: 'target-password-1', displayName: 'MCP Rogue' });
+    const otherRes = await dmAgent
+      .post('/api/v1/users')
+      .send({ username: 'mcp-whisper-other', password: 'other-password-1', displayName: 'MCP Bard' });
+    const targetUserId = targetRes.body.id;
+    const otherUserId = otherRes.body.id;
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: targetUserId, role: 'player' });
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: otherUserId, role: 'player' });
+
+    // Each member mints their own MCP token (their own identity, capped to their role).
+    const targetAgent = request.agent(ctx.app.getHttpServer());
+    await targetAgent.post('/api/v1/auth/login').send({ username: 'mcp-whisper-target', password: 'target-password-1' });
+    const targetToken = (await targetAgent.post('/api/v1/tokens').send({ name: 't', scope: 'player' })).body.token;
+    const otherAgent = request.agent(ctx.app.getHttpServer());
+    await otherAgent.post('/api/v1/auth/login').send({ username: 'mcp-whisper-other', password: 'other-password-1' });
+    const otherToken = (await otherAgent.post('/api/v1/tokens').send({ name: 'o', scope: 'player' })).body.token;
+
+    // DM whispers to the rogue alone.
+    const whisperResult = await dmClient.callTool({
+      name: 'whisper_to_player',
+      arguments: { campaignId, recipientUserId: String(targetUserId), body: 'The idol over MCP is a fake' },
+    });
+    expect(whisperResult.isError).toBeFalsy();
+    const whisper = parseResult(whisperResult) as { id: number; visibility: string; recipientName: string };
+    expect(whisper.visibility).toBe('whisper');
+    expect(whisper.recipientName).toBe('MCP Rogue');
+
+    // Over MCP list_notes: target sees it, the non-target never does.
+    const targetClient = await mcpClient(targetToken);
+    const targetNotes = parseResult(await targetClient.callTool({ name: 'list_notes', arguments: { campaignId } })) as Array<{ id: number }>;
+    expect(targetNotes.some((n) => n.id === whisper.id)).toBe(true);
+
+    const otherClient = await mcpClient(otherToken);
+    const otherNotes = parseResult(await otherClient.callTool({ name: 'list_notes', arguments: { campaignId } })) as Array<{ id: number }>;
+    expect(otherNotes.some((n) => n.id === whisper.id)).toBe(false);
   });
 
   it('add_member -> update_member -> remove_member round-trip (dm only)', async () => {

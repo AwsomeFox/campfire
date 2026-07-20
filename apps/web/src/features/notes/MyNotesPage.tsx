@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { Note } from '@campfire/schema';
+import type { CampaignMember, Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
@@ -23,10 +23,16 @@ const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string; sh
   private: { chip: 'private', label: '🔒 Private', short: '🔒 Private' },
   dm_shared: { chip: 'dm', label: '🎩 Shared with DM', short: '🎩 DM' },
   party_shared: { chip: 'party', label: '👥 Shared with party', short: '👥 Party' },
+  whisper: { chip: 'whisper', label: '🤫 Whisper', short: '🤫 Whisper' },
 };
 
-/** Design's tap-to-cycle order on a note's own visibility badge. */
-const VIS_CYCLE: Record<Note['visibility'], Note['visibility']> = {
+/**
+ * Design's tap-to-cycle order on a note's own visibility badge. `whisper` is
+ * deliberately NOT in the cycle — it needs a chosen recipient, so a blind tap can't
+ * create one; a whispered note shows a static badge instead (issue #127). Cycling a
+ * note INTO whisper happens via the compose recipient picker, not the badge.
+ */
+const VIS_CYCLE: Record<'private' | 'dm_shared' | 'party_shared', Note['visibility']> = {
   private: 'dm_shared',
   dm_shared: 'party_shared',
   party_shared: 'private',
@@ -69,6 +75,10 @@ export default function MyNotesPage() {
   const [draft, setDraft] = useState('');
   const [attach, setAttach] = useState<EntityLink | null>(null);
   const [attachResetKey, setAttachResetKey] = useState(0);
+  // Per-player whisper recipient for the compose form (issue #127): '' = not a whisper
+  // (saves private, as before); a member userId = whisper that one player.
+  const [whisperTo, setWhisperTo] = useState('');
+  const [members, setMembers] = useState<CampaignMember[]>([]);
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Note | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -97,6 +107,24 @@ export default function MyNotesPage() {
     if (Number.isFinite(cid)) void load();
   }, [cid, load]);
 
+  // Load members for the whisper recipient picker. Best-effort — a failure just leaves
+  // the picker empty (whisper is an opt-in extra, never blocks plain note-taking).
+  useEffect(() => {
+    if (!Number.isFinite(cid)) return;
+    let cancelled = false;
+    api
+      .get<CampaignMember[]>(`${API}/campaigns/${cid}/members`)
+      .then((list) => {
+        if (!cancelled) setMembers(list);
+      })
+      .catch(() => {
+        /* picker just stays empty */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cid]);
+
   // Keep the notes list live at the table (issue #113): poll ~5s while visible.
   // Only the fetched `notes` are replaced — the compose draft is separate state.
   usePollWhileVisible(() => void load(), 5000, Number.isFinite(cid));
@@ -109,11 +137,14 @@ export default function MyNotesPage() {
     try {
       await api.post(`${API}/campaigns/${cid}/notes`, {
         body: draft.trim(),
-        visibility: 'private',
+        ...(whisperTo
+          ? { visibility: 'whisper', recipientUserId: whisperTo }
+          : { visibility: 'private' }),
         ...(attach ? { entityType: attach.entityType, entityId: attach.entityId } : {}),
       });
       setDraft('');
       setAttach(null);
+      setWhisperTo('');
       setAttachResetKey((k) => k + 1);
       await load();
     } catch {
@@ -230,6 +261,9 @@ export default function MyNotesPage() {
         <FilterChip active={filter === 'party_shared'} variant="party" onClick={() => setFilter('party_shared')}>
           👥 → Party
         </FilterChip>
+        <FilterChip active={filter === 'whisper'} variant="whisper" onClick={() => setFilter('whisper')}>
+          🤫 Whisper
+        </FilterChip>
       </div>
 
       {/* Search over note bodies (and anchored entity names) */}
@@ -258,15 +292,37 @@ export default function MyNotesPage() {
             <TextInput
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder="Jot something down… saves as private"
+              placeholder={whisperTo ? 'Whisper something to one player…' : 'Jot something down… saves as private'}
             />
             <Btn type="submit" className="shrink-0" disabled={saving || !draft.trim()}>
-              Save
+              {whisperTo ? 'Whisper' : 'Save'}
             </Btn>
           </form>
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[11px] text-slate-500">Attach to:</span>
             <EntityPicker campaignId={cid} onChange={setAttach} resetKey={attachResetKey} disabled={saving} />
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] text-slate-500">🤫 Whisper to:</span>
+            <select
+              value={whisperTo}
+              onChange={(e) => setWhisperTo(e.target.value)}
+              disabled={saving}
+              aria-label="Whisper to a specific player"
+              className="cf-input !min-h-0 !py-1 text-xs"
+            >
+              <option value="">No one (private)</option>
+              {members
+                .filter((m) => !myUserId || String(m.userId) !== myUserId)
+                .map((m) => (
+                  <option key={m.userId} value={String(m.userId)}>
+                    {(m.displayName || m.username || `User ${m.userId}`) + (m.role === 'dm' ? ' (DM)' : '')}
+                  </option>
+                ))}
+            </select>
+            {whisperTo && (
+              <span className="text-[11px] text-violet-300">Only they (and the DM) will see this.</span>
+            )}
           </div>
         </Card>
       </div>
@@ -289,7 +345,12 @@ export default function MyNotesPage() {
                 campaignId={cid}
                 note={note}
                 editable
-                onCycleVisibility={() => setVisibility(note, VIS_CYCLE[note.visibility])}
+                myUserId={myUserId}
+                onCycleVisibility={
+                  note.visibility === 'whisper'
+                    ? undefined
+                    : () => setVisibility(note, VIS_CYCLE[note.visibility as keyof typeof VIS_CYCLE])
+                }
                 onDelete={() => setPendingDelete(note)}
               />
             ))}
@@ -299,7 +360,7 @@ export default function MyNotesPage() {
             <section className="space-y-3">
               <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Shared with me</p>
               {sharedWithMe.map((note) => (
-                <NoteCard key={note.id} campaignId={cid} note={note} editable={false} />
+                <NoteCard key={note.id} campaignId={cid} note={note} editable={false} myUserId={myUserId} />
               ))}
             </section>
           )}
@@ -320,7 +381,8 @@ export default function MyNotesPage() {
       <p className="text-[11px] text-slate-600">
         Notes are per-user: the DM cannot read private notes (API-enforced). Sharing a note with the DM notifies them
         (it shows in their notification bell) and lands under their &quot;Shared with me&quot;; shared-with-party notes
-        appear on entity pages for everyone.
+        appear on entity pages for everyone. A 🤫 whisper reaches exactly one player (plus the DM) — the per-player
+        secret channel for &quot;only the rogue notices the trap door&quot;.
       </p>
 
       {pendingDelete && (
@@ -359,12 +421,14 @@ function NoteCard({
   campaignId,
   note,
   editable,
+  myUserId,
   onCycleVisibility,
   onDelete,
 }: {
   campaignId: number;
   note: Note;
   editable: boolean;
+  myUserId?: string | null;
   onCycleVisibility?: () => void;
   onDelete?: () => void;
 }) {
@@ -376,11 +440,27 @@ function NoteCard({
       : `/c/${campaignId}`
     : null;
 
+  const isWhisper = note.visibility === 'whisper';
+  // Whisper indicator, from the reader's point of view: the author sees who it went to,
+  // the recipient sees it came to them, a DM sees both ends of the exchange (issue #127).
+  const recipientLabel = note.recipientName || note.recipientUserId || 'a player';
+  const whisperLabel = isWhisper
+    ? myUserId && note.recipientUserId === myUserId
+      ? `🤫 Whispered to you by ${note.authorName || note.authorUserId}`
+      : editable
+        ? `🤫 Whispered to ${recipientLabel}`
+        : `🤫 Whisper: ${note.authorName || note.authorUserId} → ${recipientLabel}`
+    : '';
+
   return (
     <div className="cf-card p-4 space-y-2">
       <Markdown className="text-slate-100">{note.body}</Markdown>
       <div className="flex items-center gap-2 flex-wrap">
-        {editable ? (
+        {isWhisper ? (
+          // No tap-to-cycle: a whisper is bound to its recipient, so the badge is a
+          // static indicator (re-targeting happens in compose, not by cycling).
+          <Chip variant="whisper">{whisperLabel}</Chip>
+        ) : editable ? (
           <button onClick={onCycleVisibility} className="cf-chip" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
             <Chip variant={meta.chip}>{meta.label} · tap to change</Chip>
           </button>

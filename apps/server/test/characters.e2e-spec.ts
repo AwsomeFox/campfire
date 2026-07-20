@@ -152,6 +152,46 @@ describe('characters (e2e)', () => {
     expect(res.body.spellSlots).toEqual({});
   });
 
+  it('new characters default to status active (issue #115)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('active');
+  });
+
+  it('status can be set on create and round-trips through update (issue #115)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Create with an explicit non-active status.
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Fallen Knight', status: 'dead' });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.status).toBe('dead');
+    const id = createRes.body.id as number;
+
+    // PATCH to another status.
+    const patchRes = await request(server).patch(`/api/v1/characters/${id}`).set(dm).send({ status: 'retired' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.status).toBe('retired');
+
+    // Re-read confirms the value persisted.
+    const getRes = await request(server).get(`/api/v1/characters/${id}`).set(dm);
+    expect(getRes.status).toBe(200);
+    expect(getRes.body.status).toBe('retired');
+
+    // Bring it back to active.
+    const reviveRes = await request(server).patch(`/api/v1/characters/${id}`).set(dm).send({ status: 'active' });
+    expect(reviveRes.status).toBe(200);
+    expect(reviveRes.body.status).toBe('active');
+  });
+
+  it('PATCH status rejects an unknown lifecycle value (issue #115)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(dm).send({ status: 'zombie' });
+    expect(res.status).toBe(400);
+  });
+
   it('PATCH saveProficiencies round-trips', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
@@ -402,6 +442,73 @@ describe('characters (e2e)', () => {
       .send({ remove: ['prone'] });
     expect(removeRes.status).toBe(201);
     expect(removeRes.body.conditions).toEqual(['poisoned']);
+  });
+
+  // Issue #129: a player may own more than one character (backup PC, familiar, companion) —
+  // the API always allowed it, and now the owner (not just the dm) can delete their own.
+  describe('multi-character ownership & owner delete (issue #129)', () => {
+    it('a player may create a second owned character', async () => {
+      const server = ctx.app.getHttpServer();
+      const first = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Main PC' });
+      expect(first.status).toBe(201);
+      expect(first.body.ownerUserId).toBe('dev:owner-1');
+
+      const second = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Pip the Familiar' });
+      expect(second.status).toBe(201);
+      expect(second.body.ownerUserId).toBe('dev:owner-1');
+      expect(second.body.id).not.toBe(first.body.id);
+    });
+
+    it('an owner may delete their own character', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Backup Barbarian' });
+      expect(created.status).toBe(201);
+      const backupId = created.body.id;
+
+      const delRes = await request(server).delete(`/api/v1/characters/${backupId}`).set(owner);
+      expect(delRes.status).toBe(200);
+
+      const getAfter = await request(server).get(`/api/v1/characters/${backupId}`).set(owner);
+      expect(getAfter.status).toBe(404);
+    });
+
+    it("a non-owner player cannot delete someone else's character (403)", async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Not Yours' });
+      expect(created.status).toBe(201);
+      const otherId = created.body.id;
+
+      const delRes = await request(server).delete(`/api/v1/characters/${otherId}`).set(nonOwner);
+      expect(delRes.status).toBe(403);
+
+      // still there
+      const getAfter = await request(server).get(`/api/v1/characters/${otherId}`).set(owner);
+      expect(getAfter.status).toBe(200);
+    });
+
+    it('the dm may still delete any character', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'DM Can Remove Me' });
+      expect(created.status).toBe(201);
+
+      const delRes = await request(server).delete(`/api/v1/characters/${created.body.id}`).set(dm);
+      expect(delRes.status).toBe(200);
+    });
   });
 
   // Issue #96: deleting a character must unlink any combatant that references it, so

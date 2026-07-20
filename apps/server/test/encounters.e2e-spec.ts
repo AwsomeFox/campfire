@@ -83,6 +83,68 @@ describe('encounters (e2e)', () => {
     expect(res.status).toBe(403);
   });
 
+  describe('encounter auto-add respects character lifecycle status (issue #115)', () => {
+    let statusCampId: number;
+    let activeId: number;
+    let deadId: number;
+    let retiredId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Graveyard Campaign' });
+      statusCampId = campRes.body.id;
+
+      const active = await request(server)
+        .post(`/api/v1/campaigns/${statusCampId}/characters`)
+        .set(dm)
+        .send({ name: 'Living Hero', hpMax: 20, hpCurrent: 20 });
+      expect(active.status).toBe(201);
+      expect(active.body.status).toBe('active');
+      activeId = active.body.id;
+
+      const dead = await request(server)
+        .post(`/api/v1/campaigns/${statusCampId}/characters`)
+        .set(dm)
+        .send({ name: 'Fallen Comrade', hpMax: 20, hpCurrent: 20, status: 'dead' });
+      expect(dead.status).toBe(201);
+      deadId = dead.body.id;
+
+      const retired = await request(server)
+        .post(`/api/v1/campaigns/${statusCampId}/characters`)
+        .set(dm)
+        .send({ name: 'Old Adventurer', hpMax: 20, hpCurrent: 20, status: 'retired' });
+      expect(retired.status).toBe(201);
+      retiredId = retired.body.id;
+    });
+
+    it('only active characters are auto-added; dead/retired are skipped', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'New Fight' });
+      expect(res.status).toBe(201);
+      const charIds = (res.body.combatants as Array<{ characterId: number | null }>).map((c) => c.characterId);
+      expect(charIds).toContain(activeId);
+      expect(charIds).not.toContain(deadId);
+      expect(charIds).not.toContain(retiredId);
+      expect(res.body.combatants).toHaveLength(1);
+    });
+
+    it('marking a PC active again re-includes it in the next encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      // Revive the fallen comrade.
+      const patch = await request(server).patch(`/api/v1/characters/${deadId}`).set(dm).send({ status: 'active' });
+      expect(patch.status).toBe(200);
+      expect(patch.body.status).toBe('active');
+
+      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'Second Fight' });
+      expect(res.status).toBe(201);
+      const charIds = (res.body.combatants as Array<{ characterId: number | null }>).map((c) => c.characterId);
+      expect(charIds).toContain(activeId);
+      expect(charIds).toContain(deadId);
+      expect(charIds).not.toContain(retiredId);
+      expect(res.body.combatants).toHaveLength(2);
+    });
+  });
+
   describe('full combat flow', () => {
     let encounterId: number;
     let monsterId: number;

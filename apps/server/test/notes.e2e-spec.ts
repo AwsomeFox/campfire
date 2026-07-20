@@ -348,6 +348,140 @@ describe('notes entityName resolution (e2e)', () => {
 });
 
 /**
+ * Issue #127: per-player whisper (targeted note visibility). A `whisper` note is a
+ * per-player secret channel — visible ONLY to its author, the single targeted
+ * recipient, and any DM (oversight). A non-target, non-DM member must never receive it
+ * over any read path. Real cookie sessions so the recipient is validated against actual
+ * campaign membership (dev-auth has no members rows).
+ */
+describe('notes whisper — per-player targeted visibility (e2e)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let targetAgent: ReturnType<typeof request.agent>;
+  let otherAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let targetUserId: number;
+  let otherUserId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'whisper-dm', password: 'dm-password-1' });
+    await dmAgent
+      .post('/api/v1/users')
+      .send({ username: 'whisper-target', password: 'target-password-1', displayName: 'The Rogue', serverRole: 'user' });
+    await dmAgent
+      .post('/api/v1/users')
+      .send({ username: 'whisper-other', password: 'other-password-1', displayName: 'The Bard', serverRole: 'user' });
+
+    targetAgent = request.agent(server);
+    await targetAgent.post('/api/v1/auth/login').send({ username: 'whisper-target', password: 'target-password-1' });
+    otherAgent = request.agent(server);
+    await otherAgent.post('/api/v1/auth/login').send({ username: 'whisper-other', password: 'other-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Whisper Campaign' });
+    campaignId = campRes.body.id;
+
+    targetUserId = (await targetAgent.get('/api/v1/me')).body.user.id;
+    otherUserId = (await otherAgent.get('/api/v1/me')).body.user.id;
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: targetUserId, role: 'player' });
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: otherUserId, role: 'player' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('DM whispers to one player: author + target + DM see it, a non-target player never does', async () => {
+    // The DM whispers a secret to the rogue alone.
+    const createRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Only you notice the trap door', visibility: 'whisper', recipientUserId: String(targetUserId) });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.visibility).toBe('whisper');
+    expect(createRes.body.recipientUserId).toBe(String(targetUserId));
+    // recipient display name resolved server-side (like entityName), never stored.
+    expect(createRes.body.recipientName).toBe('The Rogue');
+    const noteId = createRes.body.id;
+
+    // GET by id: author (DM) + target see it; the non-target player 404s (not 403 — ids don't leak).
+    expect((await dmAgent.get(`/api/v1/notes/${noteId}`)).status).toBe(200);
+    expect((await targetAgent.get(`/api/v1/notes/${noteId}`)).status).toBe(200);
+    expect((await otherAgent.get(`/api/v1/notes/${noteId}`)).status).toBe(404);
+
+    // List endpoint: target sees the whisper; the non-target player never receives it,
+    // and any whisper it does surface must be one they're the recipient of.
+    const targetList = await targetAgent.get(`/api/v1/campaigns/${campaignId}/notes`);
+    expect(targetList.body.some((n: { id: number }) => n.id === noteId)).toBe(true);
+
+    const otherList = await otherAgent.get(`/api/v1/campaigns/${campaignId}/notes`);
+    expect(otherList.body.some((n: { id: number }) => n.id === noteId)).toBe(false);
+    for (const n of otherList.body as Array<{ visibility: string; recipientUserId: string | null }>) {
+      if (n.visibility === 'whisper') expect(n.recipientUserId).toBe(String(otherUserId));
+    }
+
+    // DM oversight: the whisper is in the DM's list too (it enters the campaign record).
+    const dmList = await dmAgent.get(`/api/v1/campaigns/${campaignId}/notes`);
+    expect(dmList.body.some((n: { id: number }) => n.id === noteId)).toBe(true);
+  });
+
+  it('free-text search never leaks a whisper to a non-target', async () => {
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'The vault password is SPARROW', visibility: 'whisper', recipientUserId: String(targetUserId) });
+
+    // The target can find their own whisper by body text…
+    const targetHit = await targetAgent.get(`/api/v1/campaigns/${campaignId}/notes?q=sparrow`);
+    expect(targetHit.body.length).toBeGreaterThan(0);
+    // …but the non-target searching the same word gets nothing.
+    const otherHit = await otherAgent.get(`/api/v1/campaigns/${campaignId}/notes?q=sparrow`);
+    expect(otherHit.body).toHaveLength(0);
+  });
+
+  it('a player may whisper another player; the DM still sees it, a third player does not', async () => {
+    const createRes = await targetAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'I think the Bard is the traitor', visibility: 'whisper', recipientUserId: String(otherUserId) });
+    expect(createRes.status).toBe(201);
+    const noteId = createRes.body.id;
+
+    expect((await otherAgent.get(`/api/v1/notes/${noteId}`)).status).toBe(200); // recipient
+    expect((await targetAgent.get(`/api/v1/notes/${noteId}`)).status).toBe(200); // author
+    expect((await dmAgent.get(`/api/v1/notes/${noteId}`)).status).toBe(200); // DM oversight
+  });
+
+  it('a whisper with no recipient, or to a non-member, is rejected', async () => {
+    const noRecipient = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'whisper to nobody', visibility: 'whisper' });
+    expect(noRecipient.status).toBe(400);
+
+    const nonMember = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'whisper to a stranger', visibility: 'whisper', recipientUserId: '9999999' });
+    expect(nonMember.status).toBe(400);
+  });
+
+  it('switching a whisper to another visibility clears its recipient', async () => {
+    const createRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'was a whisper', visibility: 'whisper', recipientUserId: String(targetUserId) });
+    const noteId = createRes.body.id;
+    expect(createRes.body.recipientUserId).toBe(String(targetUserId));
+
+    const patchRes = await dmAgent.patch(`/api/v1/notes/${noteId}`).send({ visibility: 'party_shared' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.visibility).toBe('party_shared');
+    expect(patchRes.body.recipientUserId).toBeNull();
+
+    // now party-visible: the previously-excluded player can see it
+    expect((await otherAgent.get(`/api/v1/notes/${noteId}`)).status).toBe(200);
+  });
+});
+
+/**
  * Punch list item 8, real-session variant: proves the authorName override isn't a
  * dev-auth-only artifact — a real logged-in user's displayName wins over a spoofed
  * client-supplied authorName too.
