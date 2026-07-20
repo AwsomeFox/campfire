@@ -171,6 +171,58 @@ export async function startFakeOpen5eFlaky(): Promise<FakeOpen5eFlaky> {
   };
 }
 
+/**
+ * Fake Open5e server reproducing issue #143: a fresh install pulls the SAME named entry
+ * from EVERY document, so "Fireball" and "Goblin" each arrive three times — once from
+ * SRD 5.1 (`srd`, OGL), once from SRD 5.2 (`srd-2024`, CC-BY-4.0), and once from a
+ * third-party book (`a5e-ag`). Keys are shaped `<document>_<name>` exactly like the live
+ * API. The importer must collapse each to ONE canonical row (prefer `srd`), carry the
+ * real per-document license, and tag the source — not label the A5e content as SRD.
+ */
+const SRD_51_DOC = { name: 'System Reference Document 5.1', key: 'srd', licenses: [{ name: 'Open Game License v1.0a', key: 'ogl-1.0a' }] };
+const SRD_52_DOC = { name: 'System Reference Document 5.2', key: 'srd-2024', licenses: [{ name: 'Creative Commons Attribution 4.0', key: 'cc-by-40' }] };
+const A5E_DOC = { name: 'Advanced 5e Adventurers Guide', key: 'a5e-ag', licenses: [{ name: 'A5E Open Content License', key: 'a5e-ocl' }] };
+
+const MULTI_DOC_SPELLS = [
+  { key: 'a5e-ag_fireball', name: 'Fireball', desc: 'A5e fireball text.', level: 3, school: { name: 'Evocation', key: 'evocation' }, document: A5E_DOC },
+  { key: 'srd-2024_fireball', name: 'Fireball', desc: 'SRD 5.2 fireball text.', level: 3, school: { name: 'Evocation', key: 'evocation' }, document: SRD_52_DOC },
+  { key: 'srd_fireball', name: 'Fireball', desc: 'SRD 5.1 fireball text.', level: 3, school: { name: 'Evocation', key: 'evocation' }, document: SRD_51_DOC },
+];
+
+const MULTI_DOC_CREATURES = [
+  { key: 'a5e-ag_goblin', name: 'Goblin', type: { name: 'Humanoid', key: 'humanoid' }, size: { name: 'Small', key: 'small' }, challenge_rating: 0.25, document: A5E_DOC },
+  { key: 'srd-2024_goblin', name: 'Goblin', type: { name: 'Humanoid', key: 'humanoid' }, size: { name: 'Small', key: 'small' }, challenge_rating: 0.25, document: SRD_52_DOC },
+  { key: 'srd_goblin', name: 'Goblin', type: { name: 'Humanoid', key: 'humanoid' }, size: { name: 'Small', key: 'small' }, challenge_rating: 0.25, document: SRD_51_DOC },
+];
+
+export async function startFakeOpen5eMultiDoc(): Promise<FakeOpen5e> {
+  const app = express();
+  app.get('/v2/spells/', (_req, res) => res.json(page(MULTI_DOC_SPELLS)));
+  app.get('/v2/creatures/', (_req, res) => res.json(page(MULTI_DOC_CREATURES)));
+  app.get('/v2/magicitems/', (_req, res) => res.json(page([])));
+  app.get('/v2/conditions/', (_req, res) => res.json(page([])));
+  app.get('/v2/classes/', (_req, res) => res.json(page([])));
+  app.get('/v2/species/', (_req, res) => res.json(page([])));
+  app.get('/v2/feats/', (_req, res) => res.json(page([])));
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');
+  const baseUrl = `http://127.0.0.1:${address.port}/v2`;
+
+  return {
+    baseUrl,
+    server,
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}
+
 export interface FakeOpen5eWithBadPagination extends FakeOpen5e {
   evilBaseUrl: string;
   evilWasHit(): boolean;

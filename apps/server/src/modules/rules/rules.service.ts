@@ -11,7 +11,7 @@ import {
   type RulePackUpload,
 } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
-import { rulePacks, ruleEntries, combatants } from '../../db/schema';
+import { rulePacks, ruleEntries, combatants, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -61,6 +61,7 @@ function entryToDomain(row: typeof ruleEntries.$inferSelect): RuleEntry {
     summary: row.summary,
     body: row.body,
     dataJson: row.dataJson,
+    source: row.source ?? '',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -353,15 +354,27 @@ export class RulesService {
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     this.assertOpenLicense(input.pack.license);
 
-    const entries: ImportedEntry[] = input.entries.map((e) => ({
-      slug: e.slug,
-      name: e.name,
-      type: e.type,
-      summary: e.summary ?? '',
-      body: e.body ?? '',
-      dataJson: e.dataJson ?? null,
-      license: e.license ?? input.pack.license,
-    }));
+    // De-dupe the incoming entries by (type, slug), keeping the first occurrence — the
+    // (pack_id, type, slug) unique index (issue #143) would otherwise reject an upload that
+    // carried the same slug twice with a raw constraint error mid-transaction.
+    const seenKeys = new Set<string>();
+    const entries: ImportedEntry[] = input.entries
+      .filter((e) => {
+        const key = `${e.type}::${e.slug}`;
+        if (seenKeys.has(key)) return false;
+        seenKeys.add(key);
+        return true;
+      })
+      .map((e) => ({
+        slug: e.slug,
+        name: e.name,
+        type: e.type,
+        summary: e.summary ?? '',
+        body: e.body ?? '',
+        dataJson: e.dataJson ?? null,
+        license: e.license ?? input.pack.license,
+        source: e.source ?? input.pack.name,
+      }));
 
     // Report per-type import counts for progress (uploads have no network fetch, so
     // this is effectively instantaneous, but keeps the job's progress shape uniform).
@@ -431,6 +444,7 @@ export class RulesService {
               summary: entry.summary,
               body: entry.body,
               dataJson: entry.dataJson,
+              source: entry.source,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -498,6 +512,7 @@ export class RulesService {
                 summary: entry.summary,
                 body: entry.body,
                 dataJson: entry.dataJson,
+                source: entry.source,
                 createdAt: ts,
                 updatedAt: ts,
               })
@@ -555,6 +570,12 @@ export class RulesService {
       for (const entryId of entryIds) {
         tx.update(combatants).set({ ruleEntryId: null }).where(eq(combatants.ruleEntryId, entryId)).run();
       }
+      // Campaigns that selected this pack as their rule system would otherwise be left
+      // pointing at a dangling slug — GET /campaigns/:id would still report the removed
+      // pack's slug, and it would silently re-link if the pack were reinstalled (issue
+      // #147). Reset those campaigns to '' (none/homebrew, the column default) in the same
+      // transaction, matching what the uninstall dialog promises.
+      tx.update(campaigns).set({ ruleSystem: '' }).where(eq(campaigns.ruleSystem, pack.slug)).run();
       tx.delete(ruleEntries).where(eq(ruleEntries.packId, id)).run();
       tx.delete(rulePacks).where(eq(rulePacks.id, id)).run();
     });
