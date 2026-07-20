@@ -552,3 +552,285 @@ describe('encounters (e2e, real cookie sessions — non-member access)', () => {
     expect(res.status).toBe(403);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issues #49/#50/#51/#54 — combat-tracker correctness fixes. Each block owns a
+// fresh campaign so the deterministic initiative ordering isn't perturbed by the
+// shared-campaign suite above.
+// ---------------------------------------------------------------------------
+
+type CombatantShape = { id: number; name: string; characterId: number | null; initiative: number | null; hpCurrent: number; hpMax: number };
+
+describe('encounters — issue #51: character uniqueness guard (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let ariaId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Dup Guard' })).body.id;
+    ariaId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 })
+    ).body.id;
+    // create auto-adds the whole party (Aria) as a combatant.
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' })).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('re-adding a character already present in the encounter is rejected 409', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'character', characterId: ariaId });
+    expect(res.status).toBe(409);
+
+    // and no duplicate row was created — Aria still appears exactly once.
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const ariaRows = (getRes.body.combatants as CombatantShape[]).filter((c) => c.characterId === ariaId);
+    expect(ariaRows).toHaveLength(1);
+  });
+
+  it('a different, not-yet-present character can still be added (201)', async () => {
+    const server = ctx.app.getHttpServer();
+    const bramId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Bram', hpCurrent: 15, hpMax: 15 })
+    ).body.id;
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'character', characterId: bramId });
+    expect(res.status).toBe(201);
+    expect(res.body.characterId).toBe(bramId);
+  });
+});
+
+describe('encounters — issue #49: identity-based turn pointer (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let ariaCombatantId: number;
+  let m1Id: number; // sorts above Aria
+  let m2Id: number; // sorts below Aria
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Turn Pointer' })).body.id;
+    await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
+
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush' });
+    encounterId = encRes.body.id;
+    ariaCombatantId = encRes.body.combatants[0].id;
+
+    m1Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'M1', hpMax: 10 })).body.id;
+    m2Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'M2', hpMax: 10 })).body.id;
+
+    // Deterministic order via explicit initiatives: M1=20, Aria=10, M2=5.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${m1Id}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(dm).send({ initiative: 10 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${m2Id}`).set(dm).send({ initiative: 5 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('start pins currentCombatantId to the top of the order (M1)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.currentCombatantId).toBe(m1Id);
+    expect(res.body.turnIndex).toBe(0);
+    // server-sorted order: M1, Aria, M2
+    expect((res.body.combatants as CombatantShape[]).map((c) => c.id)).toEqual([m1Id, ariaCombatantId, m2Id]);
+  });
+
+  it('next-turn advances by identity to Aria', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.currentCombatantId).toBe(ariaCombatantId);
+    expect(res.body.turnIndex).toBe(1);
+  });
+
+  it('removing a combatant that sorts ABOVE the current actor keeps the pointer on Aria (not shifted)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Current is Aria (index 1). Remove M1 (index 0). A positional index would now
+    // point at M2; the identity pointer must stay on Aria, now at index 0.
+    const del = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${m1Id}`).set(dm);
+    expect(del.status).toBe(200);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.currentCombatantId).toBe(ariaCombatantId);
+    expect(getRes.body.turnIndex).toBe(0); // Aria is now the top of the order
+  });
+
+  it('a combatant added mid-fight does not move the current pointer', async () => {
+    const server = ctx.app.getHttpServer();
+    const reinf = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Reinforcement', hpMax: 8 });
+    expect(reinf.status).toBe(201);
+    expect(reinf.body.initiative).toBeNull();
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.currentCombatantId).toBe(ariaCombatantId);
+    // null-initiative joiner sorts last: Aria, M2, Reinforcement
+    expect((getRes.body.combatants as CombatantShape[]).map((c) => c.id)).toEqual([ariaCombatantId, m2Id, reinf.body.id]);
+  });
+
+  it('removing the CURRENT combatant advances the pointer to the next in order (M2)', async () => {
+    const server = ctx.app.getHttpServer();
+    const del = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(dm);
+    expect(del.status).toBe(200);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.currentCombatantId).toBe(m2Id);
+    expect(getRes.body.turnIndex).toBe(0); // M2 is now the top of the order
+  });
+});
+
+describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let ariaCombatantId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Reinforcements' })).body.id;
+    await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    encounterId = encRes.body.id;
+    ariaCombatantId = encRes.body.combatants[0].id;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(dm).send({ initiative: 12 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a combatant added while running starts at null initiative and sorts last', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Cultist', hpMax: 11 });
+    expect(res.status).toBe(201);
+    expect(res.body.initiative).toBeNull();
+  });
+
+  it('roll-initiative works while running and fills the late joiner (only null values)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    for (const c of res.body.combatants as CombatantShape[]) {
+      expect(c.initiative).not.toBeNull();
+    }
+    // Aria's manually-set initiative is left untouched.
+    const aria = (res.body.combatants as CombatantShape[]).find((c) => c.id === ariaCombatantId);
+    expect(aria?.initiative).toBe(12);
+  });
+
+  it('dm can set a specific initiative on any combatant while running', async () => {
+    const server = ctx.app.getHttpServer();
+    const cultist = (await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)).body.combatants.find(
+      (c: CombatantShape) => c.name === 'Cultist',
+    );
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${cultist.id}`)
+      .set(dm)
+      .send({ initiative: 99 });
+    expect(res.status).toBe(200);
+    expect(res.body.initiative).toBe(99);
+    // now sorts to the top
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((getRes.body.combatants as CombatantShape[])[0].id).toBe(cultist.id);
+  });
+});
+
+describe('encounters — issue #50: character/combatant HP stay in sync (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let charId: number;
+  let encounterId: number;
+  let combatantId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'HP Sync' })).body.id;
+    charId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 30, hpMax: 30 })
+    ).body.id;
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    encounterId = encRes.body.id;
+    combatantId = encRes.body.combatants[0].id;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ initiative: 10 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function combatantHp(): Promise<{ hpCurrent: number; hpMax: number }> {
+    const server = ctx.app.getHttpServer();
+    const c = (await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)).body.combatants.find(
+      (x: CombatantShape) => x.id === combatantId,
+    );
+    return { hpCurrent: c.hpCurrent, hpMax: c.hpMax };
+  }
+
+  it('combatant damage still writes through to the character (existing behavior preserved)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ hpDelta: -10 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpCurrent).toBe(20);
+    const charRes = await request(server).get(`/api/v1/characters/${charId}`).set(dm);
+    expect(charRes.body.hpCurrent).toBe(20);
+  });
+
+  it('healing on the character sheet mirrors into the live combatant row (the fix)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/characters/${charId}/hp`).set(dm).send({ delta: 5 });
+    expect(res.status).toBe(201);
+    expect(res.body.hpCurrent).toBe(25);
+    expect((await combatantHp()).hpCurrent).toBe(25);
+  });
+
+  it('raising hpMax on the character (level-up) mirrors hpMax into the combatant row', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/characters/${charId}`).set(dm).send({ hpMax: 40 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpMax).toBe(40);
+    expect((await combatantHp()).hpMax).toBe(40);
+  });
+
+  it('mid-fight heal is NOT reverted when the encounter ends', async () => {
+    const server = ctx.app.getHttpServer();
+    // character is at 25/40 (healed on sheet); the combatant mirrors it. Ending writes
+    // combatant HP back — which now equals the healed value, so nothing is reverted.
+    const endRes = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
+    expect(endRes.status).toBe(201);
+    const charRes = await request(server).get(`/api/v1/characters/${charId}`).set(dm);
+    expect(charRes.body.hpCurrent).toBe(25);
+  });
+
+  it('after the encounter has ended, character HP edits no longer touch the historical combatant row', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await combatantHp();
+    const res = await request(server).post(`/api/v1/characters/${charId}/hp`).set(dm).send({ set: 3 });
+    expect(res.status).toBe(201);
+    expect((await combatantHp()).hpCurrent).toBe(before.hpCurrent); // unchanged — ended encounter is a snapshot
+  });
+});

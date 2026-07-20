@@ -100,6 +100,7 @@ export class EncountersController {
   @ApiOperation({ summary: 'Add a combatant', description: 'dm role required. Name/HP may be resolved from a linked ruleEntryId (monster) or an existing characterId, or supplied directly.' })
   @ApiResponse({ status: 201, description: 'Created combatant.' })
   @ApiResponse({ status: 400, description: 'Combatant is unresolvable (no name, no ruleEntryId, no hpMax), or references a dangling ruleEntryId.' })
+  @ApiResponse({ status: 409, description: 'That character is already a combatant in this encounter.' })
   async addCombatant(@Param('id', ParseIntPipe) id: number, @Body() body: CombatantCreateDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');

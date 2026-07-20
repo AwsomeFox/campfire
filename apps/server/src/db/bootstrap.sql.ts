@@ -306,6 +306,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   status TEXT NOT NULL DEFAULT 'preparing',
   round INTEGER NOT NULL DEFAULT 0,
   turn_index INTEGER NOT NULL DEFAULT 0,
+  current_combatant_id INTEGER,
   ended_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest, normalizeStats } from '@campfire/schema';
@@ -27,6 +27,7 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     status: row.status as EncounterStatus,
     round: row.round,
     turnIndex: row.turnIndex,
+    currentCombatantId: row.currentCombatantId,
     endedAt: row.endedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -67,6 +68,18 @@ function sortCombatants(rows: Combatant[], status: EncounterStatus): Combatant[]
     if (a.initiative !== b.initiative) return b.initiative - a.initiative;
     return a.sortOrder - b.sortOrder;
   });
+}
+
+/**
+ * Position of `currentCombatantId` in the server-sorted running order — the
+ * positional `turnIndex` we keep in lockstep with the identity pointer (issue
+ * #49) for display/back-compat. 0 when there's no current combatant or it's no
+ * longer present (e.g. just removed with an empty encounter).
+ */
+function turnIndexFor(sorted: Combatant[], currentCombatantId: number | null): number {
+  if (currentCombatantId === null) return 0;
+  const i = sorted.findIndex((c) => c.id === currentCombatantId);
+  return i < 0 ? 0 : i;
 }
 
 @Injectable()
@@ -205,6 +218,19 @@ export class EncountersService {
       if (character.campaignId !== encounterRow.campaignId) {
         throw new NotFoundException(`Character ${input.characterId} not found in campaign ${encounterRow.campaignId}`);
       }
+      // Uniqueness guard (issue #51): a character may appear at most once in an
+      // encounter's initiative. Without this the API happily adds the same PC twice
+      // (a manual re-add, or racing the create() auto-add) — duplicate rows that
+      // then track HP independently and clutter the order. 409 Conflict rather than
+      // silently upserting, so the caller learns their add was a no-op.
+      const [dup] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.encounterId, encounterId), eq(combatants.characterId, character.id)))
+        .limit(1);
+      if (dup) {
+        throw new ConflictException(`Character ${character.id} is already a combatant in encounter ${encounterId}`);
+      }
       characterId = character.id;
       name = name ?? character.name;
       hpMax = hpMax ?? character.hpMax;
@@ -264,6 +290,19 @@ export class EncountersService {
         sortOrder,
       })
       .returning();
+
+    // Keep the positional turnIndex aligned with the identity pointer after the row
+    // count changes (issue #49). A freshly-added combatant has null initiative and so
+    // sorts last, so the current actor's index is normally unchanged — but re-deriving
+    // it keeps turnIndex correct regardless.
+    if (encounterRow.status === 'running') {
+      const rows = await this.listCombatantRows(encounterId);
+      const sorted = sortCombatants(rows.map(combatantToDomain), 'running');
+      const turnIndex = turnIndexFor(sorted, encounterRow.currentCombatantId);
+      if (turnIndex !== encounterRow.turnIndex) {
+        await this.db.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId));
+      }
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -362,7 +401,32 @@ export class EncountersService {
     const encounterRow = await this.getRowOrThrow(encounterId);
     const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
+    // Decide the new turn pointer BEFORE deleting (issue #49). Removing a combatant
+    // whose initiative sorts above the current actor used to shift every later row up
+    // a slot, so the positional index silently pointed at the wrong creature; and
+    // removing the current combatant itself left the index dangling. With an identity
+    // pointer we only need to react when the CURRENT combatant is the one leaving:
+    // advance to the next in the sorted order (wrapping to the top if it was last).
+    let newCurrentId = encounterRow.currentCombatantId;
+    if (encounterRow.status === 'running' && encounterRow.currentCombatantId === combatantId) {
+      const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+      const idx = sorted.findIndex((c) => c.id === combatantId);
+      const remaining = sorted.filter((c) => c.id !== combatantId);
+      newCurrentId = remaining.length === 0 ? null : (sorted[idx + 1]?.id ?? remaining[0].id);
+    }
+
     await this.db.delete(combatants).where(eq(combatants.id, combatantId));
+
+    // Re-derive turnIndex against the post-removal sorted order so it stays in lockstep
+    // with the (possibly advanced) identity pointer.
+    if (encounterRow.status === 'running') {
+      const sortedAfter = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+      const turnIndex = turnIndexFor(sortedAfter, newCurrentId);
+      await this.db
+        .update(encounters)
+        .set({ currentCombatantId: newCurrentId, turnIndex, updatedAt: nowIso() })
+        .where(eq(encounters.id, encounterId));
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -386,6 +450,16 @@ export class EncountersService {
       if (row.initiative !== null) continue;
       const initiative = rollInitiative(row.initMod);
       await this.db.update(combatants).set({ initiative }).where(eq(combatants.id, row.id));
+    }
+
+    // Filling a late joiner's initiative mid-fight (issue #54) re-sorts the order, so
+    // keep the positional turnIndex aligned with the (unchanged) identity pointer.
+    if (encounterRow.status === 'running') {
+      const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+      const turnIndex = turnIndexFor(sorted, encounterRow.currentCombatantId);
+      if (turnIndex !== encounterRow.turnIndex) {
+        await this.db.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId));
+      }
     }
 
     await this.audit.log({
@@ -415,9 +489,14 @@ export class EncountersService {
       throw new BadRequestException('All combatants must have initiative rolled before starting the encounter');
     }
 
+    // The first actor is the top of the initiative order — pin it by identity (issue
+    // #49), not just position, so later add/remove can't slide the pointer off it.
+    const sorted = sortCombatants(rows.map(combatantToDomain), 'running');
+    const currentCombatantId = sorted[0]?.id ?? null;
+
     await this.db
       .update(encounters)
-      .set({ status: 'running', round: 1, turnIndex: 0, updatedAt: nowIso() })
+      .set({ status: 'running', round: 1, turnIndex: 0, currentCombatantId, updatedAt: nowIso() })
       .where(eq(encounters.id, encounterId));
 
     await this.audit.log({
@@ -440,20 +519,33 @@ export class EncountersService {
       throw new BadRequestException('Encounter is not running');
     }
 
-    const rows = await this.listCombatantRows(encounterId);
-    const count = rows.length;
+    // Walk the SERVER-sorted order from the current combatant's identity, not a raw
+    // positional index (issue #49). Find where the current actor sits now, step to the
+    // next one, and wrap (round+1) past the end. Because the pointer is an id, a mid-
+    // fight add/remove that reshuffled positions can't desync who's "current".
+    const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+    const count = sorted.length;
     let { turnIndex, round } = encounterRow;
+    let currentCombatantId = encounterRow.currentCombatantId;
     if (count === 0) {
       turnIndex = 0;
+      currentCombatantId = null;
     } else {
-      turnIndex += 1;
-      if (turnIndex >= count) {
-        turnIndex = 0;
+      // Missing/unset pointer (legacy row, or it was just removed) restarts at the top.
+      const currentIdx = currentCombatantId === null ? -1 : sorted.findIndex((c) => c.id === currentCombatantId);
+      let nextIdx = currentIdx + 1;
+      if (nextIdx >= count) {
+        nextIdx = 0;
         round += 1;
       }
+      turnIndex = nextIdx;
+      currentCombatantId = sorted[nextIdx].id;
     }
 
-    await this.db.update(encounters).set({ turnIndex, round, updatedAt: nowIso() }).where(eq(encounters.id, encounterId));
+    await this.db
+      .update(encounters)
+      .set({ turnIndex, round, currentCombatantId, updatedAt: nowIso() })
+      .where(eq(encounters.id, encounterId));
 
     await this.audit.log({
       actor: auditActor(user),
