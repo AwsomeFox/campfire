@@ -451,6 +451,10 @@ export const ruleEntries = sqliteTable('rule_entries', {
   summary: text('summary').notNull().default(''),
   body: text('body').notNull().default(''),
   dataJson: text('data_json'),
+  // Human-readable source/document label (e.g. Open5e `document.name`) so entries from
+  // different rulebooks are distinguishable and attributable (issue #143). Nullable-as-''
+  // in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  source: text('source').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -519,7 +523,12 @@ export const diceRolls = sqliteTable('dice_rolls', {
   rollerName: text('roller_name').notNull().default(''),
   expr: text('expr').notNull(),
   rolls: text('rolls').notNull().default('[]'),
+  // JSON array of the kept dice (issue #130) — null when no keep/drop clause applied.
+  kept: text('kept'),
   total: integer('total').notNull(),
+  // Optional check context (issue #130): label + difficulty class. success is derived.
+  label: text('label'),
+  dc: integer('dc'),
   createdAt: text('created_at').notNull(),
 });
 

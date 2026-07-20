@@ -370,6 +370,90 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(after.body.some((q: { title: string }) => q.title === 'Proposed quest')).toBe(true);
   });
 
+  // Issue #125: add_session_recap must NOT freeze the session number into a proposed
+  // recap's payload. If it did, a session logged between propose and approve would
+  // collide on that frozen number and every approve would 409, trapping the draft.
+  it('a proposed session recap (no number) approves cleanly even after another session is logged in between', async () => {
+    // fresh campaign so the numbering is deterministic (no sessions yet -> next is 1)
+    const recapCampRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Recap Numbering #125' });
+    const recapCampaignId = recapCampRes.body.id as number;
+    const dmClient = await mcpClient(dmToken);
+
+    // 1. Draft a recap as a proposal WITHOUT an explicit number. The stored payload
+    //    must not carry a number — it's assigned at approval time.
+    const proposeResult = await dmClient.callTool({
+      name: 'add_session_recap',
+      arguments: { campaignId: recapCampaignId, recap: 'The party crossed the bridge.', propose: true },
+    });
+    expect(proposeResult.isError).toBeFalsy();
+    const { proposal } = parseResult(proposeResult) as {
+      proposal: { id: number; status: string; payload: Record<string, unknown> };
+    };
+    expect(proposal.status).toBe('pending');
+    expect(proposal.payload.number).toBeUndefined();
+
+    // 2. Meanwhile the DM logs a session directly — it takes number 1 (the value the
+    //    old code would have frozen into the proposal above).
+    const directResult = await dmClient.callTool({
+      name: 'add_session_recap',
+      arguments: { campaignId: recapCampaignId, recap: 'A different night.' },
+    });
+    expect(directResult.isError).toBeFalsy();
+    const directSession = parseResult(directResult) as { id: number; number: number };
+    expect(directSession.number).toBe(1);
+
+    // 3. Approving the proposal now must succeed (no 409) and get the next number (2).
+    const approveResult = await dmClient.callTool({
+      name: 'approve_proposal',
+      arguments: { proposalId: proposal.id },
+    });
+    expect(approveResult.isError).toBeFalsy();
+    const approved = parseResult(approveResult) as { status: string };
+    expect(approved.status).toBe('approved');
+
+    const list = await dmAgent.get(`/api/v1/campaigns/${recapCampaignId}/sessions`);
+    expect(list.body).toHaveLength(2);
+    const numbers = (list.body as Array<{ number: number }>).map((s) => s.number).sort();
+    expect(numbers).toEqual([1, 2]);
+  });
+
+  // Issue #160: the default-number path used to precompute max+1 in the tool, so the
+  // campaign-unique guard never saw a duplicate — a retried identical call created a
+  // SECOND canonical session. It must now be retry-safe (dedupe, not duplicate).
+  it('identical add_session_recap (no number) twice does not create two canonical sessions', async () => {
+    const dupCampRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Recap Retry #160' });
+    const dupCampaignId = dupCampRes.body.id as number;
+    const dmClient = await mcpClient(dmToken);
+
+    const recap = 'Session recap that gets submitted twice after a timeout.';
+    const first = await dmClient.callTool({ name: 'add_session_recap', arguments: { campaignId: dupCampaignId, recap } });
+    expect(first.isError).toBeFalsy();
+    const firstSession = parseResult(first) as { id: number; number: number };
+
+    const second = await dmClient.callTool({ name: 'add_session_recap', arguments: { campaignId: dupCampaignId, recap } });
+    expect(second.isError).toBeFalsy();
+    const secondSession = parseResult(second) as { id: number; number: number };
+
+    // The retry is a no-op: same row, same number — not a phantom second session.
+    expect(secondSession.id).toBe(firstSession.id);
+    expect(secondSession.number).toBe(firstSession.number);
+
+    const list = await dmAgent.get(`/api/v1/campaigns/${dupCampaignId}/sessions`);
+    expect(list.body).toHaveLength(1);
+
+    const campRes = await dmAgent.get(`/api/v1/campaigns/${dupCampaignId}`);
+    expect(campRes.body.sessionCount).toBe(1);
+
+    // A genuinely different recap with no number still appends a new session (number 2).
+    const distinct = await dmClient.callTool({
+      name: 'add_session_recap',
+      arguments: { campaignId: dupCampaignId, recap: 'A genuinely different recap.' },
+    });
+    expect(distinct.isError).toBeFalsy();
+    const distinctSession = parseResult(distinct) as { number: number };
+    expect(distinctSession.number).toBe(2);
+  });
+
   it('create_encounter -> add_combatant -> roll_initiative -> begin_encounter -> next_turn -> end_encounter via dm PAT', async () => {
     const client = await mcpClient(dmToken);
 
@@ -696,6 +780,105 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const deleteNoteResult = await client.callTool({ name: 'delete_note', arguments: { noteId: note.id } });
     expect(deleteNoteResult.isError).toBeFalsy();
+  });
+
+  it('#159: a second identical upsert_npc updates in place instead of duplicating', async () => {
+    const client = await mcpClient(dmToken);
+    const name = 'R5 Tavernkeeper Test';
+
+    const first = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name, role: 'Keeper' } });
+    const npc1 = parseResult(first) as { id: number; role: string };
+    expect(npc1.role).toBe('Keeper');
+
+    // Identical re-run (the scribe timeout/retry scenario) must NOT create a second NPC.
+    const second = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name, role: 'Keeper' } });
+    const npc2 = parseResult(second) as { id: number };
+    expect(npc2.id).toBe(npc1.id);
+
+    // Case-insensitive re-run with a changed field updates the SAME row.
+    const third = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: name.toUpperCase(), disposition: 'friendly' } });
+    const npc3 = parseResult(third) as { id: number; disposition: string };
+    expect(npc3.id).toBe(npc1.id);
+    expect(npc3.disposition).toBe('friendly');
+
+    // Exactly one NPC by that name exists.
+    const listResult = await client.callTool({ name: 'list_npcs', arguments: { campaignId } });
+    const matches = (parseResult(listResult) as { id: number; name: string }[]).filter(
+      (n) => n.name.toLowerCase() === name.toLowerCase(),
+    );
+    expect(matches).toHaveLength(1);
+
+    // A genuinely different name still creates a new NPC.
+    const other = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'A Different NPC' } });
+    expect((parseResult(other) as { id: number }).id).not.toBe(npc1.id);
+  });
+
+  it('#159: a second identical upsert_location updates in place instead of duplicating', async () => {
+    const client = await mcpClient(dmToken);
+    const name = 'R5 Sunken Grotto Test';
+
+    const first = await client.callTool({ name: 'upsert_location', arguments: { campaignId, name, kind: 'cave' } });
+    const loc1 = parseResult(first) as { id: number; kind: string };
+    expect(loc1.kind).toBe('cave');
+
+    const second = await client.callTool({ name: 'upsert_location', arguments: { campaignId, name: name.toLowerCase(), body: 'damp and dark' } });
+    const loc2 = parseResult(second) as { id: number; body: string };
+    expect(loc2.id).toBe(loc1.id);
+    expect(loc2.body).toBe('damp and dark');
+
+    const listResult = await client.callTool({ name: 'list_locations', arguments: { campaignId } });
+    const matches = (parseResult(listResult) as { id: number; name: string }[]).filter(
+      (l) => l.name.toLowerCase() === name.toLowerCase(),
+    );
+    expect(matches).toHaveLength(1);
+  });
+
+  it('#161: read_audit_log sinceId returns only newer entries, and npc/quest/session updates record non-empty detail', async () => {
+    const client = await mcpClient(dmToken);
+
+    // Bookmark: the highest audit id right now.
+    const before = (await client.callTool({ name: 'read_audit_log', arguments: { campaignId, limit: 1 } }));
+    const beforeRows = parseResult(before) as { id: number }[];
+    const sinceId = beforeRows.length ? beforeRows[0].id : 0;
+
+    // Generate a few new auditable actions.
+    const npc = parseResult(await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'Delta NPC' } })) as { id: number };
+    await client.callTool({ name: 'upsert_npc', arguments: { campaignId, npcId: npc.id, disposition: 'hostile' } });
+    const quest = parseResult(await client.callTool({ name: 'create_quest', arguments: { campaignId, title: 'Delta Quest' } })) as { id: number };
+    await client.callTool({ name: 'update_quest', arguments: { questId: quest.id, status: 'active' } });
+    const session = parseResult(await client.callTool({ name: 'add_session_recap', arguments: { campaignId, recap: 'delta recap' } })) as { id: number };
+    await client.callTool({ name: 'update_session', arguments: { sessionId: session.id, title: 'Delta Session' } });
+
+    // Delta read: only entries strictly newer than the bookmark.
+    const deltaResult = await client.callTool({ name: 'read_audit_log', arguments: { campaignId, sinceId, limit: 500 } });
+    const delta = parseResult(deltaResult) as { id: number; action: string; entityType: string; detail: string }[];
+    expect(delta.length).toBeGreaterThan(0);
+    expect(delta.every((r) => r.id > sinceId)).toBe(true);
+
+    // The update entries now carry a real detail payload (was '' before #161).
+    const npcUpdate = delta.find((r) => r.action === 'npc.update');
+    expect(npcUpdate).toBeDefined();
+    expect(npcUpdate!.detail).not.toBe('');
+    expect(JSON.parse(npcUpdate!.detail)).toMatchObject({ disposition: 'hostile' });
+
+    const questUpdate = delta.find((r) => r.action === 'quest.update');
+    expect(questUpdate).toBeDefined();
+    expect(questUpdate!.detail).not.toBe('');
+    expect(JSON.parse(questUpdate!.detail)).toMatchObject({ status: 'active' });
+
+    const sessionUpdate = delta.find((r) => r.action === 'session.update');
+    expect(sessionUpdate).toBeDefined();
+    expect(sessionUpdate!.detail).not.toBe('');
+    expect(JSON.parse(sessionUpdate!.detail)).toMatchObject({ title: 'Delta Session' });
+
+    // action + entityType filters narrow the delta.
+    const filteredResult = await client.callTool({
+      name: 'read_audit_log',
+      arguments: { campaignId, sinceId, action: 'npc.update', entityType: 'npc', limit: 500 },
+    });
+    const filtered = parseResult(filteredResult) as { action: string; entityType: string }[];
+    expect(filtered.length).toBeGreaterThan(0);
+    expect(filtered.every((r) => r.action === 'npc.update' && r.entityType === 'npc')).toBe(true);
   });
 
   it('submit_inbox_item (player-role) is visible via read_inbox (dm-role)', async () => {

@@ -418,7 +418,12 @@ export const Session = z.object({
   ...timestamps,
 });
 export type Session = z.infer<typeof Session>;
-export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
+// `number` is OPTIONAL on create: when omitted, the server assigns the next
+// available session number atomically at write time (and, for a proposed recap,
+// at APPROVAL time) — see SessionsService.create. Precomputing it in the caller
+// froze stale numbers into proposals (#125) and let retries sidestep the
+// campaign-unique guard (#160).
+export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial();
 export const SessionUpdate = SessionCreate.partial();
 
 // The list-shape of a session (issue #71): a session's `recap` markdown can be up
@@ -613,6 +618,12 @@ export const InboxResolve = z
     entityType: EntityType.nullable().optional(),
     entityId: Id.nullable().optional(),
   })
+  // Reject unknown keys (issue #131). This request-input schema is `.strict()` at
+  // its source — unlike the entity Create/Update schemas (kept lenient and made
+  // strict at the server DTO layer), this one is a `.refine()`-wrapped ZodEffects
+  // with no `.strict()` to apply downstream, and it's a pure request DTO reused
+  // nowhere as a pass-through (no MCP/proposal path), so tightening it here is safe.
+  .strict()
   .refine((v) => (v.entityType == null) === (v.entityId == null), {
     message: 'entityType and entityId must be provided together',
   });
@@ -674,6 +685,11 @@ export const RuleEntry = z.object({
   summary: z.string().max(1000).default(''),
   body: z.string().max(50_000).default(''), // markdown
   dataJson: z.string().nullable().default(null), // raw structured fields (stats etc.), JSON-encoded
+  // Human-readable source/document label the entry came from (Open5e `document.name`,
+  // e.g. "System Reference Document 5.1"), so entries from different rulebooks are
+  // distinguishable and the reader can attribute the real source/license (issue #143).
+  // '' for older imports/uploads that predate the column — the reader falls back to the pack name.
+  source: z.string().max(200).default(''),
   ...timestamps,
 });
 export type RuleEntry = z.infer<typeof RuleEntry>;
@@ -728,6 +744,7 @@ export const RulePackUploadEntry = z.object({
   body: z.string().max(50_000).optional(), // markdown
   dataJson: z.string().max(100_000).nullable().optional(), // raw structured fields, JSON-encoded
   license: z.string().max(120).optional(), // per-entry license; falls back to the pack license
+  source: z.string().max(200).optional(), // per-entry source/document label; falls back to the pack name
 });
 export type RulePackUploadEntry = z.infer<typeof RulePackUploadEntry>;
 
@@ -1390,16 +1407,31 @@ export const TreasuryPatch = z.union([
 export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
 
 // ---------- dice rolling ----------
-// Safe, restricted dice expression: NdM optionally followed by +K or -K, e.g. "1d20+3", "2d6-1", "d20".
-export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*([+-]\s*\d{1,3})?\s*$/i;
+// Safe, restricted dice expression: NdM, optionally followed by a keep/drop clause
+// (khN/klN/dhN/dlN) and then +K or -K. Keep/drop lets a single roll express D&D-style
+// advantage/disadvantage and stat-gen: "2d20kh1" (advantage), "2d20kl1" (disadvantage),
+// "4d6kh3" / "4d6dl1" (drop-lowest stat roll). Examples: "1d20+3", "2d6-1", "d20",
+// "4d6dl1+2". Capture groups: 1=count, 2=sides, 3=keep/drop clause, 4=modifier.
+export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*((?:kh|kl|dh|dl)\s*\d{1,2})?\s*([+-]\s*\d{1,3})?\s*$/i;
 export const RollRequest = z.object({
-  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected NdM+K, e.g. "1d20+3"'),
+  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected NdM(kh/kl/dh/dlN)(+/-K), e.g. "1d20+3" or "2d20kh1"'),
+  // Optional check context (issue #130): a human label ("DEX save") and a difficulty
+  // class. When dc is present the server computes success (total >= dc) into the result.
+  label: z.string().max(120).optional(),
+  dc: z.number().int().min(1).max(99).optional(),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
 export const RollResult = z.object({
   expr: z.string(),
-  rolls: z.array(z.number().int()),
+  rolls: z.array(z.number().int()), // every die rolled, in roll order — attestable
+  // The subset of `rolls` that counted toward the total, present ONLY when a keep/drop
+  // clause applied (e.g. advantage keeps 1 of 2 d20s). Absent == all dice counted.
+  kept: z.array(z.number().int()).optional(),
   total: z.number().int(),
+  // Echoed check context (issue #130). success is server-computed (total >= dc).
+  label: z.string().max(120).optional(),
+  dc: z.number().int().optional(),
+  success: z.boolean().optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 

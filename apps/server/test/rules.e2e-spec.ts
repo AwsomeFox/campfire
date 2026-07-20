@@ -5,6 +5,7 @@ import {
   startFakeOpen5e,
   startFakeOpen5eWithBadPagination,
   startFakeOpen5eFlaky,
+  startFakeOpen5eMultiDoc,
   type FakeOpen5e,
   type FakeOpen5eWithBadPagination,
   type FakeOpen5eFlaky,
@@ -452,6 +453,117 @@ describe('rules / rule packs — generic upload (issue #19)', () => {
     expect(secondJob.pack.entryCount).toBe(4);
 
     await request(server).delete(`/api/v1/rules/packs/${secondJob.pack.id}`).set(uploader);
+  });
+});
+
+/**
+ * Issue #143: a fresh Open5e install must NOT produce triplicate same-name rows (one per
+ * document). Each (name,type) is de-duped to a single canonical entry — preferring the SRD
+ * 5.1 baseline — carrying the real per-document source label + license, so A5e/3rd-party
+ * content is never mislabeled as SRD.
+ */
+describe('rules / rule packs — Open5e import de-dupes same-name entries + labels source (issue #143)', () => {
+  let ctx: TestAppContext;
+  let fake: FakeOpen5e;
+  const dedupeDm = { 'x-dev-role': 'dm', 'x-dev-user': 'dedupe-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    fake = await startFakeOpen5eMultiDoc();
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+  });
+
+  it('collapses 3 Fireballs / 3 Goblins to one canonical (srd) entry each, with correct source + license', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const job = await installOpen5e(server, dedupeDm, { source: 'open5e', url: fake.baseUrl, sections: ['spells', 'monsters'] });
+    expect(job.status).toBe('completed');
+    // 3 spells + 3 creatures came off the wire, but each name collapses to one row.
+    expect(job.pack.entryCount).toBe(2);
+    // The pack license reflects only the kept (canonical SRD 5.1) documents — the A5e
+    // third-party license must NOT leak into the pack label (the mislabel in issue #143).
+    expect(job.pack.license).toContain('Open Game License');
+    expect(job.pack.license).not.toContain('A5E');
+
+    // Fireball: exactly one row, sourced from SRD 5.1 (the canonical pick), not A5e/SRD 5.2.
+    const fireballRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', type: 'spell' }).set(dedupeDm);
+    const fireballs = fireballRes.body.filter((e: { name: string }) => e.name === 'Fireball');
+    expect(fireballs).toHaveLength(1);
+    expect(fireballs[0].source).toBe('System Reference Document 5.1');
+    expect(fireballs[0].body).toContain('SRD 5.1');
+
+    // Goblin: same — one row, canonical source, distinguishable in the picker.
+    const goblinRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', type: 'monster' }).set(dedupeDm);
+    const goblins = goblinRes.body.filter((e: { name: string }) => e.name === 'Goblin');
+    expect(goblins).toHaveLength(1);
+    expect(goblins[0].source).toBe('System Reference Document 5.1');
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dedupeDm);
+  });
+});
+
+/**
+ * Issue #147: uninstalling a pack must clear `ruleSystem` on any campaign that selected it,
+ * so GET /campaigns/:id no longer reports the dangling slug (which would silently re-link on
+ * reinstall) — matching what the uninstall dialog promises ("fall back to none/homebrew").
+ */
+describe('rules / rule packs — uninstall clears campaigns\' ruleSystem (issue #147)', () => {
+  let ctx: TestAppContext;
+  let fake: FakeOpen5e;
+  const uninstallDm = { 'x-dev-role': 'dm', 'x-dev-user': 'ruleSystem-cleanup-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    fake = await startFakeOpen5e();
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+  });
+
+  it('nulls out ruleSystem on the campaign that pointed at the removed pack', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Install the pack, then point a campaign at it (validateRuleSystem requires the pack exist).
+    const job = await installOpen5e(server, uninstallDm, { source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
+    expect(job.status).toBe('completed');
+    expect(job.pack.slug).toBe('open5e-srd');
+    const packId = job.pack.id;
+
+    const campRes = await request(server).post('/api/v1/campaigns').set(uninstallDm).send({ name: 'Rule System Campaign' });
+    const campaignId = campRes.body.id;
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${campaignId}`)
+      .set(uninstallDm)
+      .send({ ruleSystem: 'open5e-srd' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.ruleSystem).toBe('open5e-srd');
+
+    // Sanity: the slug is set before uninstall.
+    const beforeGet = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(uninstallDm);
+    expect(beforeGet.body.ruleSystem).toBe('open5e-srd');
+
+    // Uninstall — the dangling slug must be cleared, not left behind.
+    const uninstallRes = await request(server).delete(`/api/v1/rules/packs/${packId}`).set(uninstallDm);
+    expect(uninstallRes.status).toBe(200);
+
+    const afterGet = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(uninstallDm);
+    expect(afterGet.status).toBe(200);
+    expect(afterGet.body.ruleSystem).toBe('');
+
+    // Reinstalling must NOT silently re-link the campaign (the slug is gone for good).
+    const reJob = await installOpen5e(server, uninstallDm, { source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
+    expect(reJob.status).toBe('completed');
+    const afterReinstall = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(uninstallDm);
+    expect(afterReinstall.body.ruleSystem).toBe('');
+
+    await request(server).delete(`/api/v1/rules/packs/${reJob.pack.id}`).set(uninstallDm);
   });
 });
 

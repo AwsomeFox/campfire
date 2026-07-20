@@ -101,7 +101,9 @@ export default function ReaderPage() {
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}
           <p className="text-muted" style={{ margin: 0, fontSize: 11, borderTop: '1px solid var(--color-divider)', paddingTop: 12 }}>
-            From {pack?.name ?? 'the installed rule system'}.
+            From {entry.source || pack?.name || 'the installed rule system'}
+            {entry.source && pack?.name && entry.source !== pack.name ? ` (${pack.name})` : ''}
+            {pack?.license ? ` · ${pack.license}` : ''}.
           </p>
         </div>
       )}

@@ -129,7 +129,7 @@ export default function NpcListPage() {
         {isDm && creating && (
           <div className="cf-inset p-3.5 space-y-2">
             {createError && <ErrorNote message={createError} />}
-            <TextInput aria-label="NPC name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} autoFocus />
+            <TextInput aria-label="NPC name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
             <TextInput aria-label="NPC role" placeholder="Role (e.g. Townmaster)" value={newRole} onChange={(e) => setNewRole(e.target.value)} />
             <div className="flex items-center justify-end gap-2">
               <Btn
