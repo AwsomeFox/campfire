@@ -6,6 +6,7 @@
  */
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
@@ -36,6 +37,7 @@ function FlameMark({ size = 20 }: { size?: number }) {
 }
 
 function ChangePasswordModal({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -62,7 +64,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
       await api.post(`${API}/me/password`, { currentPassword, newPassword });
       setDone(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Failed to change password.');
+      setError(err instanceof ApiError ? err.message : t('nav.changePasswordFailed'));
     } finally {
       setSaving(false);
     }
@@ -78,16 +80,16 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
         aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="dialog-title" id={titleId}>Change password</div>
+        <div className="dialog-title" id={titleId}>{t('nav.passwordModalTitle')}</div>
         {done ? (
           <div className="space-y-3">
-            <p className="text-sm" style={{ color: '#34d399' }}>Password updated.</p>
-            <Btn className="w-full" onClick={onClose}>Done</Btn>
+            <p className="text-sm" style={{ color: '#34d399' }}>{t('nav.passwordUpdated')}</p>
+            <Btn className="w-full" onClick={onClose}>{t('nav.done')}</Btn>
           </div>
         ) : (
           <form className="space-y-3" onSubmit={onSubmit}>
             <div className="field">
-              <label htmlFor="currentPassword">Current password</label>
+              <label htmlFor="currentPassword">{t('nav.currentPassword')}</label>
               <TextInput
                 id="currentPassword"
                 type="password"
@@ -97,7 +99,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
               />
             </div>
             <div className="field">
-              <label htmlFor="newPassword">New password</label>
+              <label htmlFor="newPassword">{t('nav.newPassword')}</label>
               <TextInput
                 id="newPassword"
                 type="password"
@@ -107,7 +109,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
               />
             </div>
             <div className="field">
-              <label htmlFor="confirmPassword">Confirm new password</label>
+              <label htmlFor="confirmPassword">{t('nav.confirmNewPassword')}</label>
               <TextInput
                 id="confirmPassword"
                 type="password"
@@ -118,8 +120,8 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
             </div>
             {error && <p className="text-sm text-rose-400">{error}</p>}
             <div className="dialog-actions">
-              <Btn ghost type="button" onClick={onClose}>Cancel</Btn>
-              <Btn type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</Btn>
+              <Btn ghost type="button" onClick={onClose}>{t('nav.cancel')}</Btn>
+              <Btn type="submit" disabled={saving}>{saving ? t('nav.saving') : t('nav.save')}</Btn>
             </div>
           </form>
         )}
@@ -138,6 +140,7 @@ type NavItem = {
 
 /** Campaign-wide search box (issue #64). Submits to /c/:id/search?q=. */
 function SidebarSearch({ campaignId }: { campaignId: number }) {
+  const { t } = useTranslation();
   const [q, setQ] = useState('');
   const navigate = useNavigate();
   return (
@@ -153,8 +156,8 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
         type="search"
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder="Search…"
-        aria-label="Search this campaign"
+        placeholder={t('nav.searchPlaceholder')}
+        aria-label={t('nav.searchAria')}
         className="w-full text-sm"
         style={{
           background: 'var(--color-surface, rgba(255,255,255,0.03))',
@@ -220,6 +223,7 @@ function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: bo
 }
 
 export function Layout() {
+  const { t } = useTranslation();
   const { me, isAdmin, roleIn, refresh: refreshAuth, logout } = useAuth();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
@@ -240,7 +244,14 @@ export function Layout() {
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
-  const roleLabel = role === 'dm' ? 'DM' : role === 'player' ? 'Player' : role === 'viewer' ? 'Viewer' : null;
+  const roleLabel =
+    role === 'dm'
+      ? t('nav.roleDm')
+      : role === 'player'
+        ? t('nav.rolePlayer')
+        : role === 'viewer'
+          ? t('nav.roleViewer')
+          : null;
 
   // Scribe inbox badge count — dm-only endpoint, best-effort (a failed/empty fetch
   // just means no badge, not a page error). Re-checks on campaign switch and when
@@ -324,31 +335,31 @@ export function Layout() {
   // Compendium/Settings(player-facing) items render greyed with a "soon" tag.
   const mainNav: NavItem[] = campaignId !== undefined
     ? [
-        { key: 'dashboard', label: 'Dashboard', to: `/c/${campaignId}` },
-        { key: 'quests', label: 'Quests', to: `/c/${campaignId}/quests` },
-        { key: 'world', label: 'World', to: `/c/${campaignId}/locations` },
-        { key: 'npcs', label: 'NPCs', to: `/c/${campaignId}/npcs` },
-        { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
-        { key: 'inventory', label: 'Inventory', to: `/c/${campaignId}/inventory` },
-        { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
-        { key: 'timeline', label: 'Timeline', to: `/c/${campaignId}/timeline` },
-        { key: 'session-zero', label: 'Session Zero', to: `/c/${campaignId}/session-zero` },
-        { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
-        { key: 'compendium', label: 'Compendium', to: `/c/${campaignId}/compendium` },
-        { key: 'notes', label: 'My Notes', to: `/c/${campaignId}/notes` },
+        { key: 'dashboard', label: t('nav.dashboard'), to: `/c/${campaignId}` },
+        { key: 'quests', label: t('nav.quests'), to: `/c/${campaignId}/quests` },
+        { key: 'world', label: t('nav.world'), to: `/c/${campaignId}/locations` },
+        { key: 'npcs', label: t('nav.npcs'), to: `/c/${campaignId}/npcs` },
+        { key: 'party', label: t('nav.party'), to: `/c/${campaignId}/party` },
+        { key: 'inventory', label: t('nav.inventory'), to: `/c/${campaignId}/inventory` },
+        { key: 'sessions', label: t('nav.sessions'), to: `/c/${campaignId}/sessions` },
+        { key: 'timeline', label: t('nav.timeline'), to: `/c/${campaignId}/timeline` },
+        { key: 'session-zero', label: t('nav.sessionZero'), to: `/c/${campaignId}/session-zero` },
+        { key: 'encounters', label: t('nav.encounters'), to: `/c/${campaignId}/encounters` },
+        { key: 'compendium', label: t('nav.compendium'), to: `/c/${campaignId}/compendium` },
+        { key: 'notes', label: t('nav.myNotes'), to: `/c/${campaignId}/notes` },
         // Non-DM members get a self-view of the proposals they've submitted (issue #124);
         // the DM's full review queue lives under dmNav below.
-        ...(!isDm ? [{ key: 'proposals', label: 'My proposals', to: `/c/${campaignId}/proposals` }] : []),
+        ...(!isDm ? [{ key: 'proposals', label: t('nav.myProposals'), to: `/c/${campaignId}/proposals` }] : []),
       ]
     : [];
 
   const dmNav: NavItem[] = campaignId !== undefined && isDm
     ? [
-        { key: 'storylines', label: 'Storylines', to: `/c/${campaignId}/storylines` },
-        { key: 'settings', label: 'Settings', to: `/c/${campaignId}/settings` },
-        { key: 'inbox', label: 'Scribe inbox', to: `/c/${campaignId}/inbox`, badge: inboxCount },
-        { key: 'proposals', label: 'Proposals', to: `/c/${campaignId}/proposals` },
-        { key: 'members', label: 'Members', to: `/c/${campaignId}/members` },
+        { key: 'storylines', label: t('nav.storylines'), to: `/c/${campaignId}/storylines` },
+        { key: 'settings', label: t('nav.settings'), to: `/c/${campaignId}/settings` },
+        { key: 'inbox', label: t('nav.scribeInbox'), to: `/c/${campaignId}/inbox`, badge: inboxCount },
+        { key: 'proposals', label: t('nav.proposals'), to: `/c/${campaignId}/proposals` },
+        { key: 'members', label: t('nav.members'), to: `/c/${campaignId}/members` },
       ]
     : [];
 
@@ -367,9 +378,9 @@ export function Layout() {
         <div style={{ maxWidth: 380, width: '100%' }}>
           <Card className="text-center space-y-2">
             <p className="text-2xl">🔒</p>
-            <p className="font-bold text-white">You no longer have access to this campaign</p>
+            <p className="font-bold text-white">{t('nav.lostAccessTitle')}</p>
             <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
-              Back to your campaigns
+              {t('nav.backToCampaigns')}
             </Link>
           </Card>
         </div>
@@ -416,7 +427,7 @@ export function Layout() {
           {isDm && (
             <>
               <div className="text-muted text-[10.5px] uppercase tracking-wide pt-3 pb-1 px-2.5">
-                Dungeon master
+                {t('nav.dungeonMaster')}
               </div>
               <nav className="flex flex-col gap-0.5">
                 {dmNav.map((item) => (
@@ -429,12 +440,12 @@ export function Layout() {
           <nav className="flex flex-col gap-0.5 mt-1">
             {isAdmin && (
               <SidebarNavButton
-                item={{ key: 'admin', label: 'Server admin', to: '/admin' }}
+                item={{ key: 'admin', label: t('nav.serverAdmin'), to: '/admin' }}
                 active={location.pathname === '/admin'}
               />
             )}
             <SidebarNavButton
-              item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }}
+              item={{ key: 'tokens', label: t('nav.apiTokens'), to: '/tokens' }}
               active={location.pathname === '/tokens'}
             />
           </nav>
@@ -447,7 +458,7 @@ export function Layout() {
           </div>
           <div className="flex items-center gap-1.5 px-1">
             <Link to="/preferences" className="btn btn-ghost flex-1 justify-start" style={{ fontSize: 12 }}>
-              Preferences
+              {t('nav.preferences')}
             </Link>
           </div>
           <div className="flex items-center gap-1.5 px-1">
@@ -456,11 +467,11 @@ export function Layout() {
               style={{ fontSize: 12 }}
               onClick={() => setShowPasswordModal(true)}
             >
-              Change password
+              {t('nav.changePassword')}
             </button>
           </div>
           <button className="btn btn-ghost justify-start" style={{ fontSize: 12 }} onClick={onLogout}>
-            Sign out
+            {t('nav.signOut')}
           </button>
         </aside>
       )}
@@ -507,7 +518,7 @@ export function Layout() {
                 }}
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
-                aria-label="Account menu"
+                aria-label={t('nav.accountMenu')}
               >
                 {initials(displayName)}
               </button>
@@ -526,20 +537,20 @@ export function Layout() {
               <FlameMark />
               <span style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, fontSize: 15 }}>Campfire</span>
             </Link>
-            <span className="tag tag-outline" style={{ fontSize: 10 }}>self-hosted</span>
+            <span className="tag tag-outline" style={{ fontSize: 10 }}>{t('nav.selfHosted')}</span>
             <div className="flex-1" />
             <NotificationsBell />
             {isAdmin && (
               <Link to="/admin" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
-                Admin
+                {t('nav.admin')}
               </Link>
             )}
             <Link to="/tokens" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
-              API tokens
+              {t('nav.apiTokens')}
             </Link>
             <span className="text-muted" style={{ fontSize: 12 }}>{displayName}</span>
             <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={onLogout}>
-              Sign out
+              {t('nav.signOut')}
             </button>
           </header>
         )}

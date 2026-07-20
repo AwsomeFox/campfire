@@ -71,6 +71,13 @@ export class ApiError extends Error {
      * so callers can just show `err.message`; use this for per-field UI (e.g. inline messages).
      */
     public fieldErrors: FieldError[] = [],
+    /**
+     * Machine-readable error code from the server's body (`code`/`error`), when present.
+     * This is the i18n seam for server errors (issue #94): if the server emits a stable code
+     * (e.g. `CAMPAIGN_NOT_FOUND`), the client can map it to a translated string via
+     * {@link translateApiError}. When absent, the human-readable `message` is used as-is.
+     */
+    public code?: string,
   ) {
     super(message);
   }
@@ -102,9 +109,14 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   if (!res.ok) {
     let message = res.statusText;
     let fieldErrors: FieldError[] = [];
+    let code: string | undefined;
     try {
       const body = await res.json();
       fieldErrors = parseFieldErrors(body);
+      // A stable, machine-readable code (if the server supplies one) is the i18n seam:
+      // the client can translate it, falling back to the human message below.
+      const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
+      if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
       // Prefer the structured field-level reasons — the server's `message` for a validation
       // failure is a bare "Validation failed", the actual detail lives in `errors[]` (issue #146).
       if (fieldErrors.length > 0) {
@@ -115,7 +127,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     } catch {
       /* non-json error body */
     }
-    throw new ApiError(res.status, message, fieldErrors);
+    throw new ApiError(res.status, message, fieldErrors, code);
   }
   // Success with no body: 204/205 by spec, but many endpoints (e.g. DELETE)
   // return 200 with a 0-byte body. Guard against parsing empty/non-JSON bodies
@@ -136,3 +148,29 @@ export const api = {
 };
 
 export const API = '/api/v1';
+
+/**
+ * i18n seam for server errors (issue #94). Maps an {@link ApiError}'s server-provided `code`
+ * to a translated string under the `errors.<code>` catalog key, falling back to the server's
+ * human-readable `message` when there's no code or no matching translation. Field-level
+ * validation summaries (which are per-field server text) are always used verbatim.
+ *
+ * Usage (inside a component):
+ *   const { t } = useTranslation();
+ *   catch (e) { setError(translateApiError(e, t)); }
+ *
+ * `t` is typed loosely so this helper stays dependency-free; pass react-i18next's `t`.
+ */
+export function translateApiError(
+  err: unknown,
+  t: (key: string, opts?: { defaultValue?: string }) => string,
+): string {
+  if (!(err instanceof ApiError)) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  if (err.code) {
+    // `defaultValue` makes this a safe fallback: unknown codes render the server message.
+    return t(`errors.${err.code}`, { defaultValue: err.message });
+  }
+  return err.message;
+}

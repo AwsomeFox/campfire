@@ -9,6 +9,8 @@
  * are "kept" is resolved by multiset match against `rolls`, preserving position.
  */
 
+import { useTranslation } from 'react-i18next';
+
 interface RolledDiceProps {
   rolls: number[];
   kept?: number[];
@@ -32,6 +34,7 @@ function keptFlags(rolls: number[], kept?: number[]): boolean[] {
 }
 
 export function RolledDice({ rolls, kept, fontSize = 11 }: RolledDiceProps) {
+  const { t } = useTranslation();
   const flags = keptFlags(rolls, kept);
   const hasDropped = flags.some((k) => !k);
   return (
@@ -40,8 +43,8 @@ export function RolledDice({ rolls, kept, fontSize = 11 }: RolledDiceProps) {
       style={{ fontSize, whiteSpace: 'nowrap' }}
       aria-label={
         hasDropped
-          ? `Rolled ${rolls.join(', ')}; kept ${(kept ?? rolls).join(', ')}`
-          : `Rolled ${rolls.join(', ')}`
+          ? t('dice.rolledKept', { rolls: rolls.join(', '), kept: (kept ?? rolls).join(', ') })
+          : t('dice.rolled', { rolls: rolls.join(', ') })
       }
     >
       [

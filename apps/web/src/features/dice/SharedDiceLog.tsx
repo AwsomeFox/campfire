@@ -11,6 +11,7 @@
  * a push without touching the rendering below.
  */
 import { useCallback, useEffect, useId, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
@@ -41,6 +42,7 @@ function timeAgo(iso: string): string {
 }
 
 export function SharedDiceLog({ campaignId, compact = false }: { campaignId: number; compact?: boolean }) {
+  const { t } = useTranslation();
   const limit = compact ? 4 : 8;
   const [expr, setExpr] = useState('1d20');
   const [rolling, setRolling] = useState(false);
@@ -91,16 +93,24 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         // Announce the result — the roll feed is otherwise visual-only (issue #93),
         // calling out kept dice, DC success/fail, and a natural 20 / natural 1.
         const flavor = rollFlavor(result);
-        const flourish = flavor === 'crit' ? ' — critical!' : flavor === 'fumble' ? ' — fumble!' : '';
-        const keptSaid = result.kept ? `, kept ${result.kept.join(', ')}` : '';
+        const flourish = flavor === 'crit' ? t('dice.flourishCrit') : flavor === 'fumble' ? t('dice.flourishFumble') : '';
+        const keptSaid = result.kept ? t('dice.announceKept', { kept: result.kept.join(', ') }) : '';
         const checkSaid =
-          result.dc != null ? `, ${result.success ? 'success' : 'fail'} vs DC ${result.dc}` : '';
+          result.dc != null ? (result.success ? t('dice.announceSuccess', { dc: result.dc }) : t('dice.announceFail', { dc: result.dc })) : '';
         announce(
-          `Rolled ${result.label ? `${result.label} ` : ''}${result.expr}: ${result.total} (${result.rolls.join(', ')}${keptSaid})${checkSaid}${flourish}`,
+          t('dice.announceRoll', {
+            label: result.label ? `${result.label} ` : '',
+            expr: result.expr,
+            total: result.total,
+            rolls: result.rolls.join(', '),
+            kept: keptSaid,
+            check: checkSaid,
+            flourish,
+          }),
         );
         return result;
       } catch (err) {
-        const message = err instanceof ApiError ? err.message : "Couldn't roll.";
+        const message = err instanceof ApiError ? err.message : t('dice.rollError');
         setError(message);
         announce(message, { assertive: true });
         return null;
@@ -118,25 +128,25 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
 
   return (
     <Card className="space-y-2.5">
-      <span className="card-kicker">{compact ? 'Dice' : 'Dice log'}</span>
+      <span className="card-kicker">{compact ? t('dice.dice') : t('dice.diceLog')}</span>
       <DiceTray onSubmitExpr={submitExpr} rolling={rolling} campaignId={campaignId} compact={compact} />
       <details className="dice-advanced">
         <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
-          Advanced — type an expression
+          {t('dice.advancedSummary')}
         </summary>
         <form onSubmit={rollFromInput} className="flex gap-2 items-end flex-wrap" style={{ marginTop: 8 }}>
           <div className="field" style={{ flex: 1, minWidth: compact ? 100 : 120 }}>
-            <label htmlFor={exprId}>Expression</label>
+            <label htmlFor={exprId}>{t('dice.expression')}</label>
             <TextInput
               id={exprId}
-              aria-label="Dice expression"
-              placeholder="1d20+3 or 4d6dl1"
+              aria-label={t('dice.diceExpressionLabel')}
+              placeholder={t('dice.exprPlaceholder')}
               value={expr}
               onChange={(e) => setExpr(e.target.value)}
             />
           </div>
           <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
-            {rolling ? 'Rolling…' : 'Roll'}
+            {rolling ? t('dice.rolling') : t('dice.roll')}
           </Btn>
         </form>
       </details>
@@ -144,8 +154,8 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       {rolls.length === 0 ? (
         <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
           {compact
-            ? 'Roll anytime — not just in combat. Try 1d20, 2d6+4, or 2d20kh1 (advantage).'
-            : 'No rolls yet — the whole table sees this log. Try 1d20, 2d6+4, or 2d20kh1 (advantage).'}
+            ? t('dice.emptyCompact')
+            : t('dice.emptyFull')}
         </p>
       ) : (
         <div className="flex flex-col gap-1">
@@ -189,7 +199,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                     color: r.success ? 'var(--color-success, #4ade80)' : 'var(--color-danger, #f87171)',
                   }}
                 >
-                  {r.success ? 'PASS' : 'FAIL'}
+                  {r.success ? t('dice.pass') : t('dice.fail')}
                 </span>
               )}
               <span

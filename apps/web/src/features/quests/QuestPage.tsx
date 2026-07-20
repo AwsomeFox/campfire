@@ -4,6 +4,7 @@
  * Route: /c/:campaignId/quests/:questId (questId === 'new' renders the dm create form).
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Quest, QuestObjective, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -45,6 +46,7 @@ export default function QuestPage() {
 // ---------------------------------------------------------------------------
 
 function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId: number }) {
+  const { t } = useTranslation();
   const { roleIn } = useAuth();
   const role = roleIn(campaignId);
   const isDm = role === 'dm';
@@ -114,7 +116,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       } else if (e instanceof ApiError && e.status === 404) {
         setNotFound(true);
       } else {
-        setError("Couldn't load this quest.");
+        setError(t('quests.loadOneFailed'));
       }
     } finally {
       setLoading(false);
@@ -138,7 +140,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       setQuest({ ...quest, ...updated });
       setEditingBody(false);
     } catch {
-      setError("Couldn't save the quest body.");
+      setError(t('quests.saveBodyFailed'));
     } finally {
       setSavingBody(false);
     }
@@ -152,7 +154,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       setQuest({ ...quest, ...updated });
       setStatusMenuOpen(false);
     } catch {
-      setError("Couldn't update quest status.");
+      setError(t('quests.updateStatusFailed'));
     } finally {
       setSavingStatus(false);
     }
@@ -181,7 +183,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       setQuest((q) =>
         q ? { ...q, objectives: q.objectives.map((o) => (o.id === objective.id ? { ...o, done: previousDone } : o)) } : q,
       );
-      setError("Couldn't update the objective.");
+      setError(t('quests.updateObjectiveFailed'));
     } finally {
       setPendingObjectives((p) => {
         const next = { ...p };
@@ -201,7 +203,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       setQuest({ ...quest, objectives: [...quest.objectives, created] });
       setNewObjective('');
     } catch {
-      setError("Couldn't add the objective.");
+      setError(t('quests.addObjectiveFailed'));
     } finally {
       setAddingObjective(false);
     }
@@ -221,7 +223,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       setQuest({ ...quest, objectives: quest.objectives.map((x) => (x.id === o.id ? updated : x)) });
       setEditingObjectiveId(null);
     } catch {
-      setError("Couldn't rename the objective.");
+      setError(t('quests.renameObjectiveFailed'));
     }
   }
 
@@ -241,7 +243,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       });
       setQuest((q) => (q ? { ...q, objectives: updated } : q));
     } catch {
-      setError("Couldn't reorder objectives.");
+      setError(t('quests.reorderFailed'));
       void load();
     }
   }
@@ -254,7 +256,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: !quest.hidden });
       setQuest({ ...quest, ...updated });
     } catch {
-      setError(quest.hidden ? "Couldn't reveal this quest." : "Couldn't hide this quest.");
+      setError(quest.hidden ? t('quests.revealFailed') : t('quests.hideFailed'));
     } finally {
       setTogglingHidden(false);
     }
@@ -268,7 +270,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       setQuest({ ...quest, ...updated });
       setEditingDmSecret(false);
     } catch {
-      setError("Couldn't save the DM notes.");
+      setError(t('quests.saveDmNotesFailed'));
     } finally {
       setSavingDmSecret(false);
     }
@@ -286,7 +288,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       await api.delete(`${API}/quests/${quest.id}`);
       navigate(`/c/${campaignId}/quests`);
     } catch {
-      setError("Couldn't delete this quest.");
+      setError(t('quests.deleteFailed'));
       setDeleting(false);
     }
   }
@@ -295,7 +297,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     return (
       <PageShell campaignId={campaignId}>
         <Card>
-          <EmptyState icon="🔒" title="You don't have access to this campaign" />
+          <EmptyState icon="🔒" title={t('quests.noAccess')} />
         </Card>
       </PageShell>
     );
@@ -305,9 +307,9 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     return (
       <PageShell campaignId={campaignId}>
         <NotFoundState
-          title="Quest not found"
+          title={t('quests.notFound')}
           backTo={`/c/${campaignId}/quests`}
-          backLabel="← Back to quests"
+          backLabel={t('quests.backToQuests')}
         />
       </PageShell>
     );
@@ -344,14 +346,14 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
       <div>
         <Link to={`/c/${campaignId}/quests`} className="btn btn-ghost" style={{ fontSize: 13 }}>
-          ← Back
+          {t('quests.back')}
         </Link>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
         <Chip variant={statusVariant(quest.status)}>{capitalize(quest.status)}</Chip>
-        {isDm && quest.hidden && <Chip variant="failed">🙈 Hidden from players</Chip>}
+        {isDm && quest.hidden && <Chip variant="failed">{t('quests.hiddenChip')}</Chip>}
         {isDm && (
           <>
             <div style={{ flex: 1 }} />
@@ -360,9 +362,9 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               className="!min-h-0 !py-1.5 text-xs"
               disabled={togglingHidden}
               onClick={toggleHidden}
-              title={quest.hidden ? 'Make this quest visible to players' : 'Hide this quest from players'}
+              title={quest.hidden ? t('quests.makeVisible') : t('quests.hideFromPlayers')}
             >
-              {togglingHidden ? '…' : quest.hidden ? '👁 Reveal' : '🙈 Hide'}
+              {togglingHidden ? '…' : quest.hidden ? t('quests.reveal') : t('quests.hide')}
             </Btn>
             <Btn
               ghost
@@ -372,7 +374,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 setEditingBody((v) => !v);
               }}
             >
-              ✎ Edit quest
+              {t('quests.editQuest')}
             </Btn>
             <div className="relative">
               <Btn
@@ -381,7 +383,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 onClick={() => setStatusMenuOpen((v) => !v)}
                 disabled={savingStatus}
               >
-                Status ▾
+                {t('quests.statusMenu')}
               </Btn>
               {statusMenuOpen && (
                 <div className="absolute right-0 mt-1 z-10 cf-card p-1 space-y-0.5 min-w-[140px]">
@@ -400,7 +402,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               )}
             </div>
             <Btn danger className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)}>
-              Delete
+              {t('quests.delete')}
             </Btn>
           </>
         )}
@@ -415,14 +417,14 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   style={{ minHeight: 140 }}
                   value={bodyDraft}
                   onChange={(e) => setBodyDraft(e.target.value)}
-                  placeholder="Quest body (markdown)…"
+                  placeholder={t('quests.bodyPlaceholder')}
                 />
                 <div className="flex gap-2 justify-end">
                   <Btn ghost onClick={() => setEditingBody(false)} className="!min-h-0 !py-1.5 text-xs">
-                    Cancel
+                    {t('quests.cancel')}
                   </Btn>
                   <Btn onClick={saveBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
-                    {savingBody ? 'Saving…' : 'Save'}
+                    {savingBody ? t('quests.saving') : t('quests.save')}
                   </Btn>
                 </div>
               </div>
@@ -432,16 +434,16 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
             <div className="hr" style={{ margin: '6px 0' }} />
 
-            <span className="card-kicker">Objectives</span>
-            {quest.objectives.length === 0 && <p className="text-xs text-slate-600">No objectives yet.</p>}
+            <span className="card-kicker">{t('quests.objectives')}</span>
+            {quest.objectives.length === 0 && <p className="text-xs text-slate-600">{t('quests.noObjectives')}</p>}
             {quest.objectives.map((o, i) => (
               <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 34 }}>
                 <Toggle
                   checked={o.done}
                   onChange={() => toggleObjective(o)}
                   disabled={!canToggleObjectives || !!pendingObjectives[o.id]}
-                  title={!canToggleObjectives ? 'Only the DM and players can check off objectives.' : undefined}
-                  label={o.done ? `Mark "${o.text}" not done` : `Mark "${o.text}" done`}
+                  title={!canToggleObjectives ? t('quests.objectiveToggleHint') : undefined}
+                  label={o.done ? t('quests.markNotDone', { text: o.text }) : t('quests.markDone', { text: o.text })}
                   size={17}
                 />
                 {editingObjectiveId === o.id ? (
@@ -453,13 +455,13 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                       autoFocus
                     />
                     <button onClick={() => saveObjectiveText(o)} className="text-xs text-[var(--color-accent)] hover:underline shrink-0">
-                      Save
+                      {t('quests.save')}
                     </button>
                     <button
                       onClick={() => setEditingObjectiveId(null)}
                       className="text-xs text-slate-500 hover:text-slate-300 shrink-0"
                     >
-                      Cancel
+                      {t('quests.cancel')}
                     </button>
                   </div>
                 ) : (
@@ -479,7 +481,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                         <button
                           onClick={() => reorderObjective(i, -1)}
                           disabled={i === 0}
-                          aria-label={`Move "${o.text}" up`}
+                          aria-label={t('quests.moveUp', { text: o.text })}
                           className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-500 shrink-0"
                         >
                           ↑
@@ -487,7 +489,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                         <button
                           onClick={() => reorderObjective(i, 1)}
                           disabled={i === quest.objectives.length - 1}
-                          aria-label={`Move "${o.text}" down`}
+                          aria-label={t('quests.moveDown', { text: o.text })}
                           className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-500 shrink-0"
                         >
                           ↓
@@ -506,7 +508,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 <TextInput
                   value={newObjective}
                   onChange={(e) => setNewObjective(e.target.value)}
-                  placeholder="New objective…"
+                  placeholder={t('quests.newObjectivePlaceholder')}
                   className="!py-1.5 text-xs max-w-xs"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') void addObjective();
@@ -517,7 +519,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   disabled={addingObjective || !newObjective.trim()}
                   className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-50"
                 >
-                  + objective
+                  {t('quests.addObjective')}
                 </button>
               </div>
             )}
@@ -525,7 +527,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             {hasSubs && (
               <>
                 <span className="card-kicker" style={{ marginTop: 6 }}>
-                  Subquests
+                  {t('quests.subquests')}
                 </span>
                 {subquests.map((sq) => (
                   <div key={sq.id} style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 30 }}>
@@ -549,7 +551,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 className="text-xs text-slate-500 hover:text-slate-300 pl-1 inline-block"
                 style={{ marginTop: hasSubs ? 0 : 6 }}
               >
-                + sub-quest
+                {t('quests.addSubquest')}
               </Link>
             )}
           </div>
@@ -562,16 +564,16 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
               }}
             >
-              <span className="card-kicker">DM only — hidden from players</span>
+              <span className="card-kicker">{t('quests.dmOnly')}</span>
               {editingDmSecret ? (
                 <div className="space-y-2">
                   <TextArea style={{ minHeight: 100 }} value={dmSecretDraft} onChange={(e) => setDmSecretDraft(e.target.value)} />
                   <div className="flex gap-2 justify-end">
                     <Btn ghost onClick={() => setEditingDmSecret(false)} className="!min-h-0 !py-1.5 text-xs">
-                      Cancel
+                      {t('quests.cancel')}
                     </Btn>
                     <Btn onClick={saveDmSecret} disabled={savingDmSecret} className="!min-h-0 !py-1.5 text-xs">
-                      {savingDmSecret ? 'Saving…' : 'Save'}
+                      {savingDmSecret ? t('quests.saving') : t('quests.save')}
                     </Btn>
                   </div>
                 </div>
@@ -585,7 +587,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                     }}
                     className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
                   >
-                    ✎ edit
+                    {t('quests.editSmall')}
                   </button>
                 </div>
               )}
@@ -599,33 +601,33 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               }}
               className="text-xs text-slate-500 hover:text-slate-300"
             >
-              + DM notes
+              {t('quests.addDmNotes')}
             </button>
           )}
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <div className="card elev-sm">
-            <span className="card-kicker">Facts</span>
+            <span className="card-kicker">{t('quests.facts')}</span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <span className="text-muted">Reward</span>
+                <span className="text-muted">{t('quests.reward')}</span>
                 <span>{quest.reward || '—'}</span>
               </div>
               {giver && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                  <span className="text-muted">Given by</span>
+                  <span className="text-muted">{t('quests.givenBy')}</span>
                   <Link to={`/c/${campaignId}/npcs/${giver.id}`} style={{ color: 'var(--color-accent)', fontSize: 13, textDecoration: 'none' }}>
                     {giver.name}
                   </Link>
                 </div>
               )}
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <span className="text-muted">Status</span>
+                <span className="text-muted">{t('quests.statusLabel')}</span>
                 <span>{capitalize(quest.status)}</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <span className="text-muted">Updated</span>
+                <span className="text-muted">{t('quests.updated')}</span>
                 <span title={quest.updatedAt}>{timeAgo(quest.updatedAt)}</span>
               </div>
             </div>
@@ -637,17 +639,15 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
       {confirmingDelete && (
         <ConfirmDialog
-          title={`Delete "${quest.title}"?`}
+          title={t('quests.deleteConfirmTitle', { title: quest.title })}
           body={
             <>
-              This permanently deletes the quest and its objectives.
-              {hasSubs
-                ? ` Subquests will be promoted to top-level quests.`
-                : ''}{' '}
-              This can&apos;t be undone.
+              {t('quests.deleteBody1')}
+              {hasSubs ? t('quests.deleteBodySubs') : ''}{' '}
+              {t('quests.deleteBodyUndone')}
             </>
           }
-          confirmLabel={deleting ? 'Deleting…' : 'Delete quest'}
+          confirmLabel={deleting ? t('quests.deleting') : t('quests.deleteQuest')}
           busy={deleting}
           onConfirm={deleteQuest}
           onCancel={() => setConfirmingDelete(false)}
@@ -662,6 +662,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 // ---------------------------------------------------------------------------
 
 function QuestCreatePage({ campaignId }: { campaignId: number }) {
+  const { t } = useTranslation();
   const { roleIn } = useAuth();
   const role = roleIn(campaignId);
   const navigate = useNavigate();
@@ -702,7 +703,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
         if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
           setForbidden(true);
         } else {
-          setError("Couldn't load campaign data.");
+          setError(t('quests.loadCampaignFailed'));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -718,7 +719,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
     return (
       <PageShell campaignId={campaignId}>
         <Card>
-          <EmptyState icon="🔒" title="Only the DM can create quests" />
+          <EmptyState icon="🔒" title={t('quests.onlyDmCreate')} />
         </Card>
       </PageShell>
     );
@@ -728,7 +729,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
     return (
       <PageShell campaignId={campaignId}>
         <Card>
-          <EmptyState icon="🔒" title="You don't have access to this campaign" />
+          <EmptyState icon="🔒" title={t('quests.noAccess')} />
         </Card>
       </PageShell>
     );
@@ -749,7 +750,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
       });
       navigate(`/c/${campaignId}/quests/${created.id}`);
     } catch (err) {
-      setSaveError(err instanceof ApiError ? err.message : "Couldn't create the quest.");
+      setSaveError(err instanceof ApiError ? err.message : t('quests.createFailed'));
     } finally {
       setSaving(false);
     }
@@ -759,7 +760,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
     <PageShell campaignId={campaignId}>
       <main className="lg:col-span-2 space-y-5">
         <Card className="space-y-4">
-          <h1 className="text-2xl font-extrabold text-white">New quest</h1>
+          <h1 className="text-2xl font-extrabold text-white">{t('quests.newQuestHeading')}</h1>
           {error && <ErrorNote message={error} />}
           {saveError && <ErrorNote message={saveError} onRetry={create} />}
           {loading ? (
@@ -767,30 +768,30 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
           ) : (
             <div className="space-y-3">
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Title</label>
-                <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Quest title…" maxLength={200} />
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.fieldTitle')}</label>
+                <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t('quests.titlePlaceholder')} maxLength={200} />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Body</label>
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.fieldBody')}</label>
                 <TextArea
                   style={{ minHeight: 140 }}
                   value={body}
                   onChange={(e) => setBody(e.target.value)}
-                  placeholder="Quest body (markdown)…"
+                  placeholder={t('quests.bodyPlaceholder')}
                 />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Reward</label>
-                <TextInput value={reward} onChange={(e) => setReward(e.target.value)} placeholder="e.g. 50 GP" />
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.reward')}</label>
+                <TextInput value={reward} onChange={(e) => setReward(e.target.value)} placeholder={t('quests.rewardPlaceholder')} />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Giver</label>
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.fieldGiver')}</label>
                 <select
                   className="cf-select"
                   value={giverNpcId}
                   onChange={(e) => setGiverNpcId(e.target.value)}
                 >
-                  <option value="">— none —</option>
+                  <option value="">{t('quests.giverNone')}</option>
                   {npcs.map((n) => (
                     <option key={n.id} value={n.id}>
                       {n.name}
@@ -799,9 +800,9 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Parent quest</label>
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.fieldParent')}</label>
                 <select className="cf-select" value={parent} onChange={(e) => setParent(e.target.value)}>
-                  <option value="">— none (top-level) —</option>
+                  <option value="">{t('quests.parentNone')}</option>
                   {parentQuests.map((q) => (
                     <option key={q.id} value={q.id}>
                       {q.title}
@@ -811,14 +812,14 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
               </div>
               <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
                 <input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} />
-                <span>🙈 Hidden from players (reveal later)</span>
+                <span>{t('quests.hiddenCheckbox')}</span>
               </label>
               <div className="flex justify-end gap-2 pt-2">
                 <Btn ghost onClick={() => navigate(-1)}>
-                  Cancel
+                  {t('quests.cancel')}
                 </Btn>
                 <Btn onClick={create} disabled={saving || !title.trim()}>
-                  {saving ? 'Creating…' : 'Create quest'}
+                  {saving ? t('quests.creating') : t('quests.createQuest')}
                 </Btn>
               </div>
             </div>
