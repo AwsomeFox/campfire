@@ -53,4 +53,34 @@ export class ExportController {
       })
       .send(JSON.stringify(data));
   }
+
+  @Get('me')
+  @ApiOperation({
+    summary: 'Export your own data in a campaign',
+    description:
+      'Member-scoped export (issue #128 player data rights): the characters you own, the notes you authored, and the ' +
+      'proposals you submitted in THIS campaign, as a downloadable JSON file. Requires only campaign membership (not dm) ' +
+      'and works on an archived campaign. Distinct from GET /export (the DM-only, campaign-wide bundle).',
+  })
+  @ApiResponse({ status: 200, description: 'File download (application/json, Content-Disposition attachment) with your own data.' })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  async exportOwn(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Res() res: Response,
+  ): Promise<void> {
+    // requireMember (no writability assertion) — a member may export their own
+    // data even from an archived (read-only) campaign.
+    const role = await this.access.requireMember(user, campaignId);
+    const campaign = await this.campaigns.getOrThrow(campaignId);
+    const data = await this.exportService.buildMemberExport(campaignId, user, role);
+    const filename = this.exportService.memberExportFilename(campaign.name, user.id);
+    res
+      .status(200)
+      .set({
+        'Content-Type': 'application/json',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+      })
+      .send(JSON.stringify(data));
+  }
 }

@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { UserCreate, UserUpdate, PreferencesUpdate } from '@campfire/schema';
 import type { User } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { users, userSessions, apiTokens, campaignMembers, campaigns, passwordResetRequests } from '../../db/schema';
+import { users, userSessions, apiTokens, campaignMembers, campaigns, passwordResetRequests, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
 
@@ -225,14 +225,23 @@ export class UsersService {
     }
 
     // Cascade: sessions + api_tokens + campaign_members + open password-reset
-    // requests. Leave notes/characters — characters keep ownerUserId string.
-    // (Orphaned api_tokens rows would be dead anyway — resolveByRawToken() refuses
-    // tokens whose owner row is gone — but deleting them keeps hashes of once-live
-    // credentials out of the DB.)
+    // requests. (Orphaned api_tokens rows would be dead anyway — resolveByRawToken()
+    // refuses tokens whose owner row is gone — but deleting them keeps hashes of
+    // once-live credentials out of the DB.)
     await this.db.delete(userSessions).where(eq(userSessions.userId, id));
     await this.db.delete(apiTokens).where(eq(apiTokens.userId, id));
     await this.db.delete(passwordResetRequests).where(eq(passwordResetRequests.userId, id));
     await this.db.delete(campaignMembers).where(eq(campaignMembers.userId, id));
+
+    // De-link owned characters (issue #128): the character sheets are NOT deleted —
+    // that would destroy party/campaign data others rely on — but their
+    // ownerUserId (string form of users.id) is cleared so it no longer dangles at
+    // a gone user. Notes keep authorUserId as authored-history attribution.
+    await this.db
+      .update(characters)
+      .set({ ownerUserId: null, updatedAt: nowIso() })
+      .where(eq(characters.ownerUserId, String(id)));
+
     await this.db.delete(users).where(eq(users.id, id));
   }
 

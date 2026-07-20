@@ -260,6 +260,95 @@ export default function PreferencesPage() {
         </button>
         {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
       </div>
+
+      <DeleteAccountCard username={user.username} />
+    </div>
+  );
+}
+
+/**
+ * Self-delete (issue #128 player data rights): a type-to-confirm danger action
+ * that deletes the signed-in user's own account (DELETE /me). The server cascades
+ * sessions/tokens/memberships, de-links (keeps) owned character sheets, and
+ * refuses (409) if you're the last admin or the sole DM of a campaign — the copy
+ * points you at the fix rather than dead-ending.
+ */
+function DeleteAccountCard({ username }: { username: string }) {
+  const { logout } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canDelete = confirmText.trim() === username;
+
+  async function remove() {
+    if (!canDelete) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await api.delete(`${API}/me`);
+      // Session is already cleared server-side; logout() resets client state and
+      // routes back to the login screen.
+      await logout();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't delete your account.");
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }}>
+      <span className="card-kicker" style={{ color: '#f87171' }}>Delete account</span>
+      {!open ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+            Permanently deletes your account and its sessions and tokens. Character sheets you own stay in their
+            campaigns (un-owned); notes you wrote stay too. This cannot be undone.
+          </p>
+          <div className="flex-1" />
+          <button className="btn btn-ghost" style={{ fontSize: 12.5, color: '#f87171' }} onClick={() => setOpen(true)}>
+            Delete my account…
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--color-neutral-200)' }}>
+            Type your username <strong>{username}</strong> to confirm.
+          </p>
+          <input
+            className="input"
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder={username}
+            autoComplete="off"
+          />
+          {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+          <div className="flex gap-2 items-center">
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12.5 }}
+              onClick={() => {
+                setOpen(false);
+                setConfirmText('');
+                setError(null);
+              }}
+              disabled={deleting}
+            >
+              Cancel
+            </button>
+            <div className="flex-1" />
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: 12.5, color: '#f87171', borderColor: '#f87171' }}
+              disabled={!canDelete || deleting}
+              onClick={remove}
+            >
+              {deleting ? 'Deleting…' : 'Delete my account'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
