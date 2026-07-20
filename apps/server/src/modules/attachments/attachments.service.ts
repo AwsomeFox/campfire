@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { eq, like } from 'drizzle-orm';
+import { desc, eq, like } from 'drizzle-orm';
 import type { Attachment, AttachmentKind, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters } from '../../db/schema';
@@ -58,9 +58,20 @@ function toDomain(row: typeof attachments.$inferSelect): Attachment {
     filename: row.filename,
     mime: row.mime,
     size: row.size,
+    hidden: row.hidden,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/**
+ * Secure default for a freshly uploaded attachment's visibility (issue #97):
+ * 'map'/'image' are DM prep material and start hidden (DM-only) so an uploaded
+ * handout isn't readable by the party the instant it lands; 'portrait' is a
+ * player-facing asset and starts visible.
+ */
+function defaultHiddenForKind(kind: AttachmentKind): boolean {
+  return kind !== 'portrait';
 }
 
 @Injectable()
@@ -139,6 +150,47 @@ export class AttachmentsService {
   }
 
   /**
+   * All attachments for a campaign, newest first. Visibility filtering (dropping
+   * hidden rows for non-DM) is the CALLER's job — the controller applies
+   * filterHidden() with the requester's role, mirroring the quests/npcs list
+   * pattern (issue #42). Returned as domain objects.
+   */
+  async listForCampaign(campaignId: number): Promise<Attachment[]> {
+    const rows = await this.db
+      .select()
+      .from(attachments)
+      .where(eq(attachments.campaignId, campaignId))
+      .orderBy(desc(attachments.id));
+    return rows.map(toDomain);
+  }
+
+  /**
+   * Stage / un-stage a handout (issue #97). dm-only (enforced by the controller's
+   * requireRole). Setting hidden=false is the "reveal" moment that makes the file
+   * fetchable by the whole party; hidden=true pulls it back to DM-only. Idempotent.
+   */
+  async setHidden(id: number, hidden: boolean, user: RequestUser, role: Role): Promise<Attachment> {
+    const existing = await this.getRowOrThrow(id);
+    const [row] = await this.db
+      .update(attachments)
+      .set({ hidden, updatedAt: nowIso() })
+      .where(eq(attachments.id, id))
+      .returning();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: hidden ? 'attachment.hide' : 'attachment.reveal',
+      entityType: 'attachment',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: existing.kind,
+    });
+
+    return toDomain(row);
+  }
+
+  /**
    * Persist the uploaded buffer to disk under DATA_DIR/uploads/<campaignId>/<id>.<ext>
    * and record its metadata. Two-step (insert row -> write file named by the new
    * row id) because the on-disk filename embeds the DB id.
@@ -172,6 +224,7 @@ export class AttachmentsService {
         filename: file.originalname.slice(0, 255),
         mime: file.mimetype,
         size: file.size,
+        hidden: defaultHiddenForKind(kind),
         createdAt: ts,
         updatedAt: ts,
       })
