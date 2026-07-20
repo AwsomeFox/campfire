@@ -43,6 +43,32 @@ export class SettingsService {
     return all.allowSignup;
   }
 
+  /**
+   * Reads a JSON-encoded value stored under an arbitrary settings key. Returns
+   * null when absent or unparseable. Used for structured config blobs (e.g. the
+   * OIDC config) that live outside the flat ServerSettings shape.
+   */
+  async getJson<T>(key: string): Promise<T | null> {
+    const rows = await this.db.select().from(settings).where(eq(settings.key, key)).limit(1);
+    if (rows.length === 0) return null;
+    try {
+      return JSON.parse(rows[0].value) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Upserts a JSON-encoded value under an arbitrary settings key. */
+  async setJson(key: string, value: unknown): Promise<void> {
+    const json = JSON.stringify(value);
+    const existing = await this.db.select().from(settings).where(eq(settings.key, key)).limit(1);
+    if (existing.length > 0) {
+      await this.db.update(settings).set({ value: json }).where(eq(settings.key, key));
+    } else {
+      await this.db.insert(settings).values({ key, value: json });
+    }
+  }
+
   async update(input: SettingsUpdateInput): Promise<z.infer<typeof ServerSettings>> {
     for (const [key, value] of Object.entries(input)) {
       if (value === undefined) continue;

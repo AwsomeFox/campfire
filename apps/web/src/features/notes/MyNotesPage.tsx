@@ -270,8 +270,9 @@ export default function MyNotesPage() {
       )}
 
       <p className="text-[11px] text-slate-600">
-        Notes are per-user: the DM cannot read private notes (API-enforced). Shared-with-DM notes appear in the DM&apos;s
-        scribe view; shared-with-party notes appear on entity pages for everyone.
+        Notes are per-user: the DM cannot read private notes (API-enforced). Sharing a note with the DM notifies them
+        (it shows in their notification bell) and lands under their &quot;Shared with me&quot;; shared-with-party notes
+        appear on entity pages for everyone.
       </p>
 
       {pendingDelete && (

@@ -176,6 +176,7 @@ export default function NpcListPage() {
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
+                  {isDm && npc.hidden && <Chip variant="failed">🙈 Hidden</Chip>}
                   {isDm && npc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   {locationName(npc.locationId) && (
                     <span className="text-[11px] text-slate-500 ml-auto">{locationName(npc.locationId)}</span>

@@ -6,7 +6,7 @@ import type { Quest, QuestObjective, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { quests, questObjectives, npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import { redactSecret, redactSecrets } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -29,6 +29,7 @@ export function toDomain(row: typeof quests.$inferSelect): Quest {
     giverNpcId: row.giverNpcId,
     reward: row.reward,
     dmSecret: row.dmSecret,
+    hidden: row.hidden,
     sortOrder: row.sortOrder,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -63,7 +64,8 @@ export class QuestsService {
       .from(quests)
       .where(eq(quests.campaignId, campaignId))
       .orderBy(asc(quests.sortOrder), asc(quests.id));
-    return redactSecrets(rows.map(toDomain), role);
+    // Drop hidden quests wholesale for non-DM BEFORE redacting dmSecret (issue #42).
+    return redactSecrets(filterHidden(rows.map(toDomain), role), role);
   }
 
   async listForCampaignByStatus(campaignId: number, status: string | undefined, role: Role): Promise<Quest[]> {
@@ -110,7 +112,11 @@ export class QuestsService {
 
   async getOrThrow(id: number, role: Role): Promise<Quest> {
     const row = await this.getRowOrThrow(id);
-    return redactSecret(toDomain(row), role);
+    const quest = toDomain(row);
+    // A hidden quest must be indistinguishable from a nonexistent one for non-DM —
+    // 404 (not 403), so its very existence isn't leaked (issue #42).
+    if (!isVisibleTo(quest, role)) throw new NotFoundException(`Quest ${id} not found`);
+    return redactSecret(quest, role);
   }
 
   async getWithObjectivesOrThrow(id: number, role: Role) {
@@ -195,6 +201,7 @@ export class QuestsService {
         giverNpcId: input.giverNpcId ?? null,
         reward: input.reward ?? '',
         dmSecret: input.dmSecret ?? '',
+        hidden: input.hidden ?? false,
         sortOrder: input.sortOrder ?? 0,
         createdAt: ts,
         updatedAt: ts,

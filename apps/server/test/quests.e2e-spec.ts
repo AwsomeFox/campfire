@@ -121,6 +121,53 @@ describe('quests (e2e)', () => {
     }
   });
 
+  // Entity-level secrecy (issue #42): a hidden quest is excluded WHOLESALE from
+  // non-DM reads (not merely dmSecret-redacted), and the DM reveals it by patching
+  // hidden=false.
+  it('hidden quest is absent for player/viewer, visible to dm, and reveal makes it appear', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Unrevealed Plot', body: 'players should not see this yet', hidden: true });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.hidden).toBe(true);
+    const hiddenId = createRes.body.id;
+
+    // DM sees it in the list and by id
+    const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(dm);
+    expect(dmList.body.some((q: { id: number }) => q.id === hiddenId)).toBe(true);
+    const dmGet = await request(server).get(`/api/v1/quests/${hiddenId}`).set(dm);
+    expect(dmGet.status).toBe(200);
+
+    // Player & viewer: absent from the list entirely
+    const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(player);
+    expect(playerList.body.some((q: { id: number }) => q.id === hiddenId)).toBe(false);
+    const viewerList = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(viewer);
+    expect(viewerList.body.some((q: { id: number }) => q.id === hiddenId)).toBe(false);
+
+    // ...and a direct GET 404s (existence not leaked, not 403)
+    const playerGet = await request(server).get(`/api/v1/quests/${hiddenId}`).set(player);
+    expect(playerGet.status).toBe(404);
+    const viewerGet = await request(server).get(`/api/v1/quests/${hiddenId}`).set(viewer);
+    expect(viewerGet.status).toBe(404);
+
+    // ...and excluded from the campaign summary too
+    const playerSummary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+    expect(playerSummary.body.quests.some((q: { id: number }) => q.id === hiddenId)).toBe(false);
+
+    // DM reveals it (hidden=false) -> now visible to players
+    const reveal = await request(server).patch(`/api/v1/quests/${hiddenId}`).set(dm).send({ hidden: false });
+    expect(reveal.status).toBe(200);
+    expect(reveal.body.hidden).toBe(false);
+
+    const playerGetAfter = await request(server).get(`/api/v1/quests/${hiddenId}`).set(player);
+    expect(playerGetAfter.status).toBe(200);
+    const playerListAfter = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(player);
+    expect(playerListAfter.body.some((q: { id: number }) => q.id === hiddenId)).toBe(true);
+  });
+
   it('viewer cannot create quest (403) but can post inbox', async () => {
     const server = ctx.app.getHttpServer();
 

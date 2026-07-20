@@ -75,6 +75,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [togglingHidden, setTogglingHidden] = useState(false);
 
   // Objectives being toggled right now (keyed by objective id). Guards against the
   // optimistic-update race where a fast double-toggle could roll back to the wrong
@@ -240,6 +241,20 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     }
   }
 
+  // Entity-level secrecy (issue #42): reveal/hide the whole quest from players.
+  async function toggleHidden() {
+    if (!quest) return;
+    setTogglingHidden(true);
+    try {
+      const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: !quest.hidden });
+      setQuest({ ...quest, ...updated });
+    } catch {
+      setError(quest.hidden ? "Couldn't reveal this quest." : "Couldn't hide this quest.");
+    } finally {
+      setTogglingHidden(false);
+    }
+  }
+
   async function saveDmSecret() {
     if (!quest) return;
     setSavingDmSecret(true);
@@ -319,9 +334,19 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 style={{ margin: 0 }}>{quest.title}</h3>
         <Chip variant={statusVariant(quest.status)}>{capitalize(quest.status)}</Chip>
+        {isDm && quest.hidden && <Chip variant="failed">🙈 Hidden from players</Chip>}
         {isDm && (
           <>
             <div style={{ flex: 1 }} />
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              disabled={togglingHidden}
+              onClick={toggleHidden}
+              title={quest.hidden ? 'Make this quest visible to players' : 'Hide this quest from players'}
+            >
+              {togglingHidden ? '…' : quest.hidden ? '👁 Reveal' : '🙈 Hide'}
+            </Btn>
             <Btn
               ghost
               className="!min-h-0 !py-1.5 text-xs"
@@ -632,6 +657,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
   const [reward, setReward] = useState('');
   const [giverNpcId, setGiverNpcId] = useState<string>('');
   const [parent, setParent] = useState<string>(parentId ?? '');
+  const [hidden, setHidden] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -697,6 +723,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
         reward,
         giverNpcId: giverNpcId ? Number(giverNpcId) : null,
         parentId: parent ? Number(parent) : null,
+        hidden,
       });
       navigate(`/c/${campaignId}/quests/${created.id}`);
     } catch {
@@ -760,6 +787,10 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                   ))}
                 </select>
               </div>
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                <input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} />
+                <span>🙈 Hidden from players (reveal later)</span>
+              </label>
               <div className="flex justify-end gap-2 pt-2">
                 <Btn ghost onClick={() => navigate(-1)}>
                   Cancel
