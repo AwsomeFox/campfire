@@ -1,12 +1,25 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import request from 'supertest';
 import JSZip from 'jszip';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+
+// Minimal valid 1x1 PNG (smallest possible real PNG payload) — matches the fixture
+// used in attachments.e2e-spec.ts.
+const TINY_PNG = Buffer.from(
+  '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+    '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+  'hex',
+);
 
 describe('export (e2e, real cookie sessions)', () => {
   let ctx: TestAppContext;
   let dmAgent: ReturnType<typeof request.agent>;
   let playerAgent: ReturnType<typeof request.agent>;
   let campaignId: number;
+  let mapAttachmentId: number;
+  let portraitAttachmentId: number;
+  let portraitCharacterId: number;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -48,6 +61,25 @@ describe('export (e2e, real cookie sessions)', () => {
     await dmAgent
       .post(`/api/v1/encounters/${encounterId}/combatants`)
       .send({ kind: 'monster', name: 'Bridge Troll', hpMax: 40 });
+
+    // Issue #87: attachments (map + portrait) must be embedded in the export, and
+    // their references (campaign.mapAttachmentId, character.portraitUrl) must resolve.
+    const mapUpload = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'map')
+      .attach('file', TINY_PNG, { filename: 'overworld.png', contentType: 'image/png' });
+    mapAttachmentId = mapUpload.body.id;
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ mapAttachmentId });
+
+    const portraitUpload = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'portrait')
+      .attach('file', TINY_PNG, { filename: 'hero.png', contentType: 'image/png' });
+    portraitAttachmentId = portraitUpload.body.id;
+    const portraitCharRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'Portrait Hero', portraitUrl: `/api/v1/attachments/${portraitAttachmentId}/file` });
+    portraitCharacterId = portraitCharRes.body.id;
   });
 
   afterAll(async () => {
@@ -85,6 +117,27 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(encounter.name).toBe('Ambush at the Bridge');
     expect(Array.isArray(encounter.combatants)).toBe(true);
     expect(encounter.combatants.some((c: { name: string }) => c.name === 'Bridge Troll')).toBe(true);
+
+    // Issue #87: attachments are represented as a metadata manifest whose ids the
+    // campaign map / character portraits reference; a note documents the shape.
+    expect(Array.isArray(res.body.attachments)).toBe(true);
+    expect(res.body.attachments.length).toBe(2);
+    expect(typeof res.body.attachmentsNote).toBe('string');
+
+    const mapEntry = res.body.attachments.find((a: { id: number }) => a.id === mapAttachmentId);
+    expect(mapEntry).toBeDefined();
+    expect(mapEntry.kind).toBe('map');
+    expect(mapEntry.present).toBe(true);
+    expect(mapEntry.file).toBe(`uploads/${mapAttachmentId}.png`);
+    // campaign.mapAttachmentId resolves to an attachment in the manifest.
+    expect(res.body.campaign.mapAttachmentId).toBe(mapAttachmentId);
+
+    const portraitEntry = res.body.attachments.find((a: { id: number }) => a.id === portraitAttachmentId);
+    expect(portraitEntry).toBeDefined();
+    expect(portraitEntry.kind).toBe('portrait');
+    // character.portraitUrl ends in the manifest entry's fileRoute.
+    const hero = res.body.characters.find((c: { id: number }) => c.id === portraitCharacterId);
+    expect(hero.portraitUrl.endsWith(portraitEntry.fileRoute)).toBe(true);
   });
 
   it('403 for player (non-dm)', async () => {
@@ -128,5 +181,98 @@ describe('export (e2e, real cookie sessions)', () => {
     const characterContent = await characterFile!.async('string');
     expect(characterContent).toContain('## DM Secret');
     expect(characterContent).toContain('secretly cursed');
+
+    // Issue #87: the zip embeds the actual attachment bytes under uploads/ and the
+    // exact bytes round-trip (not a dangling reference).
+    const mapFile = zip.file(`uploads/${mapAttachmentId}.png`);
+    expect(mapFile).not.toBeNull();
+    const mapBytes = await mapFile!.async('nodebuffer');
+    expect(Buffer.compare(mapBytes, TINY_PNG)).toBe(0);
+
+    const portraitFile = zip.file(`uploads/${portraitAttachmentId}.png`);
+    expect(portraitFile).not.toBeNull();
+    const portraitBytes = await portraitFile!.async('nodebuffer');
+    expect(Buffer.compare(portraitBytes, TINY_PNG)).toBe(0);
+
+    // A manifest cross-references each attachment to what points at it.
+    const manifestFile = zip.file('attachments.md');
+    expect(manifestFile).not.toBeNull();
+    const manifest = await manifestFile!.async('string');
+    expect(manifest).toContain('# Attachments');
+    expect(manifest).toContain('campaign map');
+    expect(manifest).toContain('portrait: Portrait Hero');
+  });
+});
+
+// Issue #87: a missing on-disk file must be skipped (flagged, not fatal — the
+// row-without-file shape from #84), leaving the rest of the export intact.
+describe('export attachments — missing file is skipped, not fatal (e2e)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let goodId: number;
+  let orphanId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'orphan-dm', password: 'dm-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Orphan Campaign' });
+    campaignId = campRes.body.id;
+
+    const good = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'image')
+      .attach('file', TINY_PNG, { filename: 'present.png', contentType: 'image/png' });
+    goodId = good.body.id;
+
+    const orphan = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'image')
+      .attach('file', TINY_PNG, { filename: 'gone.png', contentType: 'image/png' });
+    orphanId = orphan.body.id;
+
+    // Simulate a row-without-file: delete just the bytes on disk, leave the DB row.
+    const dataDir = process.env.DATA_DIR ?? path.resolve(process.cwd(), 'data');
+    const orphanPath = path.join(dataDir, 'uploads', String(campaignId), `${orphanId}.png`);
+    fs.rmSync(orphanPath, { force: true });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('json export flags the missing file as present=false but still lists it', async () => {
+    const res = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
+    expect(res.status).toBe(200);
+    const good = res.body.attachments.find((a: { id: number }) => a.id === goodId);
+    const orphan = res.body.attachments.find((a: { id: number }) => a.id === orphanId);
+    expect(good.present).toBe(true);
+    expect(orphan.present).toBe(false);
+  });
+
+  it('mdzip skips the missing file (no crash), embeds the present one, records the skip', async () => {
+    const res = await dmAgent
+      .get(`/api/v1/campaigns/${campaignId}/export?format=mdzip`)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+    expect(res.status).toBe(200);
+    const zip = await JSZip.loadAsync(res.body as Buffer);
+
+    // Present file is embedded; the orphan is absent.
+    expect(zip.file(`uploads/${goodId}.png`)).not.toBeNull();
+    expect(zip.file(`uploads/${orphanId}.png`)).toBeNull();
+
+    // The skip is recorded in the manifest, so the loss is visible, not silent.
+    const manifest = await zip.file('attachments.md')!.async('string');
+    expect(manifest).toContain('Skipped');
+    expect(manifest).toContain(String(orphanId));
   });
 });

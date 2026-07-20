@@ -68,7 +68,8 @@ export class ProposalRecordsService {
   ): Promise<Proposal> {
     // Capture the target's current state so the DM review UI can show a real
     // before/after diff (issue #3). Creates have no "before"; snapshot stays null.
-    const snapshot = action === 'update' && entityId !== null ? await this.snapshotEntity(entityType, entityId) : null;
+    // Deletes snapshot too, so the DM can see exactly what would be removed.
+    const snapshot = action !== 'create' && entityId !== null ? await this.snapshotEntity(entityType, entityId) : null;
 
     const ts = nowIso();
     const [row] = await this.db
@@ -159,6 +160,19 @@ export class ProposalRecordsService {
     const [row] = await this.db.select().from(proposals).where(eq(proposals.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Proposal ${id} not found`);
     return row;
+  }
+
+  /**
+   * Persist an amended payload for a still-pending proposal (edit-before-approve):
+   * the DM tweaked the proposed create/update body at approval time, so the stored
+   * record matches what actually gets applied. Guarded on `status = 'pending'` so a
+   * concurrently-resolved proposal isn't rewritten.
+   */
+  async updatePayload(id: number, payload: Record<string, unknown>): Promise<void> {
+    await this.db
+      .update(proposals)
+      .set({ payload: toJsonText(payload), updatedAt: nowIso() })
+      .where(and(eq(proposals.id, id), eq(proposals.status, 'pending')));
   }
 
   /**
