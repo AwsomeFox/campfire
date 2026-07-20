@@ -360,7 +360,9 @@ function NoteCard({
 }
 
 function entityLabel(note: Note): string {
-  // Server doesn't denormalize entity names onto notes; fall back to type + id.
+  // Server resolves the anchored entity's display name (entityName); fall back to
+  // type + id only when the entity no longer exists (or an older server omits it).
+  if (note.entityName) return note.entityName;
   return note.entityType ? `${capitalize(note.entityType)} #${note.entityId}` : '';
 }
 
