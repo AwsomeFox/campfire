@@ -185,7 +185,6 @@ function migrateApiTokensTableForAdminEnabled(sqlite: Database.Database): void {
 }
 
 /**
-<<<<<<< HEAD
  * Migration for DBs created before proposal before/after diffs:
  * `proposals.snapshot` didn't exist. Plain nullable ADD COLUMN — no table
  * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
