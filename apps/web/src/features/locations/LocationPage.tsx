@@ -218,7 +218,7 @@ export default function LocationPage() {
       {!editing && (
         <>
           <div className="flex items-center gap-2.5 flex-wrap">
-            <h1 className="text-2xl font-extrabold text-white">{location.name}</h1>
+            <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}>{statusLabel[location.status]}</Chip>
             {isDm && nextStatus && (
               <Btn className="!min-h-0 !py-1.5 text-xs" disabled={statusSaving} onClick={() => setStatus(nextStatus)}>

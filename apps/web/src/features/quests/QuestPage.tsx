@@ -296,7 +296,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <h3 style={{ margin: 0 }}>{quest.title}</h3>
+        <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
         <Chip variant={statusVariant(quest.status)}>{capitalize(quest.status)}</Chip>
         {isDm && (
           <>

@@ -265,7 +265,7 @@ export default function RunSessionPage() {
       )}
 
       <div className="flex items-center gap-2.5 flex-wrap">
-        <h1 className="text-2xl font-extrabold text-white m-0">{encounter.name}</h1>
+        <h1 className="text-2xl font-extrabold text-white m-0 min-w-0 break-words">{encounter.name}</h1>
         <span className={STATUS_TAG_CLASS[encounter.status]} style={{ fontSize: 10 }}>
           {STATUS_LABEL[encounter.status]}
         </span>

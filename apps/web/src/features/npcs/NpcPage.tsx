@@ -173,9 +173,9 @@ export default function NpcPage() {
             <div className="h-13 w-13 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0" style={{ height: 52, width: 52 }}>
               {initials(npc.name)}
             </div>
-            <div>
-              <h1 className="text-2xl font-extrabold text-white leading-tight">{npc.name}</h1>
-              {npc.role && <p className="text-sm text-slate-400">{npc.role}</p>}
+            <div className="min-w-0">
+              <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{npc.name}</h1>
+              {npc.role && <p className="text-sm text-slate-400 break-words">{npc.role}</p>}
             </div>
             <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
             {isDm && (
