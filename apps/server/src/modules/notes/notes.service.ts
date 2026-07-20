@@ -104,6 +104,31 @@ export class NotesService {
     }
   }
 
+  /**
+   * A note shared up to the DM (dm_shared) should genuinely reach the DM — the My
+   * Notes copy promises "shared-with-DM notes appear in the DM's scribe view", but
+   * without this the note only sat silently under the DM's "Shared with me" with no
+   * signal (issue #105). Notify every dm-role member (except the author, in case a
+   * dm shares their own note) so it surfaces in their notification bell with an
+   * unread badge. Anchored notes deep-link to the entity; unanchored ones land on
+   * the notes page. Best-effort, like every other notify* emitter.
+   */
+  private async notifyDmsOfSharedNote(row: typeof notes.$inferSelect, user: RequestUser): Promise<void> {
+    if (row.visibility !== 'dm_shared') return;
+    const roles = await this.notifications.memberRoles(row.campaignId);
+    for (const [memberId, memberRole] of roles) {
+      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+      await this.notifications.notifyUser(memberId, row.campaignId, user, {
+        type: 'note_shared',
+        title: `${user.name || 'Someone'} shared a note with you`,
+        body: excerpt(row.body),
+        entityType: (row.entityType as EntityTypeValue | null) ?? null,
+        entityId: row.entityId,
+        actorName: user.name,
+      });
+    }
+  }
+
   async listForCampaign(
     campaignId: number,
     user: RequestUser,
@@ -240,6 +265,7 @@ export class NotesService {
       campaignId,
     });
     await this.notifyThreadAuthors(row, user);
+    await this.notifyDmsOfSharedNote(row, user);
     return this.toDomainWithEntityName(row);
   }
 
@@ -265,6 +291,11 @@ export class NotesService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    // Notify the DM only on the transition into dm_shared (a private/party note the
+    // author just shared up), not on every body edit of an already-shared note.
+    if (row.visibility === 'dm_shared' && existing.visibility !== 'dm_shared') {
+      await this.notifyDmsOfSharedNote(row, user);
+    }
     return this.toDomainWithEntityName(row);
   }
 

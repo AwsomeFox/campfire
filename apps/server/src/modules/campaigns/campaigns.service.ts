@@ -316,6 +316,7 @@ export class CampaignsService {
             locationId: n.locationId != null ? (locMap.get(n.locationId) ?? null) : null,
             body: n.body,
             dmSecret: n.dmSecret,
+            hidden: n.hidden, // entity-level secrecy (issue #42) is preserved on clone
             createdAt: ts,
             updatedAt: ts,
           })
@@ -339,6 +340,7 @@ export class CampaignsService {
             giverNpcId: q.giverNpcId != null ? (npcMap.get(q.giverNpcId) ?? null) : null,
             reward: q.reward,
             dmSecret: q.dmSecret,
+            hidden: q.hidden, // entity-level secrecy (issue #42) is preserved on clone
             sortOrder: q.sortOrder,
             createdAt: ts,
             updatedAt: ts,

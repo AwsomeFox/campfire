@@ -37,6 +37,11 @@ describe('export (e2e, real cookie sessions)', () => {
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .send({ name: 'Cursed Paladin', dmSecret: 'secretly cursed' });
 
+    // Entity-level secrecy (issue #42): a hidden quest/NPC must STILL be present in
+    // the DM's export (the DM sees everything); secrecy gates non-DM reads only.
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Unrevealed Quest', hidden: true });
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({ name: 'Unrevealed NPC', hidden: true });
+
     // Round-2 finding #6: export must include encounters (with combatants).
     const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Ambush at the Bridge' });
     const encounterId = encRes.body.id;
@@ -59,6 +64,12 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.body.quests[0].dmSecret).toBe('the vault code is 1234');
     expect(res.body.npcs[0].dmSecret).toBe('is a dragon');
     expect(res.body.locations[0].dmSecret).toBe('trap inside');
+    // Entity-level secrecy (issue #42): the DM's export still contains the hidden
+    // quest/NPC and the unexplored location — secrecy gates NON-DM reads, not the
+    // DM's own complete export.
+    expect(res.body.quests.some((q: { title: string; hidden: boolean }) => q.title === 'Unrevealed Quest' && q.hidden === true)).toBe(true);
+    expect(res.body.npcs.some((n: { name: string; hidden: boolean }) => n.name === 'Unrevealed NPC' && n.hidden === true)).toBe(true);
+    expect(res.body.locations.some((l: { name: string; status: string }) => l.name === 'Hidden Cave' && l.status === 'unexplored')).toBe(true);
     // Issue #59: characters and sessions carry dmSecret too — included in the dm export.
     expect(res.body.sessions.length).toBe(1);
     expect(res.body.sessions[0].dmSecret).toBe('next week: the betrayal');

@@ -267,6 +267,48 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
       expect(charRes.body.ownerUserId).toBe(String(userD.id));
     });
   });
+
+  // Issue #88: GET /users/lookup used to expose the entire server user table to ANY
+  // authenticated principal (a directory-enumeration oracle feeding the login/timing
+  // attack). It now only serves the flow it exists for — a dm resolving a username to
+  // add someone to their campaign — so it is gated to a dm-of-any-campaign or a server
+  // admin. userA is a dm (created a campaign); userB is only a player; adminAgent is a
+  // server admin who dms no campaign userA/B share.
+  describe('Issue #88: /users/lookup is not a server-wide enumeration oracle', () => {
+    it('a plain player cannot enumerate the user directory (403)', async () => {
+      const res = await userB.get('/api/v1/users/lookup').query({ query: 'user' });
+      expect(res.status).toBe(403);
+    });
+
+    it("a player cannot enumerate accounts they share no campaign with — e.g. the admin (403)", async () => {
+      const res = await userB.get('/api/v1/users/lookup').query({ query: 'root-admin' });
+      expect(res.status).toBe(403);
+    });
+
+    it('a dm (add-member flow) resolves a username to an id — the flow still works', async () => {
+      const res = await userA.get('/api/v1/users/lookup').query({ query: 'user-b' });
+      expect(res.status).toBe(200);
+      const hit = res.body.find((u: { username: string }) => u.username === 'user-b');
+      expect(hit).toBeDefined();
+      expect(hit.id).toBe(userBId);
+
+      // ...and the resolved id feeds the dm-gated add-member endpoint (Nest POST=201).
+      const other = await userA.post('/api/v1/campaigns').send({ name: 'Lookup add-member target' });
+      const addRes = await userA.post(`/api/v1/campaigns/${other.body.id}/members`).send({ userId: hit.id, role: 'player' });
+      expect(addRes.status).toBe(201);
+    });
+
+    it('a server admin may use the lookup (user management)', async () => {
+      const res = await adminAgent.get('/api/v1/users/lookup').query({ query: 'user-a' });
+      expect(res.status).toBe(200);
+      expect(res.body.some((u: { username: string }) => u.username === 'user-a')).toBe(true);
+    });
+
+    it('a dm with too-short a query still gets the 400 (authz passes first, then validation)', async () => {
+      const res = await userA.get('/api/v1/users/lookup').query({ query: 'a' });
+      expect(res.status).toBe(400);
+    });
+  });
 });
 
 /**
