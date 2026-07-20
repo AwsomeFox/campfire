@@ -748,8 +748,8 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
         hidden,
       });
       navigate(`/c/${campaignId}/quests/${created.id}`);
-    } catch {
-      setSaveError("Couldn't create the quest.");
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : "Couldn't create the quest.");
     } finally {
       setSaving(false);
     }
@@ -768,7 +768,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
             <div className="space-y-3">
               <div className="space-y-1">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Title</label>
-                <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Quest title…" />
+                <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Quest title…" maxLength={200} />
               </div>
               <div className="space-y-1">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Body</label>
