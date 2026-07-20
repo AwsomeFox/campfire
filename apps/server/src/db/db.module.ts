@@ -350,7 +350,10 @@ export function createDb(): DrizzleDb {
   migrateEncountersTableForCurrentCombatant(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
-  // after the rebuild is safe and keeps idx_users_oidc_sub in sync.
+  // after the rebuild is safe and keeps idx_users_oidc_sub in sync. This is
+  // also how index-only migrations reach existing DBs: e.g. #74's
+  // idx_audit_campaign_id_desc / idx_audit_created_at are picked up on the
+  // next boot with no bespoke ALTER migration needed.
   ruleEntriesFtsAvailable = setupRuleEntriesFts(sqlite);
 
   return drizzle(sqlite, { schema });
