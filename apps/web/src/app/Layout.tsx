@@ -331,6 +331,7 @@ export function Layout() {
         { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
         { key: 'inventory', label: 'Inventory', to: `/c/${campaignId}/inventory` },
         { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
+        { key: 'timeline', label: 'Timeline', to: `/c/${campaignId}/timeline` },
         { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
         { key: 'compendium', label: 'Compendium', to: `/c/${campaignId}/compendium` },
         { key: 'notes', label: 'My Notes', to: `/c/${campaignId}/notes` },
@@ -424,7 +425,7 @@ export function Layout() {
           <nav className="flex flex-col gap-0.5 mt-1">
             {isAdmin && (
               <SidebarNavButton
-                item={{ key: 'admin', label: 'Admin', to: '/admin' }}
+                item={{ key: 'admin', label: 'Server admin', to: '/admin' }}
                 active={location.pathname === '/admin'}
               />
             )}
@@ -676,7 +677,7 @@ function MoreSheet({
             <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
           ))}
           {isAdmin && (
-            <MoreSheetItem item={{ key: 'admin', label: 'Admin', to: '/admin' }} onNavigate={onClose} />
+            <MoreSheetItem item={{ key: 'admin', label: 'Server admin', to: '/admin' }} onNavigate={onClose} />
           )}
           <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={onClose} />
           <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={onClose} />

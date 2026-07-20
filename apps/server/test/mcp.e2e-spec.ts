@@ -820,6 +820,44 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(false);
   });
 
+  it('get_session_recaps / read_audit_log push limit/offset into SQL (issue #71)', async () => {
+    const client = await mcpClient(dmToken);
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Paging' });
+    const pagingCampaign = campRes.body.id as number;
+
+    // Three recaps — numbers auto-assign 1,2,3 on a fresh campaign.
+    for (let n = 1; n <= 3; n++) {
+      const r = await client.callTool({ name: 'add_session_recap', arguments: { campaignId: pagingCampaign, recap: `recap ${n}` } });
+      expect(r.isError).toBeFalsy();
+    }
+
+    const all = parseResult(
+      await client.callTool({ name: 'get_session_recaps', arguments: { campaignId: pagingCampaign } }),
+    ) as Array<{ number: number; recap: string }>;
+    expect(all.map((s) => s.number)).toEqual([3, 2, 1]); // newest-first
+    expect(all[0].recap).toBe('recap 3'); // full recap body — this tool keeps the whole thing
+
+    const limited = parseResult(
+      await client.callTool({ name: 'get_session_recaps', arguments: { campaignId: pagingCampaign, limit: 2 } }),
+    ) as Array<{ number: number }>;
+    expect(limited.map((s) => s.number)).toEqual([3, 2]);
+
+    const offsetPage = parseResult(
+      await client.callTool({ name: 'get_session_recaps', arguments: { campaignId: pagingCampaign, limit: 2, offset: 2 } }),
+    ) as Array<{ number: number }>;
+    expect(offsetPage.map((s) => s.number)).toEqual([1]);
+
+    // read_audit_log now accepts offset too — page back through the log.
+    const auditAll = parseResult(
+      await client.callTool({ name: 'read_audit_log', arguments: { campaignId: pagingCampaign } }),
+    ) as Array<{ id: number }>;
+    expect(auditAll.length).toBeGreaterThan(2);
+    const auditPage = parseResult(
+      await client.callTool({ name: 'read_audit_log', arguments: { campaignId: pagingCampaign, limit: 2, offset: 1 } }),
+    ) as Array<{ id: number }>;
+    expect(auditPage.map((r) => r.id)).toEqual(auditAll.slice(1, 3).map((r) => r.id));
+  });
+
   it('resources/list exposes the static index + a summary/party/recaps URI per accessible campaign (issue #26)', async () => {
     const client = await mcpClient(dmToken);
 

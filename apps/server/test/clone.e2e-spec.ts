@@ -110,7 +110,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     // Sessions and characters copied.
     const sessions = await dmAgent.get(`/api/v1/campaigns/${clone.id}/sessions`);
     expect(sessions.body.length).toBe(1);
-    expect(sessions.body[0].recap).toBe('The party arrived.');
+    // The list is list-shape now (issue #71): a recapExcerpt, not the full recap
+    // body — for this short recap the excerpt is the whole thing.
+    expect(sessions.body[0].recapExcerpt).toBe('The party arrived.');
+    expect(sessions.body[0].recap).toBeUndefined();
     const chars = await dmAgent.get(`/api/v1/campaigns/${clone.id}/characters`);
     expect(chars.body.length).toBe(1);
     expect(chars.body[0].name).toBe('Hero');

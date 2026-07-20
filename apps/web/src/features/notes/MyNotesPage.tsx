@@ -13,6 +13,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote, type ChipVariant } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from './EntityPicker';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
@@ -372,7 +373,7 @@ function NoteCard({
 
   return (
     <div className="cf-card p-4 space-y-2">
-      <p className="text-sm text-slate-100 whitespace-pre-wrap m-0">{note.body}</p>
+      <Markdown className="text-slate-100">{note.body}</Markdown>
       <div className="flex items-center gap-2 flex-wrap">
         {editable ? (
           <button onClick={onCycleVisibility} className="cf-chip" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>

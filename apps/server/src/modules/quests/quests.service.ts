@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { and, asc, eq, max } from 'drizzle-orm';
+import { and, asc, eq, inArray, max } from 'drizzle-orm';
 import type { z } from 'zod';
 import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch, ObjectiveReorder } from '@campfire/schema';
 import type { Quest, QuestObjective, Role } from '@campfire/schema';
@@ -125,13 +125,31 @@ export class QuestsService {
     return { since, quests: changed };
   }
 
+  /**
+   * Embed each quest's objectives WITHOUT an N+1 (#72): the previous version ran
+   * one objectives query per quest — O(quests) round-trips on the single most-called
+   * aggregate (summary + quest board). Now a single `WHERE quest_id IN (...)` pulls
+   * every objective for the whole list, and we group in JS by questId. The global
+   * ORDER BY (sortOrder, id) preserves each quest's per-objective ordering because
+   * grouping keeps the rows' relative order — identical output to the old per-quest
+   * `objectivesForQuest` query, just batched.
+   */
   private async embedObjectives(questList: Quest[]) {
-    const results = [];
-    for (const q of questList) {
-      const objectives = await this.objectivesForQuest(q.id);
-      results.push({ ...q, objectives });
+    if (questList.length === 0) return [];
+    const questIds = questList.map((q) => q.id);
+    const rows = await this.db
+      .select()
+      .from(questObjectives)
+      .where(inArray(questObjectives.questId, questIds))
+      .orderBy(asc(questObjectives.sortOrder), asc(questObjectives.id));
+    const byQuest = new Map<number, QuestObjective[]>();
+    for (const row of rows) {
+      const objective = objectiveToDomain(row);
+      const bucket = byQuest.get(objective.questId);
+      if (bucket) bucket.push(objective);
+      else byQuest.set(objective.questId, [objective]);
     }
-    return results;
+    return questList.map((q) => ({ ...q, objectives: byQuest.get(q.id) ?? [] }));
   }
 
   private async objectivesForQuest(questId: number): Promise<QuestObjective[]> {
