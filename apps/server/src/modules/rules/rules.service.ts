@@ -1,6 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, sql } from 'drizzle-orm';
-import type { RuleEntry, RuleEntryType, RulePack, RulePackInstall } from '@campfire/schema';
+import {
+  isOpenLicense,
+  type RuleEntry,
+  type RuleEntryType,
+  type RulePack,
+  type RulePackInstall,
+  type RulePackInstallJob,
+  type RulePackUpload,
+} from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
 import { rulePacks, ruleEntries, combatants } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -11,7 +20,6 @@ import {
   ALL_OPEN5E_SECTIONS,
   MAX_ENTRIES_PER_SECTION,
   OPEN5E_DEFAULT_BASE_URL,
-  entryTypeForSection,
   fetchOpen5eSection,
   type ImportedEntry,
   type Open5eSection,
@@ -94,11 +102,163 @@ function toFtsQuery(q: string): string {
 
 @Injectable()
 export class RulesService {
+  /**
+   * In-memory registry of background install jobs (issue #20). Campfire is a
+   * single-node SQLite app, so an in-process map is sufficient — job state is
+   * ephemeral progress, not durable data, and a restart simply drops in-flight
+   * jobs (their DB writes are transactional and already committed by section).
+   * Completed/failed jobs are pruned lazily once past PRUNE_AFTER_MS so the map
+   * can't grow without bound over a long-lived server.
+   */
+  private readonly jobs = new Map<string, RulePackInstallJob>();
+  private static readonly PRUNE_AFTER_MS = 60 * 60 * 1000; // 1h
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     @Inject(RULE_ENTRIES_FTS_AVAILABLE) private readonly ftsAvailable: boolean,
     private readonly audit: AuditService,
   ) {}
+
+  // ---------- background install jobs (issue #20) ----------
+
+  getJobOrThrow(id: string): RulePackInstallJob {
+    const job = this.jobs.get(id);
+    if (!job) throw new NotFoundException(`Install job ${id} not found`);
+    return { ...job, progress: job.progress.map((p) => ({ ...p })) };
+  }
+
+  private newJob(source: 'open5e' | 'upload', sections: string[]): RulePackInstallJob {
+    this.pruneOldJobs();
+    const ts = nowIso();
+    const job: RulePackInstallJob = {
+      id: randomUUID(),
+      source,
+      status: 'pending',
+      progress: sections.map((s) => ({ section: s, status: 'pending', imported: 0 })),
+      totalSections: sections.length,
+      completedSections: 0,
+      outcome: null,
+      pack: null,
+      added: null,
+      skippedExisting: null,
+      error: null,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    this.jobs.set(job.id, job);
+    return job;
+  }
+
+  private markSectionDone(jobId: string, section: string, imported: number): void {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+    const row = job.progress.find((p) => p.section === section);
+    if (row) {
+      row.status = 'done';
+      row.imported = imported;
+    }
+    job.completedSections = job.progress.filter((p) => p.status === 'done').length;
+    job.updatedAt = nowIso();
+  }
+
+  /**
+   * Runs one enqueued install in the background. `work` performs the actual
+   * fetch+persist (installFromOpen5e / installFromUpload) and returns the
+   * resulting pack, incremental installs additionally carrying added/skipped.
+   * All progress is reflected on the job so the UI can poll it — the request
+   * that enqueued the job has already returned 202 by the time this runs.
+   */
+  private async runJob(
+    jobId: string,
+    work: () => Promise<RulePack & { added?: number; skippedExisting?: number }>,
+  ): Promise<void> {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+    job.status = 'running';
+    job.progress.forEach((p) => {
+      if (p.status === 'pending') p.status = 'running';
+    });
+    job.updatedAt = nowIso();
+
+    try {
+      const result = await work();
+      const isIncremental = 'added' in result;
+      const { added, skippedExisting, ...pack } = result as RulePack & { added?: number; skippedExisting?: number };
+      const current = this.jobs.get(jobId);
+      if (!current) return;
+      current.status = 'completed';
+      current.outcome = isIncremental ? 'updated' : 'created';
+      current.pack = pack;
+      current.added = added ?? null;
+      current.skippedExisting = skippedExisting ?? null;
+      current.progress.forEach((p) => {
+        if (p.status !== 'done') p.status = 'done';
+      });
+      current.completedSections = current.progress.length;
+      current.updatedAt = nowIso();
+    } catch (err) {
+      const current = this.jobs.get(jobId);
+      if (!current) return;
+      current.status = 'failed';
+      current.error = err instanceof Error ? err.message : String(err);
+      current.progress.forEach((p) => {
+        if (p.status !== 'done') p.status = 'failed';
+      });
+      current.updatedAt = nowIso();
+    }
+  }
+
+  private pruneOldJobs(): void {
+    const cutoff = Date.now() - RulesService.PRUNE_AFTER_MS;
+    for (const [id, job] of this.jobs) {
+      if ((job.status === 'completed' || job.status === 'failed') && new Date(job.updatedAt).getTime() < cutoff) {
+        this.jobs.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Enqueue an Open5e install as a background job (issue #20). Returns immediately
+   * with a 'pending' job snapshot; the heavy paginated fetch + insert runs in
+   * runJob(), updating per-section progress the caller can poll.
+   */
+  enqueueOpen5eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const sections: Open5eSection[] = input.sections?.length ? (input.sections as Open5eSection[]) : ALL_OPEN5E_SECTIONS;
+    const job = this.newJob('open5e', sections);
+    // Defer to a microtask so this method returns the 'pending' snapshot before any
+    // work (or DB writes) begin — the POST is truly non-blocking (issue #20).
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromOpen5e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue a generic uploaded-dataset install as a background job (issues #19 + #20).
+   * License open-ness is validated synchronously here so a bad-license upload gets a
+   * clean 400 at the POST rather than a failed job the caller must poll to discover.
+   */
+  enqueueUploadInstall(input: RulePackUpload, user: RequestUser): RulePackInstallJob {
+    this.assertOpenLicense(input.pack.license);
+    const types = [...new Set(input.entries.map((e) => e.type))];
+    const job = this.newJob('upload', types);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromUpload(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  private assertOpenLicense(license: string): void {
+    if (!isOpenLicense(license)) {
+      throw new BadRequestException(
+        `License "${license}" is not a recognized open license. Uploaded rule packs must be OGL, ORC, Creative Commons, or public domain — copyrighted or purchased content cannot be uploaded.`,
+      );
+    }
+  }
 
   async listPacks(): Promise<RulePack[]> {
     const rows = await this.db.select().from(rulePacks);
@@ -137,14 +297,24 @@ export class RulesService {
    * call is retried once as an incremental install against the now-existing row, so
    * concurrent installs converge to one 201 and the rest clean 200/409s — never a raw 500.
    */
-  async installFromOpen5e(input: RulePackInstall, user: RequestUser): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  async installFromOpen5e(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? OPEN5E_DEFAULT_BASE_URL;
     const sections: Open5eSection[] = input.sections?.length ? (input.sections as Open5eSection[]) : ALL_OPEN5E_SECTIONS;
     const slug = 'open5e-srd';
 
-    const [existing] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).limit(1);
-
-    const sectionResults = await Promise.all(sections.map((s) => fetchOpen5eSection(baseUrl, s)));
+    // Fetch sections concurrently (as before), but report each section's imported
+    // count as its fetch resolves so a polling job (issue #20) shows live progress.
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchOpen5eSection(baseUrl, s);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
     const allEntries = sectionResults.flatMap((r) => r.entries);
     const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
     if (allEntries.length === 0) {
@@ -157,32 +327,101 @@ export class RulesService {
       );
     }
 
-    if (existing) {
-      return this.addEntriesToExistingPack(existing, allEntries, sections, user);
-    }
-
     const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
     const license = licenses.size > 0 ? [...licenses].join(', ') : 'OGL/CC';
-    const ts = nowIso();
 
+    return this.persistPack(
+      { slug, name: 'Open5e SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
+      allEntries,
+      user,
+      `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs a generic uploaded rule pack (issue #19): an open-licensed JSON dataset
+   * for any system (Pathfinder 2e ORC, other OGL/CC content, homebrew), not just
+   * Open5e. Reuses the same persistence path as the Open5e importer, so multi-pack
+   * coexistence, incremental adds, and the concurrent-install race guard all apply
+   * identically. License open-ness is (re)validated here as defense-in-depth; the
+   * enqueue path already rejected a non-open license with a 400.
+   */
+  async installFromUpload(
+    input: RulePackUpload,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    this.assertOpenLicense(input.pack.license);
+
+    const entries: ImportedEntry[] = input.entries.map((e) => ({
+      slug: e.slug,
+      name: e.name,
+      type: e.type,
+      summary: e.summary ?? '',
+      body: e.body ?? '',
+      dataJson: e.dataJson ?? null,
+      license: e.license ?? input.pack.license,
+    }));
+
+    // Report per-type import counts for progress (uploads have no network fetch, so
+    // this is effectively instantaneous, but keeps the job's progress shape uniform).
+    const byType = new Map<string, number>();
+    for (const e of entries) byType.set(e.type, (byType.get(e.type) ?? 0) + 1);
+    for (const [type, count] of byType) onSectionDone?.(type, count);
+
+    return this.persistPack(
+      {
+        slug: input.pack.slug,
+        name: input.pack.name,
+        version: input.pack.version || nowIso().slice(0, 10),
+        license: input.pack.license,
+        sourceUrl: input.pack.sourceUrl ?? '',
+        sectionLabels: [...byType.keys()],
+      },
+      entries,
+      user,
+      `upload (${entries.length} entries)`,
+    );
+  }
+
+  /**
+   * Shared persistence for both the Open5e importer and generic uploads: creates the
+   * pack + entries in one transaction, or — if a pack with this slug already exists —
+   * incrementally adds whatever entries aren't present yet (dedupe by slug+type). The
+   * UNIQUE(slug) race between two concurrent fresh installs is absorbed by falling back
+   * to the incremental path, so concurrent installs converge to one 'created' and the
+   * rest 'updated' rather than a raw 500 (see the class docs / issue history).
+   */
+  private async persistPack(
+    meta: { slug: string; name: string; version: string; license: string; sourceUrl: string; sectionLabels: string[] },
+    entries: ImportedEntry[],
+    user: RequestUser,
+    detailSuffix: string,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const [existing] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
+    if (existing) {
+      return this.addEntriesToExistingPack(existing, entries, meta.sectionLabels, user);
+    }
+
+    const ts = nowIso();
     let pack: typeof rulePacks.$inferSelect;
     try {
       pack = this.db.transaction((tx) => {
         const [packRow] = tx
           .insert(rulePacks)
           .values({
-            slug,
-            name: 'Open5e SRD',
-            version: ts.slice(0, 10),
-            license,
-            sourceUrl: baseUrl,
+            slug: meta.slug,
+            name: meta.name,
+            version: meta.version,
+            license: meta.license,
+            sourceUrl: meta.sourceUrl,
             installedAt: ts,
-            entryCount: allEntries.length,
+            entryCount: entries.length,
           })
           .returning()
           .all();
 
-        for (const entry of allEntries) {
+        for (const entry of entries) {
           tx.insert(ruleEntries)
             .values({
               packId: packRow.id,
@@ -205,9 +444,9 @@ export class RulesService {
       // Lost a race with a concurrent fresh install that committed between our
       // existence check and our INSERT — the pack now exists, so fall back to the
       // incremental path against it instead of surfacing a raw 500.
-      const [raced] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).limit(1);
+      const [raced] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
       if (!raced) throw err; // shouldn't happen, but don't swallow a genuine failure
-      return this.addEntriesToExistingPack(raced, allEntries, sections, user);
+      return this.addEntriesToExistingPack(raced, entries, meta.sectionLabels, user);
     }
 
     await this.audit.log({
@@ -216,7 +455,7 @@ export class RulesService {
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: pack.id,
-      detail: `${allEntries.length} entries from ${sections.join(',')} (cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      detail: `${entries.length} entries from ${meta.sectionLabels.join(',')} ${detailSuffix}`,
     });
 
     return packToDomain(pack);
@@ -232,7 +471,7 @@ export class RulesService {
   private async addEntriesToExistingPack(
     packRow: typeof rulePacks.$inferSelect,
     fetchedEntries: ImportedEntry[],
-    sections: Open5eSection[],
+    sections: string[],
     user: RequestUser,
   ): Promise<RulePack & { added: number; skippedExisting: number }> {
     const existingRows = await this.db

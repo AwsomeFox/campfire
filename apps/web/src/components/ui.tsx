@@ -2,7 +2,7 @@
  * Campfire UI primitives — mirror the design package (design/tokens.html).
  * Feature screens compose these; do not restyle them locally.
  */
-import { forwardRef, type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { forwardRef, useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <section className={`cf-card p-5 ${className}`}>{children}</section>;
@@ -64,9 +64,25 @@ export function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
 export function HpBar({ current, max }: { current: number; max: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (current / max) * 100)) : 0;
   const tone = pct < 25 ? 'crit' : pct < 50 ? 'low' : '';
+  // Flash + shake on HP change (issue #67). Track the previous value across
+  // renders and fire a one-shot 'damage'/'heal' pulse cleared on animation end.
+  // CSS disables the motion under prefers-reduced-motion; the bar width still
+  // conveys the change, so the feedback is never motion-only.
+  const prev = useRef(current);
+  const [pulse, setPulse] = useState<'damage' | 'heal' | null>(null);
+  useEffect(() => {
+    if (current < prev.current) setPulse('damage');
+    else if (current > prev.current) setPulse('heal');
+    prev.current = current;
+  }, [current]);
+  const flashClass = pulse === 'damage' ? 'cf-hp-flash-damage' : pulse === 'heal' ? 'cf-hp-flash-heal' : '';
   return (
-    <div className={`cf-hp ${tone}`}>
-      <div style={{ width: `${pct}%` }} />
+    <div className={`cf-hp ${tone} ${pulse === 'damage' ? 'cf-anim-hp-damage' : ''}`}>
+      <div
+        className={flashClass}
+        style={{ width: `${pct}%` }}
+        onAnimationEnd={() => setPulse(null)}
+      />
     </div>
   );
 }
