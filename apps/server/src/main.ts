@@ -110,7 +110,24 @@ export function configureApp(app: INestApplication): void {
   }
 
   app.setGlobalPrefix('api/v1', {
-    exclude: ['healthz', 'readyz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
+    exclude: [
+      'healthz',
+      'readyz',
+      'mcp',
+      // MCP OAuth (issue #37): authorization-server + protected-resource metadata
+      // and the OAuth endpoints must live at the application root, not under /api/v1.
+      '.well-known/oauth-protected-resource',
+      '.well-known/oauth-protected-resource/mcp',
+      '.well-known/oauth-authorization-server',
+      '.well-known/oauth-authorization-server/mcp',
+      'oauth/register',
+      'oauth/authorize',
+      'oauth/token',
+      'oauth/revoke',
+      'api/docs',
+      'api/docs-json',
+      'api/openapi.json',
+    ],
   });
 }
 

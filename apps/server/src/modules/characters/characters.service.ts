@@ -21,6 +21,26 @@ type XpPatchInput = z.infer<typeof XpPatch>;
 type XpAwardInput = z.infer<typeof XpAward>;
 type LevelUpInput = z.infer<typeof LevelUp>;
 
+/**
+ * Sane bounds for the two numeric combat fields, shared by every character write
+ * path (create/update/patchHp/levelUp) so they can't drift (issue #112). Previously
+ * `create()` alone wrote `hpCurrent`/`ac` verbatim while `update`/`patchHp`/combatant
+ * HP all clamped, letting a create request persist e.g. hpCurrent:99999 or ac:-50.
+ */
+export const AC_MIN = 0;
+export const AC_MAX = 40; // unarmored 10-ish through the highest achievable armor class
+
+/** Clamp hpCurrent into [0, hpMax] — the invariant every HP-writing path enforces. */
+export function clampHpCurrent(hpCurrent: number, hpMax: number): number {
+  return Math.max(0, Math.min(hpMax, hpCurrent));
+}
+
+/** Bound AC into [AC_MIN, AC_MAX]; null (AC unset) passes through untouched. */
+export function clampAc(ac: number | null | undefined): number | null {
+  if (ac === null || ac === undefined) return null;
+  return Math.max(AC_MIN, Math.min(AC_MAX, ac));
+}
+
 export function toDomain(row: typeof characters.$inferSelect): Character {
   return {
     id: row.id,
@@ -101,7 +121,7 @@ export class CharactersService {
 
     for (const { combatant } of rows) {
       const nextMax = hpMax ?? combatant.hpMax;
-      const nextCurrent = Math.max(0, Math.min(nextMax, hpCurrent));
+      const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
       await this.db
         .update(combatants)
         .set({ hpCurrent: nextCurrent, hpMax: nextMax })
@@ -113,6 +133,11 @@ export class CharactersService {
     const ts = nowIso();
     // player creates own -> ownerUserId=user.id; dm may set ownerUserId explicitly
     const ownerUserId = role === 'dm' ? (input.ownerUserId ?? null) : user.id;
+
+    // Clamp hpCurrent/ac at create time too — mirrors update/patchHp/combatant HP so an
+    // out-of-range create (hpCurrent:99999, ac:-50) can't persist verbatim (issue #112).
+    const hpMax = input.hpMax ?? 10;
+    const hpCurrent = clampHpCurrent(input.hpCurrent ?? 10, hpMax);
 
     const [row] = await this.db
       .insert(characters)
@@ -126,9 +151,9 @@ export class CharactersService {
         xp: input.xp ?? 0,
         background: input.background ?? '',
         stats: toJsonText(normalizeStats(input.stats ?? {})),
-        ac: input.ac ?? null,
-        hpCurrent: input.hpCurrent ?? 10,
-        hpMax: input.hpMax ?? 10,
+        ac: clampAc(input.ac ?? null),
+        hpCurrent,
+        hpMax,
         conditions: toJsonText(input.conditions ?? []),
         saveProficiencies: toJsonText(input.saveProficiencies ?? []),
         skills: toJsonText(input.skills ?? {}),
@@ -168,7 +193,7 @@ export class CharactersService {
     if (input.xp !== undefined) update.xp = input.xp;
     if (input.background !== undefined) update.background = input.background;
     if (input.stats !== undefined) update.stats = toJsonText(normalizeStats(input.stats));
-    if (input.ac !== undefined) update.ac = input.ac;
+    if (input.ac !== undefined) update.ac = clampAc(input.ac);
     if (input.hpMax !== undefined) update.hpMax = input.hpMax;
     // Clamp to [0, finalHpMax] whenever either hp field is touched — mirrors patchHp's
     // clamp (and the combatant equivalent). Without this, PATCHing hpMax below the
@@ -177,7 +202,7 @@ export class CharactersService {
     if (input.hpCurrent !== undefined || input.hpMax !== undefined) {
       const finalHpMax = input.hpMax !== undefined ? input.hpMax : existing.hpMax;
       const rawHpCurrent = input.hpCurrent !== undefined ? input.hpCurrent : existing.hpCurrent;
-      update.hpCurrent = Math.max(0, Math.min(finalHpMax, rawHpCurrent));
+      update.hpCurrent = clampHpCurrent(rawHpCurrent, finalHpMax);
     }
     if (input.conditions !== undefined) update.conditions = toJsonText(input.conditions);
     if (input.saveProficiencies !== undefined) update.saveProficiencies = toJsonText(input.saveProficiencies);
@@ -255,7 +280,7 @@ export class CharactersService {
     } else {
       hpCurrent = patch.set;
     }
-    hpCurrent = Math.max(0, Math.min(hpMax, hpCurrent));
+    hpCurrent = clampHpCurrent(hpCurrent, hpMax);
 
     const [row] = await this.db
       .update(characters)
@@ -363,7 +388,7 @@ export class CharactersService {
     if (input.hpMax !== undefined) {
       const gained = input.hpMax - existing.hpMax;
       update.hpMax = input.hpMax;
-      update.hpCurrent = Math.max(0, Math.min(input.hpMax, existing.hpCurrent + Math.max(0, gained)));
+      update.hpCurrent = clampHpCurrent(existing.hpCurrent + Math.max(0, gained), input.hpMax);
     }
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();

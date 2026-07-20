@@ -135,3 +135,60 @@ export function generateIcsFeedToken(): string {
 export function looksLikeIcsFeedToken(token: string): boolean {
   return /^cf_ics_[0-9a-f]{48}$/.test(token);
 }
+
+/**
+ * MCP OAuth (issue #37) secrets. Campfire acts as a minimal OAuth 2.1
+ * authorization server so `/mcp` can be added as a Claude connector without a
+ * hand-copied PAT. Four opaque token kinds, all following the same storage
+ * policy as PATs/sessions where they are bearer secrets — DB stores sha256, not
+ * the raw value:
+ *  - `cf_client_<32 hex>`  dynamic-client-registration client id (PUBLIC id,
+ *                          stored plaintext — it is not a secret, only an
+ *                          identifier, like an OAuth client_id always is).
+ *  - `cf_csec_<48 hex>`    optional client secret for confidential clients
+ *                          (token_endpoint_auth_method != "none"); sha256-stored.
+ *  - `cf_oac_<48 hex>`     one-time authorization code (short-lived); sha256-stored.
+ *  - `cf_mcp_<48 hex>`     bearer ACCESS token presented on /mcp; sha256-stored.
+ *  - `cf_ref_<48 hex>`     refresh token (rotated on use); sha256-stored.
+ * Access/refresh tokens resolve to the SAME RequestUser + TokenContext model as
+ * a PAT, so every existing scope/role cap (min(scope, membership), campaign
+ * binding) applies unchanged — see OAuthService.resolveAccessToken().
+ */
+export function generateOAuthClientId(): string {
+  return `cf_client_${randomBytes(16).toString('hex')}`;
+}
+
+export function generateOAuthClientSecret(): string {
+  return `cf_csec_${randomBytes(24).toString('hex')}`;
+}
+
+export function generateAuthorizationCode(): string {
+  return `cf_oac_${randomBytes(24).toString('hex')}`;
+}
+
+export function generateOAuthAccessToken(): string {
+  return `cf_mcp_${randomBytes(24).toString('hex')}`;
+}
+
+export function generateOAuthRefreshToken(): string {
+  return `cf_ref_${randomBytes(24).toString('hex')}`;
+}
+
+/** True for the bearer ACCESS-token shape presented on /mcp (`cf_mcp_<48 hex>`). */
+export function looksLikeOAuthAccessToken(token: string): boolean {
+  return /^cf_mcp_[0-9a-f]{48}$/.test(token);
+}
+
+/** Generic sha256(hex) for the OAuth opaque secrets above (same primitive as hashApiToken). */
+export function hashOpaqueToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * RFC 7636 PKCE S256 challenge derivation: BASE64URL(SHA256(ASCII(verifier))),
+ * no padding. Used by the token endpoint to validate a presented code_verifier
+ * against the code_challenge captured at authorization time.
+ */
+export function pkceS256Challenge(verifier: string): string {
+  return createHash('sha256').update(verifier).digest('base64url');
+}
