@@ -62,6 +62,22 @@ export default function SessionsPage() {
     [sessions, selectedId],
   );
 
+  // Auto-open the latest recap when sessions exist but none is selected (or the
+  // URL points at a session that's gone) — otherwise the detail pane sat on a
+  // misleading "No sessions yet" empty state even with sessions in the list.
+  useEffect(() => {
+    if (sessions.length > 0 && !selected) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set('session', String(sessions[0].id));
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [sessions, selected, setSearchParams]);
+
   function selectSession(id: number) {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -206,7 +222,11 @@ export default function SessionsPage() {
             <SessionDetail session={selected} isDm={isDm} onBack={backToList} onChange={load} />
           ) : (
             <Card>
-              <EmptyState title="No sessions yet — add your first recap" hint="Pick a session on the left, or add one below." />
+              {sessions.length > 0 ? (
+                <EmptyState icon="📖" title="Select a session" hint="Pick a recap from the timeline on the left." />
+              ) : (
+                <EmptyState title="No sessions yet — add your first recap" hint="Use “+ Add recap” to log your first session." />
+              )}
             </Card>
           )}
 
