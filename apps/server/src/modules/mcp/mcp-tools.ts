@@ -522,11 +522,14 @@ export class McpToolsService {
     this.tool(
       server,
       'list_proposals',
-      'DM only: list proposals for a campaign, optionally filtered by status (pending|approved|rejected).',
-      { campaignId: CampaignIdArg, status: z.enum(['pending', 'approved', 'rejected']).optional().describe('Filter by status') },
+      'List proposals for a campaign, optionally filtered by status (pending|approved|rejected|withdrawn). The DM ' +
+        'sees ALL proposals; a non-DM member sees only their OWN submissions (proposer self-view, issue #124).',
+      { campaignId: CampaignIdArg, status: z.enum(['pending', 'approved', 'rejected', 'withdrawn']).optional().describe('Filter by status') },
       async ({ campaignId, status }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        return this.proposals.listForCampaign(campaignId as number, status as string | undefined);
+        // Any member may list; the DM sees all, a non-DM member sees only their own.
+        const role = await this.access.requireMember(user, campaignId as number);
+        const opts = role === 'dm' ? undefined : { proposerUserId: user.id };
+        return this.proposals.listForCampaign(campaignId as number, status as string | undefined, opts);
       },
     );
 
@@ -1494,6 +1497,19 @@ export class McpToolsService {
         const row = await this.proposals.getRowOrThrow(proposalId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.proposals.reject(proposalId as number, { note: note as string | undefined }, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'withdraw_proposal',
+      'Withdraw YOUR OWN still-pending proposal before a DM reviews it (issue #124). Only the original proposer may ' +
+        'withdraw; 403 otherwise, 409 if the DM already resolved it. No entity write is applied.',
+      { proposalId: Id.describe('Proposal id') },
+      async ({ proposalId }) => {
+        const row = await this.proposals.getRowOrThrow(proposalId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.proposals.withdraw(proposalId as number, user, role);
       },
     );
 

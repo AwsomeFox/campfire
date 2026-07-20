@@ -70,8 +70,12 @@ export class ProposalsService {
     private readonly characters: CharactersService,
   ) {}
 
-  async listForCampaign(campaignId: number, status: string | undefined): Promise<Proposal[]> {
-    return this.records.listForCampaign(campaignId, status);
+  async listForCampaign(
+    campaignId: number,
+    status: string | undefined,
+    opts?: { proposerUserId?: string },
+  ): Promise<Proposal[]> {
+    return this.records.listForCampaign(campaignId, status, opts);
   }
 
   async latestForCampaign(campaignId: number, limit = 500): Promise<Proposal[]> {
@@ -152,13 +156,21 @@ export class ProposalsService {
       throw new ConflictException(`Proposal ${id} is already ${current.status}`);
     }
 
+    // On a create-proposal, capture the created row's id so we can backfill it onto
+    // the proposal (issue #124) — provenance points at the entity it produced.
+    let createdEntityId: number | null = null;
     try {
       if (action === 'delete') {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (service as any).remove(existing.entityId, user, role);
       } else if (action === 'create') {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (service as any).create(existing.campaignId, validated, user, role);
+        const created = await (service as any).create(existing.campaignId, validated, user, role);
+        if (created && typeof created.id === 'number') {
+          createdEntityId = created.id;
+          // entity_id was null on a create-proposal; backfill it now that the row exists.
+          await this.records.backfillEntityId(id, created.id);
+        }
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (service as any).update(existing.entityId, validated, user, role);
@@ -172,10 +184,6 @@ export class ProposalsService {
       throw err;
     }
 
-    // The claimed row was captured before updatePayload ran, so reflect the amended
-    // payload in the returned proposal (edit-before-approve).
-    if (amended) return { ...resolved, payload: validated! };
-
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -185,7 +193,14 @@ export class ProposalsService {
       campaignId: existing.campaignId,
     });
 
-    return resolved;
+    // The claimed row was captured before updatePayload/backfillEntityId ran, so reflect
+    // both the amended payload (edit-before-approve) and the backfilled entityId in the
+    // returned proposal.
+    return {
+      ...resolved,
+      ...(amended ? { payload: validated! } : {}),
+      ...(createdEntityId !== null ? { entityId: createdEntityId } : {}),
+    };
   }
 
   async reject(id: number, input: ProposalResolveInput, user: RequestUser, role: Role): Promise<Proposal> {
@@ -212,6 +227,69 @@ export class ProposalsService {
     });
 
     return resolved;
+  }
+
+  /**
+   * Withdraw the caller's OWN still-pending proposal (issue #124): the proposer
+   * pulls it before the DM acts. Ownership is enforced two ways — a 403 if the
+   * proposer's user id doesn't match `user`, and the atomic CAS in markWithdrawn
+   * (guarded on both status='pending' and the proposer id) so a concurrent DM
+   * approve/reject wins cleanly (409). No entity write is ever applied.
+   */
+  async withdraw(id: number, user: RequestUser, role: Role): Promise<Proposal> {
+    const existing = await this.records.getRowOrThrow(id);
+    if ((existing.proposerUserId ?? '') !== user.id) {
+      throw new ForbiddenException('You can only withdraw your own proposals');
+    }
+    if (existing.status !== 'pending') {
+      throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
+    }
+    const withdrawn = await this.records.markWithdrawn(id, user.id);
+    if (!withdrawn) {
+      const current = await this.records.getRowOrThrow(id);
+      throw new ConflictException(`Proposal ${id} is already ${current.status}`);
+    }
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'proposal.withdraw',
+      entityType: existing.entityType,
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return withdrawn;
+  }
+
+  /**
+   * Revise the caller's OWN still-pending proposal's payload (issue #124): the
+   * proposer amends the proposed create/update body before the DM acts. Same
+   * ownership + pending guards as withdraw. The new payload is validated against
+   * the target entity's Create/Update schema (same strict rules as an
+   * edit-before-approve), so a bad revision 400s rather than being stored. Delete
+   * proposals carry no payload and cannot be revised.
+   */
+  async revise(id: number, input: { payload: Record<string, unknown> }, user: RequestUser): Promise<Proposal> {
+    const existing = await this.records.getRowOrThrow(id);
+    if ((existing.proposerUserId ?? '') !== user.id) {
+      throw new ForbiddenException('You can only revise your own proposals');
+    }
+    if (existing.status !== 'pending') {
+      throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
+    }
+    if (!isProposableEntityType(existing.entityType)) {
+      throw new BadRequestException(`Unsupported proposal entityType: ${existing.entityType}`);
+    }
+    const action = existing.action as ProposalAction;
+    if (action === 'delete') {
+      throw new BadRequestException('Delete proposals have no payload to revise');
+    }
+    const validated = this.validatePayload(existing.entityType, action, input.payload);
+    const revised = await this.records.revisePayload(id, validated);
+    if (!revised) {
+      const current = await this.records.getRowOrThrow(id);
+      throw new ConflictException(`Proposal ${id} is already ${current.status}`);
+    }
+    return revised;
   }
 
   /**
