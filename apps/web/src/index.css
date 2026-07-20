@@ -334,6 +334,36 @@ h1, h2, h3, h4, h5, h6 {
   border-color: var(--color-accent);
 }
 
+/* Shared markdown prose body (Markdown.tsx — marked + dompurify).
+   Long unbroken tokens (200-char strings, URLs, hashes) must wrap instead of
+   panning the whole detail/reader page sideways, and GFM tables need legible
+   cell padding/borders plus a local horizontal-scroll wrapper so wide tables
+   scroll inside the prose rather than dragging the page body. */
+.cf-prose {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.cf-prose table {
+  /* display:block turns the table into its own horizontal-scroll container so
+     wide tables scroll locally; narrow tables shrink to content and are
+     unaffected. */
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.cf-prose th,
+.cf-prose td {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--color-divider);
+  text-align: left;
+  vertical-align: top;
+}
+.cf-prose th {
+  font-weight: 600;
+  color: var(--cf-ink);
+}
+
 /* Mobile bottom tab bar */
 .cf-tabbar {
   position: fixed;
