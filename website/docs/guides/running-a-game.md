@@ -37,8 +37,11 @@ Prep is just building world entities ahead of time (see
 - **Danger level** lives in the DM's status-header edit form, so it changes
   deliberately, not by accident.
 
-Everything is polled (~5s) so players on their own devices see updates shortly after
-you make them.
+Players on their own devices see updates shortly after you make them. Combat updates
+push instantly (the run-session screen and player display stream live), and the other
+shared surfaces — dashboard, quest board, party HP, and notes — refresh on a ~5s poll
+while the tab is open. Backgrounded tabs pause polling to spare the server, then catch
+up the moment you switch back.
 
 ## After the session — the recap
 
