@@ -11,7 +11,7 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type {
   Attachment,
@@ -22,7 +22,9 @@ import type {
   EncounterDifficulty,
   EncounterEvent,
   EncounterWithCombatants,
+  FogState,
   RuleEntry,
+  TokenSize,
 } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -607,18 +609,26 @@ export default function RunSessionPage() {
       .finally(() => markCombatantPending(combatantId, false));
   };
 
-  // Battle map (issue #39): attach/clear the encounter's map image (DM only).
+  // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
+  // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
+  // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
   const setMap = useMutation({
-    mutationFn: (attachmentId: number | null) => api.patch(`${API}/encounters/${eid}`, { mapAttachmentId: attachmentId }),
+    mutationFn: (patch: Record<string, unknown>) => api.patch(`${API}/encounters/${eid}`, patch),
     onMutate: () => setActionError(null),
     onError: reportError,
     onSettled: () => invalidateEncounter(queryClient, eid),
   });
-  const setEncounterMap = (attachmentId: number | null) => setMap.mutate(attachmentId);
+  const setEncounterMap = (attachmentId: number | null) => setMap.mutate({ mapAttachmentId: attachmentId });
+  // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
+  const setEncounterGrid = (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap'>>) => setMap.mutate(patch);
+  // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
+  const setEncounterFog = (fog: FogState | null) => setMap.mutate({ fog });
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
   const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(combatantId, { tokenX: x, tokenY: y });
+  // Token size category (issue #40, phase 2) — DM-only, server-enforced.
+  const setTokenSize = (combatantId: number, size: TokenSize) => patchCombatant(combatantId, { tokenSize: size });
 
   // Header run-control group shares one pending flag (see runControl above).
   const headerBusy = runControl.isPending || deleteEncounterMut.isPending;
@@ -789,6 +799,8 @@ export default function RunSessionPage() {
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
+          onSetGrid={setEncounterGrid}
+          onSetFog={setEncounterFog}
           onError={setActionError}
         />
       )}
@@ -818,6 +830,7 @@ export default function RunSessionPage() {
               onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
               onRename={(name) => patchCombatant(c.id, { name })}
               onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
+              onSetTokenSize={(size) => setTokenSize(c.id, size)}
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
             />
           ))
@@ -892,13 +905,56 @@ function tokenInitials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
+// Token footprint multipliers (issue #40, phase 2) — a Medium creature is 1×1; a token's
+// rendered diameter scales by these against a 32px base (min ~18px so tiny stays tappable).
+const TOKEN_SIZE_SCALE: Record<TokenSize, number> = {
+  tiny: 0.6,
+  small: 0.8,
+  medium: 1,
+  large: 1.6,
+  huge: 2.2,
+  gargantuan: 3,
+};
+const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
+const BASE_TOKEN_PX = 32;
+
+/** Measure an element's rendered pixel box, tracking resizes — used for square grid cells + the ruler. */
+function useElementSize<T extends HTMLElement>(ref: RefObject<T | null>): { w: number; h: number } {
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return size;
+}
+
+/** Normalize two drag corners (percent) into a positive-size {x,y,w,h} rectangle. */
+function rectFromCorners(a: { x: number; y: number }, b: { x: number; y: number }): { x: number; y: number; w: number; h: number } {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
+}
+
+type MapTool = 'move' | 'measure' | 'reveal';
+
 /**
- * Battle map (issue #39): a DM-uploaded image rendered as the encounter background with
- * combatant tokens overlaid at combatant.tokenX/tokenY (0–100 percent). Mirrors the
- * campaign world-map + location-pin drag (features/dashboard/RegionMap) — same 0–100
- * coordinate convention and pointer-drag → PATCH flow. DM may move any token; a player
- * only their own character's (canMoveToken). Unplaced combatants sit in a tray below the
- * map; clicking a movable one drops it at the center to start.
+ * Battle map (issue #39 + VTT phases 2–3, issue #40): a DM-uploaded image rendered as the
+ * encounter background with combatant tokens overlaid at combatant.tokenX/tokenY (0–100
+ * percent). On top of the #39 token drag it adds:
+ *  - a configurable square grid overlay (DM sets cell size / scale / unit / snap),
+ *  - a click-drag measurement ruler that reads out distance in squares + feet,
+ *  - per-token size footprints (tiny→gargantuan) via combatant.tokenSize,
+ *  - fog of war: the DM reveals rectangular regions; players see only revealed area, and
+ *    the server additionally withholds token positions in the dark (redaction-safe),
+ *  - a simple, client-only circular AoE template for visualising a spell's radius.
+ * Grid config and fog are DM-only PATCHes to the encounter; every change rides the existing
+ * SSE `encounter.updated` signal so other clients update live (the poll is the backstop).
+ * DM may move any token; a player only their own character's (canMoveToken).
  */
 function BattleMap({
   encounter,
@@ -908,6 +964,8 @@ function BattleMap({
   canMoveToken,
   onSetMap,
   onMoveToken,
+  onSetGrid,
+  onSetFog,
   onError,
 }: {
   encounter: EncounterWithCombatants;
@@ -917,16 +975,42 @@ function BattleMap({
   canMoveToken: (c: Combatant) => boolean;
   onSetMap: (attachmentId: number | null) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
+  onSetGrid: (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap'>>) => void;
+  onSetFog: (fog: FogState | null) => void;
   onError: (message: string) => void;
 }) {
   const [uploading, setUploading] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const [tool, setTool] = useState<MapTool>('move');
+  const [ruler, setRuler] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
+  const [revealCorners, setRevealCorners] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
+  const [gridPanelOpen, setGridPanelOpen] = useState(false);
+  const [aoe, setAoe] = useState<{ x: number; y: number; radiusFt: number } | null>(null);
+  const [aoeDragging, setAoeDragging] = useState(false);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const { w: surfaceW, h: surfaceH } = useElementSize(surfaceRef);
 
   const mapImageUrl = encounter.mapAttachmentId != null ? attachmentFileUrl(encounter.mapAttachmentId) : null;
   const placed = encounter.combatants.filter((c) => c.tokenX != null && c.tokenY != null);
   const unplaced = encounter.combatants.filter((c) => c.tokenX == null || c.tokenY == null);
+
+  const gridSize = encounter.gridSize; // cell edge as % of width; null = no grid
+  const gridScale = encounter.gridScale;
+  const gridUnit = encounter.gridUnit || 'ft';
+  const gridOn = gridSize != null && gridSize > 0;
+  // One cell in rendered pixels — cells are square in pixels regardless of the 16:9 surface.
+  const cellPx = gridOn && surfaceW > 0 ? (gridSize! / 100) * surfaceW : 0;
+  // Distance readout needs both a cell size (px) and a real-world scale.
+  const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
+  const canAoe = canMeasure; // AoE radius is expressed in feet, so it needs the scale too.
+
+  const fog = encounter.fog;
+  const fogOn = !!fog?.enabled;
+  // A non-DM whose token would be hidden by fog simply never receives its position from the
+  // server (it lands in `unplaced`), so the client never has to trust itself to hide it.
+
+  const clampPct = (v: number) => Math.max(0, Math.min(100, v));
 
   async function uploadMapFile(file: File) {
     setUploading(true);
@@ -945,11 +1029,21 @@ function BattleMap({
     if (!rect || rect.width === 0 || rect.height === 0) return null;
     const x = ((e.clientX - rect.left) / rect.width) * 100;
     const y = ((e.clientY - rect.top) / rect.height) * 100;
-    return { x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) };
+    return { x: clampPct(x), y: clampPct(y) };
+  }
+
+  /** Snap a drop point to the nearest cell centre when the grid + snap are on (issue #40). */
+  function snapPoint(pt: { x: number; y: number }): { x: number; y: number } {
+    if (!gridOn || !encounter.gridSnap || cellPx <= 0 || surfaceW === 0 || surfaceH === 0) return pt;
+    const px = (pt.x / 100) * surfaceW;
+    const py = (pt.y / 100) * surfaceH;
+    const sx = (Math.floor(px / cellPx) + 0.5) * cellPx;
+    const sy = (Math.floor(py / cellPx) + 0.5) * cellPx;
+    return { x: clampPct((sx / surfaceW) * 100), y: clampPct((sy / surfaceH) * 100) };
   }
 
   function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
-    if (!mapImageUrl || !canMoveToken(c)) return;
+    if (tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
     e.preventDefault();
     e.stopPropagation();
     (e.target as Element).setPointerCapture?.(e.pointerId);
@@ -957,21 +1051,114 @@ function BattleMap({
     setDragPos(pointerToPercent(e));
   }
 
-  function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId == null) return;
+  function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     const pct = pointerToPercent(e);
-    if (pct) setDragPos(pct);
+    if (!pct) return;
+    if (tool === 'measure' && canMeasure) {
+      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      setRuler({ start: pct, end: pct });
+    } else if (tool === 'reveal' && isDm) {
+      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      setRevealCorners({ start: pct, end: pct });
+    }
+  }
+
+  function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (draggingId != null) {
+      const pct = pointerToPercent(e);
+      if (pct) setDragPos(pct);
+      return;
+    }
+    if (aoeDragging) {
+      const pct = pointerToPercent(e);
+      if (pct) setAoe((prev) => (prev ? { ...prev, x: pct.x, y: pct.y } : prev));
+      return;
+    }
+    if (ruler) {
+      const pct = pointerToPercent(e);
+      if (pct) setRuler((prev) => (prev ? { ...prev, end: pct } : prev));
+      return;
+    }
+    if (revealCorners) {
+      const pct = pointerToPercent(e);
+      if (pct) setRevealCorners((prev) => (prev ? { ...prev, end: pct } : prev));
+    }
   }
 
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId == null) return;
-    const pct = pointerToPercent(e) ?? dragPos;
-    const id = draggingId;
-    setDraggingId(null);
-    setDragPos(null);
-    if (!pct) return;
-    onMoveToken(id, pct.x, pct.y);
+    if (draggingId != null) {
+      const raw = pointerToPercent(e) ?? dragPos;
+      const id = draggingId;
+      setDraggingId(null);
+      setDragPos(null);
+      if (raw) {
+        const pt = snapPoint(raw);
+        onMoveToken(id, pt.x, pt.y);
+      }
+      return;
+    }
+    if (aoeDragging) {
+      setAoeDragging(false);
+      return;
+    }
+    if (revealCorners) {
+      const rect = rectFromCorners(revealCorners.start, revealCorners.end);
+      setRevealCorners(null);
+      // Ignore an accidental micro-drag (a click) — a real reveal has some area.
+      if (rect.w >= 1 && rect.h >= 1) {
+        const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
+        onSetFog(next);
+      }
+      return;
+    }
+    // A ruler stays on screen after release so the readout can be read; it clears when the
+    // next measurement starts, the tool changes, or move mode is re-entered.
   }
+
+  function onAoePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    setAoeDragging(true);
+  }
+
+  // Measurement readout (5e: distance counts whole squares along the longer axis is common,
+  // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
+  const rulerReadout = (() => {
+    if (!ruler || !canMeasure) return null;
+    const dpxX = ((ruler.end.x - ruler.start.x) / 100) * surfaceW;
+    const dpxY = ((ruler.end.y - ruler.start.y) / 100) * surfaceH;
+    const cells = Math.hypot(dpxX, dpxY) / cellPx;
+    const feet = Math.round(cells) * (gridScale ?? 0);
+    return { cells, feet };
+  })();
+
+  const revealPreview = revealCorners ? rectFromCorners(revealCorners.start, revealCorners.end) : null;
+  const aoeRadiusPx = aoe && canAoe ? (aoe.radiusFt / gridScale!) * cellPx : 0;
+
+  function changeTool(next: MapTool) {
+    setTool(next);
+    setRuler(null);
+    setRevealCorners(null);
+  }
+
+  const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
+    <button
+      type="button"
+      className="cf-chip"
+      disabled={disabled}
+      title={hint}
+      onClick={() => changeTool(value)}
+      style={{
+        cursor: disabled ? 'default' : 'pointer',
+        borderColor: tool === value ? 'var(--color-accent)' : 'var(--color-divider)',
+        color: tool === value ? 'var(--color-accent)' : undefined,
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden' }}>
@@ -1004,20 +1191,166 @@ function BattleMap({
 
       {mapImageUrl && (
         <>
+          {/* Toolbar: interaction mode + (DM) grid & fog controls + AoE template. */}
+          <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }}>
+            {modeBtn('move', 'Move')}
+            {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
+            {isDm && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
+            {canAoe && (
+              <button
+                type="button"
+                className="cf-chip"
+                onClick={() => setAoe((prev) => (prev ? null : { x: 50, y: 50, radiusFt: gridScale! * 2 }))}
+                title="Toggle a circular AoE template"
+                style={{ cursor: 'pointer', borderColor: aoe ? 'var(--color-accent)' : 'var(--color-divider)', color: aoe ? 'var(--color-accent)' : undefined }}
+              >
+                AoE
+              </button>
+            )}
+            {aoe && canAoe && (
+              <label className="flex items-center gap-1 text-muted" style={{ fontSize: 11 }}>
+                radius
+                <input
+                  type="number"
+                  min={0}
+                  step={gridScale ?? 5}
+                  value={aoe.radiusFt}
+                  onChange={(e) => setAoe((prev) => (prev ? { ...prev, radiusFt: Math.max(0, Number(e.target.value) || 0) } : prev))}
+                  style={{ width: 56 }}
+                />
+                {gridUnit}
+              </label>
+            )}
+            <div style={{ flex: 1 }} />
+            {isDm && (
+              <button
+                type="button"
+                className="cf-chip"
+                onClick={() => setGridPanelOpen((v) => !v)}
+                title="Grid & fog settings"
+                style={{ cursor: 'pointer', borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
+              >
+                Grid &amp; fog
+              </button>
+            )}
+          </div>
+
+          {isDm && gridPanelOpen && (
+            <div
+              className="flex flex-wrap gap-3 items-center"
+              style={{ padding: '10px 14px', margin: '8px 14px 0', border: '1px solid var(--color-divider)', borderRadius: 8, fontSize: 12 }}
+            >
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={gridOn}
+                  onChange={(e) => onSetGrid({ gridSize: e.target.checked ? (gridSize ?? 8) : null })}
+                />
+                Grid
+              </label>
+              <label className="flex items-center gap-1 text-muted">
+                cell %w
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={0.5}
+                  disabled={!gridOn}
+                  value={gridSize ?? 8}
+                  onChange={(e) => onSetGrid({ gridSize: Math.min(100, Math.max(1, Number(e.target.value) || 8)) })}
+                  style={{ width: 60 }}
+                />
+              </label>
+              <label className="flex items-center gap-1 text-muted">
+                scale
+                <input
+                  type="number"
+                  min={0.5}
+                  step={0.5}
+                  value={gridScale ?? 5}
+                  onChange={(e) => onSetGrid({ gridScale: Math.max(0.5, Number(e.target.value) || 5) })}
+                  style={{ width: 56 }}
+                />
+              </label>
+              <label className="flex items-center gap-1 text-muted">
+                unit
+                <input
+                  type="text"
+                  maxLength={12}
+                  value={gridUnit}
+                  onChange={(e) => onSetGrid({ gridUnit: e.target.value })}
+                  style={{ width: 48 }}
+                />
+              </label>
+              <label className="flex items-center gap-1">
+                <input type="checkbox" checked={encounter.gridSnap} onChange={(e) => onSetGrid({ gridSnap: e.target.checked })} />
+                Snap
+              </label>
+              <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--color-divider)' }} />
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={fogOn}
+                  onChange={(e) => onSetFog(e.target.checked ? { enabled: true, revealed: fog?.revealed ?? [] } : null)}
+                />
+                Fog
+              </label>
+              <button
+                type="button"
+                className="cf-chip"
+                disabled={!fogOn}
+                onClick={() => onSetFog({ enabled: true, revealed: [{ x: 0, y: 0, w: 100, h: 100 }] })}
+                style={{ cursor: fogOn ? 'pointer' : 'default', opacity: fogOn ? 1 : 0.5 }}
+              >
+                Reveal all
+              </button>
+              <button
+                type="button"
+                className="cf-chip"
+                disabled={!fogOn || (fog?.revealed.length ?? 0) === 0}
+                onClick={() => onSetFog({ enabled: true, revealed: [] })}
+                style={{ cursor: fogOn && (fog?.revealed.length ?? 0) > 0 ? 'pointer' : 'default', opacity: fogOn && (fog?.revealed.length ?? 0) > 0 ? 1 : 0.5 }}
+              >
+                Hide all
+              </button>
+            </div>
+          )}
+
           <div
             ref={surfaceRef}
             className="relative overflow-hidden"
-            style={{ margin: '8px 14px', aspectRatio: '16 / 9', touchAction: draggingId != null ? 'none' : undefined }}
+            style={{
+              margin: '8px 14px',
+              aspectRatio: '16 / 9',
+              touchAction: tool !== 'move' || draggingId != null || aoeDragging ? 'none' : undefined,
+              cursor: tool === 'measure' ? 'crosshair' : tool === 'reveal' ? 'cell' : undefined,
+            }}
+            onPointerDown={onSurfacePointerDown}
             onPointerMove={onSurfacePointerMove}
             onPointerUp={onSurfacePointerUp}
           >
             <img src={mapImageUrl} alt="Battle map" className="absolute inset-0 w-full h-full object-contain" style={{ background: 'rgba(15,23,42,.4)' }} />
+
+            {/* Grid overlay (issue #40) — square cells sized in pixels off the measured surface. */}
+            {gridOn && cellPx > 1 && (
+              <div
+                className="absolute inset-0"
+                style={{
+                  pointerEvents: 'none',
+                  backgroundImage:
+                    `repeating-linear-gradient(to right, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px),` +
+                    `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
+                }}
+              />
+            )}
+
             {placed.map((c) => {
               const isDragging = draggingId === c.id && dragPos != null;
               const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
               const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
-              const movable = canMoveToken(c);
+              const movable = tool === 'move' && canMoveToken(c);
               const isCharacter = c.kind === 'character';
+              const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
               return (
                 <div
                   key={c.id}
@@ -1025,22 +1358,24 @@ function BattleMap({
                   style={{
                     left: `${left}%`,
                     top: `${top}%`,
+                    // In measure/reveal mode tokens must not eat the surface drag.
+                    pointerEvents: tool === 'move' ? 'auto' : 'none',
                     touchAction: 'none',
                     cursor: movable ? 'grab' : 'default',
                     opacity: isDragging ? 0.85 : 1,
-                    zIndex: isDragging ? 10 : 1,
+                    zIndex: isDragging ? 10 : 2,
                   }}
                   onPointerDown={(e) => onTokenPointerDown(e, c)}
-                  title={c.name}
+                  title={`${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}`}
                 >
                   <span
                     style={{
                       display: 'grid',
                       placeItems: 'center',
-                      width: 32,
-                      height: 32,
+                      width: sizePx,
+                      height: sizePx,
                       borderRadius: '50%',
-                      fontSize: 11,
+                      fontSize: Math.max(9, Math.round(sizePx * 0.34)),
                       fontWeight: 700,
                       color: '#fff',
                       background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
@@ -1053,6 +1388,104 @@ function BattleMap({
                 </div>
               );
             })}
+
+            {/* AoE template (issue #40) — client-only circle for visualising a spell radius. */}
+            {aoe && canAoe && aoeRadiusPx > 0 && (
+              <div
+                className="absolute -translate-x-1/2 -translate-y-1/2"
+                style={{
+                  left: `${aoe.x}%`,
+                  top: `${aoe.y}%`,
+                  width: aoeRadiusPx * 2,
+                  height: aoeRadiusPx * 2,
+                  borderRadius: '50%',
+                  background: 'rgba(239,68,68,.22)',
+                  border: '2px solid rgba(239,68,68,.75)',
+                  cursor: 'grab',
+                  touchAction: 'none',
+                  zIndex: 6,
+                }}
+                onPointerDown={onAoePointerDown}
+                title={`AoE · ${aoe.radiusFt} ${gridUnit} radius`}
+              />
+            )}
+
+            {/* Fog of war (issue #40). A dark overlay with the revealed rectangles punched out.
+                DM sees through it (semi-transparent) to prep; players see it solid. Coordinates
+                are 0–100, so a viewBox of 0 0 100 100 with no aspect preservation maps directly. */}
+            {fogOn && (
+              <svg
+                className="absolute inset-0 w-full h-full"
+                viewBox="0 0 100 100"
+                preserveAspectRatio="none"
+                style={{ pointerEvents: 'none', zIndex: 4 }}
+              >
+                <defs>
+                  <mask id={`fogmask-${encounter.id}`}>
+                    <rect x={0} y={0} width={100} height={100} fill="#fff" />
+                    {(fog?.revealed ?? []).map((r, i) => (
+                      <rect key={i} x={r.x} y={r.y} width={r.w} height={r.h} fill="#000" />
+                    ))}
+                  </mask>
+                </defs>
+                <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={isDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
+              </svg>
+            )}
+
+            {/* In-progress reveal rectangle (DM). */}
+            {revealPreview && (
+              <div
+                className="absolute"
+                style={{
+                  left: `${revealPreview.x}%`,
+                  top: `${revealPreview.y}%`,
+                  width: `${revealPreview.w}%`,
+                  height: `${revealPreview.h}%`,
+                  border: '2px dashed var(--color-accent)',
+                  background: 'rgba(56,189,248,.12)',
+                  pointerEvents: 'none',
+                  zIndex: 8,
+                }}
+              />
+            )}
+
+            {/* Measurement ruler (issue #40). */}
+            {ruler && canMeasure && (
+              <>
+                <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none', zIndex: 7 }}>
+                  <line
+                    x1={`${ruler.start.x}%`}
+                    y1={`${ruler.start.y}%`}
+                    x2={`${ruler.end.x}%`}
+                    y2={`${ruler.end.y}%`}
+                    stroke="var(--color-accent)"
+                    strokeWidth={2}
+                    strokeDasharray="5 4"
+                  />
+                </svg>
+                {rulerReadout && (
+                  <div
+                    className="absolute"
+                    style={{
+                      left: `${ruler.end.x}%`,
+                      top: `${ruler.end.y}%`,
+                      transform: 'translate(8px, 8px)',
+                      background: 'rgba(15,23,42,.9)',
+                      color: '#fff',
+                      fontSize: 11,
+                      fontWeight: 600,
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      pointerEvents: 'none',
+                      whiteSpace: 'nowrap',
+                      zIndex: 9,
+                    }}
+                  >
+                    {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
+                  </div>
+                )}
+              </>
+            )}
           </div>
 
           {unplaced.length > 0 && (
@@ -1081,7 +1514,13 @@ function BattleMap({
             className="text-muted"
             style={{ padding: '8px 14px', borderTop: '1px solid var(--color-divider)', fontSize: 11 }}
           >
-            {isDm ? 'Drag a token to move it. Click an unplaced token to drop it on the map.' : 'Drag your own token to move it.'}
+            {tool === 'measure'
+              ? 'Click-drag on the map to measure distance.'
+              : tool === 'reveal'
+                ? 'Click-drag to reveal a region of the map to players.'
+                : isDm
+                  ? 'Drag a token to move it. Click an unplaced token to drop it on the map.'
+                  : 'Drag your own token to move it.'}
           </div>
         </>
       )}
@@ -1108,6 +1547,7 @@ function CombatantRow({
   onRemoveCondition,
   onRename,
   onSetHpMax,
+  onSetTokenSize,
   onRemove,
 }: {
   combatant: Combatant;
@@ -1126,6 +1566,7 @@ function CombatantRow({
   onRemoveCondition: (cond: string) => void;
   onRename: (name: string) => void;
   onSetHpMax: (value: number) => void;
+  onSetTokenSize: (size: TokenSize) => void;
   onRemove: () => void;
 }) {
   const [addingCondition, setAddingCondition] = useState(false);
@@ -1270,6 +1711,21 @@ function CombatantRow({
                   if (e.key === 'Escape') { setEditingIdentity(false); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }
                 }}
               />
+            </div>
+            <div className="field" style={{ width: 108 }}>
+              <label htmlFor={`tokensize-${combatant.id}`} style={{ fontSize: 10 }}>Token size</label>
+              <select
+                id={`tokensize-${combatant.id}`}
+                aria-label={`Token size for ${combatant.name}`}
+                value={combatant.tokenSize}
+                disabled={busy}
+                onChange={(e) => onSetTokenSize(e.target.value as TokenSize)}
+                style={{ height: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+              >
+                {TOKEN_SIZE_OPTIONS.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
             </div>
             <Btn onClick={commitIdentity} disabled={busy}>Save</Btn>
             <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => { setEditingIdentity(false); setNameDraft(combatant.name); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }}>Cancel</button>

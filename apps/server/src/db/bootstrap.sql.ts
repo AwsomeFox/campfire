@@ -511,6 +511,11 @@ CREATE TABLE IF NOT EXISTS encounters (
   quest_id INTEGER REFERENCES quests(id) ON DELETE SET NULL,
   session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
+  grid_size REAL,
+  grid_scale REAL,
+  grid_unit TEXT,
+  grid_snap INTEGER NOT NULL DEFAULT 0,
+  fog TEXT,
   ended_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -597,7 +602,8 @@ CREATE TABLE IF NOT EXISTS combatants (
   rule_entry_id INTEGER REFERENCES rule_entries(id) ON DELETE SET NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
   token_x REAL,
-  token_y REAL
+  token_y REAL,
+  token_size TEXT NOT NULL DEFAULT 'medium'
 );
 
 -- Persistent per-encounter combat log (issue #61). New table, so a plain
