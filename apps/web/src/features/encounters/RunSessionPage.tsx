@@ -723,26 +723,24 @@ function CombatantRow({
           </>
         )}
       </div>
-      {canEdit && (
+      {/* HP steppers — only where a concrete number exists to adjust. A redacted
+          monster's HP is banded (hpCurrent null) for non-DM viewers (issue #43),
+          so we never render steppers pointing at a null value. Mirrors the sheet's
+          ±5 / ±1 controls, incl. shift-click ×5 (issue #68). */}
+      {canEdit && combatant.hpCurrent != null && (
         <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
-          <button
-            className="btn btn-icon btn-secondary"
-            style={{ width: 44, height: 44, fontSize: 16 }}
-            disabled={busy}
-            aria-label={`Reduce ${combatant.name}'s HP by 1 (currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
-            onClick={() => onHpDelta(-1)}
-          >
-            −
-          </button>
-          <button
-            className="btn btn-icon btn-secondary"
-            style={{ width: 44, height: 44, fontSize: 16 }}
-            disabled={busy}
-            aria-label={`Increase ${combatant.name}'s HP by 1 (currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
-            onClick={() => onHpDelta(1)}
-          >
-            +
-          </button>
+          {([-5, -1, 1, 5] as const).map((step) => (
+            <button
+              key={step}
+              className="btn btn-icon btn-secondary"
+              style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
+              disabled={busy}
+              aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
+              onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
+            >
+              {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
+            </button>
+          ))}
         </div>
       )}
       {canRemove && (

@@ -26,6 +26,10 @@ export const campaigns = sqliteTable('campaigns', {
   // the feed URL can be re-displayed to members — see modules/sessions/scheduling.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   icsToken: text('ics_token'),
+  // Per-campaign upload quota in bytes, or NULL for no limit (issue #24). Admin-set
+  // via the storage console; enforced on attachment upload. Nullable in older DBs
+  // pre-migration; see db/db.module.ts ALTER TABLE note.
+  storageQuotaBytes: integer('storage_quota_bytes'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -85,6 +89,31 @@ export const questObjectives = sqliteTable('quest_objectives', {
   sortOrder: integer('sort_order').notNull().default(0),
 });
 
+// Timeline (in-world calendar / campaign timeline) — issue #63. Standalone module.
+export const timelineEvents = sqliteTable('timeline_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  title: text('title').notNull(),
+  inWorldDate: text('in_world_date').notNull().default(''),
+  body: text('body').notNull().default(''),
+  era: text('era').notNull().default(''),
+  sortIndex: integer('sort_index').notNull().default(0),
+  dmSecret: text('dm_secret').notNull().default(''),
+  hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// One "current in-world date" row per campaign (the issue's honest v0). campaignId
+// is UNIQUE so the module upserts rather than accumulating rows.
+export const timelineCalendars = sqliteTable('timeline_calendars', {
+  campaignId: integer('campaign_id').primaryKey(),
+  currentDate: text('current_date').notNull().default(''),
+  note: text('note').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const npcs = sqliteTable('npcs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
@@ -104,6 +133,10 @@ export const npcs = sqliteTable('npcs', {
 export const locations = sqliteTable('locations', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
+  // Self-referencing parent for location nesting (region→city→dungeon→room, #99).
+  // Nullable/absent in older DBs pre-migration; see db/db.module.ts
+  // migrateLocationsTableForParentId().
+  parentId: integer('parent_id'),
   name: text('name').notNull(),
   kind: text('kind').notNull().default(''),
   status: text('status').notNull().default('unexplored'),

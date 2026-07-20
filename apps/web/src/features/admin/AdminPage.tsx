@@ -12,6 +12,7 @@ import { TokensCard } from './TokensCard';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { RulePacksCard } from './RulePacksCard';
 import { MetricsCard } from './MetricsCard';
+import { StorageCard } from './StorageCard';
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
@@ -81,6 +82,7 @@ export default function AdminPage() {
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <MetricsCard />
+      <StorageCard />
       <UsersCard users={users ?? []} onChange={load} />
       <ResetRequestsCard />
       <SettingsCard settings={settings} onChange={load} />

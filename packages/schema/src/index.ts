@@ -24,6 +24,18 @@ const timestamps = {
   updatedAt: IsoDate,
 };
 
+// ---------- pagination (issue #71) ----------
+// Shared list-pagination convention. High-volume list endpoints (sessions, notes,
+// audit) and their MCP equivalents accept optional `?limit` & `?offset` query
+// params, pushed down into SQL. When both are omitted the endpoint returns its
+// full (or historically-capped) result, so existing callers are unaffected —
+// pagination is opt-in. `limit` is clamped to a per-endpoint maximum server-side.
+export const PageParams = z.object({
+  limit: z.number().int().positive().optional(),
+  offset: z.number().int().nonnegative().optional(),
+});
+export type PageParams = z.infer<typeof PageParams>;
+
 // ---------- campaign ----------
 export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
 
@@ -37,10 +49,14 @@ export const Campaign = z.object({
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
+  // Per-campaign upload quota in bytes, or null for no limit (issue #24). Set by a
+  // server admin via the storage console — NOT part of CampaignCreate/Update, so a
+  // DM can never lift their own campaign's cap. Enforced on attachment upload.
+  storageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // Clone/template input — POST /campaigns/:id/clone.
@@ -146,6 +162,31 @@ export const ConditionsPatch = z.object({
   add: z.array(z.string().max(40)).optional(),
   remove: z.array(z.string().max(40)).optional(),
 });
+/**
+ * Canonical 5e condition vocabulary — the single source of truth shared across
+ * the character sheet, the encounter tracker, and the compendium (issue #111).
+ * Conditions stay free-text on the wire (homebrew is allowed), but these are the
+ * standard names surfaced as suggestions so the three surfaces speak the same
+ * vocabulary instead of each hardcoding its own list.
+ */
+export const CONDITIONS = [
+  'Blinded',
+  'Charmed',
+  'Deafened',
+  'Exhaustion',
+  'Frightened',
+  'Grappled',
+  'Incapacitated',
+  'Invisible',
+  'Paralyzed',
+  'Petrified',
+  'Poisoned',
+  'Prone',
+  'Restrained',
+  'Stunned',
+  'Unconscious',
+] as const;
+export type ConditionName = (typeof CONDITIONS)[number];
 /** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
@@ -280,6 +321,7 @@ export const LocationStatus = z.enum(['unexplored', 'explored', 'current']);
 export const Location = z.object({
   id: Id,
   campaignId: Id,
+  parentId: Id.nullable().default(null), // nesting: region→city→dungeon→room (#99)
   name: z.string().min(1).max(120),
   kind: z.string().max(80).default(''), // town, dungeon, region…
   status: LocationStatus.default('unexplored'),
@@ -307,6 +349,15 @@ export const Session = z.object({
 export type Session = z.infer<typeof Session>;
 export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
 export const SessionUpdate = SessionCreate.partial();
+
+// The list-shape of a session (issue #71): a session's `recap` markdown can be up
+// to 100KB, so list/summary payloads deliberately DROP the full body and carry a
+// short plain-text `recapExcerpt` instead — a 150-session campaign's list stays
+// small. Fetch the full recap with GET /sessions/:id when a single session is opened.
+export const SessionListItem = Session.omit({ recap: true }).extend({
+  recapExcerpt: z.string().default(''),
+});
+export type SessionListItem = z.infer<typeof SessionListItem>;
 
 // The canonical recap scaffold — the structured headings a DM fills instead of
 // staring at a blank box. Shared by the web "Insert template" affordance and the
@@ -395,6 +446,59 @@ export const CalendarFeed = z.object({
   url: z.string().nullable(), // relative feed path, e.g. /api/v1/calendar/<token>.ics
 });
 export type CalendarFeed = z.infer<typeof CalendarFeed>;
+
+// ---------- timeline (in-world calendar / campaign timeline) — issue #63 ----------
+// The real-world Session.playedAt tells you WHEN a table met; it says nothing about
+// the in-fiction date ("the 3rd of Flamerule, 1492 DR"). This is a standalone module:
+// a DM sequences in-world events on a campaign timeline, each carrying a free-text
+// in-world date (fantasy calendars aren't ISO-parseable) plus a DM-controlled
+// `sortIndex` so the timeline orders by narrative sequence, not by that unsortable
+// string. Canon-entity secrecy conventions apply: `dmSecret` is stripped for non-DM,
+// and a `hidden` event is dropped WHOLESALE from every non-DM read (prep for a reveal).
+export const TimelineEvent = z.object({
+  id: Id,
+  campaignId: Id,
+  title: z.string().min(1).max(200),
+  // Free-text in-fiction date, e.g. "3rd of Flamerule, 1492 DR". Empty = undated
+  // (a floating "sometime around here" beat the DM can still sequence via sortIndex).
+  inWorldDate: z.string().max(200).default(''),
+  body: z.string().max(50_000).default(''), // markdown
+  // Optional era/age grouping ("Age of Chains", "Second Era") — a light bucket the
+  // timeline view can header on; free text, no enum (every world names its ages).
+  era: z.string().max(120).default(''),
+  // DM-controlled ordering along the timeline. Free-text dates can't be sorted, so
+  // the timeline reads by this (ascending), id as a stable tiebreaker.
+  sortIndex: z.number().int().default(0),
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
+  // Entity-level secrecy (issue #42 convention): a hidden event is excluded WHOLESALE
+  // from every non-DM read until the DM reveals it (hidden=false).
+  hidden: z.boolean().default(false),
+  ...timestamps,
+});
+export type TimelineEvent = z.infer<typeof TimelineEvent>;
+export const TimelineEventCreate = TimelineEvent.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ title: true });
+export type TimelineEventCreate = z.infer<typeof TimelineEventCreate>;
+export const TimelineEventUpdate = TimelineEventCreate.partial();
+export type TimelineEventUpdate = z.infer<typeof TimelineEventUpdate>;
+
+// The "honest v0" from the issue: one free-text "current in-world date" per campaign
+// ("It is presently the 3rd of Flamerule, 1492 DR"), plus an optional calendar note
+// (month names, moon phases, whatever the DM wants to remember). Stored in the
+// timeline module's own single-row-per-campaign table so it touches nothing else.
+export const TimelineCalendar = z.object({
+  campaignId: Id,
+  currentDate: z.string().max(200).default(''),
+  note: z.string().max(4000).default(''), // markdown — calendar reference / month list
+  ...timestamps,
+});
+export type TimelineCalendar = z.infer<typeof TimelineCalendar>;
+export const TimelineCalendarUpdate = z.object({
+  currentDate: z.string().max(200).optional(),
+  note: z.string().max(4000).optional(),
+});
+export type TimelineCalendarUpdate = z.infer<typeof TimelineCalendarUpdate>;
 
 // ---------- notes ----------
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
@@ -524,7 +628,7 @@ export const CampaignSummary = z.object({
   npcs: z.array(Npc),
   locations: z.array(Location),
   characters: z.array(Character),
-  sessions: z.array(Session),
+  sessions: z.array(SessionListItem), // list-shape (recapExcerpt, not full recap) — issue #71
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;
@@ -1129,6 +1233,57 @@ export const AdminMetrics = z.object({
   recentActivity: z.array(AuditEntry), // most-recent audit rows (read-only, newest first)
 });
 export type AdminMetrics = z.infer<typeof AdminMetrics>;
+
+// ---------- storage management (issue #24) ----------
+// Server-admin storage console: upload-size visibility, per-campaign quotas, and
+// orphan cleanup. All surfaces are gated by @ServerRoles('admin'). Byte counts
+// come from the attachments table (metadata) plus a walk of DATA_DIR/uploads.
+
+// One campaign's slice of upload usage.
+export const StorageCampaignUsage = z.object({
+  campaignId: Id,
+  name: z.string(),
+  fileCount: z.number().int().nonnegative(), // attachment rows for this campaign
+  totalBytes: z.number().int().nonnegative(), // sum of attachment.size for this campaign
+  quotaBytes: z.number().int().nonnegative().nullable(), // per-campaign cap, or null for unlimited
+  overQuota: z.boolean(), // totalBytes > quotaBytes (always false when unlimited)
+});
+export type StorageCampaignUsage = z.infer<typeof StorageCampaignUsage>;
+
+// Orphans: DB rows whose bytes are missing on disk, and on-disk files with no row.
+export const StorageOrphans = z.object({
+  rowsWithoutFile: z.number().int().nonnegative(), // attachment rows whose file is gone from disk
+  filesWithoutRow: z.number().int().nonnegative(), // upload files (incl. thumbs) with no backing row
+  orphanBytes: z.number().int().nonnegative(), // bytes occupied by files-without-row (reclaimable)
+});
+export type StorageOrphans = z.infer<typeof StorageOrphans>;
+
+export const StorageStats = z.object({
+  totalBytes: z.number().int().nonnegative(), // sum of attachment.size across all campaigns (DB view)
+  fileCount: z.number().int().nonnegative(), // total attachment rows
+  diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
+  campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
+  orphans: StorageOrphans,
+});
+export type StorageStats = z.infer<typeof StorageStats>;
+
+// Set (or clear, with null) a campaign's upload quota.
+export const StorageQuotaUpdate = z.object({
+  quotaBytes: z.number().int().nonnegative().nullable(),
+});
+export type StorageQuotaUpdate = z.infer<typeof StorageQuotaUpdate>;
+
+// Result of an orphan-cleanup run. With dryRun=true nothing is deleted and the
+// *Deleted counts are 0 — only the found counts are populated, for a preview.
+export const StorageCleanupResult = z.object({
+  dryRun: z.boolean(),
+  rowsWithoutFile: z.number().int().nonnegative(), // orphan rows found
+  filesWithoutRow: z.number().int().nonnegative(), // orphan files found
+  rowsDeleted: z.number().int().nonnegative(),
+  filesDeleted: z.number().int().nonnegative(),
+  bytesReclaimed: z.number().int().nonnegative(), // disk bytes freed by deleting orphan files
+});
+export type StorageCleanupResult = z.infer<typeof StorageCleanupResult>;
 
 // ---------- campaign-wide search + @-mention cross-linking (issue #64) ----------
 // The kinds of things a campaign-wide search can turn up. `campaign` from

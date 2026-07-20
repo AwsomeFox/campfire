@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER,
   ics_token TEXT,
+  storage_quota_bytes INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -69,6 +70,28 @@ CREATE TABLE IF NOT EXISTS quest_objectives (
   sort_order INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS timeline_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  in_world_date TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  era TEXT NOT NULL DEFAULT '',
+  sort_index INTEGER NOT NULL DEFAULT 0,
+  dm_secret TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS timeline_calendars (
+  campaign_id INTEGER PRIMARY KEY,
+  current_date TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS npcs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
@@ -86,6 +109,7 @@ CREATE TABLE IF NOT EXISTS npcs (
 CREATE TABLE IF NOT EXISTS locations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
+  parent_id INTEGER,
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'unexplored',
@@ -427,8 +451,10 @@ CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quest_objectives_quest ON quest_objectives(quest_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_events_campaign ON timeline_events(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_npcs_campaign ON npcs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_campaign ON locations(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_locations_parent ON locations(parent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_session ON session_shares(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaign_id);
