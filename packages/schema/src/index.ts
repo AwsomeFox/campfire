@@ -179,13 +179,17 @@ export const Note = z.object({
   visibility: NoteVisibility.default('private'),
   entityType: EntityType.nullable().default(null),
   entityId: Id.nullable().default(null),
+  // Display name of the anchored entity (quest title, npc/location/character/campaign
+  // name, session title), resolved server-side at read time — not stored. Null when
+  // the note is unanchored or the entity no longer exists.
+  entityName: z.string().max(300).nullable().default(null),
   body: z.string().min(1).max(20_000),
   resolved: z.boolean().default(false), // inbox items only
   resolvedNote: z.string().max(1000).default(''),
   ...timestamps,
 });
 export type Note = z.infer<typeof Note>;
-export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
+export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, entityName: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
 export const NoteUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
   visibility: NoteVisibility.optional(),
