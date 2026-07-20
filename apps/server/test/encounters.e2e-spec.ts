@@ -1169,3 +1169,241 @@ describe('encounters — issue #86: concurrent HP updates are not lost (e2e)', (
     expect(new Set(sortOrders).size).toBe(sortOrders.length);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #57 — richer 5e HP model: temp HP, damage past 0 / overkill, death saves.
+// ---------------------------------------------------------------------------
+
+type HpShape = {
+  id: number;
+  name: string;
+  hpCurrent: number | null;
+  hpMax: number | null;
+  hpTemp: number | null;
+  deathState: 'none' | 'dying' | 'stable' | 'dead';
+  deathSaveSuccesses: number;
+  deathSaveFailures: number;
+};
+
+describe('encounters — issue #57: temp HP / death saves / overkill (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let heroCombatantId: number; // character, owned by p-1
+  let heroCharacterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'HP Model' })).body.id;
+    heroCharacterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Thorn', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' })
+    ).body.id;
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grave Peril' });
+    encounterId = encRes.body.id;
+    heroCombatantId = encRes.body.combatants[0].id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function hero(): Promise<HpShape> {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    return (res.body.combatants as HpShape[]).find((c) => c.id === heroCombatantId)!;
+  }
+
+  it('new combatants default to 0 temp HP / deathState none', async () => {
+    const h = await hero();
+    expect(h.hpTemp).toBe(0);
+    expect(h.deathState).toBe('none');
+    expect(h.deathSaveSuccesses).toBe(0);
+    expect(h.deathSaveFailures).toBe(0);
+  });
+
+  it('temp HP absorbs damage before real HP, then spills over', async () => {
+    const server = ctx.app.getHttpServer();
+    // Grant 8 temp HP.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpTemp: 8 });
+    expect((await hero()).hpTemp).toBe(8);
+
+    // 5 damage: fully absorbed, real HP untouched.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpDelta: -5 });
+    let h = await hero();
+    expect(h.hpTemp).toBe(3);
+    expect(h.hpCurrent).toBe(20);
+
+    // 6 more: 3 soaked by remaining temp, 3 to real HP.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpDelta: -6 });
+    h = await hero();
+    expect(h.hpTemp).toBe(0);
+    expect(h.hpCurrent).toBe(17);
+  });
+
+  it('an owning player may set their own temp HP', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(player).send({ hpTemp: 4 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpTemp).toBe(4);
+    // reset for the following tests
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpTemp: 0, hpSet: 17 });
+  });
+
+  it('dropping a character to 0 makes them dying (with a clean death-save slate)', async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpDelta: -17 });
+    const h = await hero();
+    expect(h.hpCurrent).toBe(0);
+    expect(h.deathState).toBe('dying');
+    expect(h.deathSaveSuccesses).toBe(0);
+    expect(h.deathSaveFailures).toBe(0);
+  });
+
+  it('taking damage while already at 0 records a death-save failure', async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpDelta: -3 });
+    const h = await hero();
+    expect(h.deathState).toBe('dying');
+    expect(h.deathSaveFailures).toBe(1);
+  });
+
+  it('recording a third failure flips the character to dead', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ deathSaveFailures: 3 });
+    expect(res.status).toBe(200);
+    expect(res.body.deathState).toBe('dead');
+  });
+
+  it('any healing revives a downed character and clears the death-save slate', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpDelta: 6 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpCurrent).toBe(6);
+    expect(res.body.deathState).toBe('none');
+    expect(res.body.deathSaveFailures).toBe(0);
+  });
+
+  it('three successes stabilizes a dying character', async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpSet: 0 });
+    expect((await hero()).deathState).toBe('dying');
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ deathSaveSuccesses: 3 });
+    expect(res.body.deathState).toBe('stable');
+    // full heal back to fighting shape for isolation
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpSet: 20 });
+  });
+
+  it('massive damage (overflow past 0 >= hpMax) kills a character outright', async () => {
+    const server = ctx.app.getHttpServer();
+    // Thorn is at 20/20. 45 damage: 25 overflow >= 20 hpMax -> instant death.
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`).set(dm).send({ hpDelta: -45 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpCurrent).toBe(0);
+    expect(res.body.deathState).toBe('dead');
+    expect(res.body.deathSaveFailures).toBe(0); // outright, no saves rolled
+  });
+
+  it('a monster reduced to 0 just goes down — no death saves', async () => {
+    const server = ctx.app.getHttpServer();
+    const ogreId = (
+      await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Ogre', hpMax: 30 })
+    ).body.id;
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ogreId}`).set(dm).send({ hpDelta: -999 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpCurrent).toBe(0);
+    expect(res.body.deathState).toBe('none');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #114 — combatant identity: count-add distinguishable copies, and
+// rename / hpMax / initMod edits via CombatantUpdate.
+// ---------------------------------------------------------------------------
+
+describe('encounters — issue #114: count add + rename (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Goblin Horde' })).body.id;
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush' })).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('count=3 adds three distinguishable, auto-numbered goblins', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Goblin', hpMax: 7, count: 3 });
+    expect(res.status).toBe(201);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const goblins = (getRes.body.combatants as Array<{ id: number; name: string; hpMax: number }>).filter((c) => c.name.startsWith('Goblin'));
+    expect(goblins).toHaveLength(3);
+    // Names are distinct and suffixed 1..3.
+    expect(goblins.map((g) => g.name).sort()).toEqual(['Goblin 1', 'Goblin 2', 'Goblin 3']);
+    expect(new Set(goblins.map((g) => g.id)).size).toBe(3);
+    for (const g of goblins) expect(g.hpMax).toBe(7);
+  });
+
+  it('count=1 (or omitted) adds a single un-suffixed combatant', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Hobgoblin', hpMax: 11, count: 1 });
+    expect(res.status).toBe(201);
+    expect(res.body.name).toBe('Hobgoblin'); // no "Hobgoblin 1"
+  });
+
+  it('dm can rename a combatant and fix its hpMax / initMod via PATCH', async () => {
+    const server = ctx.app.getHttpServer();
+    const gobId = (
+      await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)
+    ).body.combatants.find((c: { name: string }) => c.name === 'Goblin 1').id;
+
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${gobId}`)
+      .set(dm)
+      .send({ name: 'Goblin archer', hpMax: 12, initMod: 3 });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Goblin archer');
+    expect(res.body.hpMax).toBe(12);
+    expect(res.body.initMod).toBe(3);
+  });
+
+  it('lowering hpMax below current HP re-clamps hpCurrent', async () => {
+    const server = ctx.app.getHttpServer();
+    const gobId = (
+      await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)
+    ).body.combatants.find((c: { name: string }) => c.name === 'Goblin 2').id;
+    // Goblin 2 is at 7/7. Set hpMax to 4 -> hpCurrent clamps to 4.
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${gobId}`).set(dm).send({ hpMax: 4 });
+    expect(res.status).toBe(200);
+    expect(res.body.hpMax).toBe(4);
+    expect(res.body.hpCurrent).toBe(4);
+  });
+
+  it('a player cannot rename or edit hpMax/initMod (dm-only identity fields)', async () => {
+    const server = ctx.app.getHttpServer();
+    const gobId = (
+      await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)
+    ).body.combatants.find((c: { name: string }) => c.name === 'Goblin 3').id;
+
+    const rename = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${gobId}`).set(player).send({ name: 'Hacked' });
+    expect(rename.status).toBe(403);
+    const hp = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${gobId}`).set(player).send({ hpMax: 999 });
+    expect(hp.status).toBe(403);
+  });
+});
