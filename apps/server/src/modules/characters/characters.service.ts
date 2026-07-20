@@ -1,8 +1,8 @@
-import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch } from '@campfire/schema';
-import type { Character, Role } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch } from '@campfire/schema';
+import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -15,6 +15,7 @@ type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type CharacterUpdateInput = z.infer<typeof CharacterUpdate>;
 type HpPatchInput = z.infer<typeof HpPatch>;
 type ConditionsPatchInput = z.infer<typeof ConditionsPatch>;
+type SpellSlotPatchInput = z.infer<typeof SpellSlotPatch>;
 
 function toDomain(row: typeof characters.$inferSelect): Character {
   return {
@@ -31,6 +32,10 @@ function toDomain(row: typeof characters.$inferSelect): Character {
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
     conditions: fromJsonText<string[]>(row.conditions, []),
+    saveProficiencies: fromJsonText<Character['saveProficiencies']>(row.saveProficiencies, []),
+    skills: fromJsonText<Record<string, SkillRank>>(row.skills, {}),
+    actions: fromJsonText<CharacterAction[]>(row.actions, []),
+    spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
     portraitUrl: row.portraitUrl,
     ddbId: row.ddbId,
     notes: row.notes,
@@ -89,6 +94,10 @@ export class CharactersService {
         hpCurrent: input.hpCurrent ?? 10,
         hpMax: input.hpMax ?? 10,
         conditions: toJsonText(input.conditions ?? []),
+        saveProficiencies: toJsonText(input.saveProficiencies ?? []),
+        skills: toJsonText(input.skills ?? {}),
+        actions: toJsonText(input.actions ?? []),
+        spellSlots: toJsonText(input.spellSlots ?? {}),
         portraitUrl: input.portraitUrl ?? null,
         ddbId: input.ddbId ?? null,
         notes: input.notes ?? '',
@@ -131,6 +140,19 @@ export class CharactersService {
       update.hpCurrent = Math.max(0, Math.min(finalHpMax, rawHpCurrent));
     }
     if (input.conditions !== undefined) update.conditions = toJsonText(input.conditions);
+    if (input.saveProficiencies !== undefined) update.saveProficiencies = toJsonText(input.saveProficiencies);
+    if (input.skills !== undefined) update.skills = toJsonText(input.skills);
+    if (input.actions !== undefined) update.actions = toJsonText(input.actions);
+    // Clamp each level's `used` to [0, max] whenever slot maxima are rewritten —
+    // mirrors the hpCurrent/hpMax clamp above and patchSpellSlots' clamp, so a
+    // PATCH can never leave more slots spent than exist.
+    if (input.spellSlots !== undefined) {
+      const clamped: Record<string, SpellSlotLevel> = {};
+      for (const [level, slot] of Object.entries(input.spellSlots)) {
+        clamped[level] = { max: slot.max, used: Math.max(0, Math.min(slot.max, slot.used)) };
+      }
+      update.spellSlots = toJsonText(clamped);
+    }
     if (input.portraitUrl !== undefined) update.portraitUrl = input.portraitUrl;
     if (input.ddbId !== undefined) update.ddbId = input.ddbId;
     if (input.notes !== undefined) update.notes = input.notes;
@@ -213,6 +235,37 @@ export class CharactersService {
       actor: auditActor(user),
       actorRole: role,
       action: 'character.conditions',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify(patch),
+    });
+    return toDomain(row);
+  }
+
+  /** Spend (+delta) or restore (-delta) slots at one spell level; `used` is clamped to [0, max]. */
+  async patchSpellSlots(id: number, patch: SpellSlotPatchInput, user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+
+    const slots = fromJsonText<Record<string, SpellSlotLevel>>(existing.spellSlots, {});
+    const key = String(patch.level);
+    const slot = slots[key];
+    if (!slot || slot.max <= 0) {
+      throw new BadRequestException(`No spell slots at level ${patch.level} — set the level's max via PATCH spellSlots first`);
+    }
+    slots[key] = { max: slot.max, used: Math.max(0, Math.min(slot.max, slot.used + patch.delta)) };
+
+    const [row] = await this.db
+      .update(characters)
+      .set({ spellSlots: toJsonText(slots), updatedAt: nowIso() })
+      .where(eq(characters.id, id))
+      .returning();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.spellSlots',
       entityType: 'character',
       entityId: id,
       campaignId: existing.campaignId,
