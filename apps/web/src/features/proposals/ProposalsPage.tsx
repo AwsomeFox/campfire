@@ -44,6 +44,8 @@ export default function ProposalsPage() {
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,14 +77,61 @@ export default function ProposalsPage() {
     if (Number.isFinite(cid) && isDm) void load();
   }, [cid, isDm, load]);
 
-  async function resolve(proposal: Proposal, action: 'approve' | 'reject', note: string) {
+  async function resolve(
+    proposal: Proposal,
+    action: 'approve' | 'reject',
+    note: string,
+    amendedPayload?: Record<string, unknown>,
+  ) {
     try {
-      await api.post(`${API}/proposals/${proposal.id}/${action}`, note ? { note } : {});
+      const body: Record<string, unknown> = {};
+      if (note) body.note = note;
+      // Edit-before-approve: send the DM's amended payload so it's applied instead of
+      // the originally proposed one. Only meaningful on approve.
+      if (action === 'approve' && amendedPayload) body.payload = amendedPayload;
+      await api.post(`${API}/proposals/${proposal.id}/${action}`, body);
       setExpandedId(null);
+      setSelected((cur) => {
+        const next = new Set(cur);
+        next.delete(proposal.id);
+        return next;
+      });
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Couldn't ${action} this proposal.`);
     }
+  }
+
+  async function resolveSelected(action: 'approve' | 'reject') {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBatchBusy(true);
+    setError(null);
+    try {
+      const { results } = await api.post<{ results: { id: number; ok: boolean; error?: string }[] }>(
+        `${API}/proposals/batch/${action}`,
+        { ids },
+      );
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        setError(`${failed.length} of ${results.length} couldn't be ${action === 'approve' ? 'approved' : 'rejected'}: ${failed[0].error ?? 'unknown error'}`);
+      }
+      setSelected(new Set());
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : `Couldn't ${action} the selected proposals.`);
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  function toggleSelected(id: number) {
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   if (!Number.isFinite(cid)) {
@@ -140,13 +189,26 @@ export default function ProposalsPage() {
         <EmptyState icon="🔮" title="No pending proposals" hint="Approved & rejected proposals show up below." />
       ) : (
         <div className="space-y-3">
+          <BatchBar
+            total={(pending ?? []).length}
+            selectedCount={selected.size}
+            allSelected={(pending ?? []).length > 0 && selected.size === (pending ?? []).length}
+            busy={batchBusy}
+            onToggleAll={(all) =>
+              setSelected(all ? new Set((pending ?? []).map((p) => p.id)) : new Set())
+            }
+            onApprove={() => resolveSelected('approve')}
+            onReject={() => resolveSelected('reject')}
+          />
           {(pending ?? []).map((p) => (
             <ProposalCard
               key={p.id}
               proposal={p}
               expanded={expandedId === p.id}
+              selected={selected.has(p.id)}
+              onSelectChange={() => toggleSelected(p.id)}
               onToggle={() => setExpandedId((cur) => (cur === p.id ? null : p.id))}
-              onApprove={(note) => resolve(p, 'approve', note)}
+              onApprove={(note, payload) => resolve(p, 'approve', note, payload)}
               onReject={(note) => resolve(p, 'reject', note)}
             />
           ))}
@@ -170,35 +232,116 @@ export default function ProposalsPage() {
   );
 }
 
+const actionVerb: Record<Proposal['action'], string> = {
+  create: 'Create',
+  update: 'Update',
+  delete: 'Delete',
+};
+
 function proposalTitle(p: Proposal): string {
-  const verb = p.action === 'create' ? 'Create' : 'Update';
-  const name = typeof p.payload.name === 'string' ? p.payload.name : typeof p.payload.title === 'string' ? p.payload.title : null;
+  const verb = actionVerb[p.action];
+  const source = p.action === 'delete' ? (p.snapshot ?? {}) : p.payload;
+  const name = typeof source.name === 'string' ? source.name : typeof source.title === 'string' ? source.title : null;
   if (name) return `${verb} ${p.entityType} "${name}"`;
   return `${verb} ${p.entityType}${p.entityId ? ` #${p.entityId}` : ''}`;
+}
+
+/** Bulk approve/reject bar for the pending queue (#98) — select many, resolve in one call. */
+function BatchBar({
+  total,
+  selectedCount,
+  allSelected,
+  busy,
+  onToggleAll,
+  onApprove,
+  onReject,
+}: {
+  total: number;
+  selectedCount: number;
+  allSelected: boolean;
+  busy: boolean;
+  onToggleAll: (all: boolean) => void;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2.5 flex-wrap px-1">
+      <label className="flex items-center gap-2 text-[12px] text-slate-400 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={allSelected}
+          ref={(el) => {
+            if (el) el.indeterminate = selectedCount > 0 && !allSelected;
+          }}
+          onChange={(e) => onToggleAll(e.target.checked)}
+        />
+        {selectedCount > 0 ? `${selectedCount} of ${total} selected` : `Select all (${total})`}
+      </label>
+      {selectedCount > 0 && (
+        <div className="flex items-center gap-2 ml-auto">
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onReject} disabled={busy}>
+            Reject {selectedCount}
+          </Btn>
+          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onApprove} disabled={busy}>
+            Approve {selectedCount}
+          </Btn>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ProposalCard({
   proposal,
   expanded,
+  selected,
+  onSelectChange,
   onToggle,
   onApprove,
   onReject,
 }: {
   proposal: Proposal;
   expanded: boolean;
+  selected: boolean;
+  onSelectChange: () => void;
   onToggle: () => void;
-  onApprove: (note: string) => void;
+  onApprove: (note: string, payload?: Record<string, unknown>) => void;
   onReject: (note: string) => void;
 }) {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
   const route = entityRoute[proposal.entityType];
   const href = route && proposal.entityId ? `../${route}/${proposal.entityId}` : null;
+  const isDelete = proposal.action === 'delete';
+  // Edit-before-approve is meaningful only for create/update (delete carries no payload).
+  const canEdit = !isDelete;
 
-  async function act(fn: (note: string) => void) {
+  function startEdit() {
+    setDraft(JSON.stringify(proposal.payload, null, 2));
+    setEditError(null);
+    setEditing(true);
+  }
+
+  async function act(fn: (note: string, payload?: Record<string, unknown>) => void, withPayload: boolean) {
+    let payload: Record<string, unknown> | undefined;
+    if (withPayload && editing) {
+      try {
+        const parsed = JSON.parse(draft);
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Payload must be a JSON object.');
+        }
+        payload = parsed as Record<string, unknown>;
+      } catch (err) {
+        setEditError(err instanceof Error ? err.message : 'Invalid JSON.');
+        return;
+      }
+    }
     setBusy(true);
     try {
-      fn(note.trim());
+      fn(note.trim(), payload);
     } finally {
       setBusy(false);
     }
@@ -206,24 +349,51 @@ function ProposalCard({
 
   return (
     <Card className="space-y-2.5">
-      <div className="flex items-center gap-2 flex-wrap">
-        <p className="card-title text-[15px] m-0">
-          {entityIcon[proposal.entityType]} {proposalTitle(proposal)}
-        </p>
-        <Chip variant="proposal">{proposal.proposer}</Chip>
+      <div className="flex items-start gap-2.5">
+        <input
+          type="checkbox"
+          className="mt-1.5"
+          checked={selected}
+          onChange={onSelectChange}
+          aria-label={`Select proposal ${proposal.id}`}
+        />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="card-title text-[15px] m-0">
+              {entityIcon[proposal.entityType]} {proposalTitle(proposal)}
+            </p>
+            {isDelete && <Chip variant="proposal">delete</Chip>}
+            <Chip variant="proposal">{proposal.proposer}</Chip>
+          </div>
+          <p className="text-muted text-xs m-0 mt-0.5">
+            {actionVerb[proposal.action]} {proposal.entityType}
+            {proposal.entityId && href ? (
+              <>
+                {' '}
+                · <Link to={href} className="text-purple-400 hover:underline">view target</Link>
+              </>
+            ) : null}
+            {' '}· {timeAgo(proposal.createdAt)}
+          </p>
+        </div>
       </div>
-      <p className="text-muted text-xs m-0">
-        {proposal.action === 'create' ? 'New' : 'Update'} {proposal.entityType}
-        {proposal.entityId && href ? (
-          <>
-            {' '}
-            · <Link to={href} className="text-purple-400 hover:underline">view target</Link>
-          </>
-        ) : null}
-        {' '}· {timeAgo(proposal.createdAt)}
-      </p>
 
-      <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
+      {isDelete ? (
+        <DeleteView snapshot={proposal.snapshot} />
+      ) : editing ? (
+        <div className="space-y-1">
+          <textarea
+            className="w-full text-[12px] font-mono bg-[var(--color-surface-2,#1a1b26)] border border-[var(--color-divider)] rounded-[var(--radius-md)] p-2.5 min-h-[140px] text-slate-200"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            spellCheck={false}
+          />
+          {editError && <p className="text-[11px] text-red-400 m-0">{editError}</p>}
+          <p className="text-[10px] text-slate-600 m-0">Edit the proposed payload (JSON) before approving.</p>
+        </div>
+      ) : (
+        <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
+      )}
 
       {expanded && (
         <TextInput
@@ -234,18 +404,50 @@ function ProposalCard({
         />
       )}
 
-      <div className="flex items-center gap-2 justify-end">
+      <div className="flex items-center gap-2 justify-end flex-wrap">
         <button type="button" className="text-[11px] text-slate-500 hover:text-white mr-auto" onClick={onToggle}>
           {expanded ? 'Hide note field' : '+ note'}
         </button>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onReject)} disabled={busy}>
+        {canEdit && (
+          <button
+            type="button"
+            className="text-[11px] text-slate-500 hover:text-white"
+            onClick={() => (editing ? setEditing(false) : startEdit())}
+          >
+            {editing ? 'Cancel edit' : 'Edit payload'}
+          </button>
+        )}
+        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onReject, false)} disabled={busy}>
           Reject
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onApprove)} disabled={busy}>
-          Approve
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onApprove, true)} disabled={busy}>
+          {editing ? 'Approve edited' : 'Approve'}
         </Btn>
       </div>
     </Card>
+  );
+}
+
+/** Delete proposals carry no payload — show the snapshot of what would be removed. */
+function DeleteView({ snapshot }: { snapshot: Record<string, unknown> | null }) {
+  if (snapshot === null) {
+    return <p className="text-xs text-slate-500">This entity will be permanently deleted.</p>;
+  }
+  const entries = Object.entries(snapshot).filter(([, v]) => v !== null && v !== '' && !(Array.isArray(v) && v.length === 0));
+  return (
+    <div className="border border-[var(--color-divider)] rounded-[var(--radius-md)] overflow-hidden">
+      <div className="px-3 py-1.5 text-[11px] text-red-400 border-b border-[var(--color-divider)]">Will be deleted</div>
+      {entries.slice(0, 8).map(([key, value], i) => (
+        <div
+          key={key}
+          className="flex gap-2.5 px-3 py-2 text-[12.5px] items-baseline"
+          style={i > 0 ? { borderTop: '1px solid var(--color-divider)' } : undefined}
+        >
+          <span className="text-muted w-[86px] shrink-0 text-[11px]">{key}</span>
+          <span className="line-through text-slate-500 whitespace-pre-wrap break-all">{formatValue(value)}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 

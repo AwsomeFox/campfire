@@ -1,8 +1,12 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
+import type { Response } from 'express';
+import { CharacterCreate, CharacterUpdate } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
+import { ProposalRecordsService } from '../proposals/proposal-records.service';
+import { isProposed } from '../../common/proposed.util';
 import { CharactersService } from './characters.service';
 import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto } from './characters.dto';
 
@@ -12,6 +16,7 @@ export class CampaignCharactersController {
   constructor(
     private readonly characters: CharactersService,
     private readonly access: CampaignAccessService,
+    private readonly proposals: ProposalRecordsService,
   ) {}
 
   @Get()
@@ -23,14 +28,30 @@ export class CampaignCharactersController {
   }
 
   @Post()
-  @ApiOperation({ summary: 'Create a character', description: 'player role required. Players creating their own character get ownerUserId set automatically; a dm may set ownerUserId explicitly to create on behalf of another player.' })
-  @ApiResponse({ status: 201, description: 'Created character.' })
+  @ApiOperation({
+    summary: 'Create a character',
+    description:
+      'player role required. Players creating their own character get ownerUserId set automatically; a dm may set ownerUserId explicitly to create on behalf of another player. With `?proposed=true` any member (incl. an AI scribe) may submit it as a pending proposal instead of writing directly.',
+  })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
+  @ApiResponse({ status: 201, description: 'Created character (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: CharacterCreateDto,
+    @Query('proposed') proposed: string | undefined,
     @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
   ) {
+    if (isProposed(proposed)) {
+      const role = await this.access.requireMember(user, campaignId, { write: true });
+      const validated = CharacterCreate.parse(body);
+      const proposal = await this.proposals.create(campaignId, 'character', null, 'create', validated, user, role);
+      res.status(202);
+      return { proposal };
+    }
     const role = await this.access.requireRole(user, campaignId, 'player');
+    res.status(201);
     return this.characters.create(campaignId, body, user, role);
   }
 
@@ -54,6 +75,7 @@ export class CharactersController {
   constructor(
     private readonly characters: CharactersService,
     private readonly access: CampaignAccessService,
+    private readonly proposals: ProposalRecordsService,
   ) {}
 
   @Get(':id')
@@ -66,20 +88,55 @@ export class CharactersController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a character', description: 'dm or the owning player may write; other players get 403. dmSecret is dm-writable only (silently ignored for the owning player).' })
+  @ApiOperation({
+    summary: 'Update a character',
+    description:
+      'dm or the owning player may write; other players get 403. dmSecret is dm-writable only (silently ignored for the owning player). With `?proposed=true` any member may submit the change as a pending proposal instead of writing directly.',
+  })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
   @ApiResponse({ status: 200, description: 'Updated character.' })
+  @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
   @ApiResponse({ status: 403, description: 'Not the dm or owning player.' })
-  async update(@Param('id', ParseIntPipe) id: number, @Body() body: CharacterUpdateDto, @CurrentUser() user: RequestUser) {
+  async update(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: CharacterUpdateDto,
+    @Query('proposed') proposed: string | undefined,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const row = await this.characters.getRowOrThrow(id);
+    if (isProposed(proposed)) {
+      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const validated = CharacterUpdate.parse(body);
+      const proposal = await this.proposals.create(row.campaignId, 'character', id, 'update', validated, user, role);
+      res.status(202);
+      return { proposal };
+    }
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.update(id, body, user, role);
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a character', description: 'dm role required.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
-  async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  @ApiOperation({
+    summary: 'Delete a character',
+    description: 'dm role required, unless `?proposed=true` — then any member may submit a deletion as a pending proposal.',
+  })
+  @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending delete proposal instead of deleting directly.' })
+  @ApiResponse({ status: 200, description: 'Deleted (direct write).' })
+  @ApiResponse({ status: 202, description: 'Pending delete proposal created (proposed=true).' })
+  async remove(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('proposed') proposed: string | undefined,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const row = await this.characters.getRowOrThrow(id);
+    if (isProposed(proposed)) {
+      const role = await this.access.requireMember(user, row.campaignId, { write: true });
+      const proposal = await this.proposals.create(row.campaignId, 'character', id, 'delete', {}, user, role);
+      res.status(202);
+      return { proposal };
+    }
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.characters.remove(id, user, role);
   }
