@@ -154,6 +154,28 @@ export const Character = z.object({
 export type Character = z.infer<typeof Character>;
 export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
 export const CharacterUpdate = CharacterCreate.partial();
+
+/**
+ * Request body for importing a character from a PUBLIC D&D Beyond sheet (issue #18).
+ * The importer is unofficial and read-only — it reads the public character-service
+ * JSON that D&D Beyond exposes for characters whose privacy is set to Public. Callers
+ * pass either the raw numeric character id (`ddbId`) or a share/character URL (`url`,
+ * e.g. https://www.dndbeyond.com/characters/12345678); at least one is required. `url`
+ * (base-URL override, mainly for tests pointing at a fake server) is separate from the
+ * `url` that carries a character link — the server derives the id from whichever of
+ * ddbId/url is present.
+ */
+export const DdbCharacterImport = z
+  .object({
+    ddbId: z.string().max(200).optional(),
+    url: z.string().max(500).optional(),
+  })
+  .strict()
+  .refine((v) => Boolean(v.ddbId?.trim() || v.url?.trim()), {
+    message: 'Provide a D&D Beyond character id (ddbId) or a character URL (url)',
+  });
+export type DdbCharacterImport = z.infer<typeof DdbCharacterImport>;
+
 export const HpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
