@@ -1610,6 +1610,34 @@ export const CombatantUpdate = z.object({
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
+// ---------- persistent per-encounter combat log (issue #61) ----------
+// The in-encounter dice/turn history used to be client-only React state, capped and
+// lost on reload. `encounter_events` persists a per-encounter trail written by the
+// encounters service on the meaningful combat mutations (HP damage/heal, condition
+// add/remove, death, next-turn/round), so the DM can reconstruct "round 2: Ember
+// Hound took 8 damage" for a recap and a refresh no longer wipes it.
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note']);
+export type EncounterEventType = z.infer<typeof EncounterEventType>;
+
+export const EncounterEvent = z.object({
+  id: Id,
+  encounterId: Id,
+  // The encounter round the event happened in (0 while still preparing).
+  round: z.number().int().nonnegative().default(0),
+  type: EncounterEventType,
+  // Free-text names, denormalized so the log renders without joining combatants
+  // (which may since have been removed). `actor` is who acted (turn events, or a
+  // heal source when known); `target` is who it happened to. Either may be null.
+  actor: z.string().max(200).nullable().default(null),
+  target: z.string().max(200).nullable().default(null),
+  // Human phrasing of the event, deliberately kept free of exact monster HP totals
+  // so listing the log to a non-DM viewer can't leak what issue #43 redacts on the
+  // combatant rows (only the damage/heal delta is recorded, never the resulting HP).
+  detail: z.string().max(500).default(''),
+  createdAt: IsoDate,
+});
+export type EncounterEvent = z.infer<typeof EncounterEvent>;
+
 // ---------- inventory & loot (party treasury + per-character items) ----------
 export const ItemOwnerType = z.enum(['party', 'character']);
 export type ItemOwnerType = z.infer<typeof ItemOwnerType>;

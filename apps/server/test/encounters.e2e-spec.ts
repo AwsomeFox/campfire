@@ -721,6 +721,202 @@ describe('encounters (e2e)', () => {
       expect(rows.some((r) => r.campaignId === campaignId)).toBe(true);
     });
   });
+
+  // ------------------------------------------------------------------
+  // Persistent per-encounter combat log (issue #61)
+  // ------------------------------------------------------------------
+  describe('persistent combat log (issue #61)', () => {
+    let logCampaignId: number;
+    let logEncounterId: number;
+    let houndId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      // Fresh campaign with no party characters, so the only combatant is the monster we
+      // add — deterministic event counts.
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Combat Log Campaign' });
+      logCampaignId = campRes.body.id;
+
+      const encRes = await request(server).post(`/api/v1/campaigns/${logCampaignId}/encounters`).set(dm).send({ name: 'Logged Fight' });
+      logEncounterId = encRes.body.id;
+
+      const add = await request(server)
+        .post(`/api/v1/encounters/${logEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Ember Hound', hpMax: 30, initMod: 2 });
+      expect(add.status).toBe(201);
+      houndId = add.body.id;
+
+      await request(server).post(`/api/v1/encounters/${logEncounterId}/roll-initiative`).set(dm);
+      const start = await request(server).post(`/api/v1/encounters/${logEncounterId}/start`).set(dm);
+      expect(start.status).toBe(201);
+    });
+
+    it('starting the encounter seeds a single opening-turn event', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm);
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0].type).toBe('turn');
+      expect(res.body[0].round).toBe(1);
+    });
+
+    it('a damage mutation appends a damage event carrying the delta, never the resulting HP total', async () => {
+      const server = ctx.app.getHttpServer();
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${logEncounterId}/combatants/${houndId}`)
+        .set(dm)
+        .send({ hpDelta: -8 });
+      expect(patch.status).toBe(200);
+      expect(patch.body.hpCurrent).toBe(22);
+
+      const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; target: string; detail: string; round: number }>).filter((e) => e.type === 'damage');
+      expect(damage).toHaveLength(1);
+      expect(damage[0].target).toBe('Ember Hound');
+      expect(damage[0].detail).toContain('8');
+      expect(damage[0].round).toBe(1);
+      // Issue #43 safety: the log must not leak the monster's resulting exact HP (22).
+      expect(damage[0].detail).not.toContain('22');
+    });
+
+    it('a condition mutation appends a condition event', async () => {
+      const server = ctx.app.getHttpServer();
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${logEncounterId}/combatants/${houndId}`)
+        .set(dm)
+        .send({ addConditions: ['Poisoned'] });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm);
+      const cond = (res.body as Array<{ type: string; detail: string }>).filter((e) => e.type === 'condition');
+      expect(cond).toHaveLength(1);
+      expect(cond[0].detail).toContain('Poisoned');
+    });
+
+    it('a heal mutation appends a heal event', async () => {
+      const server = ctx.app.getHttpServer();
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${logEncounterId}/combatants/${houndId}`)
+        .set(dm)
+        .send({ hpDelta: 3 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm);
+      const heal = (res.body as Array<{ type: string; detail: string }>).filter((e) => e.type === 'heal');
+      expect(heal).toHaveLength(1);
+      expect(heal[0].detail).toContain('3');
+    });
+
+    it('a next-turn mutation appends a turn event', async () => {
+      const server = ctx.app.getHttpServer();
+      const before = (await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm)).body.filter(
+        (e: { type: string }) => e.type === 'turn',
+      ).length;
+
+      const turn = await request(server).post(`/api/v1/encounters/${logEncounterId}/next-turn`).set(dm);
+      expect(turn.status).toBe(201);
+
+      const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm);
+      const turns = (res.body as Array<{ type: string }>).filter((e) => e.type === 'turn');
+      expect(turns).toHaveLength(before + 1);
+    });
+
+    it('a lethal mutation appends a death event for the monster', async () => {
+      const server = ctx.app.getHttpServer();
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${logEncounterId}/combatants/${houndId}`)
+        .set(dm)
+        .send({ hpSet: 0 });
+      expect(patch.status).toBe(200);
+      expect(patch.body.hpCurrent).toBe(0);
+
+      const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm);
+      const death = (res.body as Array<{ type: string; target: string }>).filter((e) => e.type === 'death');
+      expect(death).toHaveLength(1);
+      expect(death[0].target).toBe('Ember Hound');
+    });
+
+    it('the log persists and lists in chronological order across the mutations above', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm);
+      expect(res.status).toBe(200);
+
+      const ids = (res.body as Array<{ id: number }>).map((e) => e.id);
+      expect(ids).toEqual([...ids].sort((a, b) => a - b)); // insertion / chronological order
+
+      const types = new Set((res.body as Array<{ type: string }>).map((e) => e.type));
+      expect(types.has('turn')).toBe(true);
+      expect(types.has('damage')).toBe(true);
+      expect(types.has('condition')).toBe(true);
+      expect(types.has('heal')).toBe(true);
+      expect(types.has('death')).toBe(true);
+    });
+
+    it('a non-DM campaign member (viewer) can list the log', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(viewer);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(res.body.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // Combatant statblock exposure (issue #56)
+  // ------------------------------------------------------------------
+  describe('combatant statblock exposure (issue #56)', () => {
+    it('a compendium-linked combatant exposes its statblock (AC / actions / abilities) via the rules read path', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      const [pack] = await db
+        .insert(rulePacks)
+        .values({ slug: 'sb-pack', name: 'SB Pack', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 1 })
+        .returning();
+      const [entry] = await db
+        .insert(ruleEntries)
+        .values({
+          packId: pack.id,
+          slug: 'ember-hound-sb',
+          name: 'Ember Hound',
+          type: 'monster',
+          summary: 'CR 1',
+          body: '',
+          dataJson: JSON.stringify({
+            armorClass: '13 (natural armor)',
+            hitPoints: 30,
+            abilityScores: { strength: 15, dexterity: 14, constitution: 13 },
+            actions: [{ name: 'Bite', desc: '+5 to hit, reach 5 ft., one target. 2d6+3 fire damage.' }],
+          }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning();
+
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Statblock Campaign' });
+      const sbCampaignId = campRes.body.id;
+      const encRes = await request(server).post(`/api/v1/campaigns/${sbCampaignId}/encounters`).set(dm).send({ name: 'SB Fight' });
+      const sbEncounterId = encRes.body.id;
+
+      // Adding by ruleEntryId stores the link on the combatant (as the tracker relies on).
+      const add = await request(server)
+        .post(`/api/v1/encounters/${sbEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', ruleEntryId: entry.id });
+      expect(add.status).toBe(201);
+      expect(add.body.ruleEntryId).toBe(entry.id);
+
+      // The tracker fetches the linked entry through the existing rules read path — assert
+      // the statblock fields the combatant row now surfaces (issue #56) are exposed there.
+      const entryRes = await request(server).get(`/api/v1/rules/entries/${entry.id}`).set(dm);
+      expect(entryRes.status).toBe(200);
+      const data = JSON.parse(entryRes.body.dataJson);
+      expect(data.armorClass).toContain('13');
+      expect(data.actions[0].name).toBe('Bite');
+      expect(data.abilityScores.strength).toBe(15);
+    });
+  });
 });
 
 // Dev-auth headers (x-dev-role/x-dev-user) always resolve to serverRole 'admin', and admins

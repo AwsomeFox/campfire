@@ -18,6 +18,7 @@ import type {
   Character,
   Combatant,
   CombatantKind,
+  EncounterEvent,
   EncounterWithCombatants,
   RuleEntry,
 } from '@campfire/schema';
@@ -26,6 +27,7 @@ import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
 import { NotFoundState } from '../../components/NotFoundState';
@@ -157,6 +159,9 @@ export default function RunSessionPage() {
   const announce = useAnnounce();
 
   const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
+  // Persistent combat log (issue #61) — fetched alongside the encounter so it survives
+  // reload and refreshes on every mutation / SSE-pushed update.
+  const [events, setEvents] = useState<EncounterEvent[]>([]);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -180,6 +185,13 @@ export default function RunSessionPage() {
     try {
       const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
       setEncounter(data);
+      // Fetch the persisted combat log too; a failure here shouldn't break the tracker.
+      try {
+        const evs = await api.get<EncounterEvent[]>(`${API}/encounters/${eid}/events`);
+        setEvents(evs);
+      } catch {
+        /* leave prior events in place */
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true);
@@ -542,6 +554,7 @@ export default function RunSessionPage() {
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
               canEditIdentity={isDm && encounter.status !== 'ended'}
+              canViewStatblock={isDm}
               canRemove={isDm}
               canSetInitiative={isDm && encounter.status !== 'ended'}
               busy={busy}
@@ -569,6 +582,8 @@ export default function RunSessionPage() {
           onAdded={load}
         />
       )}
+
+      <CombatLog events={events} />
 
       <SharedDiceLog campaignId={cid} />
 
@@ -829,6 +844,7 @@ function CombatantRow({
   isCurrentTurn,
   canEdit,
   canEditIdentity,
+  canViewStatblock,
   canRemove,
   canSetInitiative,
   busy,
@@ -846,6 +862,7 @@ function CombatantRow({
   isCurrentTurn: boolean;
   canEdit: boolean;
   canEditIdentity: boolean;
+  canViewStatblock: boolean;
   canRemove: boolean;
   canSetInitiative: boolean;
   busy: boolean;
@@ -1119,6 +1136,13 @@ function CombatantRow({
             )}
           </div>
         )}
+        {/* Compendium statblock (issue #56): a monster combatant keeps its ruleEntryId —
+            surface the linked entry's AC / attacks / ability scores inline so the DM can
+            answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
+            stays scannable; lazily fetched on first expand. */}
+        {canViewStatblock && combatant.ruleEntryId != null && (
+          <CombatantStatblock ruleEntryId={combatant.ruleEntryId} />
+        )}
       </div>
       <div style={{ minWidth: 130, flex: 'none' }}>
         {combatant.hpCurrent != null && combatant.hpMax != null ? (
@@ -1205,6 +1229,133 @@ function CombatantRow({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Collapsible statblock for a compendium-linked monster combatant (issue #56). The
+ * combatant only stores a `ruleEntryId`; the entry's AC / attacks / ability scores live
+ * in its `dataJson`, fetched lazily from the existing rules read path on first expand
+ * and rendered with the shared StatBlock component (added by #142). Kept collapsed by
+ * default so the initiative row stays scannable mid-fight.
+ */
+function CombatantStatblock({ ruleEntryId }: { ruleEntryId: number }) {
+  const [open, setOpen] = useState(false);
+  const [entry, setEntry] = useState<RuleEntry | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  async function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && entry === null && !loading) {
+      setLoading(true);
+      setFailed(false);
+      try {
+        const e = await api.get<RuleEntry>(`${API}/rules/entries/${ruleEntryId}`);
+        setEntry(e);
+      } catch {
+        setFailed(true);
+      } finally {
+        setLoading(false);
+      }
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 5 }}>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        aria-expanded={open}
+        onClick={toggle}
+        style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+      >
+        {open ? '▾' : '▸'} Statblock
+      </button>
+      {open && (
+        <div
+          style={{
+            marginTop: 6,
+            padding: '10px 12px',
+            border: '1px solid var(--color-divider)',
+            borderRadius: 'var(--radius-md)',
+            background: 'color-mix(in srgb, var(--color-accent) 4%, transparent)',
+            maxWidth: 460,
+          }}
+        >
+          {loading ? (
+            <Skeleton lines={3} />
+          ) : failed ? (
+            <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+              Couldn&apos;t load the statblock.
+            </p>
+          ) : entry && hasMonsterStatblock(entry.dataJson) ? (
+            <StatBlock data={entry.dataJson} />
+          ) : (
+            <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+              No statblock details for this entry.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const EVENT_ICON: Record<string, string> = {
+  damage: '⚔️',
+  heal: '✨',
+  condition: '🌀',
+  death: '💀',
+  turn: '⏱️',
+  roll: '🎲',
+  note: '📝',
+};
+
+/**
+ * Persistent per-encounter combat log (issue #61). Renders the server-stored event
+ * trail (damage/heal, conditions, deaths, turns) in chronological order — it survives
+ * reload and updates live with the rest of the tracker. Scrollable so a long fight
+ * doesn't push the page down.
+ */
+function CombatLog({ events }: { events: EncounterEvent[] }) {
+  return (
+    <Card className="space-y-2">
+      <span className="card-kicker">Combat log</span>
+      {events.length === 0 ? (
+        <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+          Nothing yet — damage, conditions, deaths and turns will show here as the fight unfolds.
+        </p>
+      ) : (
+        <div style={{ maxHeight: 260, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {events.map((ev) => (
+            <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5, lineHeight: 1.4 }}>
+              <span aria-hidden="true" style={{ flex: 'none' }}>
+                {EVENT_ICON[ev.type] ?? '•'}
+              </span>
+              {ev.round > 0 && (
+                <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>
+                  R{ev.round}
+                </span>
+              )}
+              <span style={{ minWidth: 0 }}>
+                {ev.type === 'turn' ? (
+                  <span>{ev.detail}</span>
+                ) : (
+                  <>
+                    {ev.target && <span style={{ fontWeight: 600 }}>{ev.target}</span>}{' '}
+                    <span className="text-muted" style={{ color: 'var(--color-text)' }}>
+                      {ev.detail}
+                    </span>
+                  </>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
 

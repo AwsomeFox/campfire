@@ -541,6 +541,21 @@ CREATE TABLE IF NOT EXISTS combatants (
   token_y REAL
 );
 
+-- Persistent per-encounter combat log (issue #61). New table, so a plain
+-- CREATE TABLE IF NOT EXISTS in bootstrap (no migrate fn needed). See db/schema.ts
+-- for column docs; detail deliberately omits monster exact-HP totals (only deltas)
+-- so listing it to a non-DM can't leak issue #43's redaction.
+CREATE TABLE IF NOT EXISTS encounter_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  encounter_id INTEGER NOT NULL,
+  round INTEGER NOT NULL DEFAULT 0,
+  type TEXT NOT NULL,
+  actor TEXT,
+  target TEXT,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
@@ -595,6 +610,7 @@ CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
+CREATE INDEX IF NOT EXISTS idx_encounter_events_encounter ON encounter_events(encounter_id);
 CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);

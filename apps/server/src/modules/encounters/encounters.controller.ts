@@ -102,6 +102,19 @@ export class EncountersController {
     return this.encounters.updateEncounter(id, body, user, role);
   }
 
+  @Get(':id/events')
+  @ApiOperation({
+    summary: "List an encounter's persistent combat log",
+    description:
+      'Requires campaign membership. Chronological per-encounter event history (damage/heal, conditions, deaths, turns) that survives reload — issue #61. Member-visible; details record only HP deltas, never a monster’s exact HP totals.',
+  })
+  @ApiResponse({ status: 200, description: 'Encounter events in chronological order.' })
+  async events(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.listEvents(id, role);
+  }
+
   @Delete(':id')
   @ApiOperation({ summary: 'Delete an encounter', description: 'dm role required.' })
   @ApiResponse({ status: 200, description: 'Deleted.' })
