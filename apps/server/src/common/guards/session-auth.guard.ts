@@ -4,14 +4,19 @@ import type { Request } from 'express';
 import { Role } from '@campfire/schema';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import type { RequestUser, TokenContext } from '../user.types';
-import { looksLikeApiToken } from '../crypto';
+import { looksLikeApiToken, looksLikeOAuthAccessToken } from '../crypto';
 import { AuthService } from '../../modules/auth/auth.service';
 import { SESSION_COOKIE_NAME } from '../../modules/auth/auth.constants';
 import { TokensService } from '../../modules/tokens/tokens.service';
+import { OAuthService } from '../../modules/oauth/oauth.service';
 
 /**
  * Resolves req.user from, in order:
  *  (a) an `Authorization: Bearer cf_pat_...` PAT header, else
+ *  (a2) an `Authorization: Bearer cf_mcp_...` MCP OAuth access token (issue
+ *      #37) — resolves to the same RequestUser + TokenContext shape as a PAT, so
+ *      every effective-role cap applies identically; lets /mcp be added as a
+ *      Claude connector via OAuth without a hand-copied PAT, else
  *  (b) the session cookie (real local-auth users), else
  *  (c) if env DEV_AUTH=1: legacy x-dev-user/x-dev-role headers — synthetic
  *      user id `dev:<name>`, keeps all pre-auth e2e tests passing, else
@@ -27,6 +32,7 @@ export class SessionAuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly authService: AuthService,
     private readonly tokensService: TokensService,
+    private readonly oauthService: OAuthService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -48,6 +54,14 @@ export class SessionAuthGuard implements CanActivate {
           return true;
         }
         // Known PAT format but not found/owner disabled: fall through (won't match cookie/dev-auth either) -> 401 below unless @Public.
+      } else if (looksLikeOAuthAccessToken(rawToken)) {
+        const resolved = await this.oauthService.resolveAccessToken(rawToken);
+        if (resolved) {
+          req.user = { ...resolved.user, tokenContext: resolved.tokenContext };
+          req.tokenContext = resolved.tokenContext;
+          return true;
+        }
+        // Known OAuth access-token format but not found/expired/owner disabled: fall through -> 401 below unless @Public.
       }
     }
 

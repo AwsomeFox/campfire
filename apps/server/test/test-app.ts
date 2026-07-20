@@ -34,7 +34,22 @@ export async function createTestApp(): Promise<TestAppContext> {
   const app = moduleRef.createNestApplication();
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1', {
-    exclude: ['healthz', 'readyz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
+    exclude: [
+      'healthz',
+      'readyz',
+      'mcp',
+      '.well-known/oauth-protected-resource',
+      '.well-known/oauth-protected-resource/mcp',
+      '.well-known/oauth-authorization-server',
+      '.well-known/oauth-authorization-server/mcp',
+      'oauth/register',
+      'oauth/authorize',
+      'oauth/token',
+      'oauth/revoke',
+      'api/docs',
+      'api/docs-json',
+      'api/openapi.json',
+    ],
   });
   await app.init();
 
@@ -62,7 +77,22 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
   const app = moduleRef.createNestApplication();
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1', {
-    exclude: ['healthz', 'readyz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
+    exclude: [
+      'healthz',
+      'readyz',
+      'mcp',
+      '.well-known/oauth-protected-resource',
+      '.well-known/oauth-protected-resource/mcp',
+      '.well-known/oauth-authorization-server',
+      '.well-known/oauth-authorization-server/mcp',
+      'oauth/register',
+      'oauth/authorize',
+      'oauth/token',
+      'oauth/revoke',
+      'api/docs',
+      'api/docs-json',
+      'api/openapi.json',
+    ],
   });
   await app.init();
 
