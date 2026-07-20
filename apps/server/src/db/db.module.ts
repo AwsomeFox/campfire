@@ -251,6 +251,25 @@ function migrateCampaignsTableForIcsToken(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-campaign storage quotas (issue #24):
+ * `campaigns.storage_quota_bytes` didn't exist. Plain nullable ADD COLUMN — no
+ * table rebuild needed, same as migrateCampaignsTableForIcsToken above. Existing
+ * campaigns default to NULL (no quota). New DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the column.
+ */
+function migrateCampaignsTableForStorageQuota(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'storage_quota_bytes')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN storage_quota_bytes INTEGER');
+}
+
+/**
  * Migration for DBs created before XP tracking (issue #14): `characters.xp`
  * didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no table rebuild needed,
  * same as migrateApiTokensTableForAdminEnabled above. New DBs never hit this
@@ -436,6 +455,7 @@ export function openDatabase(dataDir: string): {
   migrateProposalsTableForSnapshot(sqlite);
   migrateCharactersTableForSheetDepth(sqlite);
   migrateCampaignsTableForIcsToken(sqlite);
+  migrateCampaignsTableForStorageQuota(sqlite);
   migrateCharactersTableForXp(sqlite);
   migrateCharactersTableForDmSecret(sqlite);
   migrateSessionsTableForDmSecret(sqlite);

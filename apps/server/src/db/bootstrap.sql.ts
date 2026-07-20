@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER,
   ics_token TEXT,
+  storage_quota_bytes INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
