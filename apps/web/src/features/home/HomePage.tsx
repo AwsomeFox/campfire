@@ -103,7 +103,7 @@ function CampaignTile({
 }
 
 export function HomePage() {
-  const { roleIn } = useAuth();
+  const { roleIn, refresh: refreshAuth } = useAuth();
   const { campaigns, loading, error, refresh } = useCampaigns();
   const navigate = useNavigate();
   const [justCreated, setJustCreated] = useState<Campaign[]>([]);
@@ -115,9 +115,16 @@ export function HomePage() {
   const activeCampaigns = allCampaigns.filter((c) => c.status === 'active');
   const archivedCampaigns = allCampaigns.filter((c) => c.status !== 'active');
 
-  function onCampaignCreated(c: Campaign) {
+  async function onCampaignCreated(c: Campaign) {
     setJustCreated((prev) => [...prev, c]);
-    void refresh();
+    // Refresh the campaign list (drives Layout's access gate) AND auth
+    // memberships (drives roleIn / DM nav) BEFORE navigating. Navigating first
+    // raced the refetch: Layout's stale-access check ran against the old list,
+    // failed to find the just-created campaign, and latched the "You no longer
+    // have access to this campaign" lock screen for that id until a hard
+    // refresh (issue #103). allSettled so an API hiccup on one refresh still
+    // lets us proceed rather than trapping the user on the wizard.
+    await Promise.allSettled([refresh(), refreshAuth()]);
     setWizardOpen(false);
     navigate(`/c/${c.id}`);
   }
