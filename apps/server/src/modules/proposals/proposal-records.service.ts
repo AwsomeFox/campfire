@@ -17,7 +17,10 @@ import { toDomain as locationToDomain } from '../locations/locations.service';
 import { toDomain as sessionToDomain } from '../sessions/sessions.service';
 import { toDomain as characterToDomain } from '../characters/characters.service';
 
-export type ProposableEntityType = Exclude<EntityType, 'campaign'>;
+// Encounters (issue #126) join EntityType for note-pinning, but combat state is not a
+// proposable entity — exclude it alongside 'campaign' so the proposal schemas/snapshot
+// maps stay exhaustive over exactly the entity types that CAN be proposed.
+export type ProposableEntityType = Exclude<EntityType, 'campaign' | 'encounter'>;
 
 const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character'];
 

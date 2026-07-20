@@ -437,11 +437,29 @@ function migrateEncountersTableForCurrentCombatant(sqlite: Database.Database): v
 }
 
 /**
+ * Migration for DBs created before encounter linking (issue #126): encounters carried
+ * only campaignId + name + status/round/turn, with no way to attach a fight to WHERE
+ * (locationId), WHY (questId), or WHEN (sessionId) it happened. Plain nullable ADD
+ * COLUMNs, each guarded independently. New DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the columns.
+ */
+function migrateEncountersTableForLinks(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('location_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN location_id INTEGER');
+  if (!has('quest_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN quest_id INTEGER');
+  if (!has('session_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN session_id INTEGER');
+}
+
+/**
  * Migration for DBs created before per-encounter battle maps (issue #39):
- * `encounters.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no table
- * rebuild needed, same as migrateEncountersTableForCurrentCombatant above. Pre-existing
- * encounters get a NULL map (no battle map — the tracker behaves exactly as before).
- * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ * `encounters.map_attachment_id` didn't exist. Plain nullable ADD COLUMN. New DBs never
+ * hit this path — BOOTSTRAP_SQL already declares the column.
  */
 function migrateEncountersTableForMapAttachment(sqlite: Database.Database): void {
   const hasEncountersTable = sqlite
@@ -451,16 +469,13 @@ function migrateEncountersTableForMapAttachment(sqlite: Database.Database): void
 
   const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
   if (columns.some((c) => c.name === 'map_attachment_id')) return;
-
   sqlite.exec('ALTER TABLE encounters ADD COLUMN map_attachment_id INTEGER');
 }
 
 /**
  * Migration for DBs created before battle-map combatant tokens (issue #39):
- * `combatants.token_x` / `token_y` didn't exist. Plain nullable ADD COLUMNs — no table
- * rebuild needed, same shape as migrateCombatantsTableForHpModel above. Pre-existing
- * combatants get NULL positions (not yet placed on the map). New DBs never hit this
- * path — BOOTSTRAP_SQL already declares the columns.
+ * `combatants.token_x` / `token_y` didn't exist. Plain nullable ADD COLUMNs. New DBs
+ * never hit this path — BOOTSTRAP_SQL already declares the columns.
  */
 function migrateCombatantsTableForTokenPosition(sqlite: Database.Database): void {
   const hasCombatantsTable = sqlite
@@ -671,6 +686,7 @@ export function openDatabase(dataDir: string): {
   migrateNotesTableForRecipient(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
+  migrateEncountersTableForLinks(sqlite);
   migrateEncountersTableForMapAttachment(sqlite);
   migrateCombatantsTableForHpModel(sqlite);
   migrateCombatantsTableForTokenPosition(sqlite);

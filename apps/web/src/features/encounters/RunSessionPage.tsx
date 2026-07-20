@@ -18,6 +18,8 @@ import type {
   Character,
   Combatant,
   CombatantKind,
+  DifficultyBand,
+  EncounterDifficulty,
   EncounterEvent,
   EncounterWithCombatants,
   RuleEntry,
@@ -47,6 +49,187 @@ const STATUS_TAG_CLASS: Record<string, string> = {
 };
 
 const CONDITION_SUGGESTIONS = ['Poisoned', 'Prone', 'Restrained', 'Stunned', 'Grappled', 'Blinded', 'Frightened'];
+
+// 5e difficulty band badge (issue #58) — party XP thresholds vs adjusted monster XP.
+const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {
+  trivial: 'Trivial',
+  easy: 'Easy',
+  medium: 'Medium',
+  hard: 'Hard',
+  deadly: 'Deadly',
+};
+// Inline band colors — no `tag-danger` class exists in nocturne.css, and difficulty
+// wants a green→red ramp distinct from the accent-colored status chips.
+const DIFFICULTY_STYLE: Record<DifficultyBand, { background: string; color: string }> = {
+  trivial: { background: 'var(--color-neutral-800)', color: 'var(--color-neutral-100)' },
+  easy: { background: '#14532d', color: '#bbf7d0' },
+  medium: { background: '#713f12', color: '#fde68a' },
+  hard: { background: '#7c2d12', color: '#fed7aa' },
+  deadly: { background: '#7f1d1d', color: '#fecaca' },
+};
+
+/**
+ * Difficulty badge shown in the encounter header (issue #58). Reads the computed
+ * Easy/Medium/Hard/Deadly band from GET /encounters/:id/difficulty. Hidden when there
+ * are no monsters to score (band trivial + no monster XP) so a prep-only party list
+ * doesn't show a misleading "Trivial" chip. `title` surfaces the underlying XP math.
+ */
+function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | null }) {
+  if (!difficulty) return null;
+  if (difficulty.monsterCount === 0) return null;
+  const title =
+    `Adjusted monster XP ${difficulty.adjustedXp.toLocaleString()} ` +
+    `(${difficulty.totalMonsterXp.toLocaleString()} × ${difficulty.multiplier}) vs party thresholds — ` +
+    `easy ${difficulty.thresholds.easy.toLocaleString()}, medium ${difficulty.thresholds.medium.toLocaleString()}, ` +
+    `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
+  return (
+    <span className="tag" style={{ fontSize: 10, ...DIFFICULTY_STYLE[difficulty.band] }} title={title}>
+      ⚔ {DIFFICULTY_LABEL[difficulty.band]}
+    </span>
+  );
+}
+
+type LinkRow = { id: number; name?: string; title?: string; number?: number };
+function linkLabel(kind: 'location' | 'quest' | 'session', row: LinkRow): string {
+  if (kind === 'session') return row.title || `Session ${row.number ?? row.id}`;
+  return row.title ?? row.name ?? `#${row.id}`;
+}
+
+/**
+ * Encounter location/quest/session links (issue #126). Shows the current attachments as
+ * chips; the DM can expand an inline editor to (re)attach or clear each link, persisted
+ * via PATCH /encounters/:id. Non-DM members see the chips read-only (nothing at all when
+ * an encounter is unlinked, so the header stays clean).
+ */
+function EncounterLinks({
+  campaignId,
+  encounter,
+  canEdit,
+  onSaved,
+}: {
+  campaignId: number;
+  encounter: EncounterWithCombatants;
+  canEdit: boolean;
+  onSaved: (updated: Partial<EncounterWithCombatants>) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [locations, setLocations] = useState<LinkRow[]>([]);
+  const [quests, setQuests] = useState<LinkRow[]>([]);
+  const [sessions, setSessions] = useState<LinkRow[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!editing || (locations.length || quests.length || sessions.length)) return;
+    let cancelled = false;
+    void Promise.all([
+      api.get<LinkRow[]>(`${API}/campaigns/${campaignId}/locations`).catch(() => []),
+      api.get<LinkRow[]>(`${API}/campaigns/${campaignId}/quests`).catch(() => []),
+      api.get<LinkRow[]>(`${API}/campaigns/${campaignId}/sessions`).catch(() => []),
+    ]).then(([locs, qs, sess]) => {
+      if (cancelled) return;
+      setLocations(locs);
+      setQuests(qs);
+      setSessions(sess);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [editing, campaignId, locations.length, quests.length, sessions.length]);
+
+  const locName = locations.find((l) => l.id === encounter.locationId);
+  const questName = quests.find((q) => q.id === encounter.questId);
+  const sessName = sessions.find((s) => s.id === encounter.sessionId);
+
+  async function save(patch: Record<string, number | null>) {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api.patch<EncounterWithCombatants>(`${API}/encounters/${encounter.id}`, patch);
+      onSaved(updated);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update links.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const hasLink = encounter.locationId != null || encounter.questId != null || encounter.sessionId != null;
+  if (!canEdit && !hasLink) return null;
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11 }}>
+      {encounter.locationId != null && (
+        <span className="tag tag-outline" style={{ fontSize: 10 }}>
+          🗺 {locName ? linkLabel('location', locName) : `Location #${encounter.locationId}`}
+        </span>
+      )}
+      {encounter.questId != null && (
+        <span className="tag tag-outline" style={{ fontSize: 10 }}>
+          📜 {questName ? linkLabel('quest', questName) : `Quest #${encounter.questId}`}
+        </span>
+      )}
+      {encounter.sessionId != null && (
+        <span className="tag tag-outline" style={{ fontSize: 10 }}>
+          📓 {sessName ? linkLabel('session', sessName) : `Session #${encounter.sessionId}`}
+        </span>
+      )}
+      {!hasLink && canEdit && !editing && <span className="text-muted">No location / quest / session linked.</span>}
+      {canEdit && (
+        <button type="button" className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => setEditing((v) => !v)}>
+          {editing ? 'Done' : hasLink ? 'Edit links' : '+ Link'}
+        </button>
+      )}
+      {error && <span className="text-rose-400">{error}</span>}
+      {editing && canEdit && (
+        <div className="flex gap-2 flex-wrap w-full mt-1">
+          <select
+            className="cf-select !min-h-0 !py-1.5 text-xs"
+            aria-label="Location"
+            value={encounter.locationId ?? ''}
+            disabled={saving}
+            onChange={(e) => void save({ locationId: e.target.value ? Number(e.target.value) : null })}
+          >
+            <option value="">🗺 — no location —</option>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {linkLabel('location', l)}
+              </option>
+            ))}
+          </select>
+          <select
+            className="cf-select !min-h-0 !py-1.5 text-xs"
+            aria-label="Quest"
+            value={encounter.questId ?? ''}
+            disabled={saving}
+            onChange={(e) => void save({ questId: e.target.value ? Number(e.target.value) : null })}
+          >
+            <option value="">📜 — no quest —</option>
+            {quests.map((q) => (
+              <option key={q.id} value={q.id}>
+                {linkLabel('quest', q)}
+              </option>
+            ))}
+          </select>
+          <select
+            className="cf-select !min-h-0 !py-1.5 text-xs"
+            aria-label="Session"
+            value={encounter.sessionId ?? ''}
+            disabled={saving}
+            onChange={(e) => void save({ sessionId: e.target.value ? Number(e.target.value) : null })}
+          >
+            <option value="">📓 — no session —</option>
+            {sessions.map((s) => (
+              <option key={s.id} value={s.id}>
+                {linkLabel('session', s)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Non-DM viewers see a monster's HP as a coarse status band, never exact numbers
 // (issue #43 — the server redacts hpCurrent/hpMax to null and sends hpBand instead).
@@ -159,6 +342,7 @@ export default function RunSessionPage() {
   const announce = useAnnounce();
 
   const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
+  const [difficulty, setDifficulty] = useState<EncounterDifficulty | null>(null);
   // Persistent combat log (issue #61) — fetched alongside the encounter so it survives
   // reload and refreshes on every mutation / SSE-pushed update.
   const [events, setEvents] = useState<EncounterEvent[]>([]);
@@ -185,6 +369,12 @@ export default function RunSessionPage() {
     try {
       const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
       setEncounter(data);
+      // Difficulty is a separate read-only derivation (issue #58) — fetch alongside but
+      // never let its failure block the encounter view; just leave the badge hidden.
+      api
+        .get<EncounterDifficulty>(`${API}/encounters/${eid}/difficulty`)
+        .then(setDifficulty)
+        .catch(() => setDifficulty(null));
       // Fetch the persisted combat log too; a failure here shouldn't break the tracker.
       try {
         const evs = await api.get<EncounterEvent[]>(`${API}/encounters/${eid}/events`);
@@ -454,6 +644,7 @@ export default function RunSessionPage() {
             Round {encounter.round}
           </span>
         )}
+        <DifficultyBadge difficulty={difficulty} />
         <button
           type="button"
           className="btn btn-ghost"
@@ -518,6 +709,13 @@ export default function RunSessionPage() {
       </div>
 
       {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
+
+      <EncounterLinks
+        campaignId={cid}
+        encounter={encounter}
+        canEdit={isDm}
+        onSaved={(updated) => setEncounter((prev) => (prev ? { ...prev, ...updated } : prev))}
+      />
 
       {isDm && encounter.status === 'preparing' && (
         <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>

@@ -6,6 +6,11 @@ import {
   advanceTurn,
   hpBandFor,
   applyCombatantHp,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeEncounterDifficulty,
 } from '../../src/modules/encounters/encounters.logic';
 import type { CombatantHpState } from '../../src/modules/encounters/encounters.logic';
 
@@ -306,6 +311,96 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
     it('hpSet is clamped to [0, hpMax]', () => {
       expect(applyCombatantHp(charState(), { hpSet: 999 }).hpCurrent).toBe(20);
       expect(applyCombatantHp(charState(), { hpSet: 0 }).deathState).toBe('dying');
+    });
+  });
+});
+
+/**
+ * 5e difficulty / XP-budget estimation (issue #58) — pure table math, unit-tested here.
+ */
+describe('encounter difficulty (issue #58)', () => {
+  describe('parseCr', () => {
+    it('accepts numbers and fraction strings', () => {
+      expect(parseCr(5)).toBe(5);
+      expect(parseCr(0.25)).toBe(0.25);
+      expect(parseCr('1/4')).toBe(0.25);
+      expect(parseCr('1/8')).toBe(0.125);
+      expect(parseCr('10')).toBe(10);
+    });
+    it('returns null for missing / unparseable CR', () => {
+      expect(parseCr(null)).toBeNull();
+      expect(parseCr(undefined)).toBeNull();
+      expect(parseCr('')).toBeNull();
+      expect(parseCr('unknown')).toBeNull();
+      expect(parseCr('1/0')).toBeNull();
+    });
+  });
+
+  describe('crToXp', () => {
+    it('maps standard CRs to the DMG XP table', () => {
+      expect(crToXp(0)).toBe(10);
+      expect(crToXp(0.25)).toBe(50);
+      expect(crToXp(1)).toBe(200);
+      expect(crToXp(5)).toBe(1800);
+      expect(crToXp(10)).toBe(5900);
+      expect(crToXp(30)).toBe(155000);
+    });
+    it('null CR contributes 0 XP', () => {
+      expect(crToXp(null)).toBe(0);
+    });
+  });
+
+  describe('encounterMultiplier', () => {
+    it('follows the 5e number-of-monsters brackets', () => {
+      expect(encounterMultiplier(1)).toBe(1);
+      expect(encounterMultiplier(2)).toBe(1.5);
+      expect(encounterMultiplier(3)).toBe(2);
+      expect(encounterMultiplier(6)).toBe(2);
+      expect(encounterMultiplier(7)).toBe(2.5);
+      expect(encounterMultiplier(11)).toBe(3);
+      expect(encounterMultiplier(15)).toBe(4);
+    });
+  });
+
+  describe('xpThresholdsForLevel', () => {
+    it('returns the per-level thresholds and clamps to 1..20', () => {
+      expect(xpThresholdsForLevel(5)).toEqual({ easy: 250, medium: 500, hard: 750, deadly: 1100 });
+      expect(xpThresholdsForLevel(1)).toEqual({ easy: 25, medium: 50, hard: 75, deadly: 100 });
+      expect(xpThresholdsForLevel(99)).toEqual(xpThresholdsForLevel(20));
+    });
+  });
+
+  describe('computeEncounterDifficulty', () => {
+    it('bands a CR-10 solo vs four level-5 PCs as deadly', () => {
+      const d = computeEncounterDifficulty([5, 5, 5, 5], [10]);
+      expect(d.thresholds).toEqual({ easy: 1000, medium: 2000, hard: 3000, deadly: 4400 });
+      expect(d.totalMonsterXp).toBe(5900);
+      expect(d.multiplier).toBe(1);
+      expect(d.adjustedXp).toBe(5900);
+      expect(d.band).toBe('deadly');
+    });
+    it('applies the multiplier for several monsters (3 x CR2 vs 4 L5 = medium)', () => {
+      const d = computeEncounterDifficulty([5, 5, 5, 5], [2, 2, 2]);
+      expect(d.totalMonsterXp).toBe(1350); // 3 * 450
+      expect(d.multiplier).toBe(2); // 3–6 monsters
+      expect(d.adjustedXp).toBe(2700);
+      expect(d.band).toBe('medium'); // >= medium 2000, < hard 3000
+    });
+    it('a lone weak monster is trivial (below the easy threshold)', () => {
+      const d = computeEncounterDifficulty([5, 5, 5, 5], [0.25]);
+      expect(d.adjustedXp).toBe(50);
+      expect(d.band).toBe('trivial');
+    });
+    it('no party -> trivial with zeroed thresholds', () => {
+      const d = computeEncounterDifficulty([], [5]);
+      expect(d.thresholds).toEqual({ easy: 0, medium: 0, hard: 0, deadly: 0 });
+      expect(d.band).toBe('trivial');
+    });
+    it('no monsters -> trivial', () => {
+      const d = computeEncounterDifficulty([5, 5], []);
+      expect(d.monsterCount).toBe(0);
+      expect(d.adjustedXp).toBe(0);
+      expect(d.band).toBe('trivial');
     });
   });
 });

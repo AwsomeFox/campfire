@@ -30,6 +30,7 @@ import { NpcsService } from '../npcs/npcs.service';
 import { LocationsService } from '../locations/locations.service';
 import { CharactersService } from '../characters/characters.service';
 import { SessionsService } from '../sessions/sessions.service';
+import { EncountersService } from '../encounters/encounters.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { auditActor } from '../../common/user.types';
@@ -96,6 +97,7 @@ export class CampaignsService {
     private readonly locations: LocationsService,
     private readonly characters: CharactersService,
     private readonly sessions: SessionsService,
+    private readonly encounters: EncountersService,
     private readonly roleResolver: RoleResolver,
     private readonly members: MembersService,
   ) {}
@@ -983,12 +985,13 @@ export class CampaignsService {
   async summary(id: number, role: Role): Promise<CampaignSummary> {
     const campaign = await this.getOrThrow(id);
 
-    const [questList, npcList, locationList, characterList, sessionList] = await Promise.all([
+    const [questList, npcList, locationList, characterList, sessionList, encounterDigest] = await Promise.all([
       this.quests.listForCampaignWithObjectives(id, role),
       this.npcs.listForCampaign(id, role),
       this.locations.listForCampaign(id, role),
       this.characters.listForCampaign(id, role),
       this.sessions.listForCampaign(id, role),
+      this.encounters.digestForCampaign(id),
     ]);
 
     const currentLocation = campaign.currentLocationId
@@ -1010,6 +1013,7 @@ export class CampaignsService {
       locations: locationList,
       characters: characterList,
       sessions: sessionList,
+      encounters: encounterDigest,
       openInboxCount,
     };
   }

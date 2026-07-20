@@ -626,6 +626,20 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'get_encounter_difficulty',
+      'Estimate an encounter\'s 5e difficulty (issue #58): a read-only Easy/Medium/Hard/Deadly band computed from the ' +
+        'party PCs\' levels vs the combatant monsters\' CRs, with the standard number-of-monsters XP multiplier. Returns ' +
+        'the band plus the party XP thresholds and the adjusted monster XP. No state change.',
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        await this.access.requireMember(user, row.campaignId);
+        return this.encounters.getDifficulty(encounterId as number);
+      },
+    );
+
+    this.tool(
+      server,
       'list_encounters',
       'List encounters in a campaign, optionally filtered by status (preparing|running|ended). Call this before ' +
         'get_encounter/update_combatant/etc. to discover encounter ids.',
@@ -1889,11 +1903,23 @@ export class McpToolsService {
       user,
       'create_encounter',
       'DM only: create a new encounter (combat tracker) in a campaign, status=preparing. Auto-adds every campaign ' +
-        'character as a combatant with hp from their sheet and initiative modifier from DEX.',
-      { campaignId: CampaignIdArg, name: z.string().min(1).max(120).describe('Encounter name') },
-      async ({ campaignId, name }) => {
+        'character as a combatant with hp from their sheet and initiative modifier from DEX. Optionally attach it to a ' +
+        'location/quest/session (issue #126) so combat is tied to where/why/when it happened.',
+      {
+        campaignId: CampaignIdArg,
+        name: z.string().min(1).max(120).describe('Encounter name'),
+        locationId: Id.optional().describe('Attach the encounter to a location (where it happens)'),
+        questId: Id.optional().describe('Attach the encounter to a quest (why it happens)'),
+        sessionId: Id.optional().describe('Attach the encounter to a session (when it happens)'),
+      },
+      async ({ campaignId, name, locationId, questId, sessionId }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
-        return this.encounters.create(campaignId as number, { name: name as string }, user, role);
+        return this.encounters.create(
+          campaignId as number,
+          { name: name as string, locationId: locationId as number | undefined, questId: questId as number | undefined, sessionId: sessionId as number | undefined },
+          user,
+          role,
+        );
       },
     );
 
@@ -1901,9 +1927,10 @@ export class McpToolsService {
       server,
       user,
       'update_encounter',
-      'DM only: attach or clear an encounter\'s battle map (issue #39). Pass mapAttachmentId = an uploaded image ' +
-        'attachment id (kind map|image, in this campaign) to render it as the run-session background, or null to ' +
-        'clear it. Combatant token positions are set with update_combatant (tokenX/tokenY, 0–100).',
+      'DM only: edit an encounter\'s name, its location/quest/session links (issue #126), and/or its battle map ' +
+        '(issue #39: mapAttachmentId = an uploaded image attachment id, kind map|image, rendered as the run-session ' +
+        'background; combatant token positions are set with update_combatant tokenX/tokenY, 0–100). Pass null to clear ' +
+        'a link or the map; omit a field to leave it unchanged.',
       { encounterId: Id.describe('Encounter id — from list_encounters'), ...EncounterUpdate.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
