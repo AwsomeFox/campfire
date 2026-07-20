@@ -17,6 +17,12 @@ docker run -d --name campfire \
 Open `http://localhost:8080`. The first visit shows **“Light the fire”** —
 create the initial administrator account, and you're in.
 
+!!! note "Runs as a non-root user"
+    The container runs as the unprivileged `node` user (uid 1000), not root. A
+    named Docker volume gets the right ownership automatically; if you bind-mount a
+    host directory for `/data`, make sure uid 1000 can write to it (e.g.
+    `chown -R 1000:1000 <dir>`).
+
 !!! tip "That first account"
     The first user you create is the **server admin**. They can immediately run
     a campaign, or hand campaigns off to others — being the admin does not force

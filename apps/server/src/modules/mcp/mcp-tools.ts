@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, HttpException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException, Injectable, NotFoundException } from '@nestjs/common';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
@@ -57,7 +57,9 @@ import { EncountersService } from '../encounters/encounters.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
+import { AttachmentsService } from '../attachments/attachments.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
+import { filterHidden } from '../../common/redact';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -126,7 +128,8 @@ const ProposeArg = z
   .optional()
   .describe(
     'If true, submit as a proposal for DM approval instead of writing directly (quest/npc/location/session/character ' +
-      'create+update, and delete_quest/delete_npc/delete_location). Any member may propose; the returned {proposal} is ' +
+      'create+update, and delete_quest/delete_npc/delete_location/delete_character/delete_session). Any member may ' +
+      'propose; the returned {proposal} is ' +
       'pending until a dm calls approve_proposal/reject_proposal. Ignored on tools with no REST proposal path ' +
       '(objectives, notes, campaign status, members, encounters).',
   );
@@ -202,6 +205,7 @@ export class McpToolsService {
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
     private readonly aiDm: AiDmService,
+    private readonly attachments: AttachmentsService,
     private readonly sessionZero: SessionZeroService,
   ) {}
 
@@ -727,6 +731,37 @@ export class McpToolsService {
       async ({ campaignId }) => {
         await this.access.requireMember(user, campaignId as number);
         return this.aiDm.getSeat(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_attachments',
+      'List a campaign\'s attachments (maps, portraits, images) as metadata only — id, kind, filename, mime, byte ' +
+        'size, hidden flag, uploader. Requires membership; hidden (DM-only, unrevealed) attachments are omitted ' +
+        'WHOLESALE for non-DM callers, mirroring hidden quests/npcs. The raw file BYTES are not served over MCP ' +
+        '(JSON-RPC surface) — fetch them via the REST route GET /attachments/:id/file.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        const role = await this.access.requireMember(user, campaignId as number);
+        const all = await this.attachments.listForCampaign(campaignId as number);
+        return filterHidden(all, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_attachment',
+      'Get one attachment\'s metadata by id (no bytes). Requires membership; a hidden (DM-only) attachment 404s for ' +
+        'non-DM callers, exactly as it is omitted from list_attachments. Fetch the actual file via the REST route ' +
+        'GET /attachments/:id/file.',
+      { attachmentId: Id.describe('Attachment id — from list_attachments') },
+      async ({ attachmentId }) => {
+        const row = await this.attachments.getRowOrThrow(attachmentId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        const [visible] = filterHidden([await this.attachments.getOrThrow(attachmentId as number)], role);
+        if (!visible) throw new NotFoundException(`Attachment ${attachmentId} not found`);
+        return visible;
       },
     );
   }
@@ -1298,6 +1333,25 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'delete_session',
+      'Delete a session recap (DM). The campaign\'s denormalized sessionCount is recomputed. With propose:true any ' +
+        'member may submit the deletion as a pending proposal for a dm to approve instead.',
+      { sessionId: Id.describe('Session id — from get_session_recaps'), propose: ProposeArg },
+      async ({ sessionId, propose }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        if (propose) {
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const proposal = await this.proposalRecords.create(row.campaignId, 'session', sessionId as number, 'delete', {}, user, role);
+          return { proposal };
+        }
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.sessions.remove(sessionId as number, user, role);
+        return { ok: true, sessionId };
+      },
+    );
+
+    this.tool(
+      server,
       'get_session_attendance',
       'List the characters that played a session (issue #121) — the West Marches "who was there" record. Ids come ' +
         'from get_session_recaps / get_session. Empty when attendance was never recorded.',
@@ -1365,6 +1419,25 @@ export class McpToolsService {
         }
         const role = await this.access.requireRole(user, campaignId as number, 'player');
         return this.characters.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'delete_character',
+      'Delete a character (DM). With propose:true any member may submit the deletion as a pending proposal for a dm ' +
+        'to approve instead.',
+      { characterId: Id.describe('Character id'), propose: ProposeArg },
+      async ({ characterId, propose }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number);
+        if (propose) {
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const proposal = await this.proposalRecords.create(row.campaignId, 'character', characterId as number, 'delete', {}, user, role);
+          return { proposal };
+        }
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.characters.remove(characterId as number, user, role);
+        return { ok: true, characterId };
       },
     );
 
@@ -1641,6 +1714,27 @@ export class McpToolsService {
       },
     );
 
+    this.tool(
+      server,
+      'update_campaign',
+      'DM only: general campaign update — name, description, ruleSystem (the installed rule-pack slug this campaign ' +
+        'uses, or "" for none/homebrew), mapAttachmentId (a map attachment id, or null to clear), and/or the same ' +
+        'status/currentLocationId/dangerLevel that update_campaign_status covers. On a paused/completed (archived, ' +
+        'read-only) campaign only `status` may be changed — un-archive first to edit anything else. (sessionCount and ' +
+        'storageQuotaBytes are intentionally NOT settable here.)',
+      { campaignId: CampaignIdArg, ...CampaignUpdate.shape },
+      async ({ campaignId, ...fields }) => {
+        // allowArchived: CampaignsService.update() itself restricts an archived campaign to a
+        // status-only patch, matching REST PATCH /campaigns/:id.
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        const validated = CampaignUpdate.parse(fields);
+        if (Object.keys(validated).length === 0) {
+          throw new BadRequestException('Pass at least one field to update');
+        }
+        return this.campaigns.update(campaignId as number, validated, user);
+      },
+    );
+
     this.writeTool(
       server,
       user,
@@ -1726,6 +1820,25 @@ export class McpToolsService {
           ...(sections !== undefined ? { sections } : {}),
         });
         return this.rules.installFromOpen5e(validated, user);
+      },
+    );
+
+    this.tool(
+      server,
+      'uninstall_rule_pack',
+      'Server admin only: uninstall a rule pack by id — removes the pack and ALL of its entries, nulls any ' +
+        'combatant references to those entries, and resets campaigns that had selected it back to no rule system. ' +
+        'Ids come from list_rule_packs. Irreversible.',
+      { packId: Id.describe('Rule pack id — from list_rule_packs') },
+      async ({ packId }) => {
+        // hasServerAdminPower(), not a raw serverRole check — same token-cap rationale as
+        // install_rule_pack: a PAT minted for an admin must NOT carry server-wide power
+        // unless it was explicitly minted with adminEnabled=true.
+        if (!hasServerAdminPower(user)) {
+          throw new ForbiddenException('Requires server admin');
+        }
+        await this.rules.uninstall(packId as number, user);
+        return { ok: true, packId };
       },
     );
 
@@ -1873,6 +1986,20 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.encounters.end(encounterId as number, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'delete_encounter',
+      'DM only: permanently delete an encounter (combat tracker) and all of its combatants. Irreversible. Does NOT ' +
+        'write combatant hp back to characters — use end_encounter first if you want the fight\'s damage to persist.',
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.encounters.remove(encounterId as number, user, role);
+        return { ok: true, encounterId };
       },
     );
 

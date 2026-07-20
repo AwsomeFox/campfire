@@ -34,6 +34,36 @@ Locations are places — towns, dungeons, regions — with a **kind**, a **statu
 - **Discovery** — advance a location's status as the party finds it; setting one to
   *current* updates the campaign's current-location header.
 
+## Storylines — the arc/beat planner
+
+**Storylines** is a DM-only space for planning where the story might go, ahead of the
+table. It's prep, not canon — players never see it.
+
+- **Arcs** group the story into chapters, each with a markdown summary and a status
+  (planned → active → resolved / abandoned).
+- **Beats** are the ordered moments inside an arc — a scene, a reveal, a decision —
+  each with markdown notes and its own status (planned → active → done / skipped).
+- **Branches** are the forks: on a beat you add labelled next-options ("players side
+  with the duke", "the ritual is interrupted"), each optionally pointing at the beat
+  it leads to. You can sketch a branch before its destination beat even exists, so you
+  can map how a session could go without committing to one path.
+
+An AI assistant can draft and rearrange arcs and beats too (see
+[What an AI can do](../ai/capabilities.md)).
+
+## Timeline — the in-world calendar
+
+The **Timeline** tracks *in-fiction* time, separate from when your table actually met.
+
+- **Events** carry a free-text **in-world date** ("3rd of Flamerule, 1492 DR" —
+  fantasy calendars don't fit ISO dates), markdown notes, and an optional **era**
+  grouping ("Age of Chains"). The DM controls the order directly, so undated "sometime
+  around here" beats still sequence sensibly.
+- A per-campaign **current in-world date** and a free-text **calendar note** (month
+  names, moon phases — whatever you want to remember) sit alongside the events.
+- Events carry the same secrecy tools as the rest of the world: a **DM secret** field,
+  and events can be **hidden** entirely from players until you reveal them.
+
 ## How it fits together
 
 Quests reference their giver NPC; NPCs reference their location; the dashboard
