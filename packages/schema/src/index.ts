@@ -613,6 +613,12 @@ export const InboxResolve = z
     entityType: EntityType.nullable().optional(),
     entityId: Id.nullable().optional(),
   })
+  // Reject unknown keys (issue #131). This request-input schema is `.strict()` at
+  // its source — unlike the entity Create/Update schemas (kept lenient and made
+  // strict at the server DTO layer), this one is a `.refine()`-wrapped ZodEffects
+  // with no `.strict()` to apply downstream, and it's a pure request DTO reused
+  // nowhere as a pass-through (no MCP/proposal path), so tightening it here is safe.
+  .strict()
   .refine((v) => (v.entityType == null) === (v.entityId == null), {
     message: 'entityType and entityId must be provided together',
   });

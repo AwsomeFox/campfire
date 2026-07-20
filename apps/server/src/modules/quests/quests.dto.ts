@@ -9,7 +9,7 @@ import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectiveP
 // ever runs, and the redundant re-parse itself is unaffected either way.
 export class QuestCreateDto extends createZodDto(QuestCreate.strict()) {}
 export class QuestUpdateDto extends createZodDto(QuestUpdate.strict()) {}
-export class QuestStatusPatchDto extends createZodDto(QuestStatusPatch) {}
-export class ObjectiveCreateDto extends createZodDto(ObjectiveCreate) {}
-export class ObjectivePatchDto extends createZodDto(ObjectivePatch) {}
+export class QuestStatusPatchDto extends createZodDto(QuestStatusPatch.strict()) {}
+export class ObjectiveCreateDto extends createZodDto(ObjectiveCreate.strict()) {}
+export class ObjectivePatchDto extends createZodDto(ObjectivePatch.strict()) {}
 export class ObjectiveReorderDto extends createZodDto(ObjectiveReorder.strict()) {}
