@@ -93,13 +93,14 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
     expect(demoteRes.status).toBe(409);
   });
 
-  it('GET /campaigns scoping: admin sees all, user B sees only campaigns they are a member of', async () => {
-    // A second campaign created by admin — B is not a member.
+  it('GET /campaigns scoping: everyone — the server admin included — sees only campaigns they are a member of', async () => {
+    // A second campaign created by admin — the admin is auto-dm of THIS one (creator),
+    // but holds no role at all in user A's campaign (admin ≠ auto-DM, issue #9).
     const otherCampaign = await adminAgent.post('/api/v1/campaigns').send({ name: 'Admin-only campaign' });
     expect(otherCampaign.status).toBe(201);
 
     const adminList = await adminAgent.get('/api/v1/campaigns');
-    expect(adminList.body.some((c: { id: number }) => c.id === campaignId)).toBe(true);
+    expect(adminList.body.some((c: { id: number }) => c.id === campaignId)).toBe(false);
     expect(adminList.body.some((c: { id: number }) => c.id === otherCampaign.body.id)).toBe(true);
 
     const bList = await userB.get('/api/v1/campaigns');

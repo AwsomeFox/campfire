@@ -15,7 +15,7 @@ export class CampaignsController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List campaigns accessible to the caller', description: 'Server admins and dev-auth users see all campaigns; everyone else sees campaigns they are a member of (capped further by an active token\'s campaignId, if scoped).' })
+  @ApiOperation({ summary: 'List campaigns accessible to the caller', description: 'Everyone — server admins included — sees only campaigns they are a member of (capped further by an active token\'s campaignId, if scoped). Dev-auth users see all campaigns.' })
   @ApiResponse({ status: 200, description: 'Accessible campaigns.' })
   list(@CurrentUser() user: RequestUser) {
     return this.campaigns.listForUser(user);
