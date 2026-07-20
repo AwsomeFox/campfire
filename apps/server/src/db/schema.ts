@@ -26,6 +26,10 @@ export const campaigns = sqliteTable('campaigns', {
   // the feed URL can be re-displayed to members — see modules/sessions/scheduling.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   icsToken: text('ics_token'),
+  // Per-campaign upload quota in bytes, or NULL for no limit (issue #24). Admin-set
+  // via the storage console; enforced on attachment upload. Nullable in older DBs
+  // pre-migration; see db/db.module.ts ALTER TABLE note.
+  storageQuotaBytes: integer('storage_quota_bytes'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -129,6 +133,10 @@ export const npcs = sqliteTable('npcs', {
 export const locations = sqliteTable('locations', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
+  // Self-referencing parent for location nesting (region→city→dungeon→room, #99).
+  // Nullable/absent in older DBs pre-migration; see db/db.module.ts
+  // migrateLocationsTableForParentId().
+  parentId: integer('parent_id'),
   name: text('name').notNull(),
   kind: text('kind').notNull().default(''),
   status: text('status').notNull().default('unexplored'),
@@ -453,6 +461,22 @@ export const partyTreasury = sqliteTable('party_treasury', {
   ep: integer('ep').notNull().default(0),
   gp: integer('gp').notNull().default(0),
   pp: integer('pp').notNull().default(0),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Experimental server-side AI Dungeon Master (issue #28) — one seat per campaign,
+// created lazily on first configure/read. Metered against a per-campaign token
+// budget; the server never calls an LLM vendor (see modules/ai-dm).
+export const aiDmSeats = sqliteTable('ai_dm_seats', {
+  campaignId: integer('campaign_id').primaryKey(),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+  model: text('model').notNull().default(''),
+  instructions: text('instructions').notNull().default(''),
+  tokenBudget: integer('token_budget').notNull().default(0),
+  tokensUsed: integer('tokens_used').notNull().default(0),
+  turnCount: integer('turn_count').notNull().default(0),
+  lastTurnAt: text('last_turn_at'),
+  createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
 

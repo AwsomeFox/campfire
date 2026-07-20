@@ -49,10 +49,14 @@ export const Campaign = z.object({
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
+  // Per-campaign upload quota in bytes, or null for no limit (issue #24). Set by a
+  // server admin via the storage console — NOT part of CampaignCreate/Update, so a
+  // DM can never lift their own campaign's cap. Enforced on attachment upload.
+  storageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // Clone/template input — POST /campaigns/:id/clone.
@@ -317,6 +321,7 @@ export const LocationStatus = z.enum(['unexplored', 'explored', 'current']);
 export const Location = z.object({
   id: Id,
   campaignId: Id,
+  parentId: Id.nullable().default(null), // nesting: region→city→dungeon→room (#99)
   name: z.string().min(1).max(120),
   kind: z.string().max(80).default(''), // town, dungeon, region…
   status: LocationStatus.default('unexplored'),
@@ -721,6 +726,10 @@ export type AuthStatus = z.infer<typeof AuthStatus>;
 export const ServerSettings = z.object({
   allowLocalLogin: z.boolean().default(true), // gate for non-admin local login
   allowSignup: z.boolean().default(false), // gate for self-service signup (POST /auth/signup) — off by default
+  // Experimental server-side AI Dungeon Master (issue #28) — OFF by default. When
+  // false, every AI-DM configure/turn path is 403-gated server-wide, so the feature
+  // is inert until an admin opts the whole server in. See modules/ai-dm.
+  experimentalAiDm: z.boolean().default(false),
 });
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();
@@ -968,6 +977,68 @@ export const ProposalBatchResolve = z.object({
   note: z.string().max(1000).optional(),
 });
 export type ProposalBatchResolve = z.infer<typeof ProposalBatchResolve>;
+
+// ---------- experimental: server-side AI Dungeon Master (issue #28) ----------
+// Plumbing for an AI that holds the DM seat of a campaign: everyone else plays,
+// a connected agent (over MCP or REST, authenticated with a dm-scoped PAT) drives
+// the existing tool layer — narrating, running combat, writing recaps. It is
+// deliberately MCP-FIRST and self-hosted: Campfire ships NO server-side LLM
+// dependency and never calls a vendor. The narration text is produced by an
+// injected AiDmProvider (server DI seam) whose shipped default is a no-op that
+// returns a scaffold response and instructs the operator to point the seat at a
+// connected agent — an operator may swap in their own provider. Gated twice: the
+// server-wide experimental flag (ServerSettings.experimentalAiDm) AND the
+// per-campaign seat's `enabled`. Every turn is metered against a per-campaign
+// token budget and audited as `ai-dm`.
+export const AiDmTurnKind = z.enum(['narrate', 'combat', 'recap']);
+export type AiDmTurnKind = z.infer<typeof AiDmTurnKind>;
+
+// One AI-DM "seat" per campaign (created lazily on first configure/read).
+export const AiDmSeat = z.object({
+  campaignId: Id,
+  enabled: z.boolean().default(false), // per-campaign on/off (in addition to the server flag)
+  model: z.string().max(120).default(''), // informational label of the model/agent occupying the seat
+  instructions: z.string().max(20_000).default(''), // the DM persona / house rules the connected agent should follow
+  // Per-campaign metering, in tokens. tokenBudget is a HARD cap: a turn whose cost
+  // would push tokensUsed past it is rejected (403). 0 = no budget → no turns allowed
+  // (a positive budget must be configured to run the seat).
+  tokenBudget: z.number().int().nonnegative().max(1_000_000_000).default(0),
+  tokensUsed: z.number().int().nonnegative().default(0),
+  turnCount: z.number().int().nonnegative().default(0),
+  lastTurnAt: IsoDate.nullable().default(null),
+  ...timestamps,
+});
+export type AiDmSeat = z.infer<typeof AiDmSeat>;
+
+// Configure the seat (PUT /campaigns/:id/ai-dm, dm only). All fields optional;
+// an omitted field is left unchanged.
+export const AiDmSeatUpdate = z.object({
+  enabled: z.boolean().optional(),
+  model: z.string().max(120).optional(),
+  instructions: z.string().max(20_000).optional(),
+  tokenBudget: z.number().int().min(0).max(1_000_000_000).optional(),
+});
+export type AiDmSeatUpdate = z.infer<typeof AiDmSeatUpdate>;
+
+// Ask the AI DM to take a turn (POST /campaigns/:id/ai-dm/turn, dm only, or the
+// MCP ai_dm_narrate tool). `prompt` is the situation/what the players just did.
+export const AiDmTurnRequest = z.object({
+  prompt: z.string().min(1).max(20_000),
+  kind: AiDmTurnKind.default('narrate'),
+  maxTokens: z.number().int().min(1).max(4096).optional(), // cap on this turn's output; provider clamps to the remaining budget
+});
+export type AiDmTurnRequest = z.infer<typeof AiDmTurnRequest>;
+
+export const AiDmTurnResult = z.object({
+  narration: z.string(), // the DM's response text (from the configured provider; the default is a no-op scaffold)
+  provider: z.string(), // which provider produced it ('noop' by default)
+  kind: AiDmTurnKind,
+  tokensUsed: z.number().int().nonnegative(), // this turn's cost
+  tokenBudget: z.number().int().nonnegative(), // the seat's cap
+  budgetRemaining: z.number().int().nonnegative(), // after this turn
+  seat: AiDmSeat, // the seat after metering
+});
+export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 
 // ---------- attachments (uploaded images: character portraits, campaign maps) ----------
 export const AttachmentKind = z.enum(['portrait', 'map', 'image']);
@@ -1228,6 +1299,57 @@ export const AdminMetrics = z.object({
   recentActivity: z.array(AuditEntry), // most-recent audit rows (read-only, newest first)
 });
 export type AdminMetrics = z.infer<typeof AdminMetrics>;
+
+// ---------- storage management (issue #24) ----------
+// Server-admin storage console: upload-size visibility, per-campaign quotas, and
+// orphan cleanup. All surfaces are gated by @ServerRoles('admin'). Byte counts
+// come from the attachments table (metadata) plus a walk of DATA_DIR/uploads.
+
+// One campaign's slice of upload usage.
+export const StorageCampaignUsage = z.object({
+  campaignId: Id,
+  name: z.string(),
+  fileCount: z.number().int().nonnegative(), // attachment rows for this campaign
+  totalBytes: z.number().int().nonnegative(), // sum of attachment.size for this campaign
+  quotaBytes: z.number().int().nonnegative().nullable(), // per-campaign cap, or null for unlimited
+  overQuota: z.boolean(), // totalBytes > quotaBytes (always false when unlimited)
+});
+export type StorageCampaignUsage = z.infer<typeof StorageCampaignUsage>;
+
+// Orphans: DB rows whose bytes are missing on disk, and on-disk files with no row.
+export const StorageOrphans = z.object({
+  rowsWithoutFile: z.number().int().nonnegative(), // attachment rows whose file is gone from disk
+  filesWithoutRow: z.number().int().nonnegative(), // upload files (incl. thumbs) with no backing row
+  orphanBytes: z.number().int().nonnegative(), // bytes occupied by files-without-row (reclaimable)
+});
+export type StorageOrphans = z.infer<typeof StorageOrphans>;
+
+export const StorageStats = z.object({
+  totalBytes: z.number().int().nonnegative(), // sum of attachment.size across all campaigns (DB view)
+  fileCount: z.number().int().nonnegative(), // total attachment rows
+  diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
+  campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
+  orphans: StorageOrphans,
+});
+export type StorageStats = z.infer<typeof StorageStats>;
+
+// Set (or clear, with null) a campaign's upload quota.
+export const StorageQuotaUpdate = z.object({
+  quotaBytes: z.number().int().nonnegative().nullable(),
+});
+export type StorageQuotaUpdate = z.infer<typeof StorageQuotaUpdate>;
+
+// Result of an orphan-cleanup run. With dryRun=true nothing is deleted and the
+// *Deleted counts are 0 — only the found counts are populated, for a preview.
+export const StorageCleanupResult = z.object({
+  dryRun: z.boolean(),
+  rowsWithoutFile: z.number().int().nonnegative(), // orphan rows found
+  filesWithoutRow: z.number().int().nonnegative(), // orphan files found
+  rowsDeleted: z.number().int().nonnegative(),
+  filesDeleted: z.number().int().nonnegative(),
+  bytesReclaimed: z.number().int().nonnegative(), // disk bytes freed by deleting orphan files
+});
+export type StorageCleanupResult = z.infer<typeof StorageCleanupResult>;
 
 // ---------- campaign-wide search + @-mention cross-linking (issue #64) ----------
 // The kinds of things a campaign-wide search can turn up. `campaign` from

@@ -1,0 +1,243 @@
+import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { eq } from 'drizzle-orm';
+import type { z } from 'zod';
+import type { AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult } from '@campfire/schema';
+import { DB, type DrizzleDb } from '../../db/db.module';
+import { aiDmSeats } from '../../db/schema';
+import { nowIso } from '../../common/time';
+import { auditActor, type RequestUser } from '../../common/user.types';
+import { AuditService } from '../audit/audit.service';
+import { SettingsService } from '../settings/settings.service';
+import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
+
+type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
+type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
+
+/** Default per-turn output cap when the caller doesn't specify maxTokens. */
+const DEFAULT_MAX_TOKENS = 512;
+
+function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
+  return {
+    campaignId: row.campaignId,
+    enabled: row.enabled,
+    model: row.model,
+    instructions: row.instructions,
+    tokenBudget: row.tokenBudget,
+    tokensUsed: row.tokensUsed,
+    turnCount: row.turnCount,
+    lastTurnAt: row.lastTurnAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/** In-memory default seat for a campaign that has never configured one — never persisted. */
+function defaultSeat(campaignId: number): AiDmSeat {
+  const ts = nowIso();
+  return {
+    campaignId,
+    enabled: false,
+    model: '',
+    instructions: '',
+    tokenBudget: 0,
+    tokensUsed: 0,
+    turnCount: 0,
+    lastTurnAt: null,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+}
+
+/**
+ * Experimental server-side AI Dungeon Master (issue #28).
+ *
+ * This service owns the per-campaign "AI DM seat" and the metering/gating/audit
+ * around it — it does NOT itself generate any text. Narration comes from the
+ * injected AiDmProvider (AI_DM_PROVIDER); the shipped default is a no-op that
+ * makes no network calls and returns a scaffold response (see ai-dm.provider.ts).
+ * Campfire never calls an LLM vendor from the server.
+ *
+ * Two independent gates protect every write path:
+ *   1. ServerSettings.experimentalAiDm — the server-wide opt-in (admin only).
+ *   2. the per-campaign seat's `enabled` flag (turns only).
+ * Plus a per-campaign token budget that a turn is metered against.
+ */
+@Injectable()
+export class AiDmService {
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    private readonly audit: AuditService,
+    private readonly settings: SettingsService,
+    @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
+  ) {}
+
+  /** 403 unless the server-wide experimental flag is on. The single choke point for the whole feature. */
+  private async assertExperimentalEnabled(): Promise<void> {
+    const all = await this.settings.getAll();
+    if (!all.experimentalAiDm) {
+      throw new ForbiddenException(
+        'Server-side AI Dungeon Master is experimental and disabled. A server admin must enable it via PATCH /settings {experimentalAiDm:true}.',
+      );
+    }
+  }
+
+  private async findRow(campaignId: number): Promise<(typeof aiDmSeats.$inferSelect) | undefined> {
+    const [row] = await this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1);
+    return row;
+  }
+
+  /** Read the seat (its configured, un-metered default when none exists yet). No experimental gate — reads are inert. */
+  async getSeat(campaignId: number): Promise<AiDmSeat> {
+    const row = await this.findRow(campaignId);
+    return row ? toDomain(row) : defaultSeat(campaignId);
+  }
+
+  /** Configure the seat (dm only). Gated on the server experimental flag. Upserts; omitted fields are left unchanged. */
+  async configure(campaignId: number, input: AiDmSeatUpdateInput, user: RequestUser): Promise<AiDmSeat> {
+    await this.assertExperimentalEnabled();
+    const ts = nowIso();
+    const existing = await this.findRow(campaignId);
+
+    if (!existing) {
+      const base = defaultSeat(campaignId);
+      await this.db.insert(aiDmSeats).values({
+        campaignId,
+        enabled: input.enabled ?? base.enabled,
+        model: input.model ?? base.model,
+        instructions: input.instructions ?? base.instructions,
+        tokenBudget: input.tokenBudget ?? base.tokenBudget,
+        tokensUsed: 0,
+        turnCount: 0,
+        lastTurnAt: null,
+        createdAt: ts,
+        updatedAt: ts,
+      });
+    } else {
+      await this.db
+        .update(aiDmSeats)
+        .set({
+          ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+          ...(input.model !== undefined ? { model: input.model } : {}),
+          ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
+          ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+          updatedAt: ts,
+        })
+        .where(eq(aiDmSeats.campaignId, campaignId));
+    }
+
+    const changed = Object.keys(input).filter((k) => (input as Record<string, unknown>)[k] !== undefined);
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.configure',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: changed.join(', ') || 'no-op',
+    });
+
+    return this.getSeat(campaignId);
+  }
+
+  /** Reset the metering counters (tokensUsed/turnCount/lastTurnAt) without changing config. dm only, experimental-gated. */
+  async resetUsage(campaignId: number, user: RequestUser): Promise<AiDmSeat> {
+    await this.assertExperimentalEnabled();
+    const existing = await this.findRow(campaignId);
+    if (existing) {
+      await this.db
+        .update(aiDmSeats)
+        .set({ tokensUsed: 0, turnCount: 0, lastTurnAt: null, updatedAt: nowIso() })
+        .where(eq(aiDmSeats.campaignId, campaignId));
+    }
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.reset',
+      entityType: 'ai-dm',
+      campaignId,
+    });
+    return this.getSeat(campaignId);
+  }
+
+  /**
+   * The AI DM takes a turn: the provider produces narration, and its token cost is
+   * metered against the per-campaign budget. Gated on the server experimental flag,
+   * the seat being enabled, and having budget remaining. The server performs no LLM
+   * call itself — text comes from the injected provider (no-op by default).
+   */
+  async takeTurn(campaignId: number, input: AiDmTurnRequestInput, user: RequestUser): Promise<AiDmTurnResult> {
+    await this.assertExperimentalEnabled();
+
+    const existing = await this.findRow(campaignId);
+    const seat = existing ? toDomain(existing) : defaultSeat(campaignId);
+    if (!seat.enabled) {
+      throw new ForbiddenException(
+        'The AI Dungeon Master seat is not enabled for this campaign. Configure it first: PUT /campaigns/:id/ai-dm {enabled:true, tokenBudget:N}.',
+      );
+    }
+
+    const remaining = seat.tokenBudget - seat.tokensUsed;
+    if (remaining <= 0) {
+      throw new ForbiddenException(
+        `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
+      );
+    }
+
+    const maxTokens = Math.min(input.maxTokens ?? DEFAULT_MAX_TOKENS, remaining);
+    const result = await this.provider.generate({
+      campaignId,
+      kind: input.kind,
+      prompt: input.prompt,
+      instructions: seat.instructions,
+      model: seat.model,
+      maxTokens,
+    });
+
+    // Clamp recorded usage to the budget so the counter never overshoots the cap —
+    // the turn that lands on/over the cap still runs, but the next one 403s (remaining<=0).
+    const tokensUsed = Math.max(0, Math.floor(result.tokensUsed));
+    const newTokensUsed = Math.min(seat.tokenBudget, seat.tokensUsed + tokensUsed);
+    const ts = nowIso();
+
+    if (existing) {
+      await this.db
+        .update(aiDmSeats)
+        .set({ tokensUsed: newTokensUsed, turnCount: seat.turnCount + 1, lastTurnAt: ts, updatedAt: ts })
+        .where(eq(aiDmSeats.campaignId, campaignId));
+    } else {
+      // enabled seat with no persisted row is impossible (defaultSeat.enabled=false),
+      // but guard anyway so an enabled-in-memory seat never silently drops metering.
+      await this.db.insert(aiDmSeats).values({
+        campaignId,
+        enabled: seat.enabled,
+        model: seat.model,
+        instructions: seat.instructions,
+        tokenBudget: seat.tokenBudget,
+        tokensUsed: newTokensUsed,
+        turnCount: 1,
+        lastTurnAt: ts,
+        createdAt: ts,
+        updatedAt: ts,
+      });
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.turn',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `${input.kind} via ${this.provider.name} (+${tokensUsed} tokens, ${newTokensUsed}/${seat.tokenBudget})`,
+    });
+
+    const updatedSeat = await this.getSeat(campaignId);
+    return {
+      narration: result.narration,
+      provider: this.provider.name,
+      kind: input.kind,
+      tokensUsed,
+      tokenBudget: seat.tokenBudget,
+      budgetRemaining: Math.max(0, seat.tokenBudget - newTokensUsed),
+      seat: updatedSeat,
+    };
+  }
+}
