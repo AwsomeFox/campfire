@@ -276,15 +276,18 @@ function NewCharacterForm({
           <TextInput aria-label="Class" placeholder="Class" value={className} onChange={(e) => setClassName(e.target.value)} />
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <TextInput
-            type="number"
-            min={1}
-            max={20}
-            aria-label="Level"
-            placeholder="Level"
-            value={level}
-            onChange={(e) => setLevel(e.target.value)}
-          />
+          <label className="space-y-1">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Level</span>
+            <TextInput
+              type="number"
+              min={1}
+              max={20}
+              aria-label="Level"
+              placeholder="Level"
+              value={level}
+              onChange={(e) => setLevel(e.target.value)}
+            />
+          </label>
           <div />
         </div>
         <div className="flex gap-2 justify-end">

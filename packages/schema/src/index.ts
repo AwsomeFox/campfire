@@ -24,6 +24,18 @@ const timestamps = {
   updatedAt: IsoDate,
 };
 
+// ---------- pagination (issue #71) ----------
+// Shared list-pagination convention. High-volume list endpoints (sessions, notes,
+// audit) and their MCP equivalents accept optional `?limit` & `?offset` query
+// params, pushed down into SQL. When both are omitted the endpoint returns its
+// full (or historically-capped) result, so existing callers are unaffected —
+// pagination is opt-in. `limit` is clamped to a per-endpoint maximum server-side.
+export const PageParams = z.object({
+  limit: z.number().int().positive().optional(),
+  offset: z.number().int().nonnegative().optional(),
+});
+export type PageParams = z.infer<typeof PageParams>;
+
 // ---------- campaign ----------
 export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
 
@@ -146,6 +158,31 @@ export const ConditionsPatch = z.object({
   add: z.array(z.string().max(40)).optional(),
   remove: z.array(z.string().max(40)).optional(),
 });
+/**
+ * Canonical 5e condition vocabulary — the single source of truth shared across
+ * the character sheet, the encounter tracker, and the compendium (issue #111).
+ * Conditions stay free-text on the wire (homebrew is allowed), but these are the
+ * standard names surfaced as suggestions so the three surfaces speak the same
+ * vocabulary instead of each hardcoding its own list.
+ */
+export const CONDITIONS = [
+  'Blinded',
+  'Charmed',
+  'Deafened',
+  'Exhaustion',
+  'Frightened',
+  'Grappled',
+  'Incapacitated',
+  'Invisible',
+  'Paralyzed',
+  'Petrified',
+  'Poisoned',
+  'Prone',
+  'Restrained',
+  'Stunned',
+  'Unconscious',
+] as const;
+export type ConditionName = (typeof CONDITIONS)[number];
 /** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
@@ -308,6 +345,15 @@ export type Session = z.infer<typeof Session>;
 export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
 export const SessionUpdate = SessionCreate.partial();
 
+// The list-shape of a session (issue #71): a session's `recap` markdown can be up
+// to 100KB, so list/summary payloads deliberately DROP the full body and carry a
+// short plain-text `recapExcerpt` instead — a 150-session campaign's list stays
+// small. Fetch the full recap with GET /sessions/:id when a single session is opened.
+export const SessionListItem = Session.omit({ recap: true }).extend({
+  recapExcerpt: z.string().default(''),
+});
+export type SessionListItem = z.infer<typeof SessionListItem>;
+
 // The canonical recap scaffold — the structured headings a DM fills instead of
 // staring at a blank box. Shared by the web "Insert template" affordance and the
 // MCP `draft_session_recap` tool so a hand-written recap and an AI-drafted one
@@ -395,6 +441,59 @@ export const CalendarFeed = z.object({
   url: z.string().nullable(), // relative feed path, e.g. /api/v1/calendar/<token>.ics
 });
 export type CalendarFeed = z.infer<typeof CalendarFeed>;
+
+// ---------- timeline (in-world calendar / campaign timeline) — issue #63 ----------
+// The real-world Session.playedAt tells you WHEN a table met; it says nothing about
+// the in-fiction date ("the 3rd of Flamerule, 1492 DR"). This is a standalone module:
+// a DM sequences in-world events on a campaign timeline, each carrying a free-text
+// in-world date (fantasy calendars aren't ISO-parseable) plus a DM-controlled
+// `sortIndex` so the timeline orders by narrative sequence, not by that unsortable
+// string. Canon-entity secrecy conventions apply: `dmSecret` is stripped for non-DM,
+// and a `hidden` event is dropped WHOLESALE from every non-DM read (prep for a reveal).
+export const TimelineEvent = z.object({
+  id: Id,
+  campaignId: Id,
+  title: z.string().min(1).max(200),
+  // Free-text in-fiction date, e.g. "3rd of Flamerule, 1492 DR". Empty = undated
+  // (a floating "sometime around here" beat the DM can still sequence via sortIndex).
+  inWorldDate: z.string().max(200).default(''),
+  body: z.string().max(50_000).default(''), // markdown
+  // Optional era/age grouping ("Age of Chains", "Second Era") — a light bucket the
+  // timeline view can header on; free text, no enum (every world names its ages).
+  era: z.string().max(120).default(''),
+  // DM-controlled ordering along the timeline. Free-text dates can't be sorted, so
+  // the timeline reads by this (ascending), id as a stable tiebreaker.
+  sortIndex: z.number().int().default(0),
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
+  // Entity-level secrecy (issue #42 convention): a hidden event is excluded WHOLESALE
+  // from every non-DM read until the DM reveals it (hidden=false).
+  hidden: z.boolean().default(false),
+  ...timestamps,
+});
+export type TimelineEvent = z.infer<typeof TimelineEvent>;
+export const TimelineEventCreate = TimelineEvent.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ title: true });
+export type TimelineEventCreate = z.infer<typeof TimelineEventCreate>;
+export const TimelineEventUpdate = TimelineEventCreate.partial();
+export type TimelineEventUpdate = z.infer<typeof TimelineEventUpdate>;
+
+// The "honest v0" from the issue: one free-text "current in-world date" per campaign
+// ("It is presently the 3rd of Flamerule, 1492 DR"), plus an optional calendar note
+// (month names, moon phases, whatever the DM wants to remember). Stored in the
+// timeline module's own single-row-per-campaign table so it touches nothing else.
+export const TimelineCalendar = z.object({
+  campaignId: Id,
+  currentDate: z.string().max(200).default(''),
+  note: z.string().max(4000).default(''), // markdown — calendar reference / month list
+  ...timestamps,
+});
+export type TimelineCalendar = z.infer<typeof TimelineCalendar>;
+export const TimelineCalendarUpdate = z.object({
+  currentDate: z.string().max(200).optional(),
+  note: z.string().max(4000).optional(),
+});
+export type TimelineCalendarUpdate = z.infer<typeof TimelineCalendarUpdate>;
 
 // ---------- notes ----------
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
@@ -524,7 +623,7 @@ export const CampaignSummary = z.object({
   npcs: z.array(Npc),
   locations: z.array(Location),
   characters: z.array(Character),
-  sessions: z.array(Session),
+  sessions: z.array(SessionListItem), // list-shape (recapExcerpt, not full recap) — issue #71
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;

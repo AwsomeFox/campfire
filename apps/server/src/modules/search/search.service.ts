@@ -131,7 +131,9 @@ export class SearchService {
       const title = s.title || `Session ${s.number}`;
       push('session', s.id, title, [
         { field: 'title', text: title },
-        { field: 'recap', text: s.recap },
+        // The sessions list carries a short recapExcerpt, not the full recap body (#71
+        // trimmed it for pagination); searching the excerpt keeps this a cheap list read.
+        { field: 'recap', text: s.recapExcerpt },
         { field: 'dmSecret', text: s.dmSecret },
       ]);
     }

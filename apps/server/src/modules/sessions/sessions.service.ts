@@ -1,11 +1,12 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, desc, eq, ne } from 'drizzle-orm';
+import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionCreate, SessionUpdate, RECAP_TEMPLATE } from '@campfire/schema';
-import type { Session, Role, Note, EncounterWithCombatants } from '@campfire/schema';
+import type { Session, SessionListItem, Role, Note, EncounterWithCombatants, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, sessionShares, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { applyPage } from '../../common/pagination';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
@@ -91,12 +92,61 @@ export class SessionsService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  async listForCampaign(campaignId: number, role: Role): Promise<Session[]> {
-    const rows = await this.db
+  /**
+   * List-shape sessions (issue #71): newest-first, WITHOUT the full recap body
+   * (which can be 100KB each) — instead a short plain-text `recapExcerpt`, sliced
+   * out in SQL so a 150-session campaign's list/summary payload stays small.
+   * Optional limit/offset are pushed into the query. Used by the REST list endpoint
+   * and the campaign summary; MCP's recap tool uses listRecapsForCampaign for full bodies.
+   */
+  async listForCampaign(campaignId: number, role: Role, page?: PageParams): Promise<SessionListItem[]> {
+    let q = this.db
+      .select({
+        id: sessions.id,
+        campaignId: sessions.campaignId,
+        number: sessions.number,
+        title: sessions.title,
+        playedAt: sessions.playedAt,
+        // substr caps what SQLite reads/returns; excerpt() then flattens+trims to ~200 chars.
+        recapExcerpt: sql<string>`substr(${sessions.recap}, 1, 400)`,
+        dmSecret: sessions.dmSecret,
+        createdAt: sessions.createdAt,
+        updatedAt: sessions.updatedAt,
+      })
+      .from(sessions)
+      .where(eq(sessions.campaignId, campaignId))
+      .orderBy(desc(sessions.number))
+      .$dynamic();
+    q = applyPage(q, page);
+    const rows = await q;
+    const items: SessionListItem[] = rows.map((r) => ({
+      id: r.id,
+      campaignId: r.campaignId,
+      number: r.number,
+      title: r.title,
+      playedAt: r.playedAt,
+      recapExcerpt: excerpt(r.recapExcerpt ?? ''),
+      dmSecret: r.dmSecret,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+    return redactSecrets(items, role);
+  }
+
+  /**
+   * Full-recap sessions, newest-first, with limit/offset in SQL — for the MCP
+   * `get_session_recaps` tool, whose whole point is returning recap bodies. Kept
+   * separate from the lightweight list-shape used by the dashboard.
+   */
+  async listRecapsForCampaign(campaignId: number, role: Role, page?: PageParams): Promise<Session[]> {
+    let q = this.db
       .select()
       .from(sessions)
       .where(eq(sessions.campaignId, campaignId))
-      .orderBy(desc(sessions.number));
+      .orderBy(desc(sessions.number))
+      .$dynamic();
+    q = applyPage(q, page);
+    const rows = await q;
     return redactSecrets(rows.map(toDomain), role);
   }
 

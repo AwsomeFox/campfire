@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, SkillRank } from '@campfire/schema';
-import { xpForLevel } from '@campfire/schema';
+import { xpForLevel, CONDITIONS } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
@@ -1171,6 +1171,7 @@ function ConditionsRow({
           <span className="inline-flex items-center gap-1">
             <input
               autoFocus
+              list="cf-condition-vocab"
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
@@ -1184,6 +1185,11 @@ function ConditionsRow({
               className="cf-input !min-h-0 !py-1 !w-28 text-xs"
               style={{ minHeight: 0, padding: '4px 8px' }}
             />
+            <datalist id="cf-condition-vocab">
+              {CONDITIONS.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
             <button type="button" onClick={addCondition} disabled={busy || !value.trim()} className="cf-chip cf-chip-available">
               Add
             </button>
