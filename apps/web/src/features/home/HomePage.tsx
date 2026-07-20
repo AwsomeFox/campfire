@@ -51,6 +51,57 @@ function NewCampaignTile({ onClick }: { onClick: () => void }) {
   );
 }
 
+function CampaignTile({
+  campaign,
+  role,
+  onOpen,
+  archived,
+}: {
+  campaign: Campaign;
+  role: string | null;
+  onOpen: () => void;
+  archived?: boolean;
+}) {
+  return (
+    <button
+      onClick={onOpen}
+      className="card elev-sm text-left overflow-hidden"
+      style={{ padding: 0, gap: 0, ...(archived ? { opacity: 0.72 } : {}) }}
+    >
+      <div
+        className="h-[88px] grid place-items-center"
+        style={{ background: coverFor(campaign.id), ...(archived ? { filter: 'saturate(0.45)' } : {}) }}
+      >
+        <span
+          style={{ fontFamily: 'var(--font-heading)', fontSize: 30, color: 'var(--color-accent-100)' }}
+        >
+          {campaign.name.charAt(0).toUpperCase()}
+        </span>
+      </div>
+      <div className="flex flex-col gap-2.5" style={{ padding: '14px 16px 16px' }}>
+        <div>
+          <div className="card-title" style={{ fontSize: 16 }}>{campaign.name}</div>
+          <div className="flex gap-1.5 flex-wrap" style={{ marginTop: 6 }}>
+            <Chip variant={statusVariant(campaign.status)}>{campaign.status}</Chip>
+            {archived && <Chip variant="private">read-only</Chip>}
+            {role && (
+              <Chip variant="dm">{role === 'dm' ? 'DM' : role === 'player' ? 'Player' : 'Viewer'}</Chip>
+            )}
+          </div>
+        </div>
+        {campaign.description && (
+          <p className="text-muted line-clamp-2" style={{ fontSize: 11.5, margin: 0 }}>
+            {campaign.description}
+          </p>
+        )}
+        <div className="text-muted" style={{ fontSize: 11.5 }}>
+          Session {campaign.sessionCount}
+        </div>
+      </div>
+    </button>
+  );
+}
+
 export function HomePage() {
   const { roleIn } = useAuth();
   const { campaigns, loading, error, refresh } = useCampaigns();
@@ -59,6 +110,10 @@ export function HomePage() {
   const [wizardOpen, setWizardOpen] = useState(false);
 
   const allCampaigns = [...campaigns, ...justCreated.filter((c) => !campaigns.some((x) => x.id === c.id))];
+  // Archived (paused/completed) campaigns are read-only server-side — keep them
+  // out of the main hub grid so finished games stop cluttering the active list.
+  const activeCampaigns = allCampaigns.filter((c) => c.status === 'active');
+  const archivedCampaigns = allCampaigns.filter((c) => c.status !== 'active');
 
   function onCampaignCreated(c: Campaign) {
     setJustCreated((prev) => [...prev, c]);
@@ -96,53 +151,47 @@ export function HomePage() {
           <NewCampaignTile onClick={() => setWizardOpen(true)} />
         </div>
       ) : (
-        <div
-          className="grid gap-3.5"
-          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))' }}
-        >
-          {allCampaigns.map((campaign) => {
-            const role = roleIn(campaign.id);
-            return (
-              <button
+        <>
+          <div
+            className="grid gap-3.5"
+            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))' }}
+          >
+            {activeCampaigns.map((campaign) => (
+              <CampaignTile
                 key={campaign.id}
-                onClick={() => navigate(`/c/${campaign.id}`)}
-                className="card elev-sm text-left overflow-hidden"
-                style={{ padding: 0, gap: 0 }}
+                campaign={campaign}
+                role={roleIn(campaign.id)}
+                onOpen={() => navigate(`/c/${campaign.id}`)}
+              />
+            ))}
+            <NewCampaignTile onClick={() => setWizardOpen(true)} />
+          </div>
+
+          {archivedCampaigns.length > 0 && (
+            <>
+              <div style={{ marginTop: 10 }}>
+                <h4 style={{ margin: 0, color: 'var(--color-neutral-300)' }}>Archive</h4>
+                <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12.5 }}>
+                  Paused and completed campaigns are read-only until a DM sets them back to active.
+                </p>
+              </div>
+              <div
+                className="grid gap-3.5"
+                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))' }}
               >
-                <div
-                  className="h-[88px] grid place-items-center"
-                  style={{ background: coverFor(campaign.id) }}
-                >
-                  <span
-                    style={{ fontFamily: 'var(--font-heading)', fontSize: 30, color: 'var(--color-accent-100)' }}
-                  >
-                    {campaign.name.charAt(0).toUpperCase()}
-                  </span>
-                </div>
-                <div className="flex flex-col gap-2.5" style={{ padding: '14px 16px 16px' }}>
-                  <div>
-                    <div className="card-title" style={{ fontSize: 16 }}>{campaign.name}</div>
-                    <div className="flex gap-1.5 flex-wrap" style={{ marginTop: 6 }}>
-                      <Chip variant={statusVariant(campaign.status)}>{campaign.status}</Chip>
-                      {role && (
-                        <Chip variant="dm">{role === 'dm' ? 'DM' : role === 'player' ? 'Player' : 'Viewer'}</Chip>
-                      )}
-                    </div>
-                  </div>
-                  {campaign.description && (
-                    <p className="text-muted line-clamp-2" style={{ fontSize: 11.5, margin: 0 }}>
-                      {campaign.description}
-                    </p>
-                  )}
-                  <div className="text-muted" style={{ fontSize: 11.5 }}>
-                    Session {campaign.sessionCount}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-          <NewCampaignTile onClick={() => setWizardOpen(true)} />
-        </div>
+                {archivedCampaigns.map((campaign) => (
+                  <CampaignTile
+                    key={campaign.id}
+                    campaign={campaign}
+                    role={roleIn(campaign.id)}
+                    onOpen={() => navigate(`/c/${campaign.id}`)}
+                    archived
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </>
       )}
     </div>
   );

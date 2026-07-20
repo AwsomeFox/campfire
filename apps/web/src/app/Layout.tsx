@@ -475,6 +475,22 @@ export function Layout() {
           </header>
         )}
 
+        {/* Archived (paused/completed) campaigns are read-only server-side — surface it on every campaign page. */}
+        {campaign && campaign.status !== 'active' && (
+          <div
+            className="px-4 py-2 text-center"
+            style={{
+              fontSize: 12.5,
+              color: 'var(--color-accent-200)',
+              background: 'color-mix(in srgb, var(--color-accent) 10%, transparent)',
+              borderBottom: '1px solid var(--color-divider)',
+            }}
+          >
+            This campaign is {campaign.status} — archived and read-only.
+            {isDm ? ' Set its status back to active in Settings to make changes.' : ''}
+          </div>
+        )}
+
         <main className="flex-1 w-full pb-20 md:pb-10">
           <Outlet />
         </main>

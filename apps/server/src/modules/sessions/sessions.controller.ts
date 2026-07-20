@@ -40,7 +40,7 @@ export class CampaignSessionsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     if (isProposed(proposed)) {
-      const role = await this.access.requireMember(user, campaignId);
+      const role = await this.access.requireMember(user, campaignId, { write: true });
       const validated = SessionCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'session', null, 'create', validated, user, role);
       res.status(202);
@@ -84,7 +84,7 @@ export class SessionsController {
   ) {
     const row = await this.sessions.getRowOrThrow(id);
     if (isProposed(proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId);
+      const role = await this.access.requireMember(user, row.campaignId, { write: true });
       const validated = SessionUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'session', id, 'update', validated, user, role);
       res.status(202);
