@@ -29,6 +29,7 @@ import { NpcsModule } from './modules/npcs/npcs.module';
 import { LocationsModule } from './modules/locations/locations.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
 import { NotesModule } from './modules/notes/notes.module';
+import { SearchModule } from './modules/search/search.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { TokensModule } from './modules/tokens/tokens.module';
 import { ProposalsModule } from './modules/proposals/proposals.module';
@@ -127,6 +128,7 @@ function serveStaticImports(): DynamicModule[] {
     LocationsModule,
     SessionsModule,
     NotesModule,
+    SearchModule,
     ProposalsModule,
     ExportModule,
     RulesModule,
