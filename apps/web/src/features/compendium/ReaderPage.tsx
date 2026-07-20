@@ -13,6 +13,7 @@ import { api, ApiError, API } from '../../lib/api';
 import type { RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 
 export default function ReaderPage() {
   const { campaignId, entryId } = useParams<{ campaignId: string; entryId: string }>();
@@ -86,10 +87,19 @@ export default function ReaderPage() {
             <h3 style={{ margin: 0, fontFamily: 'var(--font-heading)' }}>{entry.name}</h3>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
           </div>
-          {/* Older imports stored literal escape sequences (backslash-n) that break
-              markdown tables/paragraphs; normalise defensively so already-installed
-              packs render correctly without a reinstall. */}
-          <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
+          {/* Monster entries carry an empty `body` — their stats live in `dataJson`
+              (issue #142). Render the structured statblock when there's no prose body
+              and the JSON has renderable fields; otherwise fall back to the markdown
+              body. Older imports stored literal escape sequences (backslash-n) that
+              break markdown tables/paragraphs; normalise defensively so
+              already-installed packs render correctly without a reinstall. */}
+          {entry.body.trim() ? (
+            <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
+          ) : hasMonsterStatblock(entry.dataJson) ? (
+            <StatBlock data={entry.dataJson} />
+          ) : (
+            <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
+          )}
           <p className="text-muted" style={{ margin: 0, fontSize: 11, borderTop: '1px solid var(--color-divider)', paddingTop: 12 }}>
             From {pack?.name ?? 'the installed rule system'}.
           </p>
