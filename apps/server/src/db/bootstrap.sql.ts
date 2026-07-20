@@ -165,6 +165,19 @@ CREATE TABLE IF NOT EXISTS campaign_members (
   UNIQUE(campaign_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS campaign_invites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  code TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL,
+  created_by_user_id INTEGER,
+  expires_at TEXT NOT NULL,
+  max_uses INTEGER,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS api_tokens (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
@@ -269,6 +282,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_campaign ON audit_log(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_invites_campaign ON campaign_invites(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_campaign ON proposals(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
