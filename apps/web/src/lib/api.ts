@@ -38,8 +38,14 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     }
     throw new ApiError(res.status, message);
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  // Success with no body: 204/205 by spec, but many endpoints (e.g. DELETE)
+  // return 200 with a 0-byte body. Guard against parsing empty/non-JSON bodies
+  // so a succeeded operation isn't reported as a failure.
+  if (res.status === 204 || res.status === 205) return undefined as T;
+  if (res.headers.get('Content-Length') === '0') return undefined as T;
+  const text = await res.text();
+  if (text === '') return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 export const api = {
