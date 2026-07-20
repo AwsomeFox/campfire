@@ -137,6 +137,11 @@ export default function QuestListPage() {
                 <span className={STATUS_TAG_CLASS[q.status]} style={{ fontSize: 10 }}>
                   {STATUS_LABEL[q.status]}
                 </span>
+                {isDm && q.hidden && (
+                  <span className="tag tag-outline" style={{ fontSize: 10 }} title="Hidden from players">
+                    🙈 Hidden
+                  </span>
+                )}
                 <div style={{ flex: 1 }} />
                 {q.reward && (
                   <span className="tag tag-neutral" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>

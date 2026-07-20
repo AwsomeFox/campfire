@@ -46,11 +46,12 @@ export default function NpcPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: '', role: '', disposition: '', locationId: '' as string, body: '', dmSecret: '' });
+  const [form, setForm] = useState({ name: '', role: '', disposition: '', locationId: '' as string, body: '', dmSecret: '', hidden: false });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [togglingHidden, setTogglingHidden] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -91,9 +92,24 @@ export default function NpcPage() {
       locationId: npc.locationId ? String(npc.locationId) : '',
       body: npc.body,
       dmSecret: npc.dmSecret,
+      hidden: npc.hidden,
     });
     setSaveError(null);
     setEditing(true);
+  }
+
+  // Entity-level secrecy (issue #42): reveal/hide the whole NPC from players.
+  async function toggleHidden() {
+    if (!npc) return;
+    setTogglingHidden(true);
+    try {
+      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: !npc.hidden });
+      setNpc(updated);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't change visibility.");
+    } finally {
+      setTogglingHidden(false);
+    }
   }
 
   async function save() {
@@ -108,6 +124,7 @@ export default function NpcPage() {
         locationId: form.locationId ? Number(form.locationId) : null,
         body: form.body,
         dmSecret: form.dmSecret,
+        hidden: form.hidden,
       });
       setNpc(updated);
       setEditing(false);
@@ -178,10 +195,22 @@ export default function NpcPage() {
               {npc.role && <p className="text-sm text-slate-400">{npc.role}</p>}
             </div>
             <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
+            {isDm && npc.hidden && <Chip variant="failed">🙈 Hidden from players</Chip>}
             {isDm && (
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs ml-auto" onClick={startEdit}>
-                ✎ Edit
-              </Btn>
+              <div className="flex gap-2 ml-auto">
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1.5 text-xs"
+                  disabled={togglingHidden}
+                  onClick={toggleHidden}
+                  title={npc.hidden ? 'Make this NPC visible to players' : 'Hide this NPC from players'}
+                >
+                  {togglingHidden ? '…' : npc.hidden ? '👁 Reveal' : '🙈 Hide'}
+                </Btn>
+                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                  ✎ Edit
+                </Btn>
+              </div>
             )}
           </div>
 
@@ -293,6 +322,10 @@ export default function NpcPage() {
             <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
             <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
           </div>
+          <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+            <input type="checkbox" checked={form.hidden} onChange={(e) => setForm({ ...form, hidden: e.target.checked })} />
+            <span>🙈 Hidden from players (whole NPC, not just the secret)</span>
+          </label>
           <div className="flex items-center justify-between gap-2">
             <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
               {deleting ? 'Deleting…' : 'Delete NPC'}

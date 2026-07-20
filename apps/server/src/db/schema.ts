@@ -66,6 +66,10 @@ export const quests = sqliteTable('quests', {
   giverNpcId: integer('giver_npc_id'),
   reward: text('reward').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
+  // Entity-level secrecy (issue #42): hidden quests are excluded wholesale from
+  // non-DM reads. Nullable/absent in older DBs pre-migration; see db/db.module.ts
+  // migrateQuestsTableForHidden().
+  hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   sortOrder: integer('sort_order').notNull().default(0),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -88,6 +92,9 @@ export const npcs = sqliteTable('npcs', {
   locationId: integer('location_id'),
   body: text('body').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
+  // Entity-level secrecy (issue #42) — see quests.hidden. Migrated via
+  // migrateNpcsTableForHidden() in db/db.module.ts.
+  hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

@@ -192,6 +192,11 @@ export const Quest = z.object({
   giverNpcId: Id.nullable().default(null),
   reward: z.string().max(500).default(''),
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
+  // Entity-level secrecy (issue #42): a hidden quest is excluded WHOLESALE from
+  // every non-DM read (list/get/summary/export) — not merely dmSecret-redacted.
+  // Default false = visible; the DM sets it true to prep future content, then
+  // "reveals" by patching it back to false.
+  hidden: z.boolean().default(false),
   sortOrder: z.number().int().default(0),
   ...timestamps,
 });
@@ -212,6 +217,9 @@ export const Npc = z.object({
   locationId: Id.nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
+  // Entity-level secrecy (issue #42) — see Quest.hidden. A hidden NPC is dropped
+  // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  hidden: z.boolean().default(false),
   ...timestamps,
 });
 export type Npc = z.infer<typeof Npc>;
@@ -219,6 +227,11 @@ export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true,
 export const NpcUpdate = NpcCreate.partial();
 
 // ---------- location ----------
+// Entity-level secrecy (issue #42) reuses `status` rather than adding a separate
+// `hidden` flag (reconcile, don't duplicate): an `unexplored` location is the
+// DM's un-revealed prep and is dropped wholesale from every non-DM read
+// (list/get/summary/export). The DM "reveals" it via the existing discovery
+// action (POST /locations/:id/discover → explored|current).
 export const LocationStatus = z.enum(['unexplored', 'explored', 'current']);
 
 export const Location = z.object({
