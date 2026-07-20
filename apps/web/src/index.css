@@ -215,6 +215,12 @@ h1, h2, h3, h4, h5, h6 {
   background: color-mix(in srgb, var(--color-accent-2) 18%, transparent);
   color: var(--color-accent-2-300);
 }
+/* Whisper — per-player secret channel (issue #127): violet, distinct from every
+   other visibility badge so a targeted note reads as its own thing at a glance. */
+.cf-chip-whisper {
+  background: rgb(167 139 250 / 0.16);
+  color: #c4b5fd;
+}
 
 .cf-btn {
   display: inline-flex;
