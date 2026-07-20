@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch, ObjectiveReorder } from '@campfire/schema';
 import type { Quest, QuestObjective, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { quests, questObjectives, npcs } from '../../db/schema';
+import { quests, questObjectives, npcs, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
@@ -84,6 +84,45 @@ export class QuestsService {
    */
   async listForCampaignByStatusWithObjectives(campaignId: number, status: string | undefined, role: Role) {
     return this.embedObjectives(await this.listForCampaignByStatus(campaignId, status, role));
+  }
+
+  /**
+   * The reference instant for "what changed since last session" (#66): the most
+   * recent session's date, taken as max(playedAt ?? createdAt) across the
+   * campaign's sessions. playedAt (the night it was played) is the natural anchor;
+   * we fall back to createdAt when a session has no recorded date so a dateless
+   * log still moves the marker rather than being skipped. Returns null when the
+   * campaign has no sessions — there's then nothing to diff against.
+   */
+  private async latestSessionDate(campaignId: number): Promise<string | null> {
+    const rows = await this.db
+      .select({ playedAt: sessions.playedAt, createdAt: sessions.createdAt })
+      .from(sessions)
+      .where(eq(sessions.campaignId, campaignId));
+    let latest: string | null = null;
+    for (const r of rows) {
+      const ref = r.playedAt ?? r.createdAt;
+      if (ref && (latest == null || ref > latest)) latest = ref;
+    }
+    return latest;
+  }
+
+  /**
+   * Quests touched since a reference instant (#66) — the data behind the Quests
+   * "what changed since last session" indicator. `since` defaults to the campaign's
+   * latest session date but may be overridden (e.g. the player's last visit).
+   * A quest counts as changed when its updatedAt is at/after `since`; ISO-8601
+   * strings compare lexicographically, and a date-only `since` (YYYY-MM-DD) is a
+   * prefix of any same-day timestamp, so a same-day edit still registers. Reuses
+   * listForCampaign so hidden-filtering, dmSecret redaction and board ordering all
+   * carry over. When there's no session to diff against (`since` null), nothing is
+   * reported changed rather than flagging every quest.
+   */
+  async changesSince(campaignId: number, sinceParam: string | undefined, role: Role): Promise<{ since: string | null; quests: Quest[] }> {
+    const since = sinceParam && sinceParam.trim() !== '' ? sinceParam : await this.latestSessionDate(campaignId);
+    const all = await this.listForCampaign(campaignId, role);
+    const changed = since == null ? [] : all.filter((q) => q.updatedAt >= since);
+    return { since, quests: changed };
   }
 
   private async embedObjectives(questList: Quest[]) {

@@ -498,3 +498,123 @@ describe('quests (e2e)', () => {
     });
   });
 });
+
+// "What changed since last session" indicator (#66). GET
+// /campaigns/:id/quests/changes returns { since, quests } — the visible quests
+// whose updatedAt is at/after `since`, which defaults to the campaign's latest
+// session date and can be overridden with ?since=. A fresh campaign per block so
+// the quest set and session dates are fully controlled.
+describe('quests: changed-since-last-session (#66, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const res = await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(dm).send({ name: 'Changes Campaign' });
+    campaignId = res.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  const createQuest = async (title: string, extra: Record<string, unknown> = {}) => {
+    const res = await request(ctx.app.getHttpServer()).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title, ...extra });
+    expect(res.status).toBe(201);
+    return res.body;
+  };
+  const createSession = async (number: number, playedAt: string | null) => {
+    const res = await request(ctx.app.getHttpServer()).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number, playedAt });
+    expect(res.status).toBe(201);
+    return res.body;
+  };
+  const getChanges = (headers: Record<string, string>, since?: string) => {
+    const url = `/api/v1/campaigns/${campaignId}/quests/changes${since ? `?since=${encodeURIComponent(since)}` : ''}`;
+    return request(ctx.app.getHttpServer()).get(url).set(headers);
+  };
+
+  it('no sessions yet -> since is null and nothing is reported changed', async () => {
+    await createQuest('Lonely quest');
+    const res = await getChanges(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.since).toBeNull();
+    expect(res.body.quests).toEqual([]);
+  });
+
+  it('default since = latest session date; a far-past session flags every visible quest', async () => {
+    // playedAt way in the past -> every quest (updatedAt = now) is at/after it.
+    await createSession(1, '2000-01-01');
+    const res = await getChanges(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.since).toBe('2000-01-01');
+    const titles = res.body.quests.map((q: { title: string }) => q.title);
+    expect(titles).toContain('Lonely quest');
+    // Board order is honored (same sortOrder/id ordering as the list endpoint).
+    const list = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/quests`).set(dm);
+    expect(res.body.quests.map((q: { id: number }) => q.id)).toEqual(list.body.map((q: { id: number }) => q.id));
+  });
+
+  it('latest session date is the max across sessions (a newer session wins)', async () => {
+    await createSession(2, '2010-06-15');
+    const res = await getChanges(dm);
+    // max(2000-01-01, 2010-06-15) = 2010-06-15
+    expect(res.body.since).toBe('2010-06-15');
+  });
+
+  it('?since override: a future instant reports nothing, a past instant reports the quest', async () => {
+    const q = await createQuest('Override quest');
+
+    const future = await getChanges(dm, '2999-01-01T00:00:00.000Z');
+    expect(future.body.quests).toEqual([]);
+    expect(future.body.since).toBe('2999-01-01T00:00:00.000Z');
+
+    const past = await getChanges(dm, '2000-01-01T00:00:00.000Z');
+    expect(past.body.quests.map((x: { id: number }) => x.id)).toContain(q.id);
+    expect(past.body.since).toBe('2000-01-01T00:00:00.000Z');
+  });
+
+  it('boundary is inclusive at updatedAt and excludes the quest one instant later', async () => {
+    // Derive the boundaries from the quest's own updatedAt so the assertion never
+    // races the wall clock (no reliance on sub-millisecond create/read timing).
+    const created = await createQuest('Quiet quest');
+    const patched = await request(ctx.app.getHttpServer()).patch(`/api/v1/quests/${created.id}`).set(dm).send({ body: 'DM flipped a detail' });
+    expect(patched.status).toBe(200);
+    const u: string = patched.body.updatedAt;
+
+    // since === updatedAt -> included (the comparison is `updatedAt >= since`).
+    const atInstant = await getChanges(dm, u);
+    expect(atInstant.body.quests.map((x: { id: number }) => x.id)).toContain(created.id);
+
+    // since one second after updatedAt -> excluded.
+    const justAfter = new Date(new Date(u).getTime() + 1000).toISOString();
+    const afterInstant = await getChanges(dm, justAfter);
+    expect(afterInstant.body.quests.map((x: { id: number }) => x.id)).not.toContain(created.id);
+  });
+
+  it('respects redaction + hidden: player never sees a hidden quest or dmSecret in the diff', async () => {
+    const hidden = await createQuest('Hidden prep', { hidden: true, dmSecret: 'twist' });
+    const visible = await createQuest('Visible with secret', { dmSecret: 'also secret' });
+
+    // Diff against the far past so both quests qualify by date.
+    const dmRes = await getChanges(dm, '2000-01-01');
+    const dmIds = dmRes.body.quests.map((q: { id: number }) => q.id);
+    expect(dmIds).toContain(hidden.id);
+    expect(dmIds).toContain(visible.id);
+
+    const playerRes = await getChanges(player, '2000-01-01');
+    expect(playerRes.status).toBe(200);
+    const playerIds = playerRes.body.quests.map((q: { id: number }) => q.id);
+    expect(playerIds).not.toContain(hidden.id); // hidden dropped wholesale
+    expect(playerIds).toContain(visible.id);
+    const visibleForPlayer = playerRes.body.quests.find((q: { id: number }) => q.id === visible.id);
+    expect(visibleForPlayer.dmSecret).toBeFalsy(); // dmSecret stripped
+
+    // A viewer (read-only member) may still read the diff, with the same
+    // hidden-filtering + redaction as the player.
+    const viewerRes = await getChanges(viewer, '2000-01-01');
+    expect(viewerRes.status).toBe(200);
+    const viewerIds = viewerRes.body.quests.map((q: { id: number }) => q.id);
+    expect(viewerIds).not.toContain(hidden.id);
+    expect(viewerIds).toContain(visible.id);
+  });
+});

@@ -235,6 +235,21 @@ export const ObjectivePatch = z.object({ text: z.string().min(1).max(500).option
 export const ObjectiveReorder = z.object({ objectiveIds: z.array(Id).min(1) });
 export type ObjectiveReorder = z.infer<typeof ObjectiveReorder>;
 
+// "What changed since last session" (issue #66). `since` is the reference instant
+// the diff was taken against — by default the campaign's latest session date
+// (max of each session's playedAt, falling back to its createdAt), or the caller's
+// explicit `?since=` override (e.g. the player's last visit). `quests` are the
+// visible quests whose updatedAt is at/after `since`, in board order. `since` is
+// null when the campaign has no sessions to diff against — then `quests` is empty.
+// A quest is "new" when its createdAt is also at/after `since`, otherwise "changed"
+// (the client derives this from the returned createdAt to keep the payload a plain
+// Quest list). Respects redaction + hidden filtering like every other quest read.
+export const QuestChanges = z.object({
+  since: IsoDate.nullable(),
+  quests: z.array(Quest),
+});
+export type QuestChanges = z.infer<typeof QuestChanges>;
+
 // ---------- npc ----------
 export const Npc = z.object({
   id: Id,
