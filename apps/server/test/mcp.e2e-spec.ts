@@ -515,8 +515,32 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(inboxList.isError).toBeFalsy();
     expect((parseResult(inboxList) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(true);
 
-    const resolveResult = await dmClient.callTool({ name: 'resolve_inbox_item', arguments: { noteId: item.id, resolvedNote: 'handled' } });
+    const resolveResult = await dmClient.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: item.id, resolvedNote: 'handled', entityType: 'campaign', entityId: campaignId },
+    });
     expect(resolveResult.isError).toBeFalsy();
+    const resolved = parseResult(resolveResult) as { resolved: boolean; entityType: string | null; entityId: number | null };
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.entityType).toBe('campaign');
+    expect(resolved.entityId).toBe(campaignId);
+
+    // resolved history via read_inbox { resolved: true }; open list no longer has it
+    const openAfter = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId } });
+    expect((parseResult(openAfter) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(false);
+    const historyList = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId, resolved: true } });
+    expect(historyList.isError).toBeFalsy();
+    expect((parseResult(historyList) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(true);
+
+    // half-provided entity link is rejected
+    const secondItem = parseResult(
+      await dmClient.callTool({ name: 'submit_inbox_item', arguments: { campaignId, body: 'Another question' } }),
+    ) as { id: number };
+    const badResolve = await dmClient.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: secondItem.id, entityType: 'quest' },
+    });
+    expect(badResolve.isError).toBe(true);
   });
 
   it('add_member -> update_member -> remove_member round-trip (dm only)', async () => {

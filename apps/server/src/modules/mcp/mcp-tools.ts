@@ -351,11 +351,13 @@ export class McpToolsService {
     this.tool(
       server,
       'read_inbox',
-      'DM only: list open (unresolved) player inbox items for a campaign — messages players sent up via submit_inbox_item.',
-      { campaignId: CampaignIdArg },
-      async ({ campaignId }) => {
+      'DM only: list player inbox items for a campaign — messages players sent up via submit_inbox_item. ' +
+        'Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest first), ' +
+        'including any entity link each item was resolved into.',
+      { campaignId: CampaignIdArg, resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones') },
+      async ({ campaignId, resolved }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
-        return this.notes.listInbox(campaignId as number);
+        return this.notes.listInbox(campaignId as number, (resolved as boolean | undefined) ?? false);
       },
     );
 
@@ -963,12 +965,30 @@ export class McpToolsService {
     this.tool(
       server,
       'resolve_inbox_item',
-      'DM only: resolve a player inbox item, optionally with a resolution note.',
-      { noteId: Id.describe('Inbox note id'), resolvedNote: z.string().max(1000).optional().describe('Resolution note') },
-      async ({ noteId, resolvedNote }) => {
+      'DM only: resolve a player inbox item, optionally with a resolution note and/or a link to the entity it ' +
+        'became (entityType + entityId together) — shown in the resolved history (read_inbox with resolved=true).',
+      {
+        noteId: Id.describe('Inbox note id'),
+        resolvedNote: z.string().max(1000).optional().describe('Resolution note'),
+        entityType: EntityType.optional().describe('Entity type this item was resolved into (requires entityId)'),
+        entityId: Id.optional().describe('Entity id this item was resolved into (requires entityType)'),
+      },
+      async ({ noteId, resolvedNote, entityType, entityId }) => {
+        if ((entityType == null) !== (entityId == null)) {
+          throw new BadRequestException('entityType and entityId must be provided together');
+        }
         const row = await this.notes.getRowOrThrow(noteId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.notes.resolveInbox(noteId as number, { resolvedNote: (resolvedNote as string | undefined) ?? '' }, user, role);
+        return this.notes.resolveInbox(
+          noteId as number,
+          {
+            resolvedNote: (resolvedNote as string | undefined) ?? '',
+            entityType: (entityType as z.infer<typeof EntityType> | undefined) ?? null,
+            entityId: (entityId as number | undefined) ?? null,
+          },
+          user,
+          role,
+        );
       },
     );
 
