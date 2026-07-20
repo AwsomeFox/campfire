@@ -2,12 +2,12 @@ import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nest
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { ApiTokenCreate } from '@campfire/schema';
-import type { ApiToken, ApiTokenCreated, TokenScope } from '@campfire/schema';
+import type { ApiToken, ApiTokenCreated, TokenScope, WriteScope } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { apiTokens, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateApiToken, hashApiToken, apiTokenPrefix } from '../../common/crypto';
-import { hasServerAdminPower, minRole, type RequestUser, type TokenContext } from '../../common/user.types';
+import { hasServerAdminPower, minRole, minWriteScope, type RequestUser, type TokenContext } from '../../common/user.types';
 import { RoleResolver } from '../membership/role-resolver.service';
 
 type ApiTokenCreateInput = z.infer<typeof ApiTokenCreate>;
@@ -16,12 +16,22 @@ type ApiTokenCreateInput = z.infer<typeof ApiTokenCreate>;
 export interface MintForInput {
   tokenName: string;
   scope?: TokenScope;
+  writeScope?: WriteScope;
   campaignId?: number | null;
   adminEnabled?: boolean;
 }
 
 /** Least-privilege default when a mint request omits `scope` — matches ApiToken.scope semantics (caps effective role). */
 const DEFAULT_TOKEN_SCOPE: TokenScope = 'viewer';
+
+/**
+ * Back-compat default when a mint request omits `writeScope`: 'direct' — the
+ * token writes exactly as pre-#158 tokens always did. (Least privilege for the
+ * WRITE dimension would be 'none', but defaulting there would silently break
+ * every existing integration/UI flow that mints a token and expects it to write;
+ * operators opt INTO 'propose'/'none' explicitly.)
+ */
+const DEFAULT_WRITE_SCOPE: WriteScope = 'direct';
 
 /** Throttle lastUsedAt writes to at most once per hour per token. */
 const LAST_USED_THROTTLE_MS = 60 * 60 * 1000;
@@ -32,6 +42,7 @@ function toDomain(row: typeof apiTokens.$inferSelect): ApiToken {
     userId: row.userId,
     name: row.name,
     scope: row.scope as ApiToken['scope'],
+    writeScope: row.writeScope as ApiToken['writeScope'],
     campaignId: row.campaignId,
     adminEnabled: !!row.adminEnabled,
     tokenPrefix: row.tokenPrefix,
@@ -107,11 +118,17 @@ export class TokensService {
    */
   async create(userId: number, input: ApiTokenCreateInput, caller: RequestUser): Promise<ApiTokenCreated> {
     let scope = input.scope;
+    // Back-compat default 'direct'. Capped below to the calling token so a
+    // propose-only / read-only PAT can never mint a broader-write sibling (the
+    // exact escalation the writeScope cap exists to prevent — mirrors the scope
+    // and adminEnabled caps).
+    let writeScope: WriteScope = input.writeScope ?? DEFAULT_WRITE_SCOPE;
     let campaignId = input.campaignId ?? null;
 
     const callingToken = caller.tokenContext;
     if (callingToken) {
       scope = minRole(scope, callingToken.scope);
+      writeScope = minWriteScope(writeScope, callingToken.writeScope);
       if (callingToken.campaignId !== null) {
         if (campaignId !== null && campaignId !== callingToken.campaignId) {
           throw new ForbiddenException('You do not have access to this campaign');
@@ -137,6 +154,7 @@ export class TokensService {
         userId,
         name: input.name,
         scope,
+        writeScope,
         campaignId,
         adminEnabled,
         tokenHash: hashApiToken(raw),
@@ -177,7 +195,13 @@ export class TokensService {
     const adminEnabled = input.adminEnabled === true && owner.serverRole === 'admin' && hasServerAdminPower(requester);
     return this.create(
       ownerId,
-      { name: input.tokenName, scope: input.scope ?? DEFAULT_TOKEN_SCOPE, campaignId: input.campaignId ?? null, adminEnabled },
+      {
+        name: input.tokenName,
+        scope: input.scope ?? DEFAULT_TOKEN_SCOPE,
+        writeScope: input.writeScope ?? DEFAULT_WRITE_SCOPE,
+        campaignId: input.campaignId ?? null,
+        adminEnabled,
+      },
       owner,
     );
   }
@@ -233,6 +257,7 @@ export class TokensService {
       tokenId: row.id,
       name: row.name,
       scope: row.scope as TokenContext['scope'],
+      writeScope: row.writeScope as TokenContext['writeScope'],
       campaignId: row.campaignId,
       adminEnabled: !!row.adminEnabled,
     };

@@ -6,7 +6,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
-import { isProposed } from '../../common/proposed.util';
+import { requireWriteMode } from '../../common/proposed.util';
+import { Proposable } from '../../common/decorators/proposable.decorator';
 import { CharactersService } from './characters.service';
 import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto } from './characters.dto';
 
@@ -36,6 +37,7 @@ export class CampaignCharactersController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
   @ApiResponse({ status: 201, description: 'Created character (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
+  @Proposable()
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: CharacterCreateDto,
@@ -43,7 +45,7 @@ export class CampaignCharactersController {
     @CurrentUser() user: RequestUser,
     @Res({ passthrough: true }) res: Response,
   ) {
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, campaignId, { write: true });
       const validated = CharacterCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'character', null, 'create', validated, user, role);
@@ -96,6 +98,7 @@ export class CharactersController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
   @ApiResponse({ status: 200, description: 'Updated character.' })
   @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
+  @Proposable()
   @ApiResponse({ status: 403, description: 'Not the dm or owning player.' })
   async update(
     @Param('id', ParseIntPipe) id: number,
@@ -105,7 +108,7 @@ export class CharactersController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const row = await this.characters.getRowOrThrow(id);
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, row.campaignId, { write: true });
       const validated = CharacterUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'character', id, 'update', validated, user, role);
@@ -124,6 +127,7 @@ export class CharactersController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending delete proposal instead of deleting directly.' })
   @ApiResponse({ status: 200, description: 'Deleted (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending delete proposal created (proposed=true).' })
+  @Proposable()
   async remove(
     @Param('id', ParseIntPipe) id: number,
     @Query('proposed') proposed: string | undefined,
@@ -131,7 +135,7 @@ export class CharactersController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const row = await this.characters.getRowOrThrow(id);
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, row.campaignId, { write: true });
       const proposal = await this.proposals.create(row.campaignId, 'character', id, 'delete', {}, user, role);
       res.status(202);

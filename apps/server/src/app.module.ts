@@ -7,6 +7,7 @@ import { ZodValidationPipe } from 'nestjs-zod';
 import { DbModule } from './db/db.module';
 import { SessionAuthGuard } from './common/guards/session-auth.guard';
 import { ServerRolesGuard } from './common/guards/server-roles.guard';
+import { WriteModeGuard } from './common/guards/write-mode.guard';
 import {
   THROTTLE_DEFAULT,
   THROTTLE_AUTH,
@@ -163,6 +164,11 @@ function serveStaticImports(): DynamicModule[] {
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: SessionAuthGuard },
     { provide: APP_GUARD, useClass: ServerRolesGuard },
+    // Runs after SessionAuthGuard has populated req.tokenContext: enforces the
+    // token's server-side writeScope (issue #158) — a 'none' token can't write,
+    // a 'propose' token may only reach @Proposable() handlers. Only ever tightens
+    // propose/none tokens; direct/cookie/dev-auth requests pass through unchanged.
+    { provide: APP_GUARD, useClass: WriteModeGuard },
   ],
 })
 export class AppModule {}

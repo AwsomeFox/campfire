@@ -1,8 +1,10 @@
 # What an AI can do
 
 Once [connected](connect.md), an AI assistant reaches Campfire through its **MCP
-server** (64 tools) and REST API. What it's allowed to do is capped by the token's
-**scope** and enforced server-side — exactly like a human of that role.
+server** (64 tools) and REST API. What it's allowed to do is capped by two
+independent, server-enforced token dimensions — a **read scope** (dm / player /
+viewer) and a **write mode** (direct / propose / read-only) — exactly like a human
+of that role.
 
 ## The whole loop, over MCP
 
@@ -21,12 +23,23 @@ An AI with a DM-scoped token can run a campaign end to end — verified end-to-e
 
 ## Governance & safety
 
-- **Scope caps are real.** A player- or viewer-scoped token can't do DM things; DM
-  secrets are stripped for non-DM tokens; a campaign-bound token can't see other
-  campaigns. Tested at every level.
-- **The proposal queue.** Player/viewer tokens (and DM tokens that opt in) create
-  **proposals** instead of direct edits — a queue the DM approves or rejects, so an
-  AI can't silently rewrite canon.
+- **Read scope caps are real.** A player- or viewer-scoped token can't read DM
+  secrets; a campaign-bound token can't see other campaigns. Tested at every level.
+- **Write mode is server-enforced, not voluntary.** A token's write authority is a
+  separate dimension from its read scope, so a token can read the whole campaign
+  yet be barred from writing it directly:
+    - **Direct** (default, back-compat) — writes apply immediately when the read
+      scope allows; the `?proposed=true` flag is an opt-in.
+    - **Propose only** — *every* mutation, deletes included, is **coerced into a
+      pending proposal by the server**, whether or not the caller sets
+      `?proposed=true`. The AI cannot write canon directly even if it tries. This
+      is the recommended mode for AI agents: give it `dm` read scope so it has full
+      context, but `propose` write mode so nothing lands without a DM approving it.
+      Write endpoints that have no proposal path (HP/XP tweaks, combat, dice,
+      settings) are rejected outright for a propose-only token.
+    - **Read-only** — every write is rejected.
+- **The proposal queue.** A queue the DM approves or rejects — so an AI on a
+  propose-only token can't silently rewrite canon.
 - **Audit.** Every AI action is audit-logged under the token's name.
 
 ## Common asks

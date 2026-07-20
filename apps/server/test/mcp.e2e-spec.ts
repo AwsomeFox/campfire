@@ -1157,4 +1157,62 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(get.status).toBe(405);
     expect(get.body.error.message).toContain('POST');
   });
+
+  // Issue #158 — the same server-enforced write-mode that guards the REST write
+  // path also guards the MCP surface (where tools call services directly, so the
+  // HTTP WriteModeGuard can't see per-tool intent). A dm-scoped token with
+  // writeScope 'propose' reads everything but every canon mutation is coerced into
+  // a proposal; 'none' is read-only.
+  describe('token write-mode is enforced over MCP', () => {
+    let proposeToken: string;
+    let noneToken: string;
+
+    beforeAll(async () => {
+      const proposeMint = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-propose', scope: 'dm', writeScope: 'propose' });
+      proposeToken = proposeMint.body.token;
+      const noneMint = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-none', scope: 'dm', writeScope: 'none' });
+      noneToken = noneMint.body.token;
+    });
+
+    it('propose-mode: create_quest WITHOUT propose:true is still forced into a proposal, not a direct write', async () => {
+      const client = await mcpClient(proposeToken);
+      const res = await client.callTool({
+        name: 'create_quest',
+        arguments: { campaignId, title: 'MCP Injected Quest' }, // note: NO propose arg
+      });
+      expect(res.isError).toBeFalsy();
+      const { proposal } = parseResult(res) as { proposal: { status: string; action: string; entityType: string } };
+      expect(proposal.status).toBe('pending');
+      expect(proposal.action).toBe('create');
+      expect(proposal.entityType).toBe('quest');
+
+      // Not created directly.
+      const quests = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
+      expect(quests.body.some((q: { title: string }) => q.title === 'MCP Injected Quest')).toBe(false);
+    });
+
+    it('propose-mode: a direct-only write tool (create_arc, no proposal path) is rejected', async () => {
+      const client = await mcpClient(proposeToken);
+      const res = await client.callTool({ name: 'create_arc', arguments: { campaignId, title: 'Should Not Exist Arc' } });
+      expect(res.isError).toBeTruthy();
+    });
+
+    it('propose-mode: reads are unaffected (dm read scope)', async () => {
+      const client = await mcpClient(proposeToken);
+      const res = await client.callTool({ name: 'list_campaigns', arguments: {} });
+      expect(res.isError).toBeFalsy();
+    });
+
+    it('none-mode: create_quest is rejected outright (even with propose:true)', async () => {
+      const client = await mcpClient(noneToken);
+      const res = await client.callTool({ name: 'create_quest', arguments: { campaignId, title: 'Nope', propose: true } });
+      expect(res.isError).toBeTruthy();
+    });
+
+    it('none-mode: reads still work (write-mode does not touch read authority)', async () => {
+      const client = await mcpClient(noneToken);
+      const res = await client.callTool({ name: 'list_campaigns', arguments: {} });
+      expect(res.isError).toBeFalsy();
+    });
+  });
 });
