@@ -1665,3 +1665,156 @@ describe('encounters — issue #114: count add + rename (e2e)', () => {
     expect(hp.status).toBe(403);
   });
 });
+
+// Minimal valid 1x1 PNG (smallest possible real PNG payload — mirrors attachments.e2e-spec.ts).
+const BATTLE_MAP_PNG = Buffer.from(
+  '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+    '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+  'hex',
+);
+
+describe('encounters — issue #39: per-encounter battle map + combatant tokens (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let ownedCharacterId: number; // owned by dev:p-1 — exercises the player-token path
+  let encounterId: number;
+  let charCombatantId: number; // the character combatant (dev:p-1's)
+  let monsterCombatantId: number;
+  let mapAttachmentId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Battle Map Campaign' })).body.id;
+
+    ownedCharacterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Aria', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' })
+    ).body.id;
+
+    // create auto-adds the party (Aria) as a combatant.
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Map Fight' });
+    encounterId = encRes.body.id;
+    charCombatantId = encRes.body.combatants.find((c: CombatantShape) => c.characterId === ownedCharacterId).id;
+
+    monsterCombatantId = (
+      await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Goblin', hpMax: 7 })
+    ).body.id;
+
+    // Upload a map-kind image to the campaign (the attachments pipeline the DM would use).
+    const upload = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(dm)
+      .field('kind', 'map')
+      .attach('file', BATTLE_MAP_PNG, { filename: 'battle.png', contentType: 'image/png' });
+    expect(upload.status).toBe(201);
+    mapAttachmentId = upload.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a fresh encounter has no map and null token positions (unchanged behavior)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.mapAttachmentId).toBeNull();
+    for (const c of res.body.combatants) {
+      expect(c.tokenX).toBeNull();
+      expect(c.tokenY).toBeNull();
+    }
+  });
+
+  it('DM attaches a battle map to the encounter (mapAttachmentId round-trips)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ mapAttachmentId });
+    expect(res.status).toBe(200);
+    expect(res.body.mapAttachmentId).toBe(mapAttachmentId);
+
+    // persisted — a fresh GET shows the same map.
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.mapAttachmentId).toBe(mapAttachmentId);
+  });
+
+  it('attaching a map reveals the (DM-only by default) attachment so players can load it', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/attachments/${mapAttachmentId}/file`).set(player);
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects an attachment id that does not exist in this campaign (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    const otherCampId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other' })).body.id;
+    const otherMap = await request(server)
+      .post(`/api/v1/campaigns/${otherCampId}/attachments`)
+      .set(dm)
+      .field('kind', 'map')
+      .attach('file', BATTLE_MAP_PNG, { filename: 'other.png', contentType: 'image/png' });
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ mapAttachmentId: otherMap.body.id });
+    expect(res.status).toBe(400);
+  });
+
+  it('a player cannot attach a battle map (dm only, 403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ mapAttachmentId: null });
+    expect(res.status).toBe(403);
+  });
+
+  it('DM sets a monster token position; it round-trips', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(dm)
+      .send({ tokenX: 25, tokenY: 40 });
+    expect(res.status).toBe(200);
+    expect(res.body.tokenX).toBe(25);
+    expect(res.body.tokenY).toBe(40);
+  });
+
+  it('out-of-range token coordinates are clamped to 0–100', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(dm)
+      .send({ tokenX: 150, tokenY: -20 });
+    expect(res.status).toBe(200);
+    expect(res.body.tokenX).toBe(100);
+    expect(res.body.tokenY).toBe(0);
+  });
+
+  it('a player may move their OWN character token', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${charCombatantId}`)
+      .set(player)
+      .send({ tokenX: 60, tokenY: 70 });
+    expect(res.status).toBe(200);
+    expect(res.body.tokenX).toBe(60);
+    expect(res.body.tokenY).toBe(70);
+  });
+
+  it('a player may NOT move a monster token (not their character, 403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(player)
+      .send({ tokenX: 10, tokenY: 10 });
+    expect(res.status).toBe(403);
+  });
+
+  it('DM can clear the battle map (mapAttachmentId back to null)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ mapAttachmentId: null });
+    expect(res.status).toBe(200);
+    expect(res.body.mapAttachmentId).toBeNull();
+  });
+
+  it('an unknown key in the encounter PATCH body is rejected (strict, 400)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ round: 99 });
+    expect(res.status).toBe(400);
+  });
+});

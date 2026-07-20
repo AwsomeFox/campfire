@@ -573,6 +573,10 @@ export const encounters = sqliteTable('encounters', {
   // Identity-based turn pointer (issue #49) — the combatant whose turn it is,
   // independent of positional shuffling on add/remove. null when not running/empty.
   currentCombatantId: integer('current_combatant_id'),
+  // Optional battle map (issue #39) — attachment (kind='map'|'image') rendered as the
+  // run-session background. Nullable; added by migration on older DBs — see
+  // db/db.module.ts migrateEncountersTableForMapAttachment. null = no map.
+  mapAttachmentId: integer('map_attachment_id'),
   endedAt: text('ended_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -675,6 +679,11 @@ export const combatants = sqliteTable('combatants', {
   conditions: text('conditions').notNull().default('[]'),
   ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
   sortOrder: integer('sort_order').notNull().default(0),
+  // Battle-map token position (issue #39) — 0–100 percent overlay on the encounter's
+  // map image, mirroring locations.map_x/map_y. Nullable; added by migration on older
+  // DBs — see db/db.module.ts migrateCombatantsTableForTokenPosition. null = not placed.
+  tokenX: real('token_x'),
+  tokenY: real('token_y'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row
