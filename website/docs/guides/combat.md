@@ -42,9 +42,10 @@ Ending is guarded — you can't end a fight that isn't running, or revive an end
 
 ## At the table on a phone
 
-Players can pull the encounter up on their own devices; it refreshes every few
-seconds (and a manual **Refresh** is there too). The dice log is shared by the
-whole table — every member's rolls appear in the same feed, with the roller's
+Players can pull the encounter up on their own devices; the run-session and player
+displays **stream live over SSE**, so damage, turns and conditions show up the moment
+you make them (with a refetch to catch up if the stream drops). The dice log is shared
+by the whole table — every member's rolls appear in the same feed, with the roller's
 name, on every device.
 
 !!! tip "Depth"

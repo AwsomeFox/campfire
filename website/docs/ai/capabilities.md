@@ -1,7 +1,7 @@
 # What an AI can do
 
 Once [connected](connect.md), an AI assistant reaches Campfire through its **MCP
-server** (64 tools) and REST API. What it's allowed to do is capped by the token's
+server** (82 tools) and REST API. What it's allowed to do is capped by the token's
 **scope** and enforced server-side — exactly like a human of that role.
 
 ## The whole loop, over MCP
@@ -10,6 +10,8 @@ An AI with a DM-scoped token can run a campaign end to end — verified end-to-e
 
 - **World-building** — create and edit campaigns, quests (with objectives and
   subquests), NPCs, and locations, including DM secrets and map pins.
+- **Story planning** — build branching **arcs and beats** (with labelled branches
+  between beats) so an assistant can draft and rearrange where the story might fork.
 - **Rules** — install a rule pack, search it, and cite entries.
 - **Characters** — create and update sheets, adjust HP and conditions.
 - **Combat** — create an encounter, add monsters from the compendium, roll
@@ -37,7 +39,7 @@ An AI with a DM-scoped token can run a campaign end to end — verified end-to-e
 
 ## On the horizon
 
-A server-side **AI Dungeon Master** (you connect an API key and the server runs the
-game, everyone joins as a player) and a **branching story planner** are experimental
-features on the [roadmap](../reference/roadmap.md) — both build on this same tool
-surface.
+A server-side **AI Dungeon Master** — you connect an API key and the server runs the
+game, everyone joins as a player — is an experimental, admin-gated feature on the
+[roadmap](../reference/roadmap.md), built on this same tool surface. (The branching
+**story planner** it complements has shipped — see *Story planning* above.)

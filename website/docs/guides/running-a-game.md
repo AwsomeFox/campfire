@@ -31,7 +31,10 @@ Prep is just building world entities ahead of time (see
 - **Run fights** on the run-session screen — initiative, turns, damage, conditions,
   with HP writing back to character sheets when the encounter ends.
 - **Roll dice** from the dashboard widget or inside combat; players roll their own,
-  and everyone sees the same shared roll feed.
+  and everyone sees the same shared roll feed. Notation supports keep/drop —
+  `2d20kh1` for advantage, `2d20kl1` for disadvantage, `4d6dl1` for stat rolls — and
+  you can attach a **DC** and a **label** so the log records the check and whether it
+  succeeded.
 - **Players drive their own characters** — HP, conditions, ticking objectives — and
   keep notes. What they can't touch is DM canon or anyone else's character.
 - **Danger level** lives in the DM's status-header edit form, so it changes
@@ -56,9 +59,11 @@ up the moment you switch back.
 ## Between sessions
 
 Players log in to reread recaps and shared notes and to keep planning their
-characters. As DM you keep prepping the next beats. _(Notifications and a shareable
-read-only recap link for absent players are on the
-[roadmap](../reference/roadmap.md); today catching up means logging in.)_
+characters. As DM you keep prepping the next beats — sketch where the story might
+fork on the **Storylines** arc/beat planner and record in-world dates on the
+**Timeline** (see [Quests, NPCs & the world](world.md)). Absent players get caught
+up by **notifications** (recap posted, next session) and a **read-only recap share
+link** you can send them.
 
 ## XP & levelling up
 

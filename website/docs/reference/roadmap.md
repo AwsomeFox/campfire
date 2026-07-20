@@ -12,6 +12,8 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 
 - ✅ **Campaigns** — create (guided wizard), rename, danger level, current location, delete (cascades all children)
 - ✅ **Quests** — board + detail, objectives (player-tickable), subquests, giver NPC, reward, DM-only secret
+- ✅ **Storylines** — a DM-only branching arc/beat planner: arcs group ordered beats, and each beat carries labelled branches (next-options) toward other beats, so you can sketch where the story might fork before it does
+- ✅ **In-world timeline** — a campaign calendar the DM sequences by narrative order: events with free-text in-fiction dates (fantasy calendars aren't ISO), optional era grouping, a "current in-world date", plus DM secrets and hideable-until-reveal events
 - ✅ **NPCs** — disposition, location, body, DM secret
 - ✅ **Locations** — pin map, status (unexplored → explored → current), uploaded map image with draggable pins
 - ✅ **Characters** — stats, AC, HP, conditions, portrait upload, markdown bio, owner-or-DM editing, plus saving throws, skills, actions, and spell slots; XP & guided level-up; a DM-only secret field
@@ -19,11 +21,12 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **Notes** — private / share-with-DM / share-with-party, anchored to any entity
 - ✅ **Scribe inbox** — zero-friction quick capture → DM resolves into canon
 - ✅ **Encounters / run-session** — initiative (auto-rolled d20+DEX), turn order, next-turn, at-table HP & conditions, add monsters from the compendium, HP writes back to sheets on end
-- ✅ **Dice roller** — server-side, audited, on the dashboard and in combat, with a campaign-shared roll log every member sees
-- ✅ **Compendium** — Open5e SRD import (spells, monsters, items, conditions, classes, races, feats), exact-name-first full-text search, reader
+- ✅ **Dice roller** — server-side, audited, on the dashboard and in combat, with a campaign-shared roll log every member sees; supports keep/drop notation (`khN`/`klN`/`dhN`/`dlN`, i.e. advantage/disadvantage and 4d6-drop-lowest) and an optional DC + label so a roll records success/failure
+- ✅ **Compendium** — Open5e SRD import **plus generic open-licensed dataset upload** (any system, license-gated), installs run as non-blocking background jobs with per-section progress, and a DM (not just the server admin) can install; exact-name-first full-text search and a reader
+- ✅ **Campaign search & @-mentions** — campaign-wide search across entities, with @-mention link targets
 - ✅ **Proposals** — AI/collab writes queue for DM approval, with before/after diffs against current state
 - ✅ **Notifications** — recap posted, note reply, added to a campaign, next session — with an in-app bell
-- ✅ **Real-time updates** — the run-session and dashboard update live over SSE (no more polling)
+- ✅ **Live updates** — combat (the run-session and player display) streams over SSE; the dashboard, quest board, party HP, dice log and notes refresh on a ~5s poll that pauses while the tab is backgrounded
 - ✅ **Inventory & loot** — party treasury (coin) + per-character items
 - ✅ **Campaign archive & cloning** — a real read-only "completed" state, and full/template campaign duplication
 - ✅ **Export** — whole campaign to JSON or Markdown zip
@@ -34,14 +37,16 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **SSO** — OIDC / Authentik, auto-provisioning, admin-group mapping, and a sign-in allowlist group (`OIDC_ALLOWED_GROUP`)
 - ✅ **Per-campaign roles** — dm / player / viewer, with last-DM & last-admin protection
 - ✅ **MCP server** — AI-operable over streamable HTTP, PAT-authenticated, scope-capped
-- ✅ **Single-image deploy** — multi-arch Docker image, one data volume, same-origin SPA serving, Traefik/Authentik ready
+- ✅ **Single-image deploy** — multi-arch Docker image (runs as an unprivileged `node` user), one data volume, same-origin SPA serving, Traefik/Authentik ready
+- ✅ **Installable PWA** — a web-app manifest and a service worker precache the app shell so Campfire installs to a device and opens offline; the last successful read of a page stays available without a connection
 - ✅ **Preferences** — per-user accent colour and text size
 
 ## AI operability ✅
 
 An AI agent can run an entire campaign over MCP alone — verified end-to-end:
 
-- ✅ **Full MCP parity — 66+ tools** covering campaign lifecycle, characters (incl. XP awards & level-up), the whole combat loop (including dealing damage to combatants), members, rule packs, deletes, and read-back; tool schemas serialize inline (no broken `$ref`s) and strict-schema violations return the documented `{error}` JSON
+- ✅ **Full MCP parity — 82 tools** covering campaign lifecycle, characters (incl. XP awards & level-up), story arcs/beats/branches, the whole combat loop (including dealing damage to combatants), members, rule packs, deletes, and read-back; tool schemas serialize inline (no broken `$ref`s) and strict-schema violations return the documented `{error}` JSON
+- ✅ **MCP resources & prompts** — read surfaces are also exposed as MCP resources, plus prep/recap prompts, beyond the tool set
 - ✅ **Strict schemas & structured errors** — unknown args are rejected with named keys; errors are machine-parseable `{status, code, message}` JSON
 - ✅ **Headless agent auth** — `POST /auth/token` (credentials → PAT) and an admin "mint a token for a user", so agents and whole tables bootstrap without a browser
 - ✅ **Self-describing REST** — OpenAPI annotations across every controller
@@ -60,7 +65,7 @@ The operator and the storyteller are kept distinct
 Honest rough edges that exist but aren't finished:
 
 - 🟡 **AI scribe automation** — the proposal queue is real, but there's no built-in scheduled/automatic scribe; today it's client-driven (connect an MCP client and ask it to act)
-- 🟡 **Multi-system rule packs** — only Open5e (D&D 5e SRD) is wired; the data model is generic but Pathfinder 2e and other datasets aren't imported yet
+- 🟡 **Multi-system rule packs** — Open5e (D&D 5e SRD) has a built-in importer, and any other system can be added via the **generic open-licensed dataset upload**; no other system ships with a one-click importer yet, so non-5e content means bringing your own dataset
 
 ## Planned ⬜
 
@@ -74,7 +79,7 @@ who hits them. Grouped by theme:
 **Between-session engagement** — ✅ shipped
 
 - ✅ **Notifications**, ✅ **read-only recap share links**, ✅ **session scheduling with an ICS feed**, and ✅ **a campaign-shared dice log**
-- ⬜ **In-world calendar / campaign timeline**, ⬜ **campaign-wide search & @-mentions**, and ⬜ **"what changed since last session"** are the next engagement items
+- ✅ **In-world calendar / campaign timeline** and ✅ **campaign-wide search & @-mentions** shipped; ⬜ **"what changed since last session"** is the next engagement item
 
 **Table depth**
 
@@ -83,8 +88,8 @@ who hits them. Grouped by theme:
 - ✅ **Campaign archive** — a real read-only "completed" state, enforced server-wide
 - ✅ **Campaign templates / cloning** — full or template (prep-only) duplication
 - ⬜ **D&D Beyond import** — _(the `ddbId` field exists; import does not)_
-- ⬜ **Multi-system rule packs** — Pathfinder 2e and others via uploaded open-licensed datasets, since only Open5e (D&D 5e SRD) is wired today
-- ⬜ **DM-installable content** — let a DM add rule packs without the server admin; make install a non-blocking background job with per-section progress
+- ✅ **Multi-system rule packs** — other systems via **uploaded open-licensed datasets** (license-gated), alongside the built-in Open5e (D&D 5e SRD) importer
+- ✅ **DM-installable content** — a DM (not just the server admin) can install rule packs, and install runs as a non-blocking background job with per-section progress
 
 **Operator confidence**
 
@@ -102,10 +107,11 @@ _(Several of these operator items are in active development for the next release
 - ✅ **PAT lifecycle** — a password reset revokes the user's tokens & sessions; admins can list and revoke another user's tokens
 - ✅ **OIDC sign-in allowlist** (`OIDC_ALLOWED_GROUP`), ✅ **docs gated behind auth in production**, ✅ **upload content-sniffing** (magic-byte vs declared MIME), and ✅ **readiness probe** (`/readyz` does a real DB check)
 - ✅ **DM-only secrets on characters & sessions**, matching quests/NPCs/locations
+- ✅ **Deploy-time interlocks** — the `DEV_AUTH` auth-bypass is hard-disabled under `NODE_ENV=production` (and warns loudly when active in dev), `TRUST_PROXY` is coerced so per-IP rate limiting sees the real client behind a proxy, `ALLOW_INSECURE_HTTP` is an explicit opt-in for plain-HTTP LAN deployments, and the container runs as an unprivileged user
 
 **AI depth**
 
-- ⬜ **MCP resources & prompts** — expose read surfaces as resources and add prep/recap prompts, beyond tools
+- ✅ **MCP resources & prompts** — read surfaces are exposed as MCP resources, with prep/recap prompts, beyond the tool set
 - ⬜ **AI co-DM** — generated NPCs, encounters, maps, and story beats, always routed through the approval queue
 
 ## How this list is kept
