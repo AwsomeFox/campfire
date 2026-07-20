@@ -412,11 +412,12 @@ export const InboxResolve = z
 // ---------- notifications (in-app) ----------
 // Per-user notification rows written by the server when something a member cares
 // about happens while they're not looking: a session recap is posted, someone
-// replies on a shared note thread (or the DM answers an inbox item), they're
-// added to a campaign, or the next session gets scheduled. Read via
+// replies on a shared note thread (or the DM answers an inbox item), a player
+// shares a note up to the DM (note_shared), they're added to a campaign, or the
+// next session gets scheduled. Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
-export const NotificationType = z.enum(['recap_posted', 'note_reply', 'added_to_campaign', 'session_scheduled']);
+export const NotificationType = z.enum(['recap_posted', 'note_reply', 'note_shared', 'added_to_campaign', 'session_scheduled']);
 export type NotificationType = z.infer<typeof NotificationType>;
 
 export const Notification = z.object({
