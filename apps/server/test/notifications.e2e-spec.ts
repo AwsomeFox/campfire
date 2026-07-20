@@ -255,3 +255,114 @@ describe('notifications (e2e)', () => {
     expect((await anon.post('/api/v1/notifications/read-all')).status).toBe(401);
   });
 });
+
+/**
+ * Issue #105: "shared-with-DM notes appear in the DM's scribe view" — but a
+ * dm_shared note previously just sat under the DM's "Shared with me" with no
+ * signal, so the DM could miss player notes entirely. Sharing a note up to the
+ * DM now notifies every dm-role member (type note_shared), giving the promised
+ * unread indicator. Real cookie sessions — notifications hang off real users.id.
+ */
+describe('note_shared notifications (issue #105, e2e)', () => {
+  let ctx: TestAppContext;
+  let dm: ReturnType<typeof request.agent>; // campaign creator/dm
+  let player: ReturnType<typeof request.agent>; // a player
+  let playerId: number;
+  let campaignId: number;
+
+  type Notification = { id: number; type: string; title: string; body: string; entityType: string | null; entityId: number | null; actorName: string };
+
+  async function sharedFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
+    const res = await agent.get('/api/v1/notifications');
+    expect(res.status).toBe(200);
+    return (res.body as Notification[]).filter((n) => n.type === 'note_shared');
+  }
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'ns-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'ns-dm', password: 'password-dm-1', displayName: 'Dana DM' });
+    const createPlayer = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'ns-player', password: 'password-pl-1', displayName: 'Pat Player' });
+    playerId = createPlayer.body.id;
+
+    dm = request.agent(server);
+    await dm.post('/api/v1/auth/login').send({ username: 'ns-dm', password: 'password-dm-1' });
+    player = request.agent(server);
+    await player.post('/api/v1/auth/login').send({ username: 'ns-player', password: 'password-pl-1' });
+
+    const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Scribe Keep' });
+    campaignId = campaign.body.id;
+    await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('creating a dm_shared note notifies the DM (not the author)', async () => {
+    const res = await player
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'DM, my character has a secret patron.', visibility: 'dm_shared' });
+    expect(res.status).toBe(201);
+
+    const dmShared = await sharedFor(dm);
+    expect(dmShared).toHaveLength(1);
+    expect(dmShared[0].title).toContain('Pat Player');
+    expect(dmShared[0].actorName).toBe('Pat Player');
+    expect(dmShared[0].body).toContain('secret patron');
+
+    // The author gets nothing from their own share.
+    expect(await sharedFor(player)).toHaveLength(0);
+  });
+
+  it('a private note does NOT notify the DM', async () => {
+    const before = (await sharedFor(dm)).length;
+    const res = await player
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Just for me.', visibility: 'private' });
+    expect(res.status).toBe(201);
+    expect((await sharedFor(dm)).length).toBe(before);
+  });
+
+  it('carries the entity link when the shared note is anchored', async () => {
+    const quest = await dm.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'The Patron' });
+    const before = (await sharedFor(dm)).length;
+
+    const res = await player.post(`/api/v1/campaigns/${campaignId}/notes`).send({
+      body: 'Relevant to this quest.',
+      visibility: 'dm_shared',
+      entityType: 'quest',
+      entityId: quest.body.id,
+    });
+    expect(res.status).toBe(201);
+
+    const dmShared = await sharedFor(dm);
+    expect(dmShared.length).toBe(before + 1);
+    const latest = dmShared[0]; // newest first (ordered by id desc)
+    expect(latest.entityType).toBe('quest');
+    expect(latest.entityId).toBe(quest.body.id);
+  });
+
+  it('patching a private note to dm_shared notifies the DM once; editing the shared body again does not', async () => {
+    const created = await player
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Was private.', visibility: 'private' });
+    expect(created.status).toBe(201);
+    const before = (await sharedFor(dm)).length;
+
+    // private -> dm_shared: notifies.
+    const share = await player.patch(`/api/v1/notes/${created.body.id}`).send({ visibility: 'dm_shared' });
+    expect(share.status).toBe(200);
+    expect((await sharedFor(dm)).length).toBe(before + 1);
+
+    // body edit of an already-shared note: no re-notify (no spam).
+    const edit = await player.patch(`/api/v1/notes/${created.body.id}`).send({ body: 'Was private. Now edited.' });
+    expect(edit.status).toBe(200);
+    expect((await sharedFor(dm)).length).toBe(before + 1);
+  });
+});

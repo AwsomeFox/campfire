@@ -21,6 +21,7 @@ function targetPath(n: Notification): string {
     case 'session_scheduled':
       return `/c/${n.campaignId}/sessions`;
     case 'note_reply':
+    case 'note_shared':
       return `/c/${n.campaignId}/notes`;
     case 'added_to_campaign':
     default:
@@ -34,6 +35,8 @@ function typeIcon(type: Notification['type']): string {
       return '📖';
     case 'note_reply':
       return '💬';
+    case 'note_shared':
+      return '🎩';
     case 'added_to_campaign':
       return '🏕️';
     case 'session_scheduled':
