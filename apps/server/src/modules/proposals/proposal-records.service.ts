@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { proposals, quests, npcs, locations, sessions, characters } from '../../db/schema';
@@ -35,6 +35,8 @@ export function toDomain(row: typeof proposals.$inferSelect): Proposal {
     payload: fromJsonText<Record<string, unknown>>(row.payload, {}),
     snapshot: row.snapshot == null ? null : fromJsonText<Record<string, unknown> | null>(row.snapshot, null),
     proposer: row.proposer,
+    proposerUserId: row.proposerUserId ?? '',
+    proposerToken: row.proposerToken ?? null,
     status: row.status as Proposal['status'],
     resolvedBy: row.resolvedBy,
     note: row.note,
@@ -81,7 +83,13 @@ export class ProposalRecordsService {
         action,
         payload: toJsonText(payload),
         snapshot: snapshot === null ? null : toJsonText(snapshot),
-        proposer: auditActor(user),
+        // Attribution (issue #124): record the actual USER — display name for the
+        // human-readable `proposer`, their stable id for the self-view filter — even
+        // when the write arrives over a PAT (RequestUser resolves to the token's owning
+        // user). The token name is kept as secondary provenance, never the identity.
+        proposer: user.name,
+        proposerUserId: user.id,
+        proposerToken: user.tokenContext ? user.tokenContext.name : null,
         status: 'pending',
         resolvedBy: '',
         note: '',
@@ -136,13 +144,25 @@ export class ProposalRecordsService {
     }
   }
 
-  async listForCampaign(campaignId: number, status: string | undefined): Promise<Proposal[]> {
+  /**
+   * List a campaign's proposals, newest first. `opts.proposerUserId` scopes the
+   * result to a single submitter — the proposer self-view (issue #124): a non-DM
+   * member sees only what they authored, while the DM (no filter) sees everyone's.
+   */
+  async listForCampaign(
+    campaignId: number,
+    status: string | undefined,
+    opts?: { proposerUserId?: string },
+  ): Promise<Proposal[]> {
     const rows = await this.db
       .select()
       .from(proposals)
       .where(eq(proposals.campaignId, campaignId))
       .orderBy(desc(proposals.id));
-    const all = rows.map(toDomain);
+    let all = rows.map(toDomain);
+    if (opts?.proposerUserId !== undefined) {
+      all = all.filter((p) => p.proposerUserId === opts.proposerUserId);
+    }
     return status ? all.filter((p) => p.status === status) : all;
   }
 
@@ -173,6 +193,57 @@ export class ProposalRecordsService {
       .update(proposals)
       .set({ payload: toJsonText(payload), updatedAt: nowIso() })
       .where(and(eq(proposals.id, id), eq(proposals.status, 'pending')));
+  }
+
+  /**
+   * Revise a still-pending proposal's payload (issue #124): the proposer amends
+   * their own proposed create/update body before the DM acts. Guarded on
+   * `status = 'pending'` so an already-resolved (or withdrawn) proposal isn't
+   * rewritten. Returns the updated domain row, or null if it was no longer
+   * pending (lost a race to a resolver). Ownership is checked by the caller.
+   */
+  async revisePayload(id: number, payload: Record<string, unknown>): Promise<Proposal | null> {
+    const [row] = await this.db
+      .update(proposals)
+      .set({ payload: toJsonText(payload), updatedAt: nowIso() })
+      .where(and(eq(proposals.id, id), eq(proposals.status, 'pending')))
+      .returning();
+    return row ? toDomain(row) : null;
+  }
+
+  /**
+   * Backfill the created entity's id onto an approved create-proposal (issue #124):
+   * once the create applies, the proposal record points at the row it produced, so
+   * canon provenance survives acceptance. Guarded on `entity_id IS NULL` so it never
+   * clobbers an already-set target, and applied right after the successful write.
+   */
+  async backfillEntityId(id: number, entityId: number): Promise<void> {
+    await this.db
+      .update(proposals)
+      .set({ entityId, updatedAt: nowIso() })
+      .where(and(eq(proposals.id, id), isNull(proposals.entityId)));
+  }
+
+  /**
+   * Withdraw a still-pending proposal (issue #124): a compare-and-set to the
+   * `withdrawn` terminal state, guarded on BOTH `status = 'pending'` and the
+   * proposer's own user id, so a member can only ever pull their own proposal and
+   * only while it is still pending (a concurrent DM approve/reject wins the CAS).
+   * Returns the withdrawn domain row, or null if the guard didn't match.
+   */
+  async markWithdrawn(id: number, proposerUserId: string): Promise<Proposal | null> {
+    const [row] = await this.db
+      .update(proposals)
+      .set({ status: 'withdrawn', updatedAt: nowIso() })
+      .where(
+        and(
+          eq(proposals.id, id),
+          eq(proposals.status, 'pending'),
+          eq(proposals.proposerUserId, proposerUserId),
+        ),
+      )
+      .returning();
+    return row ? toDomain(row) : null;
   }
 
   /**

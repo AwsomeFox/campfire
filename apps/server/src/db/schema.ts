@@ -528,7 +528,13 @@ export const proposals = sqliteTable('proposals', {
   // JSON snapshot of the target entity at propose time (update proposals only; NULL for
   // creates and for rows written before this column existed) — powers before/after diffs.
   snapshot: text('snapshot'),
+  // Human-readable display name of the submitting user (issue #124).
   proposer: text('proposer').notNull(),
+  // Stable id of the submitting user (String(users.id) or dev:<name>) — powers the
+  // proposer self-view filter. Empty on rows written before this column existed.
+  proposerUserId: text('proposer_user_id').notNull().default(''),
+  // Token name when submitted via a PAT (secondary provenance), else NULL.
+  proposerToken: text('proposer_token'),
   status: text('status').notNull().default('pending'),
   resolvedBy: text('resolved_by').notNull().default(''),
   note: text('note').notNull().default(''),
