@@ -22,6 +22,7 @@ import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from 
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { SchedulePanel } from './SchedulePanel';
+import { CommentsThread } from '../comments/CommentsThread';
 
 export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -254,7 +255,7 @@ export default function SessionsPage() {
         {/* Recap detail */}
         <main className={`lg:col-span-2 space-y-4 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
           {selected ? (
-            <SessionDetail session={selected} isDm={isDm} onBack={backToList} onChange={load} />
+            <SessionDetail session={selected} campaignId={cid} isDm={isDm} onBack={backToList} onChange={load} />
           ) : (
             <Card>
               {sessions.length > 0 ? (
@@ -288,11 +289,13 @@ export default function SessionsPage() {
 
 function SessionDetail({
   session,
+  campaignId,
   isDm,
   onBack,
   onChange,
 }: {
   session: SessionListItem;
+  campaignId: number;
   isDm: boolean;
   onBack: () => void;
   onChange: () => void;
@@ -449,6 +452,12 @@ function SessionDetail({
           onCancel={() => setConfirmingDelete(false)}
         />
       )}
+
+      {/* Discussion thread on the recap (issue #123) — the shared, between-sessions
+          surface: react to the recap, ask the DM, or post an in-character scene. */}
+      <Card>
+        <CommentsThread campaignId={campaignId} entityType="session" entityId={session.id} />
+      </Card>
     </div>
   );
 }

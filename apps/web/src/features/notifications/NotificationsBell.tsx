@@ -23,6 +23,12 @@ function targetPath(n: Notification): string {
     case 'note_reply':
     case 'note_shared':
       return `/c/${n.campaignId}/notes`;
+    case 'comment_reply':
+      // Discussion threads currently render on the session/recap page; deep-link
+      // to the thread's session when we know it, else the session log.
+      return n.entityType === 'session' && n.entityId
+        ? `/c/${n.campaignId}/sessions?session=${n.entityId}`
+        : `/c/${n.campaignId}/sessions`;
     case 'added_to_campaign':
     default:
       return `/c/${n.campaignId}`;
@@ -35,6 +41,8 @@ function typeIcon(type: Notification['type']): string {
       return '📖';
     case 'note_reply':
       return '💬';
+    case 'comment_reply':
+      return '🗨️';
     case 'note_shared':
       return '🎩';
     case 'added_to_campaign':

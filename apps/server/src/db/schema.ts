@@ -251,6 +251,23 @@ export const notes = sqliteTable('notes', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Threaded discussion layer (issue #123). Distinct from notes: always anchored
+// to an entity, always visible to all campaign members, one level of threading
+// via parent_id, optional in-character flag.
+export const comments = sqliteTable('comments', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  entityType: text('entity_type').notNull(),
+  entityId: integer('entity_id').notNull(),
+  parentId: integer('parent_id'),
+  authorUserId: text('author_user_id').notNull(),
+  authorName: text('author_name').notNull().default(''),
+  body: text('body').notNull(),
+  inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const auditLog = sqliteTable('audit_log', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id'),
