@@ -204,13 +204,23 @@ export class McpToolsService {
   ): void {
     // Every tool's args are validated against z.object(shape).strict() — an unknown/
     // misnamed key (e.g. {hpCurrent} instead of {hpSet}) is a validation_failed error
-    // instead of being silently dropped by the SDK's default (non-strict) object parse.
+    // instead of being silently dropped by a non-strict object parse.
     // Cast away the SDK's deep conditional generics (TS2589 with a non-literal
     // ZodRawShape); passing a prebuilt ZodObject instance (rather than the raw shape) is
     // an officially supported `inputSchema` form and is what carries `.strict()` through
-    // to both `tools/list`'s JSON schema (additionalProperties:false) and the per-call
-    // validation the SDK runs before invoking our handler.
+    // to `tools/list`'s JSON schema (additionalProperties:false).
     const strictShape = z.object(shape).strict();
+    // The SDK runs its own validation against inputSchema BEFORE invoking our callback
+    // and, on failure, returns its "-32602 Input validation error ..." prose as the
+    // isError text — NOT the documented {"error":{status,code,message}} JSON (our
+    // try/catch below never runs). Shadow safeParseAsync — the only parse entry point
+    // the SDK's per-call validation uses for a zod-v3 object schema — so the SDK's
+    // pre-parse always passes, and run the real strict parse inside the callback where
+    // fail() renders a ZodError as {"error":{status:400,code:"validation_failed",...}}.
+    // tools/list is unaffected: JSON-schema generation reads the object shape (not the
+    // parse method), so additionalProperties:false is still advertised.
+    (strictShape as { safeParseAsync: unknown }).safeParseAsync = (data: unknown) =>
+      Promise.resolve({ success: true as const, data });
     const register = server.registerTool.bind(server) as (
       name: string,
       config: { description: string; inputSchema: z.ZodTypeAny },
@@ -218,7 +228,8 @@ export class McpToolsService {
     ) => void;
     register(name, { description, inputSchema: strictShape }, async (args) => {
       try {
-        return ok(await handler(args ?? {}));
+        const validated = strictShape.parse(args ?? {}) as Record<string, unknown>;
+        return ok(await handler(validated));
       } catch (err) {
         return fail(err);
       }
