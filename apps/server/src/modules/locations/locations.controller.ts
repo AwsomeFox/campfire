@@ -6,7 +6,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
-import { isProposed } from '../../common/proposed.util';
+import { requireWriteMode } from '../../common/proposed.util';
+import { Proposable } from '../../common/decorators/proposable.decorator';
 import { LocationsService } from './locations.service';
 import { LocationCreateDto, LocationUpdateDto, LocationDiscoverDto } from './locations.dto';
 
@@ -32,6 +33,7 @@ export class CampaignLocationsController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly (any member may propose).' })
   @ApiResponse({ status: 201, description: 'Created location (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
+  @Proposable()
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: LocationCreateDto,
@@ -39,7 +41,7 @@ export class CampaignLocationsController {
     @CurrentUser() user: RequestUser,
     @Res({ passthrough: true }) res: Response,
   ) {
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, campaignId, { write: true });
       const validated = LocationCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'location', null, 'create', validated, user, role);
@@ -75,6 +77,7 @@ export class LocationsController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
   @ApiResponse({ status: 200, description: 'Updated location (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
+  @Proposable()
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: LocationUpdateDto,
@@ -83,7 +86,7 @@ export class LocationsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const row = await this.locations.getRowOrThrow(id);
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, row.campaignId, { write: true });
       const validated = LocationUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'location', id, 'update', validated, user, role);
@@ -102,6 +105,7 @@ export class LocationsController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending delete proposal instead of deleting directly.' })
   @ApiResponse({ status: 200, description: 'Deleted (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending delete proposal created (proposed=true).' })
+  @Proposable()
   async remove(
     @Param('id', ParseIntPipe) id: number,
     @Query('proposed') proposed: string | undefined,
@@ -109,7 +113,7 @@ export class LocationsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const row = await this.locations.getRowOrThrow(id);
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, row.campaignId, { write: true });
       const proposal = await this.proposals.create(row.campaignId, 'location', id, 'delete', {}, user, role);
       res.status(202);

@@ -1,4 +1,4 @@
-import type { Role, ServerRole } from '@campfire/schema';
+import type { Role, ServerRole, WriteScope } from '@campfire/schema';
 
 /**
  * Resolved from either a session cookie (real users) or, when DEV_AUTH=1,
@@ -30,6 +30,16 @@ export interface TokenContext {
   tokenId: number;
   name: string;
   scope: Role;
+  /**
+   * Server-enforced WRITE authority, independent of `scope` (which caps read/role):
+   *  - 'direct'  — writes apply immediately (default; back-compat with every
+   *                pre-#158 token). The `?proposed=true` flag is an opt-in.
+   *  - 'propose' — every mutation is coerced into a pending proposal server-side,
+   *                regardless of the flag; the token can never write canon directly.
+   *  - 'none'    — read-only; every write is rejected.
+   * See requireWriteMode() (proposed.util) and WriteModeGuard for enforcement.
+   */
+  writeScope: WriteScope;
   campaignId: number | null;
   /**
    * Whether this specific token is allowed to exercise SERVER-admin powers
@@ -56,6 +66,23 @@ export function roleAtLeast(role: Role, min: Role): boolean {
 /** Lower of the two roles by ROLE_RANK — how a token's scope caps an effective role (RoleResolver, /me). */
 export function minRole(a: Role, b: Role): Role {
   return ROLE_RANK[a] <= ROLE_RANK[b] ? a : b;
+}
+
+/** direct (broadest write authority) > propose > none (read-only). */
+export const WRITE_SCOPE_RANK: Record<WriteScope, number> = {
+  none: 0,
+  propose: 1,
+  direct: 2,
+};
+
+/**
+ * Narrower (less-privileged) of two write scopes by WRITE_SCOPE_RANK — how a
+ * calling token caps the writeScope of a token it mints (TokensService.create),
+ * mirroring minRole for the read dimension. A propose-only token can never mint a
+ * direct-write sibling.
+ */
+export function minWriteScope(a: WriteScope, b: WriteScope): WriteScope {
+  return WRITE_SCOPE_RANK[a] <= WRITE_SCOPE_RANK[b] ? a : b;
 }
 
 /** Audit-log / proposer actor string: `token:<name>` when acting via a PAT, else the user id. */

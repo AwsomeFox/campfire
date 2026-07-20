@@ -7,7 +7,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
-import { isProposed } from '../../common/proposed.util';
+import { requireWriteMode } from '../../common/proposed.util';
+import { Proposable } from '../../common/decorators/proposable.decorator';
 import { parsePageParams } from '../../common/pagination';
 import { SessionsService } from './sessions.service';
 import { SessionCreateDto, SessionUpdateDto, SessionAttendanceSetDto } from './sessions.dto';
@@ -50,6 +51,7 @@ export class CampaignSessionsController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
   @ApiResponse({ status: 201, description: 'Created session (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
+  @Proposable()
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: SessionCreateDto,
@@ -57,7 +59,7 @@ export class CampaignSessionsController {
     @CurrentUser() user: RequestUser,
     @Res({ passthrough: true }) res: Response,
   ) {
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, campaignId, { write: true });
       const validated = SessionCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'session', null, 'create', validated, user, role);
@@ -93,6 +95,7 @@ export class SessionsController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
   @ApiResponse({ status: 200, description: 'Updated session (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
+  @Proposable()
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: SessionUpdateDto,
@@ -101,7 +104,7 @@ export class SessionsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const row = await this.sessions.getRowOrThrow(id);
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, row.campaignId, { write: true });
       const validated = SessionUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'session', id, 'update', validated, user, role);
@@ -120,6 +123,7 @@ export class SessionsController {
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending delete proposal instead of deleting directly.' })
   @ApiResponse({ status: 200, description: 'Deleted (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending delete proposal created (proposed=true).' })
+  @Proposable()
   async remove(
     @Param('id', ParseIntPipe) id: number,
     @Query('proposed') proposed: string | undefined,
@@ -127,7 +131,7 @@ export class SessionsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const row = await this.sessions.getRowOrThrow(id);
-    if (isProposed(proposed)) {
+    if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, row.campaignId, { write: true });
       const proposal = await this.proposals.create(row.campaignId, 'session', id, 'delete', {}, user, role);
       res.status(202);
