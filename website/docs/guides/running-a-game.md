@@ -50,7 +50,8 @@ up the moment you switch back.
 
 1. **Write the recap.** Open **Sessions → Add recap** (auto-numbered) and summarise
    what happened — or connect an AI and ask it to draft one (see
-   [Connect an AI](../ai/connect.md)).
+   [Connect an AI](../ai/connect.md)). You can also record **attendance** — which
+   characters actually played that session.
 2. **Sweep the scribe inbox.** Players drop quick notes during play; resolve them
    into quests, NPCs, and updates (see [Notes & the scribe inbox](notes.md)).
 3. **Review proposals.** If an AI or a player proposed canon changes, approve or

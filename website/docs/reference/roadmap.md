@@ -16,11 +16,12 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **In-world timeline** — a campaign calendar the DM sequences by narrative order: events with free-text in-fiction dates (fantasy calendars aren't ISO), optional era grouping, a "current in-world date", plus DM secrets and hideable-until-reveal events
 - ✅ **NPCs** — disposition, location, body, DM secret
 - ✅ **Locations** — pin map, status (unexplored → explored → current), uploaded map image with draggable pins
-- ✅ **Characters** — stats, AC, HP, conditions, portrait upload, markdown bio, owner-or-DM editing, plus saving throws, skills, actions, and spell slots; XP & guided level-up; a DM-only secret field
-- ✅ **Sessions** — numbered recaps, timeline, scheduling with RSVPs + public ICS feed, read-only recap share links, a DM-only secret field, and a recap template scaffold
+- ✅ **Session zero / table charter** — a per-campaign charter the whole table can read: **lines** (hard limits) & **veils** (soft limits), agreed **safety tools** (X-Card, Open Door…), **house rules**, and **tone & expectations**; the DM edits it, everyone sees it (also readable over MCP)
+- ✅ **Characters** — stats, AC, HP, conditions, portrait upload, markdown bio, owner-or-DM editing, plus saving throws, skills, actions, and spell slots; XP & guided level-up; a DM-only secret field. A player may own **multiple characters** (backup PC, familiar) and create/delete their own. **D&D Beyond import** pulls a public sheet by id or URL
+- ✅ **Sessions** — numbered recaps, timeline, scheduling with RSVPs + public ICS feed, per-session **attendance** (which characters played), read-only recap share links, a DM-only secret field, and a recap template scaffold
 - ✅ **Notes** — private / share-with-DM / share-with-party, anchored to any entity
 - ✅ **Scribe inbox** — zero-friction quick capture → DM resolves into canon
-- ✅ **Encounters / run-session** — initiative (auto-rolled d20+DEX), turn order, next-turn, at-table HP & conditions, add monsters from the compendium, HP writes back to sheets on end
+- ✅ **Encounters / run-session** — initiative (auto-rolled d20+DEX), turn order, next-turn, at-table HP & conditions, **temp HP**, the 5e **death-save** lifecycle (dying → stable/dead, plus overkill), adding several identical monsters at once (auto-numbered) and renaming combatants, add monsters from the compendium, HP writes back to sheets on end
 - ✅ **Dice roller** — server-side, audited, on the dashboard and in combat, with a campaign-shared roll log every member sees; supports keep/drop notation (`khN`/`klN`/`dhN`/`dlN`, i.e. advantage/disadvantage and 4d6-drop-lowest) and an optional DC + label so a roll records success/failure
 - ✅ **Compendium** — Open5e SRD import **plus generic open-licensed dataset upload** (any system, license-gated), installs run as non-blocking background jobs with per-section progress, and a DM (not just the server admin) can install; exact-name-first full-text search and a reader
 - ✅ **Campaign search & @-mentions** — campaign-wide search across entities, with @-mention link targets
@@ -28,8 +29,8 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **Notifications** — recap posted, note reply, added to a campaign, next session — with an in-app bell
 - ✅ **Live updates** — combat (the run-session and player display) streams over SSE; the dashboard, quest board, party HP, dice log and notes refresh on a ~5s poll that pauses while the tab is backgrounded
 - ✅ **Inventory & loot** — party treasury (coin) + per-character items
-- ✅ **Campaign archive & cloning** — a real read-only "completed" state, and full/template campaign duplication
-- ✅ **Export** — whole campaign to JSON or Markdown zip
+- ✅ **Campaign archive, cloning & import** — a real read-only "completed" state, full/template campaign duplication, and **import** of a Campfire JSON export (round-trips export, remaps every id) to move a campaign between servers
+- ✅ **Export** — whole campaign to JSON or Markdown zip (the JSON re-imports)
 
 ## Platform ✅
 
@@ -45,7 +46,7 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 
 An AI agent can run an entire campaign over MCP alone — verified end-to-end:
 
-- ✅ **Full MCP parity — 82 tools** covering campaign lifecycle, characters (incl. XP awards & level-up), story arcs/beats/branches, the whole combat loop (including dealing damage to combatants), members, rule packs, deletes, and read-back; tool schemas serialize inline (no broken `$ref`s) and strict-schema violations return the documented `{error}` JSON
+- ✅ **Full MCP parity — ~85 tools** covering campaign lifecycle, characters (incl. XP awards & level-up), story arcs/beats/branches, the whole combat loop (including dealing damage to combatants), the session-zero charter, members, rule packs, deletes, and read-back; tool schemas serialize inline (no broken `$ref`s) and strict-schema violations return the documented `{error}` JSON
 - ✅ **MCP resources & prompts** — read surfaces are also exposed as MCP resources, plus prep/recap prompts, beyond the tool set
 - ✅ **Strict schemas & structured errors** — unknown args are rejected with named keys; errors are machine-parseable `{status, code, message}` JSON
 - ✅ **Headless agent auth** — `POST /auth/token` (credentials → PAT) and an admin "mint a token for a user", so agents and whole tables bootstrap without a browser
@@ -86,8 +87,8 @@ who hits them. Grouped by theme:
 - ✅ **XP & levelling** — XP tracking with 5e thresholds, party-wide DM awards, and a guided level-up (level +1, new max HP, damage carried over)
 - ✅ **Inventory & loot** — party treasury (coin) and per-character items
 - ✅ **Campaign archive** — a real read-only "completed" state, enforced server-wide
-- ✅ **Campaign templates / cloning** — full or template (prep-only) duplication
-- ⬜ **D&D Beyond import** — _(the `ddbId` field exists; import does not)_
+- ✅ **Campaign templates / cloning / import** — full or template (prep-only) duplication, plus import of a Campfire JSON export (round-trips the export)
+- ✅ **D&D Beyond import** — pull a **public** D&D Beyond character sheet by id or URL (unofficial, read-only)
 - ✅ **Multi-system rule packs** — other systems via **uploaded open-licensed datasets** (license-gated), alongside the built-in Open5e (D&D 5e SRD) importer
 - ✅ **DM-installable content** — a DM (not just the server admin) can install rule packs, and install runs as a non-blocking background job with per-section progress
 

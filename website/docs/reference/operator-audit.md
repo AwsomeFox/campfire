@@ -14,16 +14,17 @@ This is the "what would I actually need?" pass, grounded in what's really built.
 | Create a campaign | ✅ | Guided wizard, become DM automatically |
 | Choose a rule system | ✅ | A DM (not just an admin) can install a rule pack — Open5e, or an uploaded open-licensed dataset — as a background job |
 | Get my players in | ✅ | Generate an **invite link / join code** from **Members → Invite** (per role, expiring, revocable); the player opens it, creates their own account, and lands in the campaign — no admin needed |
+| Set the table's safety expectations (session zero) | ✅ | A **session-zero charter** — lines & veils, agreed safety tools, house rules, tone — that the whole table reads and the DM edits |
 | Build the world (quests/NPCs/locations/map) | ✅ | Full CRUD, DM secrets, pin map, uploaded map image |
 | Plan the story ahead (arcs / beats / branches) | ✅ | A DM-only **Storylines** planner: arcs group ordered beats, beats carry labelled branches toward other beats |
 | Track in-world time | ✅ | A **Timeline** of dated in-fiction events (free-text dates, eras, DM secrets, hideable) plus a "current in-world date" |
-| Reuse prep (templates / clone a campaign / import a module) | 🟡 | **Clone** a campaign in full, or as a prep-only **template** — but no published-adventure/module import |
+| Reuse prep (templates / clone a campaign / import a module) | 🟡 | **Clone** a campaign in full or as a prep-only **template**, and **import** a Campfire JSON export (round-trips the export, e.g. moving a campaign between servers) — but no published-adventure/module import |
 | Prep an encounter ahead of time | ✅ | "Preparing" state, add monsters from compendium |
-| Run combat at the table | ✅ | Initiative, turns, HP, conditions, dice, HP writes back to sheets |
+| Run combat at the table | ✅ | Initiative, turns, HP (incl. temp HP and 5e death saves), conditions, dice, add several identical monsters at once, HP writes back to sheets |
 | See changes live on my players' devices | ✅ | Combat streams over **SSE** (instant); the dashboard, quest board, party HP and notes refresh on a ~5s poll that pauses when the tab is hidden |
 | Award XP / level the party | ✅ | XP tracking with 5e thresholds, party-wide DM awards, and a guided level-up (level +1, new max HP, damage carried over) |
 | Hand out loot / track the party's gold | ✅ | Party treasury (coin) and per-character inventory items |
-| Write the session recap | ✅ | Manually, or ask an AI to draft it |
+| Write the session recap | ✅ | Manually, or ask an AI to draft it; record per-session **attendance** (which characters played) |
 | Sweep the scribe inbox into canon | ✅ | Player notes → quests/NPCs, or let an AI propose the edits |
 | Schedule the next session | ✅ | Set a date with player **RSVPs** and a public **ICS feed** subscribers can add to their calendar |
 | Let an absent player catch up | ✅ | **Notifications** (recap posted, next session) plus a **read-only recap share link** to send a guest |
@@ -45,9 +46,9 @@ combat, and getting players in without the admin have all since landed.)
 | Get an account | ✅ | Open a DM's **invite link** and create my own account, or self-register if the admin turned on **self-service signup** (an admin can still hand-create it) |
 | First login with nothing assigned | ✅ | The hub tells me to ask my DM to add me (no dead-end "create a campaign" trap) |
 | Join a campaign | ✅ | Follow the DM's invite link to self-join with the role they set, or the DM adds me by username |
-| Make my character | ✅ | Create my own, or the DM links one to me |
+| Make my character | ✅ | Create my own (and keep more than one — a backup PC, a familiar), or the DM links one to me; I can delete a character I own |
 | Fill in the full sheet | ✅ | HP, conditions, stats, bio, portrait — plus saving throws, skills, actions, and spell slots |
-| Import my D&D Beyond character | ❌ | The `ddbId` field exists but there's no importer |
+| Import my D&D Beyond character | ✅ | Paste a **public** D&D Beyond sheet's id or URL and it imports (unofficial, read-only; the sheet must be set to Public) |
 | Play at the table on my phone | 🟡 | Mobile nav works, but live combat is two taps into "More" and the "Live" chip only shows on the dashboard |
 | Tick objectives / edit my HP & conditions / roll dice | ✅ | All allowed for players; dice now on the dashboard too |
 | Take notes (private / to DM / to party) | ✅ | Three visibility levels, anchored to any entity |
@@ -56,9 +57,10 @@ combat, and getting players in without the admin have all since landed.)
 | Get told when something happens | ✅ | An in-app **notification bell** — new recap, a reply to my note, "you were added," next session |
 | Reset my own password if I forget it | 🟡 | I can file a **forgot-password request**; since the server may have no mail transport, an admin approves it and relays a one-time reset code — no fully self-serve email reset yet |
 
-**Biggest player gaps:** a D&D Beyond character import is still missing, and live
-combat is a couple of taps deep in mobile nav. (Notifications, full sheet depth, XP
-visibility, account entry, and self-service password recovery have all since landed.)
+**Biggest player gaps:** live combat is a couple of taps deep in mobile nav.
+(Notifications, full sheet depth, XP visibility, a public D&D Beyond sheet import,
+owning multiple characters, account entry, and self-service password recovery have all
+since landed.)
 
 ---
 

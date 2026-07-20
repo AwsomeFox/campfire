@@ -1,7 +1,7 @@
 # What an AI can do
 
 Once [connected](connect.md), an AI assistant reaches Campfire through its **MCP
-server** (82 tools) and REST API. What it's allowed to do is capped by the token's
+server** (~85 tools) and REST API. What it's allowed to do is capped by the token's
 **scope** and enforced server-side — exactly like a human of that role.
 
 ## The whole loop, over MCP
@@ -30,6 +30,10 @@ An AI with a DM-scoped token can run a campaign end to end — verified end-to-e
   **proposals** instead of direct edits — a queue the DM approves or rejects, so an
   AI can't silently rewrite canon.
 - **Audit.** Every AI action is audit-logged under the token's name.
+- **The table's charter.** An assistant can read the campaign's **session-zero charter**
+  (`get_session_zero`, or the `session-zero` resource) — the lines and veils, safety
+  tools, house rules and tone the table agreed to — so AI-assisted prep can stay inside
+  the same boundaries the humans set.
 
 ## Common asks
 

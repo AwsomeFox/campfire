@@ -20,6 +20,11 @@ On the run-session screen, **Add combatant** offers three tabs:
 - **Manual** — type a name, HP, and init mod for a homebrew creature.
 - **Party** — add a late-joining character.
 
+Adding a monster, you can set a **count** to drop several identical creatures in at
+once — they come in auto-numbered (*Goblin 1*, *Goblin 2*…) so they stay distinct. A
+DM can **rename** any combatant or fix its max HP / init mod afterwards without
+deleting and re-adding it.
+
 ## Run the round
 
 1. **Roll initiative** — fills initiative for everyone who doesn't have one yet
@@ -29,7 +34,14 @@ On the run-session screen, **Add combatant** offers three tabs:
 4. **Deal damage / heal** — the ± buttons on each combatant adjust HP (clamped at 0
    and max). As DM you can edit anyone; a **player can adjust only their own
    character's** HP and conditions.
-5. **Conditions** — add and remove condition tags on any combatant.
+5. **Temporary HP** — a separate pool that soaks damage *before* real HP; it doesn't
+   stack (you take the higher of the two) and isn't capped by max HP.
+6. **Death saves** — when a player character drops to 0 HP they start **dying**;
+   track their death-save successes and failures (0–3 each). Three successes →
+   stable; three failures → dead. Healing above 0 clears the counters automatically.
+   A single hit that overflows past 0 by the character's whole max HP is **overkill** —
+   instant death, no saves. (Monsters just go down at 0.)
+7. **Conditions** — add and remove condition tags on any combatant.
 
 Rolls from the **dice widget** on the screen, and everyone's turn actions, keep the
 fight moving.
@@ -49,6 +61,7 @@ by the whole table — every member's rolls appear in the same feed, with the ro
 name, on every device.
 
 !!! tip "Depth"
-    The tracker covers initiative, turns, HP, and condition tags. Mechanical
-    condition effects, concentration, and legendary/lair actions aren't modelled —
-    it's a tracker, not a rules engine. See the [roadmap](../reference/roadmap.md).
+    The tracker covers initiative, turns, HP (including temp HP and the 5e death-save
+    lifecycle), and condition tags. The *mechanical* effects of conditions,
+    concentration, and legendary/lair actions still aren't modelled — it's a tracker,
+    not a rules engine. See the [roadmap](../reference/roadmap.md).
