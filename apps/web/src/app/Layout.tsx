@@ -10,6 +10,7 @@ import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { api, ApiError, API } from '../lib/api';
 import { Btn, Card, TextInput } from '../components/ui';
+import { NotificationsBell } from '../features/notifications/NotificationsBell';
 
 function initials(name: string): string {
   const trimmed = name.trim();
@@ -320,22 +321,25 @@ export function Layout() {
           className="hidden md:flex w-[230px] shrink-0 sticky top-0 flex-col gap-1.5 h-screen p-3.5 border-r"
           style={{ borderColor: 'var(--color-divider)' }}
         >
-          <Link
-            to="/"
-            className="flex items-center gap-2.5 px-2 py-1.5 mb-2 rounded-md"
-            style={{ borderRadius: 'var(--radius-md)' }}
-          >
-            <FlameMark size={22} />
-            <span className="min-w-0 leading-tight">
-              <span
-                className="block truncate text-[15px]"
-                style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, color: 'var(--color-text)' }}
-              >
-                {campaign?.name ?? 'Campfire'}
+          <div className="flex items-center gap-1 mb-2">
+            <Link
+              to="/"
+              className="flex flex-1 min-w-0 items-center gap-2.5 px-2 py-1.5 rounded-md"
+              style={{ borderRadius: 'var(--radius-md)' }}
+            >
+              <FlameMark size={22} />
+              <span className="min-w-0 leading-tight">
+                <span
+                  className="block truncate text-[15px]"
+                  style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, color: 'var(--color-text)' }}
+                >
+                  {campaign?.name ?? 'Campfire'}
+                </span>
+                <span className="block text-[11px] text-muted">Switch campaign</span>
               </span>
-              <span className="block text-[11px] text-muted">Switch campaign</span>
-            </span>
-          </Link>
+            </Link>
+            <NotificationsBell />
+          </div>
 
           <nav className="flex flex-col gap-0.5">
             {mainNav.map((item) => (
@@ -413,6 +417,7 @@ export function Layout() {
             </div>
           </div>
           <div className="flex-1" />
+          <NotificationsBell />
           {campaignId !== undefined && roleLabel && (
             <button
               className="tag tag-outline cursor-pointer"
@@ -452,6 +457,7 @@ export function Layout() {
             </Link>
             <span className="tag tag-outline" style={{ fontSize: 10 }}>self-hosted</span>
             <div className="flex-1" />
+            <NotificationsBell />
             {isAdmin && (
               <Link to="/admin" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
                 Admin
