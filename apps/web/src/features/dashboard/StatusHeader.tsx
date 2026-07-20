@@ -112,7 +112,7 @@ export function StatusHeader({
           </Link>
         )}
         <span className="tag tag-neutral" style={{ whiteSpace: 'nowrap' }}>
-          Session {campaign.sessionCount}
+          {campaign.sessionCount > 0 ? `Session ${campaign.sessionCount}` : 'No sessions yet'}
         </span>
         <span className="tag tag-accent" style={{ whiteSpace: 'nowrap' }}>
           {DANGER_LABEL[campaign.dangerLevel]} danger
