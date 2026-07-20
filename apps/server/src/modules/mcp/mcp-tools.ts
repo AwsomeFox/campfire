@@ -114,9 +114,10 @@ const ProposeArg = z
   .boolean()
   .optional()
   .describe(
-    'If true, submit as a proposal for DM approval instead of writing directly (quest/npc/location/session only). ' +
-      'Any member may propose; the returned {proposal} is pending until a dm calls approve_proposal/reject_proposal. ' +
-      'Ignored on tools with no REST proposal path (objectives, characters, notes, campaign status, members, encounters).',
+    'If true, submit as a proposal for DM approval instead of writing directly (quest/npc/location/session/character ' +
+      'create+update, and delete_quest/delete_npc/delete_location). Any member may propose; the returned {proposal} is ' +
+      'pending until a dm calls approve_proposal/reject_proposal. Ignored on tools with no REST proposal path ' +
+      '(objectives, notes, campaign status, members, encounters).',
   );
 const LimitArg = (max: number, fallback: number) =>
   z.number().int().positive().max(max).optional().describe(`Max rows to return (default ${fallback}, max ${max})`);
@@ -226,12 +227,13 @@ export class McpToolsService {
         'carries server-admin power unless it was explicitly minted with adminEnabled:true by a caller who ' +
         'currently held real server-admin power themselves — an admin\'s ordinary/viewer-scoped token is NOT an ' +
         'admin token by default.\n\n' +
-        'PROPOSE-THEN-APPROVE — quest/npc/location/session create+update (and set_quest_status, which proposes a ' +
-        'quest update) accept propose:true: any member may submit a change as a pending Proposal instead of writing ' +
-        'directly; a dm later calls approve_proposal (applies it through the normal write path) or reject_proposal. ' +
-        'Use this when acting as a player-role agent proposing world changes for a human DM to review. propose is ' +
-        'not available on objectives, characters, notes, campaign status, members, or combat tools — those write ' +
-        'directly and are already gated by role.\n\n' +
+        'PROPOSE-THEN-APPROVE — quest/npc/location/session/character create+update, upsert_character, ' +
+        'delete_quest/delete_npc/delete_location, and set_quest_status (which proposes a quest update) accept ' +
+        'propose:true: any member may submit a change (including a deletion) as a pending Proposal instead of writing ' +
+        'directly; a dm later calls approve_proposal (applies it through the normal write path) or reject_proposal, ' +
+        'or resolves many at once via the batch endpoints. Use this when acting as a player-role agent proposing ' +
+        'world changes for a human DM to review. propose is not available on objectives, notes, campaign status, ' +
+        'members, or combat tools — those write directly and are already gated by role.\n\n' +
         'ARCHIVED CAMPAIGNS — a campaign whose status is paused or completed is READ-ONLY: every write tool ' +
         '(quests, npcs, locations, sessions, characters, notes, inbox, members, encounters, dice rolls, proposal ' +
         'submission/approval) fails with 403 until a dm sets status back to "active" via update_campaign_status. ' +
@@ -660,10 +662,16 @@ export class McpToolsService {
     this.tool(
       server,
       'delete_quest',
-      'DM only: delete a quest. Any subquests (parentId pointing at this quest) are promoted to top-level rather than deleted.',
-      { questId: Id.describe('Quest id') },
-      async ({ questId }) => {
+      'Delete a quest (DM). Any subquests (parentId pointing at this quest) are promoted to top-level rather than ' +
+        'deleted. With propose:true any member may submit the deletion as a pending proposal instead.',
+      { questId: Id.describe('Quest id'), propose: ProposeArg },
+      async ({ questId, propose }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
+        if (propose) {
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'delete', {}, user, role);
+          return { proposal };
+        }
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.quests.remove(questId as number, user, role);
         return { ok: true, questId };
@@ -790,10 +798,15 @@ export class McpToolsService {
     this.tool(
       server,
       'delete_npc',
-      'DM only: delete an NPC.',
-      { npcId: Id.describe('NPC id') },
-      async ({ npcId }) => {
+      'Delete an NPC (DM). With propose:true any member may submit the deletion as a pending proposal instead.',
+      { npcId: Id.describe('NPC id'), propose: ProposeArg },
+      async ({ npcId, propose }) => {
         const row = await this.npcs.getRowOrThrow(npcId as number);
+        if (propose) {
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const proposal = await this.proposalRecords.create(row.campaignId, 'npc', npcId as number, 'delete', {}, user, role);
+          return { proposal };
+        }
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.npcs.remove(npcId as number, user, role);
         return { ok: true, npcId };
@@ -841,10 +854,15 @@ export class McpToolsService {
     this.tool(
       server,
       'delete_location',
-      'DM only: delete a location.',
-      { locationId: Id.describe('Location id') },
-      async ({ locationId }) => {
+      'Delete a location (DM). With propose:true any member may submit the deletion as a pending proposal instead.',
+      { locationId: Id.describe('Location id'), propose: ProposeArg },
+      async ({ locationId, propose }) => {
         const row = await this.locations.getRowOrThrow(locationId as number);
+        if (propose) {
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          const proposal = await this.proposalRecords.create(row.campaignId, 'location', locationId as number, 'delete', {}, user, role);
+          return { proposal };
+        }
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.locations.remove(locationId as number, user, role);
         return { ok: true, locationId };
@@ -938,23 +956,35 @@ export class McpToolsService {
       'upsert_character',
       'Create a character (omit characterId) or update one (pass characterId). player may create/update their own ' +
         'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
-        'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise.',
+        'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise. With propose:true ' +
+        'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly.',
       {
         campaignId: CampaignIdArg,
         characterId: Id.optional().describe('Existing character id (update); omit to create'),
+        propose: ProposeArg,
         ...CharacterUpdate.shape,
       },
-      async ({ campaignId, characterId, ...fields }) => {
+      async ({ campaignId, characterId, propose, ...fields }) => {
         if (characterId !== undefined) {
           const row = await this.characters.getRowOrThrow(characterId as number);
           if (row.campaignId !== (campaignId as number)) {
             throw new BadRequestException(`Character ${characterId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
           }
           const validated = CharacterUpdate.parse(fields);
+          if (propose) {
+            const role = await this.access.requireMember(user, row.campaignId, { write: true });
+            const proposal = await this.proposalRecords.create(row.campaignId, 'character', characterId as number, 'update', validated, user, role);
+            return { proposal };
+          }
           const role = await this.access.requireRole(user, row.campaignId, 'player');
           return this.characters.update(characterId as number, validated, user, role);
         }
         const validated = CharacterCreate.parse(fields); // name required on create
+        if (propose) {
+          const role = await this.access.requireMember(user, campaignId as number, { write: true });
+          const proposal = await this.proposalRecords.create(campaignId as number, 'character', null, 'create', validated, user, role);
+          return { proposal };
+        }
         const role = await this.access.requireRole(user, campaignId as number, 'player');
         return this.characters.create(campaignId as number, validated, user, role);
       },

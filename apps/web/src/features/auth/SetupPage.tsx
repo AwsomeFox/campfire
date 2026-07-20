@@ -71,7 +71,11 @@ export function SetupPage() {
       await refresh();
       navigate('/', { replace: true });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+      if (err instanceof ApiError && err.status === 429) {
+        setError('Too many attempts — wait a minute and try again.');
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+      }
     } finally {
       setSubmitting(false);
     }

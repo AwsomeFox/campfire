@@ -120,6 +120,8 @@ export function LoginPage() {
         setError('Local sign-in is disabled — ask your server admin.');
       } else if (err instanceof ApiError && err.status === 401) {
         setError('Wrong username or password.');
+      } else if (err instanceof ApiError && err.status === 429) {
+        setError('Too many attempts — wait a minute and try again.');
       } else {
         setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
       }

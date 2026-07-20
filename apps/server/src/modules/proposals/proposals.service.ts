@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import type { z } from 'zod';
 import {
   QuestCreate,
@@ -11,6 +11,7 @@ import {
   SessionUpdate,
   CharacterCreate,
   CharacterUpdate,
+  ProposalApprove,
   ProposalResolve,
 } from '@campfire/schema';
 import type { Proposal, ProposalAction, Role } from '@campfire/schema';
@@ -26,6 +27,12 @@ import { CharactersService } from '../characters/characters.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
+type ProposalApproveInput = z.infer<typeof ProposalApprove>;
+
+/** One entry in a batch approve/reject result — success carries the resolved proposal, failure the reason. */
+export type BatchResolveResult =
+  | { id: number; ok: true; proposal: Proposal }
+  | { id: number; ok: false; status: number; error: string };
 
 export { isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 
@@ -95,19 +102,18 @@ export class ProposalsService {
   }
 
   /**
-   * Applies the proposal's payload through the SAME service create/update path
-   * used by the direct write endpoints, so invariants hold.
+   * Applies the proposal through the SAME service create/update/delete path used by the
+   * direct write endpoints, so invariants hold. `input.payload` (edit-before-approve, #98)
+   * lets the DM amend the proposed create/update body before it's applied.
    *
-   * Concurrency (issue #85): the status transition is the point of
-   * serialization. We validate first, then *claim* the proposal with an atomic
-   * compare-and-set (`pending -> approved`, only if still pending). Only one of
-   * N concurrent approves — or an approve racing a reject — can win that claim;
-   * the losers get a 409 and never touch the entity, so the payload applies at
-   * most once. The entity write happens only after a successful claim; if it
-   * throws, we revert the claim to `pending` so nothing is left `approved` with
-   * no write applied (the proposal stays re-approvable).
+   * Concurrency (issue #85): the status transition is the point of serialization. We
+   * validate first, then *claim* the proposal with an atomic compare-and-set
+   * (`pending -> approved`, only if still pending). Only one of N concurrent approves —
+   * or an approve racing a reject — can win that claim; the losers get a 409 and never
+   * touch the entity, so the write applies at most once. The entity write happens only
+   * after a successful claim; if it throws, we revert the claim to `pending`.
    */
-  async approve(id: number, input: ProposalResolveInput, user: RequestUser, role: Role): Promise<Proposal> {
+  async approve(id: number, input: ProposalApproveInput, user: RequestUser, role: Role): Promise<Proposal> {
     const existing = await this.records.getRowOrThrow(id);
     if (existing.status !== 'pending') {
       throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
@@ -116,19 +122,24 @@ export class ProposalsService {
       throw new BadRequestException(`Unsupported proposal entityType: ${existing.entityType}`);
     }
 
-    const payload = fromJsonText<Record<string, unknown>>(existing.payload, {});
     const action = existing.action as ProposalAction;
-    // Validate BEFORE claiming so an invalid payload doesn't consume the
-    // one-and-only pending->approved transition (it would leave the proposal
-    // stuck approved-but-unapplied).
-    const validated = this.validatePayload(existing.entityType, action, payload);
-    if (action === 'update' && existing.entityId === null) {
-      throw new BadRequestException('update proposal missing entityId');
-    }
     const service = this.serviceFor(existing.entityType);
+    // Edit-before-approve: an amended payload replaces the stored one (create/update only).
+    const amended = input.payload !== undefined && action !== 'delete';
+    const payload = amended ? input.payload! : fromJsonText<Record<string, unknown>>(existing.payload, {});
 
-    // Atomically claim the proposal. A null return means it was already resolved
-    // or a concurrent request won the race — either way, do not apply the write.
+    // Validate BEFORE claiming so an invalid payload doesn't consume the one-and-only
+    // pending->approved transition (issue #85). Delete carries no payload to validate.
+    let validated: Record<string, unknown> | undefined;
+    if (action !== 'delete') {
+      validated = this.validatePayload(existing.entityType, action, payload);
+    }
+    if ((action === 'update' || action === 'delete') && existing.entityId === null) {
+      throw new BadRequestException(`${action} proposal missing entityId`);
+    }
+
+    // Atomically claim the proposal (pending -> approved). A null return means it was
+    // already resolved or a concurrent request won the race — do not apply the write.
     const resolved = await this.records.markResolved(id, 'approved', input.note ?? '', user);
     if (!resolved) {
       const current = await this.records.getRowOrThrow(id);
@@ -136,19 +147,28 @@ export class ProposalsService {
     }
 
     try {
-      if (action === 'create') {
+      if (action === 'delete') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (service as any).remove(existing.entityId, user, role);
+      } else if (action === 'create') {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (service as any).create(existing.campaignId, validated, user, role);
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (service as any).update(existing.entityId, validated, user, role);
       }
+      // Persist the DM's amended body so the record reflects what was actually applied.
+      if (amended) await this.records.updatePayload(id, validated!);
     } catch (err) {
-      // The entity write failed — undo the claim so the proposal returns to
-      // pending rather than being stranded as approved with no write applied.
+      // The entity write failed — undo the claim so the proposal returns to pending
+      // rather than being stranded as approved with no write applied.
       await this.records.revertToPending(id);
       throw err;
     }
+
+    // The claimed row was captured before updatePayload ran, so reflect the amended
+    // payload in the returned proposal (edit-before-approve).
+    if (amended) return { ...resolved, payload: validated! };
 
     await this.audit.log({
       actor: auditActor(user),
@@ -186,5 +206,38 @@ export class ProposalsService {
     });
 
     return resolved;
+  }
+
+  /**
+   * Batch approve/reject. Each id is resolved independently through the same single-item
+   * path (and its atomic CAS), so one failure (already-resolved, invalid payload, missing
+   * access) doesn't abort the rest — the caller gets a per-id result. `resolveAccess` maps
+   * a proposal's campaignId to the caller's role there (dm required), so a batch spanning
+   * campaigns is access-checked per item.
+   */
+  async resolveBatch(
+    ids: number[],
+    action: 'approve' | 'reject',
+    note: string | undefined,
+    user: RequestUser,
+    resolveAccess: (campaignId: number) => Promise<Role>,
+  ): Promise<BatchResolveResult[]> {
+    const results: BatchResolveResult[] = [];
+    for (const id of ids) {
+      try {
+        const row = await this.records.getRowOrThrow(id);
+        const role = await resolveAccess(row.campaignId);
+        const proposal =
+          action === 'approve'
+            ? await this.approve(id, { note }, user, role)
+            : await this.reject(id, { note }, user, role);
+        results.push({ id, ok: true, proposal });
+      } catch (err) {
+        const status = typeof (err as { getStatus?: () => number }).getStatus === 'function' ? (err as { getStatus: () => number }).getStatus() : 500;
+        const error = err instanceof Error ? err.message : String(err);
+        results.push({ id, ok: false, status, error });
+      }
+    }
+    return results;
   }
 }
