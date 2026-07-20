@@ -37,9 +37,20 @@ export class LocationsService {
     private readonly audit: AuditService,
   ) {}
 
+  /**
+   * Entity-level secrecy (issue #42) for locations reconciles with the existing
+   * `status` enum rather than adding a separate `hidden` flag: an `unexplored`
+   * location is the DM's un-revealed prep and must not appear in any non-DM read.
+   * The DM reveals it via the discovery action (status → explored|current).
+   */
+  private isHiddenFrom(status: string, role: Role): boolean {
+    return role !== 'dm' && status === 'unexplored';
+  }
+
   async listForCampaign(campaignId: number, role: Role): Promise<Location[]> {
     const rows = await this.db.select().from(locations).where(eq(locations.campaignId, campaignId));
-    return redactSecrets(rows.map(toDomain), role);
+    const visible = rows.filter((r) => !this.isHiddenFrom(r.status, role));
+    return redactSecrets(visible.map(toDomain), role);
   }
 
   async getRowOrThrow(id: number) {
@@ -50,6 +61,8 @@ export class LocationsService {
 
   async getOrThrow(id: number, role: Role): Promise<Location> {
     const row = await this.getRowOrThrow(id);
+    // Unexplored location → 404 for non-DM, so its existence isn't leaked (issue #42).
+    if (this.isHiddenFrom(row.status, role)) throw new NotFoundException(`Location ${id} not found`);
     return redactSecret(toDomain(row), role);
   }
 
