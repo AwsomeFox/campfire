@@ -42,6 +42,11 @@ const MAGIC_ITEMS = [
 const CONDITIONS = [
   { key: 'srd_prone', name: 'Prone', descriptions: [{ desc: 'A prone creature has disadvantage on attack rolls.', document: 'srd-2024' }], document: DOCUMENT },
   { key: 'srd_grappled', name: 'Grappled', descriptions: [{ desc: "A grappled creature's speed becomes 0.", document: 'srd-2024' }], document: DOCUMENT },
+  // Petrified deliberately precedes Poisoned (matching Open5e's alphabetical order) and its
+  // body mentions the Poisoned condition — the issue #33 ranking scenario: searching
+  // "poisoned" must put the exact-name match first, not the body-only match with the lower rowid.
+  { key: 'srd_petrified', name: 'Petrified', descriptions: [{ desc: 'A petrified creature is immune to the Poisoned condition.', document: 'srd-2024' }], document: DOCUMENT },
+  { key: 'srd_poisoned', name: 'Poisoned', descriptions: [{ desc: 'A poisoned creature has disadvantage on attack rolls and ability checks.', document: 'srd-2024' }], document: DOCUMENT },
 ];
 
 export async function startFakeOpen5e(): Promise<FakeOpen5e> {
