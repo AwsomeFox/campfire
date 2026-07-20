@@ -59,10 +59,11 @@ export class AuthController {
   @ApiOperation({ summary: 'Server auth status', description: 'Whether first-run setup is required, whether local (non-admin) login is enabled, and whether OIDC SSO is configured. Unauthenticated.' })
   @ApiResponse({ status: 200, description: 'Current auth status.' })
   async status(): Promise<AuthStatus> {
-    const [setupRequired, allowLocalLogin, allowSignup] = await Promise.all([
+    const [setupRequired, allowLocalLogin, allowSignup, oidcEnabled] = await Promise.all([
       this.auth.setupRequired(),
       this.settings.getAllowLocalLogin(),
       this.settings.getAllowSignup(),
+      this.oidc.isEnabled(),
     ]);
     return {
       setupRequired,
@@ -70,7 +71,7 @@ export class AuthController {
       // Effective flag (mirrors AuthService.signup()'s gates) so the login page
       // only advertises signup when POST /auth/signup would actually accept it.
       signupEnabled: allowSignup && allowLocalLogin && !setupRequired,
-      oidcEnabled: this.oidc.isEnabled(),
+      oidcEnabled,
       version: VERSION,
     };
   }

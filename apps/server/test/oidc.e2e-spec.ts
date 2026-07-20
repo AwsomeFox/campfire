@@ -456,15 +456,20 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       // "last-admin protection is isolated" below).
     });
 
-    it('local login attempt on an SSO-provisioned (passwordless) user returns 403 with a clear message', async () => {
+    it('local login attempt on an SSO-provisioned (passwordless) user returns the generic 401, not an SSO-revealing 403 (issue #89)', async () => {
+      // Previously this returned 403 "This account uses SSO", which let an
+      // unauthenticated caller enumerate which usernames are SSO-only (and it
+      // fired before any scrypt work, so timing confirmed existence too). It now
+      // collapses to the same generic 401 as an unknown user / wrong password.
       const res = await fetch(`${app.baseUrl}/api/v1/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: 'alice', password: 'whatever' }),
       });
       const body = await res.json();
-      expect(res.status).toBe(403);
-      expect(body.message).toMatch(/SSO/i);
+      expect(res.status).toBe(401);
+      expect(body.message).toBe('Invalid username or password');
+      expect(JSON.stringify(body)).not.toMatch(/SSO/i);
     });
   });
 
@@ -662,6 +667,170 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       meBody = await me.json();
       expect(me.status).toBe(200);
       expect(meBody.user.serverRole).toBe('admin'); // refused demotion — last enabled admin
+    });
+  });
+
+  // ── Issue #25: in-app OIDC config & connection test ──────────────────────
+  // These boot the app with NO OIDC env vars, so OIDC is driven purely by the
+  // in-app (settings-store) config an admin sets via the API. A local admin is
+  // created via first-run setup to authenticate the admin-only settings routes.
+  describe('in-app OIDC config (no env vars)', () => {
+    const NO_OIDC_ENV: Record<string, string | undefined> = {
+      OIDC_ISSUER: undefined,
+      OIDC_CLIENT_ID: undefined,
+      OIDC_CLIENT_SECRET: undefined,
+      OIDC_REDIRECT_URI: undefined,
+      OIDC_ADMIN_GROUP: undefined,
+      OIDC_ALLOWED_GROUP: undefined,
+      OIDC_GROUPS_CLAIM: undefined,
+      OIDC_SCOPE: undefined,
+    };
+
+    /** Boots a fresh env-free app and creates the first (admin) user via first-run setup, returning an authenticated admin agent. */
+    async function bootWithAdmin(): Promise<{ app: AppProcess; admin: CookieAgent }> {
+      const app = await bootApp(NO_OIDC_ENV);
+      const admin = new CookieAgent(app.baseUrl);
+      const setupRes = await admin.postJson('/api/v1/auth/setup', {
+        username: 'root',
+        password: 'admin-pass-123',
+        displayName: 'Root Admin',
+      });
+      expect(setupRes.status).toBe(201);
+      return { app, admin };
+    }
+
+    it('GET /settings/oidc is admin-only (401 unauthenticated, 403 for a normal user, 200 for admin) and never returns the secret', async () => {
+      const { app, admin } = await bootWithAdmin();
+
+      const anon = await fetch(`${app.baseUrl}/api/v1/settings/oidc`);
+      expect(anon.status).toBe(401);
+
+      // Create a normal user and log them in locally.
+      const created = await admin.postJson('/api/v1/users', {
+        username: 'plain',
+        password: 'user-pass-123',
+        serverRole: 'user',
+      });
+      expect(created.status).toBe(201);
+      const userAgent = new CookieAgent(app.baseUrl);
+      const login = await userAgent.postJson('/api/v1/auth/login', { username: 'plain', password: 'user-pass-123' });
+      expect(login.status).toBe(201);
+      const denied = await userAgent.get('/api/v1/settings/oidc');
+      expect(denied.status).toBe(403);
+
+      const okRes = await admin.get('/api/v1/settings/oidc');
+      expect(okRes.status).toBe(200);
+      const body = await okRes.json();
+      expect(body.enabled).toBe(false);
+      expect(body.clientSecretSet).toBe(false);
+      expect(body.envKeys).toEqual([]); // no OIDC_* env vars set
+      expect(body).not.toHaveProperty('clientSecret');
+    });
+
+    it('persists config, keeps the client secret write-only, and flips AuthStatus.oidcEnabled', async () => {
+      const { app, admin } = await bootWithAdmin();
+      const redirectUri = `${app.baseUrl}/api/v1/auth/oidc/callback`;
+
+      const patch = await admin.patchJson('/api/v1/settings/oidc', {
+        issuer: idp.issuer,
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        redirectUri,
+        adminGroup: 'campfire-admins',
+      });
+      expect(patch.status).toBe(200);
+      const patched = await patch.json();
+      expect(patched.enabled).toBe(true);
+      expect(patched.clientSecretSet).toBe(true);
+      expect(patched.issuer).toBe(idp.issuer);
+      expect(patched.adminGroup).toBe('campfire-admins');
+      expect(patched).not.toHaveProperty('clientSecret');
+
+      // GET reflects persistence, still no secret.
+      const got = await (await admin.get('/api/v1/settings/oidc')).json();
+      expect(got.clientId).toBe('test-client');
+      expect(got.clientSecretSet).toBe(true);
+      expect(got).not.toHaveProperty('clientSecret');
+
+      // AuthStatus now advertises OIDC — driven by stored config, not env vars.
+      const status = await (await fetch(`${app.baseUrl}/api/v1/auth/status`)).json();
+      expect(status.oidcEnabled).toBe(true);
+
+      // Omitting clientSecret keeps the stored secret (write-only semantics).
+      const patch2 = await admin.patchJson('/api/v1/settings/oidc', { scope: 'openid profile email groups' });
+      const p2 = await patch2.json();
+      expect(p2.clientSecretSet).toBe(true);
+      expect(p2.enabled).toBe(true);
+      expect(p2.scope).toBe('openid profile email groups');
+
+      // Explicitly clearing the secret ('') disables OIDC.
+      const patch3 = await admin.patchJson('/api/v1/settings/oidc', { clientSecret: '' });
+      const p3 = await patch3.json();
+      expect(p3.clientSecretSet).toBe(false);
+      expect(p3.enabled).toBe(false);
+    });
+
+    it('test-connection reports ok against a real discovery endpoint and error against an unreachable issuer', async () => {
+      const { admin } = await bootWithAdmin();
+
+      const okRes = await admin.postJson('/api/v1/settings/oidc/test', { issuer: idp.issuer });
+      expect(okRes.status).toBe(200); // probe returns 200, not the default POST 201
+      const okBody = await okRes.json();
+      expect(okBody.ok).toBe(true);
+      expect(okBody.authorizationEndpoint).toBe(`${idp.issuer}/authorize`);
+      expect(okBody.tokenEndpoint).toBe(`${idp.issuer}/token`);
+
+      const badRes = await admin.postJson('/api/v1/settings/oidc/test', { issuer: 'http://127.0.0.1:1/nope' });
+      expect(badRes.status).toBe(200);
+      const badBody = await badRes.json();
+      expect(badBody.ok).toBe(false);
+    });
+
+    it('drives a full OIDC login round trip from in-app config alone (no env vars)', async () => {
+      const { app, admin } = await bootWithAdmin();
+      const redirectUri = `${app.baseUrl}/api/v1/auth/oidc/callback`;
+      await admin.patchJson('/api/v1/settings/oidc', {
+        issuer: idp.issuer,
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        redirectUri,
+        adminGroup: 'campfire-admins',
+      });
+
+      idp.setNextUser({ sub: 'sub-inapp', preferred_username: 'inapp', email: 'inapp@example.com', name: 'In App' });
+      const agent = new CookieAgent(app.baseUrl);
+      const cb = await performOidcLogin(agent);
+      expect(cb.status).toBe(302);
+      expect(cb.headers.get('location')).toBe('/');
+
+      const me = await (await agent.get('/api/v1/me')).json();
+      expect(me.user.username).toBe('inapp');
+    });
+
+    it('allowed-group set via in-app config gates sign-in (deny without the group, allow with it)', async () => {
+      const { app, admin } = await bootWithAdmin();
+      const redirectUri = `${app.baseUrl}/api/v1/auth/oidc/callback`;
+      await admin.patchJson('/api/v1/settings/oidc', {
+        issuer: idp.issuer,
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        redirectUri,
+        adminGroup: 'campfire-admins',
+        allowedGroup: 'campfire-users',
+      });
+
+      // No allowed-group membership -> denied at the callback with a 403, no session.
+      idp.setNextUser({ sub: 'sub-nogroup', preferred_username: 'nogroup', email: 'n@example.com', name: 'No Group', groups: [] });
+      const denied = await performOidcLogin(new CookieAgent(app.baseUrl));
+      expect(denied.status).toBe(403);
+
+      // Member of the allowed group -> provisioned normally.
+      idp.setNextUser({ sub: 'sub-ingroup', preferred_username: 'ingroup', email: 'i@example.com', name: 'In Group', groups: ['campfire-users'] });
+      const okAgent = new CookieAgent(app.baseUrl);
+      const okCb = await performOidcLogin(okAgent);
+      expect(okCb.status).toBe(302);
+      const me = await (await okAgent.get('/api/v1/me')).json();
+      expect(me.user.username).toBe('ingroup');
     });
   });
 });

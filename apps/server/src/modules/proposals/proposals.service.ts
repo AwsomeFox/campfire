@@ -103,15 +103,20 @@ export class ProposalsService {
 
   /**
    * Applies the proposal through the SAME service create/update/delete path used by the
-   * direct write endpoints, so invariants hold. `input.payload` (edit-before-approve) lets
-   * the DM amend the proposed create/update body before it's applied — the amended payload
-   * is validated and persisted onto the record so it matches what was written. The status
-   * flip is an atomic compare-and-set (see markResolved): a concurrent double-approve 409s.
+   * direct write endpoints, so invariants hold. `input.payload` (edit-before-approve, #98)
+   * lets the DM amend the proposed create/update body before it's applied.
+   *
+   * Concurrency (issue #85): the status transition is the point of serialization. We
+   * validate first, then *claim* the proposal with an atomic compare-and-set
+   * (`pending -> approved`, only if still pending). Only one of N concurrent approves —
+   * or an approve racing a reject — can win that claim; the losers get a 409 and never
+   * touch the entity, so the write applies at most once. The entity write happens only
+   * after a successful claim; if it throws, we revert the claim to `pending`.
    */
   async approve(id: number, input: ProposalApproveInput, user: RequestUser, role: Role): Promise<Proposal> {
     const existing = await this.records.getRowOrThrow(id);
     if (existing.status !== 'pending') {
-      throw new ForbiddenException(`Proposal ${id} is already ${existing.status}`);
+      throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
     }
     if (!isProposableEntityType(existing.entityType)) {
       throw new BadRequestException(`Unsupported proposal entityType: ${existing.entityType}`);
@@ -123,35 +128,47 @@ export class ProposalsService {
     const amended = input.payload !== undefined && action !== 'delete';
     const payload = amended ? input.payload! : fromJsonText<Record<string, unknown>>(existing.payload, {});
 
-    if (action === 'delete') {
-      if (existing.entityId === null) {
-        throw new BadRequestException('delete proposal missing entityId');
-      }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (service as any).remove(existing.entityId, user, role);
-    } else {
-      const validated = this.validatePayload(existing.entityType, action, payload);
-      if (amended) {
-        // Persist the DM's amended body so the record reflects what was actually applied.
-        await this.records.updatePayload(id, validated);
-      }
-      if (action === 'create') {
+    // Validate BEFORE claiming so an invalid payload doesn't consume the one-and-only
+    // pending->approved transition (issue #85). Delete carries no payload to validate.
+    let validated: Record<string, unknown> | undefined;
+    if (action !== 'delete') {
+      validated = this.validatePayload(existing.entityType, action, payload);
+    }
+    if ((action === 'update' || action === 'delete') && existing.entityId === null) {
+      throw new BadRequestException(`${action} proposal missing entityId`);
+    }
+
+    // Atomically claim the proposal (pending -> approved). A null return means it was
+    // already resolved or a concurrent request won the race — do not apply the write.
+    const resolved = await this.records.markResolved(id, 'approved', input.note ?? '', user);
+    if (!resolved) {
+      const current = await this.records.getRowOrThrow(id);
+      throw new ConflictException(`Proposal ${id} is already ${current.status}`);
+    }
+
+    try {
+      if (action === 'delete') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (service as any).remove(existing.entityId, user, role);
+      } else if (action === 'create') {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (service as any).create(existing.campaignId, validated, user, role);
       } else {
-        if (existing.entityId === null) {
-          throw new BadRequestException('update proposal missing entityId');
-        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (service as any).update(existing.entityId, validated, user, role);
       }
+      // Persist the DM's amended body so the record reflects what was actually applied.
+      if (amended) await this.records.updatePayload(id, validated!);
+    } catch (err) {
+      // The entity write failed — undo the claim so the proposal returns to pending
+      // rather than being stranded as approved with no write applied.
+      await this.records.revertToPending(id);
+      throw err;
     }
 
-    const resolved = await this.records.markResolved(id, 'approved', input.note ?? '', user);
-    if (resolved === null) {
-      // Lost the race to a concurrent resolution after we already applied the write.
-      throw new ConflictException(`Proposal ${id} was resolved concurrently`);
-    }
+    // The claimed row was captured before updatePayload ran, so reflect the amended
+    // payload in the returned proposal (edit-before-approve).
+    if (amended) return { ...resolved, payload: validated! };
 
     await this.audit.log({
       actor: auditActor(user),
@@ -168,12 +185,15 @@ export class ProposalsService {
   async reject(id: number, input: ProposalResolveInput, user: RequestUser, role: Role): Promise<Proposal> {
     const existing = await this.records.getRowOrThrow(id);
     if (existing.status !== 'pending') {
-      throw new ForbiddenException(`Proposal ${id} is already ${existing.status}`);
+      throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
     }
 
+    // Same atomic claim as approve: a null return means a concurrent approve or
+    // reject already resolved this proposal, so this reject is a no-op 409.
     const resolved = await this.records.markResolved(id, 'rejected', input.note ?? '', user);
-    if (resolved === null) {
-      throw new ConflictException(`Proposal ${id} was resolved concurrently`);
+    if (!resolved) {
+      const current = await this.records.getRowOrThrow(id);
+      throw new ConflictException(`Proposal ${id} is already ${current.status}`);
     }
 
     await this.audit.log({

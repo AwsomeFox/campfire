@@ -215,6 +215,11 @@ export const Quest = z.object({
   giverNpcId: Id.nullable().default(null),
   reward: z.string().max(500).default(''),
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
+  // Entity-level secrecy (issue #42): a hidden quest is excluded WHOLESALE from
+  // every non-DM read (list/get/summary/export) — not merely dmSecret-redacted.
+  // Default false = visible; the DM sets it true to prep future content, then
+  // "reveals" by patching it back to false.
+  hidden: z.boolean().default(false),
   sortOrder: z.number().int().default(0),
   ...timestamps,
 });
@@ -235,6 +240,9 @@ export const Npc = z.object({
   locationId: Id.nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
+  // Entity-level secrecy (issue #42) — see Quest.hidden. A hidden NPC is dropped
+  // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  hidden: z.boolean().default(false),
   ...timestamps,
 });
 export type Npc = z.infer<typeof Npc>;
@@ -242,6 +250,11 @@ export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true,
 export const NpcUpdate = NpcCreate.partial();
 
 // ---------- location ----------
+// Entity-level secrecy (issue #42) reuses `status` rather than adding a separate
+// `hidden` flag (reconcile, don't duplicate): an `unexplored` location is the
+// DM's un-revealed prep and is dropped wholesale from every non-DM read
+// (list/get/summary/export). The DM "reveals" it via the existing discovery
+// action (POST /locations/:id/discover → explored|current).
 export const LocationStatus = z.enum(['unexplored', 'explored', 'current']);
 
 export const Location = z.object({
@@ -412,11 +425,12 @@ export const InboxResolve = z
 // ---------- notifications (in-app) ----------
 // Per-user notification rows written by the server when something a member cares
 // about happens while they're not looking: a session recap is posted, someone
-// replies on a shared note thread (or the DM answers an inbox item), they're
-// added to a campaign, or the next session gets scheduled. Read via
+// replies on a shared note thread (or the DM answers an inbox item), a player
+// shares a note up to the DM (note_shared), they're added to a campaign, or the
+// next session gets scheduled. Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
-export const NotificationType = z.enum(['recap_posted', 'note_reply', 'added_to_campaign', 'session_scheduled']);
+export const NotificationType = z.enum(['recap_posted', 'note_reply', 'note_shared', 'added_to_campaign', 'session_scheduled']);
 export type NotificationType = z.infer<typeof NotificationType>;
 
 export const Notification = z.object({
@@ -591,6 +605,57 @@ export const ServerSettings = z.object({
 });
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();
+
+// ── OIDC / SSO in-app configuration (server-admin only) ──────────────────────
+// Persisted alongside server settings so OIDC can be configured from the admin
+// UI, not only via env vars. Precedence: an OIDC_* env var, when set, OVERRIDES
+// the stored value for that field (see server oidc.config.ts). The client
+// secret is WRITE-ONLY — it is accepted on update but never returned.
+const OidcField = z.string().trim().max(2048);
+
+/** OIDC settings as returned to admins (GET). Never includes the client secret. */
+export const OidcSettings = z.object({
+  issuer: z.string(),
+  clientId: z.string(),
+  redirectUri: z.string(),
+  adminGroup: z.string(),
+  allowedGroup: z.string(),
+  groupsClaim: z.string(),
+  scope: z.string(),
+  // Server-computed, read-only:
+  clientSecretSet: z.boolean(), // a secret is stored or set via env (value never returned)
+  enabled: z.boolean(), // effective config is complete (issuer + clientId + clientSecret all resolve)
+  envKeys: z.array(z.string()), // OIDC_* env vars currently set — these override the stored values
+  effectiveRedirectUri: z.string(), // the callback URL the flow will actually use
+});
+export type OidcSettings = z.infer<typeof OidcSettings>;
+
+/** Admin update payload. All fields optional. clientSecret is write-only: omit to keep the current secret, pass '' to clear it. */
+export const OidcSettingsUpdate = z.object({
+  issuer: OidcField.optional(),
+  clientId: OidcField.optional(),
+  clientSecret: z.string().max(2048).optional(),
+  redirectUri: OidcField.optional(),
+  adminGroup: OidcField.optional(),
+  allowedGroup: OidcField.optional(),
+  groupsClaim: OidcField.optional(),
+  scope: OidcField.optional(),
+});
+export type OidcSettingsUpdate = z.infer<typeof OidcSettingsUpdate>;
+
+/** Test-connection request. Optional issuer lets an admin validate before saving; omitted = test the effective issuer. */
+export const OidcTestRequest = z.object({ issuer: OidcField.optional() });
+export type OidcTestRequest = z.infer<typeof OidcTestRequest>;
+
+/** Result of fetching + validating the issuer's OIDC discovery document. */
+export const OidcTestResult = z.object({
+  ok: z.boolean(),
+  issuer: z.string(),
+  message: z.string(),
+  authorizationEndpoint: z.string().nullable().default(null),
+  tokenEndpoint: z.string().nullable().default(null),
+});
+export type OidcTestResult = z.infer<typeof OidcTestResult>;
 
 export const CampaignMember = z.object({
   id: Id,

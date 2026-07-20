@@ -11,7 +11,18 @@ change their own password from the user menu.
 
 ## OIDC / SSO (optional)
 
-Set these environment variables and restart:
+OIDC can be configured two ways — from the **admin UI** or via **environment
+variables** — and you can mix them.
+
+### In the admin UI
+
+Go to **Admin → OIDC single sign-on**. Fill in the issuer, client id and secret
+(and optionally the admin/allowed groups), press **Test connection** to validate
+that the discovery endpoint is reachable, then **Save**. Changes take effect on
+the next sign-in — no restart needed. The client secret is write-only: once
+saved it is never shown again (the form shows only whether one is set).
+
+### Via environment variables
 
 | Variable | Purpose |
 |---|---|
@@ -20,11 +31,24 @@ Set these environment variables and restart:
 | `OIDC_CLIENT_SECRET` | The OAuth client secret |
 | `OIDC_REDIRECT_URI` | `https://<your-host>/api/v1/auth/oidc/callback` |
 | `OIDC_ADMIN_GROUP` | *(optional)* members of this group become **server admins** |
-| `OIDC_ALLOWED_GROUP` | *(optional)* only members of this group may **sign in at all** |
+| `OIDC_ALLOWED_GROUP` | *(optional)* when set, only members of this group (or the admin group) may sign in |
+| `OIDC_GROUPS_CLAIM` | *(optional)* claim to read groups from (default `groups`) |
+| `OIDC_SCOPE` | *(optional)* requested scopes (default `openid profile email`) |
 
-When these are set, the login page offers **Sign in with <provider>**. On first
+### Precedence
+
+For each field, an environment variable — **when set** — takes precedence over
+the value stored via the admin UI; otherwise the stored value (or a built-in
+default) is used. This keeps existing env-var deployments working unchanged. The
+admin screen marks any field that is currently pinned by the environment with an
+**env** badge, so it's clear which values are in force.
+
+OIDC is considered **enabled** only once the effective issuer, client id, and
+client secret all resolve to non-empty values.
+
+When enabled, the login page offers **Sign in with &lt;provider&gt;**. On first
 login a Campfire account is provisioned automatically from the token's claims;
-membership in `OIDC_ADMIN_GROUP` grants the server-admin role. Campaign roles
+membership in the admin group grants the server-admin role. Campaign roles
 (dm/player/viewer) are still assigned inside Campfire.
 
 By default **any** user who can authenticate at your IdP gets a Campfire account
