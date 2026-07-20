@@ -1,8 +1,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest, normalizeStats } from '@campfire/schema';
-import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
+import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, HpBand, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters, combatants, encounters, ruleEntries } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -45,10 +45,33 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     initMod: row.initMod,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
+    hpBand: null,
     conditions: fromJsonText<string[]>(row.conditions, []),
     ruleEntryId: row.ruleEntryId,
     sortOrder: row.sortOrder,
   };
+}
+
+/** Coarse status band for a monster's HP shown to non-DM viewers (issue #43). */
+function hpBandFor(hpCurrent: number, hpMax: number): HpBand {
+  if (hpCurrent <= 0) return 'down';
+  const pct = hpMax > 0 ? hpCurrent / hpMax : 0;
+  if (pct <= 0.25) return 'critical';
+  if (pct <= 0.5) return 'bloodied';
+  return 'healthy';
+}
+
+/**
+ * Issue #43: non-DM viewers must not see a monster's exact HP — a player polling
+ * the run-session view would otherwise read the boss at an exact `3/150`, a live
+ * secrets leak (and the same view a shared screen shows). For monster combatants
+ * we replace hpCurrent/hpMax with a coarse status band and null the exact numbers.
+ * Character combatants keep exact HP for everyone: party HP is shared table
+ * knowledge and a player already sees their own character sheet.
+ */
+function redactMonsterHp(c: Combatant): Combatant {
+  if (c.kind !== 'monster' || c.hpCurrent === null || c.hpMax === null) return c;
+  return { ...c, hpBand: hpBandFor(c.hpCurrent, c.hpMax), hpCurrent: null, hpMax: null };
 }
 
 /** floor((score - 10) / 2), the standard 5e ability-modifier formula. */
@@ -117,11 +140,19 @@ export class EncountersService {
     return rows.map(encounterToDomain);
   }
 
-  async getWithCombatantsOrThrow(id: number): Promise<EncounterWithCombatants> {
+  /**
+   * `viewerRole` drives issue #43 redaction: anyone below `dm` (player/viewer)
+   * gets monster HP replaced with a coarse band. Omit it (or pass `dm`) only for
+   * DM-facing returns — the DM always sees exact HP.
+   */
+  async getWithCombatantsOrThrow(id: number, viewerRole?: Role): Promise<EncounterWithCombatants> {
     const row = await this.getRowOrThrow(id);
     const combatantRows = await this.listCombatantRows(id);
     const status = row.status as EncounterStatus;
-    const list = sortCombatants(combatantRows.map(combatantToDomain), status);
+    let list = sortCombatants(combatantRows.map(combatantToDomain), status);
+    if (viewerRole !== undefined && viewerRole !== 'dm') {
+      list = list.map(redactMonsterHp);
+    }
     return { ...encounterToDomain(row), combatants: list };
   }
 
@@ -184,7 +215,7 @@ export class EncountersService {
 
     this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id);
 
-    return this.getWithCombatantsOrThrow(encounterRow.id);
+    return this.getWithCombatantsOrThrow(encounterRow.id, role);
   }
 
   /**
@@ -271,9 +302,9 @@ export class EncountersService {
     }
     if (hpCurrent === undefined) hpCurrent = hpMax;
 
-    const existing = await this.listCombatantRows(encounterId);
-    const sortOrder = existing.length;
-
+    // Issue #86: derive sortOrder in SQL (MAX(sort_order)+1) instead of from a
+    // stale `existing.length` read — two concurrent adds used to read the same
+    // count and insert colliding sortOrders.
     const [row] = await this.db
       .insert(combatants)
       .values({
@@ -287,7 +318,7 @@ export class EncountersService {
         hpMax,
         conditions: '[]',
         ruleEntryId,
-        sortOrder,
+        sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
       })
       .returning();
 
@@ -347,13 +378,21 @@ export class EncountersService {
       }
     }
 
-    const update: Partial<typeof combatants.$inferInsert> = {};
-
-    if (patch.hpDelta !== undefined || patch.hpSet !== undefined) {
-      let hpCurrent = existing.hpCurrent;
-      if (patch.hpDelta !== undefined) hpCurrent += patch.hpDelta;
-      if (patch.hpSet !== undefined) hpCurrent = patch.hpSet;
-      update.hpCurrent = Math.max(0, Math.min(existing.hpMax, hpCurrent));
+    // Issue #86: apply the HP change AS SQL against the row's CURRENT value rather
+    // than reading hpCurrent into JS, recomputing, and writing it back across an
+    // await. Two authorized deltas landing near-simultaneously (DM applies 5 damage
+    // while the owning player applies 8) used to each read the same starting HP and
+    // last-write-win — one delta silently vanished. `hp_current = MAX(0, MIN(hp_max,
+    // hp_current + ?))` is evaluated atomically by SQLite, so concurrent deltas
+    // compose instead of clobbering. hpSet still takes precedence over hpDelta (it's
+    // an absolute set), matching prior behavior.
+    const update: Omit<Partial<typeof combatants.$inferInsert>, 'hpCurrent'> & { hpCurrent?: number | SQL } = {};
+    const hpChanged = patch.hpDelta !== undefined || patch.hpSet !== undefined;
+    if (hpChanged) {
+      update.hpCurrent =
+        patch.hpSet !== undefined
+          ? sql`MAX(0, MIN(${combatants.hpMax}, ${patch.hpSet}))`
+          : sql`MAX(0, MIN(${combatants.hpMax}, ${combatants.hpCurrent} + ${patch.hpDelta}))`;
     }
 
     if (patch.addConditions !== undefined || patch.removeConditions !== undefined) {
@@ -371,16 +410,19 @@ export class EncountersService {
       return combatantToDomain(existing);
     }
 
-    const [row] = await this.db.update(combatants).set(update).where(eq(combatants.id, combatantId)).returning();
-
-    // Keep the linked character's HP in sync live too (not just at encounter end), so the
-    // character sheet reflects table state while the fight is in progress.
-    if (existing.kind === 'character' && existing.characterId !== null && update.hpCurrent !== undefined) {
-      await this.db
-        .update(characters)
-        .set({ hpCurrent: update.hpCurrent, updatedAt: nowIso() })
-        .where(eq(characters.id, existing.characterId));
-    }
+    // Combatant write + linked-character HP mirror run in ONE synchronous
+    // better-sqlite3 transaction (issue #86): a failure between them can no longer
+    // leave the two HP copies disagreeing mid-fight, and the mirror reads the
+    // atomically-clamped result (`updated.hpCurrent`) rather than a value computed
+    // from a stale read.
+    let row!: typeof combatants.$inferSelect;
+    this.db.transaction((tx) => {
+      const [updated] = tx.update(combatants).set(update).where(eq(combatants.id, combatantId)).returning().all();
+      row = updated;
+      if (existing.kind === 'character' && existing.characterId !== null && hpChanged) {
+        tx.update(characters).set({ hpCurrent: updated.hpCurrent, updatedAt: nowIso() }).where(eq(characters.id, existing.characterId)).run();
+      }
+    });
 
     // #74: don't audit-log pure HP ticks. A single combat generates hundreds of
     // ±1 HP updates (every hit, heal, temp-hp adjust); auditing each one was the
@@ -482,7 +524,7 @@ export class EncountersService {
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
-    return this.getWithCombatantsOrThrow(encounterId);
+    return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
@@ -519,7 +561,7 @@ export class EncountersService {
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
-    return this.getWithCombatantsOrThrow(encounterId);
+    return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
   async nextTurn(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
@@ -568,7 +610,7 @@ export class EncountersService {
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
-    return this.getWithCombatantsOrThrow(encounterId);
+    return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
   /**
@@ -608,7 +650,7 @@ export class EncountersService {
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
-    return this.getWithCombatantsOrThrow(encounterId);
+    return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
   async remove(encounterId: number, user: RequestUser, role: Role): Promise<void> {

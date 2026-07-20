@@ -42,6 +42,33 @@ const STATUS_TAG_CLASS: Record<string, string> = {
 
 const CONDITION_SUGGESTIONS = ['Poisoned', 'Prone', 'Restrained', 'Stunned', 'Grappled', 'Blinded', 'Frightened'];
 
+// Non-DM viewers see a monster's HP as a coarse status band, never exact numbers
+// (issue #43 — the server redacts hpCurrent/hpMax to null and sends hpBand instead).
+const HP_BAND_LABEL: Record<string, string> = {
+  healthy: 'Healthy',
+  bloodied: 'Bloodied',
+  critical: 'Critical',
+  down: 'Down',
+};
+const HP_BAND_PCT: Record<string, number> = { healthy: 100, bloodied: 50, critical: 20, down: 0 };
+const HP_BAND_TONE: Record<string, string> = { healthy: '', bloodied: 'low', critical: 'crit', down: 'crit' };
+
+/** Fuzzy HP indicator for redacted monster rows — mirrors HpBar's look off a band. */
+function HpBandBar({ band }: { band: string | null }) {
+  const pct = band ? (HP_BAND_PCT[band] ?? 0) : 0;
+  const tone = band ? (HP_BAND_TONE[band] ?? '') : '';
+  return (
+    <div className={`cf-hp ${tone}`}>
+      <div style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+/** A combatant is "down" when at 0 HP, or (for a redacted monster) banded 'down'. */
+function isDown(c: Combatant): boolean {
+  return c.hpCurrent != null ? c.hpCurrent <= 0 : c.hpBand === 'down';
+}
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -581,10 +608,21 @@ function CombatantRow({
         )}
       </div>
       <div style={{ minWidth: 130, flex: 'none' }}>
-        <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3 }}>
-          {combatant.hpCurrent} / {combatant.hpMax}
-        </div>
-        <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
+        {combatant.hpCurrent != null && combatant.hpMax != null ? (
+          <>
+            <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3 }}>
+              {combatant.hpCurrent} / {combatant.hpMax}
+            </div>
+            <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3 }} title="Exact HP is hidden for monsters">
+              {combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}
+            </div>
+            <HpBandBar band={combatant.hpBand} />
+          </>
+        )}
       </div>
       {canEdit && (
         <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
@@ -622,8 +660,8 @@ function CombatantRow({
 }
 
 function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
-  const fallen = encounter.combatants.filter((c) => c.hpCurrent <= 0);
-  const survivors = encounter.combatants.filter((c) => c.hpCurrent > 0);
+  const fallen = encounter.combatants.filter(isDown);
+  const survivors = encounter.combatants.filter((c) => !isDown(c));
   return (
     <Card>
       <span className="card-kicker">Summary</span>
