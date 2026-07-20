@@ -384,6 +384,25 @@ function migrateAttachmentsTableForHidden(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE attachments ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * Migration for DBs created before location nesting (issue #99): `locations.parent_id`
+ * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same shape as
+ * migrateQuestsTableForHidden above. Existing rows get NULL (top-level), preserving
+ * the pre-migration flat list; the DM opts a location into a hierarchy by setting
+ * parentId. New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateLocationsTableForParentId(sqlite: Database.Database): void {
+  const hasLocationsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+    .get();
+  if (!hasLocationsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(locations)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'parent_id')) return;
+
+  sqlite.exec('ALTER TABLE locations ADD COLUMN parent_id INTEGER');
+}
+
 /** Absolute path to the SQLite DB file for a given data dir. */
 export function dbFilePath(dataDir: string): string {
   return path.join(dataDir, 'campfire.db');
@@ -424,6 +443,7 @@ export function openDatabase(dataDir: string): {
   migrateQuestsTableForHidden(sqlite);
   migrateNpcsTableForHidden(sqlite);
   migrateAttachmentsTableForHidden(sqlite);
+  migrateLocationsTableForParentId(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync. This is
   // also how index-only migrations reach existing DBs: e.g. #74's

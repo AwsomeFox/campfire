@@ -47,6 +47,7 @@ export default function LocationPage() {
   const isDm = role === 'dm';
 
   const [location, setLocation] = useState<Location | null>(null);
+  const [allLocations, setAllLocations] = useState<Location[]>([]);
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [npcs, setNpcs] = useState<Npc[]>([]);
   const [quests, setQuests] = useState<Quest[]>([]);
@@ -55,7 +56,7 @@ export default function LocationPage() {
   const [notFound, setNotFound] = useState(false);
 
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: '', kind: '', body: '', dmSecret: '' });
+  const [form, setForm] = useState({ name: '', kind: '', body: '', dmSecret: '', parentId: '' });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -74,13 +75,15 @@ export default function LocationPage() {
     setError(null);
     setNotFound(false);
     try {
-      const [locData, npcsData, questsData, campaignData] = await Promise.all([
+      const [locData, allLocData, npcsData, questsData, campaignData] = await Promise.all([
         api.get<Location>(`${API}/locations/${id}`),
+        api.get<Location[]>(`${API}/campaigns/${cid}/locations`),
         api.get<Npc[]>(`${API}/campaigns/${cid}/npcs`),
         api.get<Quest[]>(`${API}/campaigns/${cid}/quests`),
         api.get<Campaign>(`${API}/campaigns/${cid}`),
       ]);
       setLocation(locData);
+      setAllLocations(allLocData);
       setNpcs(npcsData);
       setQuests(questsData);
       setCampaign(campaignData);
@@ -106,9 +109,53 @@ export default function LocationPage() {
     [quests, hereNpcIds],
   );
 
+  const locById = useMemo(() => new Map(allLocations.map((l) => [l.id, l])), [allLocations]);
+
+  /** Ancestor chain from outermost to the direct parent, for the breadcrumb (#99). */
+  const ancestors = useMemo(() => {
+    const chain: Location[] = [];
+    const seen = new Set<number>([id]);
+    let cursor = location?.parentId ?? null;
+    while (cursor != null && !seen.has(cursor)) {
+      seen.add(cursor);
+      const parent = locById.get(cursor);
+      if (!parent) break;
+      chain.unshift(parent);
+      cursor = parent.parentId ?? null;
+    }
+    return chain;
+  }, [location, locById, id]);
+
+  const children = useMemo(() => allLocations.filter((l) => l.parentId === id), [allLocations, id]);
+
+  /**
+   * Candidate parents for the DM's move control: any location that isn't this one and
+   * isn't one of its descendants (which would create a cycle the API rejects anyway).
+   */
+  const parentOptions = useMemo(() => {
+    const descendants = new Set<number>([id]);
+    let added = true;
+    while (added) {
+      added = false;
+      for (const l of allLocations) {
+        if (l.parentId != null && descendants.has(l.parentId) && !descendants.has(l.id)) {
+          descendants.add(l.id);
+          added = true;
+        }
+      }
+    }
+    return allLocations.filter((l) => !descendants.has(l.id));
+  }, [allLocations, id]);
+
   function startEdit() {
     if (!location) return;
-    setForm({ name: location.name, kind: location.kind, body: location.body, dmSecret: location.dmSecret });
+    setForm({
+      name: location.name,
+      kind: location.kind,
+      body: location.body,
+      dmSecret: location.dmSecret,
+      parentId: location.parentId != null ? String(location.parentId) : '',
+    });
     setSaveError(null);
     setEditing(true);
   }
@@ -123,8 +170,10 @@ export default function LocationPage() {
         kind: form.kind.trim(),
         body: form.body,
         dmSecret: form.dmSecret,
+        parentId: form.parentId ? Number(form.parentId) : null,
       });
       setLocation(updated);
+      setAllLocations((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
       setEditing(false);
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : "Couldn't save changes.");
@@ -232,6 +281,26 @@ export default function LocationPage() {
 
       {!editing && (
         <>
+          {ancestors.length > 0 && (
+            <nav aria-label="Location breadcrumb" className="flex items-center gap-1.5 flex-wrap text-xs text-slate-400 -mb-1">
+              {ancestors.map((a) => (
+                <span key={a.id} className="flex items-center gap-1.5">
+                  <a
+                    href={`/c/${cid}/locations/${a.id}`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigate(`/c/${cid}/locations/${a.id}`);
+                    }}
+                    className="hover:text-amber-400"
+                  >
+                    {a.name}
+                  </a>
+                  <span className="text-slate-600" aria-hidden>›</span>
+                </span>
+              ))}
+              <span className="text-slate-500">{location.name}</span>
+            </nav>
+          )}
           <div className="flex items-center gap-2.5 flex-wrap">
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}>{statusLabel[location.status]}</Chip>
@@ -392,6 +461,28 @@ export default function LocationPage() {
                   </div>
                 )}
               </Card>
+
+              {children.length > 0 && (
+                <Card className="space-y-3">
+                  <h2 className="font-bold text-white text-sm">Contains</h2>
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    {children.map((child) => (
+                      <a
+                        key={child.id}
+                        href={`/c/${cid}/locations/${child.id}`}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          navigate(`/c/${cid}/locations/${child.id}`);
+                        }}
+                        className="cf-inset p-3 hover:border-amber-500/50"
+                      >
+                        <p className="text-sm font-bold text-amber-400">🗺 {child.name}</p>
+                        <p className="text-xs text-slate-400">{child.kind || 'Location'}</p>
+                      </a>
+                    ))}
+                  </div>
+                </Card>
+              )}
             </div>
 
             <div className="space-y-4 min-w-0">
@@ -404,6 +495,10 @@ export default function LocationPage() {
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Kind</span>
                   <span>{location.kind || '—'}</span>
+                </div>
+                <div className="flex justify-between gap-2 text-[13px]">
+                  <span className="text-muted">Within</span>
+                  <span>{ancestors.length > 0 ? ancestors[ancestors.length - 1].name : '—'}</span>
                 </div>
               </Card>
 
@@ -425,6 +520,22 @@ export default function LocationPage() {
               <label className="text-[10px] text-slate-500 font-bold uppercase">Kind</label>
               <TextInput value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} />
             </div>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] text-slate-500 font-bold uppercase">Parent location</label>
+            <select
+              aria-label="Parent location"
+              className="cf-input text-sm w-full"
+              value={form.parentId}
+              onChange={(e) => setForm({ ...form, parentId: e.target.value })}
+            >
+              <option value="">No parent (top level)</option>
+              {parentOptions.map((loc) => (
+                <option key={loc.id} value={loc.id}>
+                  Inside: {loc.name}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="space-y-1">
             <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
