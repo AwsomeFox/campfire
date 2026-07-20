@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import type { Session } from '@campfire/schema';
+import type { Session, SessionShare, SessionShareCreated } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -262,6 +262,7 @@ function SessionDetail({
   onChange: () => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [titleDraft, setTitleDraft] = useState(session.title);
   const [dateDraft, setDateDraft] = useState(toDateInputValue(session.playedAt));
   const [recapDraft, setRecapDraft] = useState(session.recap);
@@ -272,6 +273,7 @@ function SessionDetail({
 
   useEffect(() => {
     setEditing(false);
+    setSharing(false);
     setTitleDraft(session.title);
     setDateDraft(toDateInputValue(session.playedAt));
     setRecapDraft(session.recap);
@@ -365,11 +367,16 @@ function SessionDetail({
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
           </Btn>
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setSharing((v) => !v)}>
+            {sharing ? 'Hide sharing' : 'Share'}
+          </Btn>
           <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} disabled={deleting}>
             {deleting ? 'Deleting…' : 'Delete'}
           </Btn>
         </div>
       )}
+
+      {isDm && !editing && sharing && <SharePanel sessionId={session.id} />}
 
       {confirmingDelete && (
         <ConfirmDialog
@@ -382,6 +389,125 @@ function SessionDetail({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * DM-only share-link management for one recap. The raw link is shown ONCE at
+ * creation (the server stores only a hash) — after that the list shows the
+ * display prefix, and the DM can revoke or mint a fresh link at any time.
+ */
+function SharePanel({ sessionId }: { sessionId: number }) {
+  const [shares, setShares] = useState<SessionShare[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [revokingId, setRevokingId] = useState<number | null>(null);
+  const [newLink, setNewLink] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    setLoading(true);
+    try {
+      setShares(await api.get<SessionShare[]>(`${API}/sessions/${sessionId}/shares`));
+    } catch {
+      setError("Couldn't load share links.");
+    } finally {
+      setLoading(false);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    setNewLink(null);
+    setCopied(false);
+    void load();
+  }, [load]);
+
+  async function create() {
+    setCreating(true);
+    setError(null);
+    setCopied(false);
+    try {
+      const res = await api.post<SessionShareCreated>(`${API}/sessions/${sessionId}/shares`);
+      setNewLink(`${window.location.origin}/share/${res.token}`);
+      await load();
+    } catch {
+      setError("Couldn't create a share link.");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function revoke(id: number) {
+    setRevokingId(id);
+    setError(null);
+    try {
+      await api.delete(`${API}/sessions/${sessionId}/shares/${id}`);
+      setNewLink(null);
+      await load();
+    } catch {
+      setError("Couldn't revoke that link.");
+    } finally {
+      setRevokingId(null);
+    }
+  }
+
+  async function copy() {
+    if (!newLink) return;
+    try {
+      await navigator.clipboard.writeText(newLink);
+      setCopied(true);
+    } catch {
+      /* clipboard unavailable — the link is selectable below */
+    }
+  }
+
+  return (
+    <Card className="space-y-3">
+      <div className="flex items-center gap-2">
+        <h3 className="font-bold text-white text-sm m-0">Read-only share links</h3>
+        <div className="flex-1" />
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={create} disabled={creating}>
+          {creating ? 'Creating…' : '+ New link'}
+        </Btn>
+      </div>
+      <p className="text-[11.5px] text-slate-500 m-0">
+        Anyone with a link can read this recap — no account needed. The full link is shown only once, so copy it now;
+        revoke it here any time.
+      </p>
+      {error && <ErrorNote message={error} onRetry={load} />}
+
+      {newLink && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <code className="text-xs break-all flex-1 min-w-0" style={{ color: 'var(--color-accent)' }}>
+            {newLink}
+          </code>
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs shrink-0" onClick={copy}>
+            {copied ? 'Copied ✓' : 'Copy link'}
+          </Btn>
+        </div>
+      )}
+
+      {loading ? (
+        <Skeleton lines={2} />
+      ) : shares.length === 0 ? (
+        <p className="text-sm text-slate-600 m-0">No active links.</p>
+      ) : (
+        <ul className="m-0 p-0 space-y-1.5" style={{ listStyle: 'none' }}>
+          {shares.map((s) => (
+            <li key={s.id} className="flex items-center gap-2.5 text-xs">
+              <code className="text-slate-400">{s.tokenPrefix}…</code>
+              <span className="text-muted">created {formatDate(s.createdAt)}</span>
+              <div className="flex-1" />
+              <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={() => revoke(s.id)} disabled={revokingId === s.id}>
+                {revokingId === s.id ? 'Revoking…' : 'Revoke'}
+              </Btn>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 

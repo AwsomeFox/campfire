@@ -16,6 +16,7 @@
 /** Named throttler config keys, matching ThrottlerModule.forRoot()'s `throttlers[].name`. */
 export const THROTTLE_DEFAULT = 'default';
 export const THROTTLE_AUTH = 'auth';
+export const THROTTLE_SHARE = 'share';
 
 /** Loose default: normal API usage (including MCP tool-call bursts) should never realistically hit this. */
 export const DEFAULT_THROTTLE_LIMIT = 300;
@@ -24,6 +25,16 @@ export const DEFAULT_THROTTLE_TTL_MS = 60_000;
 /** Strict: login/token/setup — 10 attempts/minute/IP is generous for a real user, punishing for a scrypt-DoS script. */
 export const AUTH_THROTTLE_LIMIT = 10;
 export const AUTH_THROTTLE_TTL_MS = 60_000;
+
+/**
+ * Strict-ish: GET /shared/recaps/:token (public read-only recap share links).
+ * The lookup itself is cheap (one sha256 + one indexed SELECT) and tokens are
+ * 192-bit unguessable, so this is defense-in-depth against enumeration scripts
+ * and unauthenticated hammering rather than a CPU guard — 30/minute/IP is
+ * plenty for a shared link opened by real people.
+ */
+export const SHARE_THROTTLE_LIMIT = 30;
+export const SHARE_THROTTLE_TTL_MS = 60_000;
 
 /**
  * Test-env escape hatch: e2e suites legitimately fire many rapid auth calls

@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { SessionCreate, SessionUpdate } from '@campfire/schema';
 import type { Session, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { sessions, campaigns } from '../../db/schema';
+import { sessions, sessionShares, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -127,6 +127,10 @@ export class SessionsService {
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     await this.db.delete(sessions).where(eq(sessions.id, id));
+    // Hygiene: drop this session's share links too. The public resolver joins
+    // through to the live session row, so orphaned links would already 404 —
+    // this just keeps the table from accumulating dead rows.
+    await this.db.delete(sessionShares).where(eq(sessionShares.sessionId, id));
     await this.recomputeSessionCount(existing.campaignId);
     await this.audit.log({
       actor: auditActor(user),

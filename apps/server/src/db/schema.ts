@@ -107,6 +107,20 @@ export const sessions = sqliteTable('sessions', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Read-only recap share links (see modules/sessions/session-shares.service.ts).
+// DB stores sha256(token) only — the raw token lives in the shared URL and is
+// shown once at creation. Deleting a row revokes the link.
+export const sessionShares = sqliteTable('session_shares', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  sessionId: integer('session_id').notNull(),
+  campaignId: integer('campaign_id').notNull(),
+  createdBy: text('created_by').notNull().default(''),
+  tokenHash: text('token_hash').notNull().unique(),
+  tokenPrefix: text('token_prefix').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const notes = sqliteTable('notes', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),

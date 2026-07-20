@@ -99,6 +99,17 @@ CREATE TABLE IF NOT EXISTS sessions (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_shares (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL UNIQUE,
+  token_prefix TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
@@ -264,6 +275,8 @@ CREATE INDEX IF NOT EXISTS idx_quest_objectives_quest ON quest_objectives(quest_
 CREATE INDEX IF NOT EXISTS idx_npcs_campaign ON npcs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_campaign ON locations(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_session_shares_session ON session_shares(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_audit_campaign ON audit_log(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
