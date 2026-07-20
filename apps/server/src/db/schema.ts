@@ -385,6 +385,32 @@ export const notifications = sqliteTable('notifications', {
   createdAt: text('created_at').notNull(),
 });
 
+// Inventory & loot — see modules/inventory. Items belong to the party stash
+// (owner_type='party', character_id NULL) or a single character
+// (owner_type='character', character_id set).
+export const inventoryItems = sqliteTable('inventory_items', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  ownerType: text('owner_type').notNull().default('party'), // 'party' | 'character'
+  characterId: integer('character_id'), // set iff ownerType='character'
+  name: text('name').notNull(),
+  qty: integer('qty').notNull().default(1),
+  notes: text('notes').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Party treasury — one coin-totals row per campaign, created lazily on first read/write.
+export const partyTreasury = sqliteTable('party_treasury', {
+  campaignId: integer('campaign_id').primaryKey(),
+  cp: integer('cp').notNull().default(0),
+  sp: integer('sp').notNull().default(0),
+  ep: integer('ep').notNull().default(0),
+  gp: integer('gp').notNull().default(0),
+  pp: integer('pp').notNull().default(0),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),

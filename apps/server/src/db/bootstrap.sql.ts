@@ -333,6 +333,28 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS inventory_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  owner_type TEXT NOT NULL DEFAULT 'party',
+  character_id INTEGER,
+  name TEXT NOT NULL,
+  qty INTEGER NOT NULL DEFAULT 1,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS party_treasury (
+  campaign_id INTEGER PRIMARY KEY,
+  cp INTEGER NOT NULL DEFAULT 0,
+  sp INTEGER NOT NULL DEFAULT 0,
+  ep INTEGER NOT NULL DEFAULT 0,
+  gp INTEGER NOT NULL DEFAULT 0,
+  pp INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL,
@@ -379,6 +401,8 @@ CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
 CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
 `;
 
 /**
