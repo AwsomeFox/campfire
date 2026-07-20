@@ -4,7 +4,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from './campaigns.service';
-import { CampaignCloneDto, CampaignCreateDto, CampaignUpdateDto } from './campaigns.dto';
+import { CampaignCloneDto, CampaignCreateDto, CampaignImportDto, CampaignUpdateDto } from './campaigns.dto';
 
 @ApiTags('campaigns')
 @Controller('campaigns')
@@ -26,6 +26,18 @@ export class CampaignsController {
   @ApiResponse({ status: 201, description: 'Created campaign.' })
   create(@Body() body: CampaignCreateDto, @CurrentUser() user: RequestUser) {
     return this.campaigns.create(body, user);
+  }
+
+  @Post('import')
+  @ApiOperation({
+    summary: 'Import a campaign from a Campfire export',
+    description:
+      "Any authenticated user may import; the caller becomes the new campaign's dm. Accepts a Campfire JSON export document (the shape GET /campaigns/:id/export?format=json produces) and recreates the campaign with fresh ids and every intra-campaign reference remapped (location nesting, npc→location, quest parent/giver, combatant→character, note entity links, currentLocationId). Imported PCs come in unowned; attachments (metadata-only in the JSON export) are not recreated (mapAttachmentId/portraitUrl reset); status starts 'active'; an unknown ruleSystem is cleared. Members, audit and proposals are not imported.",
+  })
+  @ApiResponse({ status: 201, description: 'The newly created campaign.' })
+  @ApiResponse({ status: 400, description: 'Body is not a valid Campfire export document.' })
+  importCampaign(@Body() body: CampaignImportDto, @CurrentUser() user: RequestUser) {
+    return this.campaigns.importCampaign(body, user);
   }
 
   @Get(':id')
