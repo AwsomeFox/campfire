@@ -12,6 +12,7 @@ import { MembersService } from '../membership/members.service';
 import { AuditService } from '../audit/audit.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { AttachmentsService, ALLOWED_MIME_TO_EXT } from '../attachments/attachments.service';
 import type { RequestUser } from '../../common/user.types';
 
 /** Filesystem/URL-safe slug for filenames — lowercase, alnum + hyphens. */
@@ -38,7 +39,14 @@ export class ExportService {
     private readonly audit: AuditService,
     private readonly proposals: ProposalsService,
     private readonly encounters: EncountersService,
+    private readonly attachments: AttachmentsService,
   ) {}
+
+  /** Archive-relative path an attachment's bytes live at inside a zip export. */
+  private attachmentArchivePath(row: { id: number; mime: string }): string {
+    const ext = ALLOWED_MIME_TO_EXT[row.mime] ?? 'bin';
+    return `uploads/${row.id}.${ext}`;
+  }
 
   /**
    * Full campaign export as the requesting dm sees it: dmSecret fields
@@ -49,7 +57,7 @@ export class ExportService {
   async buildExport(campaignId: number, user: RequestUser) {
     const role = 'dm' as const;
 
-    const [campaign, questList, npcList, locationList, sessionList, characterList, noteList, memberList, auditList, proposalList, encounterList] =
+    const [campaign, questList, npcList, locationList, sessionList, characterList, noteList, memberList, auditList, proposalList, encounterList, attachmentRows] =
       await Promise.all([
         this.campaigns.getOrThrow(campaignId),
         this.quests.listForCampaignWithObjectives(campaignId, role),
@@ -64,7 +72,29 @@ export class ExportService {
         this.audit.listForCampaign(campaignId, 500),
         this.proposals.listForCampaign(campaignId, undefined),
         this.encounters.listForCampaign(campaignId),
+        this.attachments.listRowsForCampaign(campaignId),
       ]);
+
+    // Attachment manifest (issue #87): the export used to reference attachment ids
+    // (campaign.mapAttachmentId) and portrait URLs (character.portraitUrl) that only
+    // resolved against the source install. We now enumerate every attachment as
+    // metadata, marking which files are actually present on disk (a missing file is a
+    // known row-without-file shape — see #84 — and is flagged, not fatal). The zip
+    // export additionally embeds the bytes under the `file` path below.
+    const attachments = attachmentRows.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      filename: row.filename,
+      mime: row.mime,
+      size: row.size,
+      createdAt: row.createdAt,
+      /** Archive-relative path the bytes are stored at in the mdzip export. */
+      file: this.attachmentArchivePath(row),
+      /** Resolved GET route the source install's portraitUrl points at, for cross-referencing. */
+      fileRoute: `/api/v1/attachments/${row.id}/file`,
+      /** false when the bytes are missing on disk — reference is dangling, byte embed skipped. */
+      present: this.attachments.hasBytesOnDisk(row),
+    }));
 
     // Encounters need their combatants too (listForCampaign only returns the bare
     // Encounter rows) — fetch each one's full detail in parallel.
@@ -99,6 +129,13 @@ export class ExportService {
       audit: auditList,
       proposals: proposalList,
       encounters: encountersWithCombatants,
+      attachments,
+      attachmentsNote:
+        'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl ' +
+        'ends in attachments[].fileRoute. This JSON document carries attachment METADATA only — ' +
+        'the raw image bytes are NOT embedded here. Export with format=mdzip to obtain a zip whose ' +
+        'uploads/ folder holds the actual files at attachments[].file. Entries with present=false ' +
+        'have no file on disk (dangling reference); their bytes are omitted from every export format.',
     };
   }
 
@@ -145,7 +182,72 @@ export class ExportService {
       encountersFolder.file(`${slugify(e.name)}.md`, this.encounterMarkdown(e));
     }
 
+    // Issue #87: embed the actual attachment bytes (maps, portraits, images) under
+    // uploads/ so the export is self-contained and its references resolve. A file
+    // missing on disk is skipped (not fatal — same row-without-file case as #84) and
+    // recorded in the manifest as skipped so the loss is visible, never silent.
+    const skipped: typeof data.attachments = [];
+    for (const a of data.attachments) {
+      const bytes = this.attachments.readBytesIfPresent({ campaignId, id: a.id, mime: a.mime });
+      if (bytes) {
+        zip.file(a.file, bytes);
+      } else {
+        skipped.push(a);
+      }
+    }
+    zip.file('attachments.md', this.attachmentsManifestMarkdown(data.campaign, data.characters, data.attachments, skipped));
+
     return zip.generateAsync({ type: 'nodebuffer' });
+  }
+
+  /**
+   * Human-readable manifest cross-referencing every attachment to its embedded file
+   * and to what points at it (the campaign map, or the characters whose portrait it
+   * is), plus an explicit list of any files that were missing on disk and skipped.
+   */
+  private attachmentsManifestMarkdown(
+    campaign: Awaited<ReturnType<CampaignsService['getOrThrow']>>,
+    characters: Awaited<ReturnType<CharactersService['listForCampaign']>>,
+    attachments: {
+      id: number;
+      kind: string;
+      filename: string;
+      mime: string;
+      size: number;
+      file: string;
+      fileRoute: string;
+      present: boolean;
+    }[],
+    skipped: { id: number; file: string; filename: string }[],
+  ): string {
+    const lines = ['# Attachments', ''];
+    if (!attachments.length) {
+      lines.push('_This campaign has no attachments._', '');
+      return lines.join('\n');
+    }
+    lines.push(
+      'Image bytes are embedded in this archive under `uploads/`. The table maps each',
+      'attachment to its file and to what references it.',
+      '',
+      '| ID | Kind | Filename | File | Referenced by |',
+      '| --- | --- | --- | --- | --- |',
+    );
+    for (const a of attachments) {
+      const refs: string[] = [];
+      if (campaign.mapAttachmentId === a.id) refs.push('campaign map');
+      for (const c of characters) {
+        if (c.portraitUrl && c.portraitUrl.endsWith(a.fileRoute)) refs.push(`portrait: ${c.name}`);
+      }
+      const fileCell = a.present ? `\`${a.file}\`` : '_missing — skipped_';
+      lines.push(`| ${a.id} | ${a.kind} | ${a.filename} | ${fileCell} | ${refs.length ? refs.join(', ') : '_unreferenced_'} |`);
+    }
+    if (skipped.length) {
+      lines.push('', '## Skipped (file missing on disk)', '');
+      for (const s of skipped) {
+        lines.push(`- Attachment ${s.id} (${s.filename}) — expected at \`${s.file}\`, not present; bytes omitted.`);
+      }
+    }
+    return lines.join('\n') + '\n';
   }
 
   private campaignMarkdown(campaign: Awaited<ReturnType<CampaignsService['getOrThrow']>>, notes: Awaited<ReturnType<NotesService['listForCampaign']>>): string {
