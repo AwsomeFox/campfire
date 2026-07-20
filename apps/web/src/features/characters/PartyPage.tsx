@@ -96,7 +96,17 @@ export default function PartyPage() {
       ) : (
         <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
           {characters.map((c, i) => (
-            <CharacterCard key={c.id} campaignId={id} character={c} index={i} ownerLabel={ownerLabel(c.ownerUserId)} />
+            <CharacterCard
+              key={c.id}
+              campaignId={id}
+              character={c}
+              index={i}
+              ownerLabel={ownerLabel(c.ownerUserId)}
+              // Quick HP is offered on a card the viewer can edit: the DM (any card)
+              // or a player on their own character (issue #68).
+              canEditHp={isDm || (c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
+              onChange={load}
+            />
           ))}
         </div>
       )}
@@ -113,55 +123,107 @@ function CharacterCard({
   character,
   index,
   ownerLabel,
+  canEditHp,
+  onChange,
 }: {
   campaignId: number;
   character: Character;
   index: number;
   ownerLabel: string | null;
+  canEditHp: boolean;
+  onChange: () => void;
 }) {
   const tone = avatarTone(index);
   const hpPct = character.hpMax > 0 ? Math.max(0, Math.min(100, (character.hpCurrent / character.hpMax) * 100)) : 0;
+  // The card stays a single click target to the sheet, but the quick-HP steppers
+  // are siblings of the Link (not nested inside it) — nesting <button> inside an
+  // <a> is invalid and would hijack the navigation click (issue #68).
   return (
-    <Link
-      to={`/c/${campaignId}/characters/${character.id}`}
-      className="cf-card p-3.5 space-y-2.5 hover:border-amber-500/50 transition-colors"
-    >
-      <div className="flex items-center gap-2.5">
-        <div
-          className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}
-        >
-          {initials(character.name)}
+    <div className="cf-card p-3.5 space-y-2.5 hover:border-amber-500/50 transition-colors">
+      <Link to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
+        <div className="flex items-center gap-2.5">
+          <div
+            className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}
+          >
+            {initials(character.name)}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
+            <p className="text-[11.5px] text-slate-500 truncate">
+              {character.className || 'Unknown class'} · Lv {character.level}
+              {ownerLabel && ` · ${ownerLabel}`}
+            </p>
+          </div>
+          {levelForXp(character.xp) > character.level && (
+            <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${levelForXp(character.xp)}`}>
+              ⬆ Level up
+            </span>
+          )}
         </div>
-        <div className="flex-1 min-w-0">
-          <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
-          <p className="text-[11.5px] text-slate-500 truncate">
-            {character.className || 'Unknown class'} · Lv {character.level}
-            {ownerLabel && ` · ${ownerLabel}`}
-          </p>
-        </div>
-        {levelForXp(character.xp) > character.level && (
-          <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${levelForXp(character.xp)}`}>
-            ⬆ Level up
+        <div className="flex justify-between text-[11.5px] text-slate-500">
+          <span>HP</span>
+          <span>
+            {character.hpCurrent} / {character.hpMax}
           </span>
+        </div>
+        <div className="h-[5px] rounded-full bg-[var(--color-neutral-800)] overflow-hidden">
+          <div className="h-full rounded-full bg-[var(--color-accent)]" style={{ width: `${hpPct}%` }} />
+        </div>
+        {character.conditions.length > 0 && (
+          <div className="flex gap-1.5 flex-wrap">
+            <span className="tag tag-outline" style={{ fontSize: 10 }}>
+              {character.conditions.join(', ')}
+            </span>
+          </div>
         )}
+      </Link>
+      {canEditHp && <QuickHp character={character} onChange={onChange} />}
+    </div>
+  );
+}
+
+/**
+ * Inline HP steppers on a Party card — ±5 / ±1 with shift-click ×5, mirroring the
+ * sheet's HpEditor so quick out-of-combat tracking doesn't need a navigation to the
+ * full sheet (issue #68). Posts to the existing POST /characters/:id/hp {delta}.
+ */
+function QuickHp({ character, onChange }: { character: Character; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function applyDelta(delta: number) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`${API}/characters/${character.id}/hp`, { delta });
+      onChange();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update HP.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex gap-1.5">
+        {([-5, -1, 1, 5] as const).map((step) => (
+          <button
+            key={step}
+            type="button"
+            className="btn btn-secondary !min-h-0"
+            style={{ flex: 1, minHeight: 38, fontSize: 13, fontFamily: 'var(--font-heading)' }}
+            disabled={busy}
+            aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${character.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${character.hpCurrent} of ${character.hpMax})`}
+            onClick={(e) => void applyDelta(e.shiftKey ? step * 5 : step)}
+          >
+            {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
+          </button>
+        ))}
       </div>
-      <div className="flex justify-between text-[11.5px] text-slate-500">
-        <span>HP</span>
-        <span>
-          {character.hpCurrent} / {character.hpMax}
-        </span>
-      </div>
-      <div className="h-[5px] rounded-full bg-[var(--color-neutral-800)] overflow-hidden">
-        <div className="h-full rounded-full bg-[var(--color-accent)]" style={{ width: `${hpPct}%` }} />
-      </div>
-      {character.conditions.length > 0 && (
-        <div className="flex gap-1.5 flex-wrap">
-          <span className="tag tag-outline" style={{ fontSize: 10 }}>
-            {character.conditions.join(', ')}
-          </span>
-        </div>
-      )}
-    </Link>
+      {error && <p role="alert" className="text-[11px] text-rose-400">{error}</p>}
+    </div>
   );
 }
 
