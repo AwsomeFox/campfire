@@ -24,7 +24,9 @@ import type {
   EncounterWithCombatants,
   RuleEntry,
 } from '@campfire/schema';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
+import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
@@ -321,6 +323,26 @@ function DeathSaveTracker({
   );
 }
 
+/**
+ * Optimistic HP application (issue #73) — the local guess we write into the query cache
+ * the instant an HP stepper is clicked, so a DM spamming ±1 sees each hit land without
+ * waiting a round-trip. Mirrors the server's 5e math closely enough for the interim
+ * render; `onSettled` invalidates and reconciles against server truth. A redacted monster
+ * (exact HP hidden — issue #43) has null HP and gets no optimistic guess.
+ */
+function applyHpDelta(c: Combatant, delta: number): Combatant {
+  if (c.hpCurrent == null || c.hpMax == null) return c;
+  if (delta >= 0) {
+    return { ...c, hpCurrent: Math.min(c.hpMax, c.hpCurrent + delta) };
+  }
+  // Damage: temporary HP absorbs first, then real HP, floored at 0.
+  const dmg = -delta;
+  const temp = c.hpTemp ?? 0;
+  const fromTemp = Math.min(temp, dmg);
+  const overflow = dmg - fromTemp;
+  return { ...c, hpTemp: temp - fromTemp, hpCurrent: Math.max(0, c.hpCurrent - overflow) };
+}
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -341,83 +363,82 @@ export default function RunSessionPage() {
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
 
-  const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
-  const [difficulty, setDifficulty] = useState<EncounterDifficulty | null>(null);
-  // Persistent combat log (issue #61) — fetched alongside the encounter so it survives
-  // reload and refreshes on every mutation / SSE-pushed update.
-  const [events, setEvents] = useState<EncounterEvent[]>([]);
-  const [characters, setCharacters] = useState<Character[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [notFound, setNotFound] = useState(false);
+  const queryClient = useQueryClient();
+
   const [actionError, setActionError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  // Mirrors `busy` but updates synchronously (state updates are batched/async in React,
-  // so a rapid double-click on e.g. the HP +/- steppers could fire twice before the
-  // first setBusy(true) re-render lands). withBusy checks+sets this ref before anything
-  // async happens, closing that race.
-  const busyRef = useRef(false);
+  // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
+  // flag so one combatant's slower edit (rename, condition, initiative…) disables only
+  // that row, never the whole tracker. HP steppers bypass this entirely: they're
+  // optimistic and stay live even while a request is in flight.
+  const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  const markCombatantPending = useCallback((combatantId: number, on: boolean) => {
+    setPendingCombatantIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(combatantId);
+      else next.delete(combatantId);
+      return next;
+    });
+  }, []);
 
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [confirmReopen, setConfirmReopen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
 
-  const load = useCallback(async () => {
-    setError(null);
-    setNotFound(false);
-    try {
-      const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
-      setEncounter(data);
-      // Difficulty is a separate read-only derivation (issue #58) — fetch alongside but
-      // never let its failure block the encounter view; just leave the badge hidden.
-      api
-        .get<EncounterDifficulty>(`${API}/encounters/${eid}/difficulty`)
-        .then(setDifficulty)
-        .catch(() => setDifficulty(null));
-      // Fetch the persisted combat log too; a failure here shouldn't break the tracker.
-      try {
-        const evs = await api.get<EncounterEvent[]>(`${API}/encounters/${eid}/events`);
-        setEvents(evs);
-      } catch {
-        /* leave prior events in place */
-      }
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 404) {
-        setNotFound(true);
-      } else {
-        setError(err instanceof ApiError ? err.message : "Couldn't load this encounter.");
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [eid]);
+  // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
+  // (refetchInterval pauses in the background by default) as a backstop to the SSE
+  // push below; SSE remains the fast path (invalidate-on-event), the poll only catches
+  // anything a dropped stream missed. The ~5s cadence matches the pre-SSE poll.
+  const encounterQuery = useQuery({
+    queryKey: queryKeys.encounter(eid),
+    queryFn: () => api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
+    enabled: Number.isFinite(eid),
+    refetchInterval: 5_000,
+  });
+  const encounter = encounterQuery.data ?? null;
 
-  useEffect(() => {
-    if (Number.isFinite(eid)) void load();
-  }, [eid, load]);
+  // Difficulty is a separate read-only derivation (issue #58) — never let its failure
+  // block the encounter view; the badge just stays hidden (retry off, error ignored).
+  const difficultyQuery = useQuery({
+    queryKey: queryKeys.encounterDifficulty(eid),
+    queryFn: () => api.get<EncounterDifficulty>(`${API}/encounters/${eid}/difficulty`),
+    enabled: Number.isFinite(eid),
+    refetchInterval: 5_000,
+    retry: false,
+  });
+  const difficulty = difficultyQuery.data ?? null;
 
-  // Fetch campaign characters once, to map a combatant.characterId -> ownerUserId
-  // so players can be scoped to only their own character's combatant.
-  useEffect(() => {
-    if (!Number.isFinite(cid)) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const list = await api.get<Character[]>(`${API}/campaigns/${cid}/characters`);
-        if (!cancelled) setCharacters(list);
-      } catch {
-        if (!cancelled) setCharacters([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [cid]);
+  // Persistent combat log (issue #61) — refreshes on every mutation / SSE update.
+  const eventsQuery = useQuery({
+    queryKey: queryKeys.encounterEvents(eid),
+    queryFn: () => api.get<EncounterEvent[]>(`${API}/encounters/${eid}/events`),
+    enabled: Number.isFinite(eid),
+    refetchInterval: 5_000,
+  });
+  const events = eventsQuery.data ?? [];
 
-  // Live updates over SSE (replaces the old 5s poll) — players waiting for the DM to
-  // hit "Start" (or take a turn, adjust HP, …) see it pushed instantly. On a remote
-  // delete, bounce back to the encounters list rather than surfacing a 404.
+  // Campaign characters — maps a combatant.characterId -> ownerUserId so a player is
+  // scoped to only their own character's combatant. Low-churn, so no poll.
+  const charactersQuery = useQuery({
+    queryKey: queryKeys.campaignCharacters(cid),
+    queryFn: () => api.get<Character[]>(`${API}/campaigns/${cid}/characters`),
+    enabled: Number.isFinite(cid),
+  });
+  const characters = useMemo(() => charactersQuery.data ?? [], [charactersQuery.data]);
+
+  const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
+  const loadError =
+    encounterQuery.error && !notFound
+      ? encounterQuery.error instanceof ApiError
+        ? encounterQuery.error.message
+        : "Couldn't load this encounter."
+      : null;
+  const refetchEncounter = useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]);
+
+  // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
+  // take a turn, adjust HP, …) see it pushed instantly. Rather than a manual reload, an
+  // event just invalidates the encounter's reads and Query refetches. On a remote delete,
+  // bounce back to the encounters list rather than surfacing a 404.
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
@@ -426,12 +447,12 @@ export default function RunSessionPage() {
           navigate(`/c/${cid}/encounters`);
           return;
         }
-        void load();
+        invalidateEncounter(queryClient, eid);
       },
-      [eid, cid, navigate, load],
+      [eid, cid, navigate, queryClient],
     ),
     // The stream was down for a while — refetch to catch anything missed.
-    onReconnect: useCallback(() => void load(), [load]),
+    onReconnect: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
   });
 
   // Announce turn/round changes and HP mutations for screen readers (issue #93).
@@ -482,96 +503,122 @@ export default function RunSessionPage() {
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
   }
 
-  async function withBusy(fn: () => Promise<void>) {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
+  const reportError = useCallback(
+    (err: unknown) => setActionError(err instanceof ApiError ? err.message : 'That action failed.'),
+    [],
+  );
+
+  // Encounter-level run controls (roll-initiative / start / next-turn / end / reopen).
+  // These are mutually exclusive DM header actions, so one shared pending flag gating
+  // just the header group is correct — unlike the old global lock, it never touches the
+  // combatant rows. Each settles by invalidating the encounter's reads.
+  const runControl = useMutation({
+    mutationFn: (action: 'roll-initiative' | 'start' | 'next-turn' | 'end' | 'reopen') =>
+      api.post(`${API}/encounters/${eid}/${action}`),
+    onMutate: () => setActionError(null),
+    onError: reportError,
+    onSettled: () => invalidateEncounter(queryClient, eid),
+  });
+
+  const deleteEncounterMut = useMutation({
+    mutationFn: () => api.delete(`${API}/encounters/${eid}`),
+    onMutate: () => setActionError(null),
+    onError: reportError,
+    onSuccess: () => navigate(`/c/${cid}/encounters`),
+  });
+
+  // General per-combatant patch (conditions, death saves, initiative, rename, max/temp HP,
+  // token position). Non-optimistic but per-combatant: onMutate flags just this row as
+  // pending, onSettled clears it and reconciles. Concurrent edits to different combatants
+  // don't block each other.
+  const combatantPatch = useMutation({
+    mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
+      api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, patch),
+    onMutate: ({ combatantId }) => {
+      setActionError(null);
+      markCombatantPending(combatantId, true);
+    },
+    onError: reportError,
+    onSettled: (_data, _err, { combatantId }) => {
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
+  // Optimistic HP steppers (issue #73) — the headline fix. onMutate writes the guessed HP
+  // straight into the query cache so the click lands instantly (no round-trip wait, no
+  // disabled control); onError rolls back to the pre-click snapshot; onSettled reconciles
+  // against server truth, but only once the *last* of a rapid burst settles so spamming
+  // ±1 doesn't trigger a refetch storm.
+  const HP_MUTATION_KEY = useMemo(() => ['encounter', eid, 'hpDelta'] as const, [eid]);
+  const hpDelta = useMutation({
+    mutationKey: HP_MUTATION_KEY,
+    mutationFn: ({ combatantId, delta }: { combatantId: number; delta: number }) =>
+      api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta }),
+    onMutate: async ({ combatantId, delta }) => {
+      setActionError(null);
+      await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
+      const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
+      if (previous) {
+        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
+          ...previous,
+          combatants: previous.combatants.map((c) => (c.id === combatantId ? applyHpDelta(c, delta) : c)),
+        });
+      }
+      return { previous };
+    },
+    onError: (err, _vars, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(queryKeys.encounter(eid), ctx.previous);
+      reportError(err);
+    },
+    onSettled: () => {
+      // Only reconcile after the last in-flight HP write of a burst settles.
+      if (queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) === 1) {
+        invalidateEncounter(queryClient, eid);
+      }
+    },
+  });
+
+  const patchCombatant = useCallback(
+    (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
+    [combatantPatch],
+  );
+
+  const rollInitiative = () => runControl.mutate('roll-initiative');
+  const startEncounter = () => runControl.mutate('start');
+  const nextTurn = () => runControl.mutate('next-turn');
+  const endEncounter = () => runControl.mutate('end', { onSuccess: () => setConfirmEnd(false) });
+  const reopenEncounter = () => runControl.mutate('reopen', { onSuccess: () => setConfirmReopen(false) });
+  const deleteEncounter = () => deleteEncounterMut.mutate();
+
+  const removeCombatant = (combatantId: number) => {
     setActionError(null);
-    try {
-      await fn();
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'That action failed.');
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  }
-
-  async function rollInitiative() {
-    await withBusy(async () => {
-      await api.post(`${API}/encounters/${eid}/roll-initiative`);
-      await load();
-    });
-  }
-
-  async function startEncounter() {
-    await withBusy(async () => {
-      await api.post(`${API}/encounters/${eid}/start`);
-      await load();
-    });
-  }
-
-  async function nextTurn() {
-    await withBusy(async () => {
-      await api.post(`${API}/encounters/${eid}/next-turn`);
-      await load();
-    });
-  }
-
-  async function endEncounter() {
-    await withBusy(async () => {
-      await api.post(`${API}/encounters/${eid}/end`);
-      setConfirmEnd(false);
-      await load();
-    });
-  }
-
-  async function reopenEncounter() {
-    await withBusy(async () => {
-      await api.post(`${API}/encounters/${eid}/reopen`);
-      setConfirmReopen(false);
-      await load();
-    });
-  }
-
-  async function deleteEncounter() {
-    await withBusy(async () => {
-      await api.delete(`${API}/encounters/${eid}`);
-      navigate(`/c/${cid}/encounters`);
-    });
-  }
-
-  async function patchCombatant(combatantId: number, patch: Record<string, unknown>) {
-    await withBusy(async () => {
-      await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, patch);
-      await load();
-    });
-  }
-
-  async function removeCombatant(combatantId: number) {
-    await withBusy(async () => {
-      await api.delete(`${API}/encounters/${eid}/combatants/${combatantId}`);
-      setConfirmRemoveCombatantId(null);
-      await load();
-    });
-  }
+    markCombatantPending(combatantId, true);
+    api
+      .delete(`${API}/encounters/${eid}/combatants/${combatantId}`)
+      .then(() => {
+        setConfirmRemoveCombatantId(null);
+        invalidateEncounter(queryClient, eid);
+      })
+      .catch(reportError)
+      .finally(() => markCombatantPending(combatantId, false));
+  };
 
   // Battle map (issue #39): attach/clear the encounter's map image (DM only).
-  async function setEncounterMap(attachmentId: number | null) {
-    await withBusy(async () => {
-      await api.patch(`${API}/encounters/${eid}`, { mapAttachmentId: attachmentId });
-      await load();
-    });
-  }
+  const setMap = useMutation({
+    mutationFn: (attachmentId: number | null) => api.patch(`${API}/encounters/${eid}`, { mapAttachmentId: attachmentId }),
+    onMutate: () => setActionError(null),
+    onError: reportError,
+    onSettled: () => invalidateEncounter(queryClient, eid),
+  });
+  const setEncounterMap = (attachmentId: number | null) => setMap.mutate(attachmentId);
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
-  async function moveToken(combatantId: number, x: number, y: number) {
-    await withBusy(async () => {
-      await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { tokenX: x, tokenY: y });
-      await load();
-    });
-  }
+  const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(combatantId, { tokenX: x, tokenY: y });
+
+  // Header run-control group shares one pending flag (see runControl above).
+  const headerBusy = runControl.isPending || deleteEncounterMut.isPending;
 
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
@@ -581,7 +628,7 @@ export default function RunSessionPage() {
     );
   }
 
-  if (loading && !encounter) {
+  if (encounterQuery.isPending && !encounter) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4">
         <Card>
@@ -599,10 +646,10 @@ export default function RunSessionPage() {
     );
   }
 
-  if (error && !encounter) {
+  if (loadError && !encounter) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <ErrorNote message={error} onRetry={load} />
+        <ErrorNote message={loadError} onRetry={refetchEncounter} />
       </div>
     );
   }
@@ -624,12 +671,12 @@ export default function RunSessionPage() {
         </Btn>
       </div>
 
-      {(error || actionError) && (
+      {(loadError || actionError) && (
         <ErrorNote
-          message={actionError ?? error ?? ''}
+          message={actionError ?? loadError ?? ''}
           onRetry={() => {
             setActionError(null);
-            void load();
+            refetchEncounter();
           }}
         />
       )}
@@ -649,7 +696,7 @@ export default function RunSessionPage() {
           type="button"
           className="btn btn-ghost"
           style={{ fontSize: 11.5 }}
-          onClick={() => void load()}
+          onClick={refetchEncounter}
           title="Refresh"
         >
           ↻ Refresh
@@ -668,10 +715,10 @@ export default function RunSessionPage() {
             </Btn>
             {encounter.status === 'preparing' && (
               <>
-                <Btn ghost disabled={busy} onClick={rollInitiative}>
+                <Btn ghost disabled={headerBusy} onClick={rollInitiative}>
                   Roll initiative
                 </Btn>
-                <Btn disabled={busy} onClick={startEncounter}>
+                <Btn disabled={headerBusy} onClick={startEncounter}>
                   Start
                 </Btn>
               </>
@@ -681,26 +728,26 @@ export default function RunSessionPage() {
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
                     keep Roll initiative reachable so the DM can fill them (issue #54).
                     Already-set initiatives are left untouched server-side. */}
-                <Btn ghost disabled={busy} onClick={rollInitiative}>
+                <Btn ghost disabled={headerBusy} onClick={rollInitiative}>
                   Roll initiative
                 </Btn>
-                <Btn disabled={busy} onClick={nextTurn}>
+                <Btn disabled={headerBusy} onClick={nextTurn}>
                   Next turn →
                 </Btn>
               </>
             )}
             {encounter.status !== 'ended' && (
-              <Btn ghost danger disabled={busy} onClick={() => setConfirmEnd(true)}>
+              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
             {encounter.status === 'ended' && (
-              <Btn ghost disabled={busy} onClick={() => setConfirmReopen(true)}>
+              <Btn ghost disabled={headerBusy} onClick={() => setConfirmReopen(true)}>
                 Reopen
               </Btn>
             )}
             {(encounter.status === 'ended' || encounter.status === 'preparing') && (
-              <Btn ghost danger disabled={busy} onClick={() => setConfirmDelete(true)}>
+              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmDelete(true)}>
                 Delete
               </Btn>
             )}
@@ -714,7 +761,11 @@ export default function RunSessionPage() {
         campaignId={cid}
         encounter={encounter}
         canEdit={isDm}
-        onSaved={(updated) => setEncounter((prev) => (prev ? { ...prev, ...updated } : prev))}
+        onSaved={(updated) =>
+          queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (prev) =>
+            prev ? { ...prev, ...updated } : prev,
+          )
+        }
       />
 
       {isDm && encounter.status === 'preparing' && (
@@ -731,7 +782,7 @@ export default function RunSessionPage() {
           encounter={encounter}
           campaignId={cid}
           isDm={isDm}
-          busy={busy}
+          busy={setMap.isPending}
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
@@ -755,8 +806,8 @@ export default function RunSessionPage() {
               canViewStatblock={isDm}
               canRemove={isDm}
               canSetInitiative={isDm && encounter.status !== 'ended'}
-              busy={busy}
-              onHpDelta={(delta) => patchCombatant(c.id, { hpDelta: delta })}
+              busy={pendingCombatantIds.has(c.id)}
+              onHpDelta={(delta) => hpDelta.mutate({ combatantId: c.id, delta })}
               onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
               onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
               onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
@@ -777,7 +828,7 @@ export default function RunSessionPage() {
           characters={characters}
           existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
           rulePack={campaign?.ruleSystem || ''}
-          onAdded={load}
+          onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
         />
       )}
 
@@ -789,8 +840,8 @@ export default function RunSessionPage() {
         <ConfirmDialog
           title="End this encounter?"
           body="HP writes back to character sheets. This cannot be undone."
-          confirmLabel={busy ? 'Ending…' : 'End encounter'}
-          busy={busy}
+          confirmLabel={runControl.isPending ? 'Ending…' : 'End encounter'}
+          busy={runControl.isPending}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
         />
@@ -799,8 +850,8 @@ export default function RunSessionPage() {
         <ConfirmDialog
           title="Reopen this encounter?"
           body="It returns to Running where combat left off. HP was written back to character sheets when it ended; it will write back again the next time you End."
-          confirmLabel={busy ? 'Reopening…' : 'Reopen encounter'}
-          busy={busy}
+          confirmLabel={runControl.isPending ? 'Reopening…' : 'Reopen encounter'}
+          busy={runControl.isPending}
           onConfirm={reopenEncounter}
           onCancel={() => setConfirmReopen(false)}
         />
@@ -809,8 +860,8 @@ export default function RunSessionPage() {
         <ConfirmDialog
           title="Delete this encounter?"
           body="This cannot be undone."
-          confirmLabel={busy ? 'Deleting…' : 'Delete encounter'}
-          busy={busy}
+          confirmLabel={deleteEncounterMut.isPending ? 'Deleting…' : 'Delete encounter'}
+          busy={deleteEncounterMut.isPending}
           onConfirm={deleteEncounter}
           onCancel={() => setConfirmDelete(false)}
         />
@@ -818,8 +869,8 @@ export default function RunSessionPage() {
       {confirmRemoveCombatantId != null && (
         <ConfirmDialog
           title="Remove this combatant from the encounter?"
-          confirmLabel={busy ? 'Removing…' : 'Remove'}
-          busy={busy}
+          confirmLabel={pendingCombatantIds.has(confirmRemoveCombatantId) ? 'Removing…' : 'Remove'}
+          busy={pendingCombatantIds.has(confirmRemoveCombatantId)}
           onConfirm={() => removeCombatant(confirmRemoveCombatantId)}
           onCancel={() => setConfirmRemoveCombatantId(null)}
         />
@@ -1406,7 +1457,8 @@ function CombatantRow({
               key={step}
               className="btn btn-icon btn-secondary"
               style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
-              disabled={busy}
+              /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
+                 lands instantly via setQueryData, so there's no round-trip to wait on. */
               aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
               onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
             >
