@@ -7,8 +7,12 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { isProposed } from '../../common/proposed.util';
+import { parsePageParams } from '../../common/pagination';
 import { SessionsService } from './sessions.service';
 import { SessionCreateDto, SessionUpdateDto } from './sessions.dto';
+
+/** Upper bound for `?limit` on the sessions list (issue #71). */
+const SESSIONS_LIST_MAX_LIMIT = 200;
 
 @ApiTags('sessions')
 @Controller('campaigns/:campaignId/sessions')
@@ -20,11 +24,24 @@ export class CampaignSessionsController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List sessions (play logs) in a campaign', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
-  @ApiResponse({ status: 200, description: 'Sessions in the campaign.' })
-  async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+  @ApiOperation({
+    summary: 'List sessions (play logs) in a campaign',
+    description:
+      'Requires campaign membership. dmSecret is stripped for non-dm. Newest-first. Each item carries a short ' +
+      '`recapExcerpt` instead of the full recap body (fetch a single session for the full recap). Supports ' +
+      'optional `?limit`/`?offset` paging (default: all sessions).',
+  })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max sessions to return (default: all, capped at 200).' })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Sessions to skip, for paging (default 0).' })
+  @ApiResponse({ status: 200, description: 'Sessions in the campaign (list-shape, with recapExcerpt).' })
+  async list(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
     const role = await this.access.requireMember(user, campaignId);
-    return this.sessions.listForCampaign(campaignId, role);
+    return this.sessions.listForCampaign(campaignId, role, parsePageParams({ limit, offset }, SESSIONS_LIST_MAX_LIMIT));
   }
 
   @Post()

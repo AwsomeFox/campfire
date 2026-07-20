@@ -1,19 +1,19 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { ScheduledSessionWithRsvps, Session } from '@campfire/schema';
+import type { ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { EmptyState } from '../../components/ui';
 
-/** First non-empty line of a markdown recap, with basic markdown syntax stripped for preview. */
-function firstLinePlain(markdown: string): string {
-  const line = markdown.split('\n').find((l) => l.trim().length > 0) ?? '';
+/** Strip basic markdown syntax from a recap excerpt for a one-line preview. */
+function firstLinePlain(text: string): string {
+  const line = text.split('\n').find((l) => l.trim().length > 0) ?? '';
   return line
     .replace(/^#+\s*/, '')
     .replace(/[*_`>#-]/g, '')
     .trim();
 }
 
-export function SessionLog({ campaignId, sessions }: { campaignId: number; sessions: Session[] }) {
+export function SessionLog({ campaignId, sessions }: { campaignId: number; sessions: SessionListItem[] }) {
   const sorted = [...sessions].sort((a, b) => b.number - a.number);
   const latest3 = sorted.slice(0, 3);
 
@@ -92,7 +92,7 @@ export function SessionLog({ campaignId, sessions }: { campaignId: number; sessi
             }}
           >
             <span style={{ fontSize: 12, color: 'var(--color-accent)', flex: 'none' }}>S{s.number}</span>
-            <span style={{ fontSize: 14 }}>{s.title || firstLinePlain(s.recap) || 'No recap yet.'}</span>
+            <span style={{ fontSize: 14 }}>{s.title || firstLinePlain(s.recapExcerpt) || 'No recap yet.'}</span>
             <span className="text-muted" style={{ fontSize: 11, marginLeft: 'auto', flex: 'none' }}>
               {s.playedAt ? new Date(s.playedAt).toLocaleDateString() : ''}
             </span>

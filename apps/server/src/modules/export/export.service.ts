@@ -63,7 +63,9 @@ export class ExportService {
         this.quests.listForCampaignWithObjectives(campaignId, role),
         this.npcs.listForCampaign(campaignId, role),
         this.locations.listForCampaign(campaignId, role),
-        this.sessions.listForCampaign(campaignId, role),
+        // Full recaps — an export must carry the complete session bodies, not the
+        // dashboard's list-shape excerpts (issue #71).
+        this.sessions.listRecapsForCampaign(campaignId, role),
         this.characters.listForCampaign(campaignId, role),
         this.notes.listForCampaign(campaignId, user, role, {}),
         this.members.listForCampaign(campaignId),
@@ -326,7 +328,7 @@ export class ExportService {
     return lines.join('\n') + '\n';
   }
 
-  private sessionMarkdown(s: Awaited<ReturnType<SessionsService['listForCampaign']>>[number]): string {
+  private sessionMarkdown(s: Awaited<ReturnType<SessionsService['listRecapsForCampaign']>>[number]): string {
     const lines = [
       `# Session ${s.number}${s.title ? `: ${s.title}` : ''}`,
       '',
