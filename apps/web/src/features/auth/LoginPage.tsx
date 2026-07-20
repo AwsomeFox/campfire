@@ -6,7 +6,7 @@
  * when it's on.
  */
 import { useState, type FormEvent } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -123,6 +123,7 @@ export function LoginPage() {
   }
 
   const oidcEnabled = Boolean(status?.oidcEnabled);
+  const signupEnabled = Boolean(status?.signupEnabled);
   const installHint = typeof window !== 'undefined'
     && !window.matchMedia('(display-mode: standalone)').matches
     && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -193,6 +194,12 @@ export function LoginPage() {
                 primary
               />
             </div>
+          )}
+
+          {signupEnabled && (
+            <Link to="/signup" className="btn btn-ghost" style={{ fontSize: 12.5, marginTop: 2 }}>
+              New here? Create an account
+            </Link>
           )}
         </div>
 

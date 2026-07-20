@@ -11,7 +11,7 @@ import { OidcService } from './oidc.service';
 import { SettingsService } from '../settings/settings.service';
 import { UsersService } from '../users/users.service';
 import { TokensService } from '../tokens/tokens.service';
-import { SetupRequestDto, LoginRequestDto, PasswordChangeDto, AuthTokenRequestDto } from './auth.dto';
+import { SetupRequestDto, LoginRequestDto, SignupRequestDto, PasswordChangeDto, AuthTokenRequestDto } from './auth.dto';
 import { PreferencesUpdateDto } from '../users/users.dto';
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, VERSION } from './auth.constants';
 import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
@@ -49,13 +49,17 @@ export class AuthController {
   @ApiOperation({ summary: 'Server auth status', description: 'Whether first-run setup is required, whether local (non-admin) login is enabled, and whether OIDC SSO is configured. Unauthenticated.' })
   @ApiResponse({ status: 200, description: 'Current auth status.' })
   async status(): Promise<AuthStatus> {
-    const [setupRequired, allowLocalLogin] = await Promise.all([
+    const [setupRequired, allowLocalLogin, allowSignup] = await Promise.all([
       this.auth.setupRequired(),
       this.settings.getAllowLocalLogin(),
+      this.settings.getAllowSignup(),
     ]);
     return {
       setupRequired,
       localLoginEnabled: allowLocalLogin,
+      // Effective flag (mirrors AuthService.signup()'s gates) so the login page
+      // only advertises signup when POST /auth/signup would actually accept it.
+      signupEnabled: allowSignup && allowLocalLogin && !setupRequired,
       oidcEnabled: this.oidc.isEnabled(),
       version: VERSION,
     };
@@ -69,6 +73,23 @@ export class AuthController {
   @ApiResponse({ status: 409, description: 'Setup already completed.' })
   async setup(@Body() body: SetupRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
     const { token, me } = await this.auth.setup(body);
+    res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
+    return me;
+  }
+
+  /**
+   * Same scrypt-DoS surface as setup()/login() (hashPassword on an
+   * unauthenticated route), so it carries the same strict AUTH_THROTTLE.
+   */
+  @Public()
+  @AUTH_THROTTLE
+  @Post('signup')
+  @ApiOperation({ summary: 'Self-service signup', description: 'Creates a regular (non-admin) user account and starts a session. Only available when the server-admin allowSignup setting is on (and local login is enabled) — 403 otherwise. Check GET /auth/status `signupEnabled` first.' })
+  @ApiResponse({ status: 201, description: 'Account created; session cookie set.' })
+  @ApiResponse({ status: 403, description: 'Self-service signup is disabled.' })
+  @ApiResponse({ status: 409, description: 'Username already taken, or first-run setup not completed yet.' })
+  async signup(@Body() body: SignupRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
+    const { token, me } = await this.auth.signup(body);
     res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
     return me;
   }
