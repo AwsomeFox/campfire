@@ -51,6 +51,7 @@ import { BackupModule } from './modules/backup/backup.module';
 import { AiDmModule } from './modules/ai-dm/ai-dm.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
+import { RevisionsModule } from './modules/revisions/revisions.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -159,6 +160,7 @@ function serveStaticImports(): DynamicModule[] {
     AiDmModule,
     TimelineModule,
     SessionZeroModule,
+    RevisionsModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },
