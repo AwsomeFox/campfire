@@ -1443,11 +1443,20 @@ export const Encounter = z.object({
   // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
   currentCombatantId: Id.nullable().default(null),
+  // Optional battle map (issue #39): a DM-uploaded image (attachment kind='map'|'image')
+  // rendered as the run-session background, with combatant tokens overlaid at
+  // combatant.tokenX/tokenY (0–100). null = no map, the tracker behaves exactly as before.
+  mapAttachmentId: Id.nullable().default(null),
   endedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
 export type Encounter = z.infer<typeof Encounter>;
 export const EncounterCreate = z.object({ name: z.string().min(1).max(120) });
+// Only the battle-map attachment is settable via PATCH — round/turn/status are driven
+// by the dedicated lifecycle endpoints (start/next-turn/end/reopen), not a generic update.
+export const EncounterUpdate = z.object({
+  mapAttachmentId: Id.nullable().optional(),
+});
 
 export const CombatantKind = z.enum(['character', 'monster']);
 export type CombatantKind = z.infer<typeof CombatantKind>;
@@ -1500,6 +1509,10 @@ export const Combatant = z.object({
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
+  // Battle-map token position (issue #39): 0–100 percent overlay on the encounter's
+  // map image, mirroring location.mapX/mapY. null = not yet placed on the map.
+  tokenX: z.number().nullable().default(null),
+  tokenY: z.number().nullable().default(null),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -1533,6 +1546,11 @@ export const CombatantUpdate = z.object({
   name: z.string().min(1).max(120).optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  // Battle-map token position (issue #39), 0–100 percent overlay. The DM may move any
+  // token; a player may move only their own character's. Values are clamped to 0–100
+  // server-side (mirrors the campaign map's location-pin drag). Both must be sent together.
+  tokenX: z.number().optional(),
+  tokenY: z.number().optional(),
 });
 
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });

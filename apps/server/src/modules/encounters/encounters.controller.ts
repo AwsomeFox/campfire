@@ -5,7 +5,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto } from './encounters.dto';
 
 @ApiTags('encounters')
 @Controller('campaigns/:campaignId/encounters')
@@ -86,6 +86,20 @@ export class EncountersController {
     // HP as a coarse band, never exact numbers.
     const role = await this.access.requireMember(user, row.campaignId);
     return this.encounters.getWithCombatantsOrThrow(id, role);
+  }
+
+  @Patch(':id')
+  @ApiOperation({ summary: 'Update an encounter', description: 'dm role required. Attach (or clear) the battle map via mapAttachmentId — an uploaded image (attachment kind map|image) rendered as the run-session background.' })
+  @ApiResponse({ status: 200, description: 'Updated encounter, with combatants.' })
+  @ApiResponse({ status: 400, description: 'mapAttachmentId does not exist in this campaign.' })
+  async update(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.updateEncounter(id, body, user, role);
   }
 
   @Delete(':id')

@@ -388,6 +388,44 @@ function migrateEncountersTableForCurrentCombatant(sqlite: Database.Database): v
 }
 
 /**
+ * Migration for DBs created before per-encounter battle maps (issue #39):
+ * `encounters.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no table
+ * rebuild needed, same as migrateEncountersTableForCurrentCombatant above. Pre-existing
+ * encounters get a NULL map (no battle map — the tracker behaves exactly as before).
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateEncountersTableForMapAttachment(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'map_attachment_id')) return;
+
+  sqlite.exec('ALTER TABLE encounters ADD COLUMN map_attachment_id INTEGER');
+}
+
+/**
+ * Migration for DBs created before battle-map combatant tokens (issue #39):
+ * `combatants.token_x` / `token_y` didn't exist. Plain nullable ADD COLUMNs — no table
+ * rebuild needed, same shape as migrateCombatantsTableForHpModel above. Pre-existing
+ * combatants get NULL positions (not yet placed on the map). New DBs never hit this
+ * path — BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateCombatantsTableForTokenPosition(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('token_x')) sqlite.exec('ALTER TABLE combatants ADD COLUMN token_x REAL');
+  if (!has('token_y')) sqlite.exec('ALTER TABLE combatants ADD COLUMN token_y REAL');
+}
+
+/**
  * Migration for DBs created before entity-level secrecy (issue #42):
  * `quests.hidden` / `npcs.hidden` didn't exist. Plain NOT NULL DEFAULT 0 ADD
  * COLUMNs — no table rebuild needed, same as migrateCharactersTableForXp above.
@@ -582,7 +620,9 @@ export function openDatabase(dataDir: string): {
   migrateNotesTableForRecipient(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
+  migrateEncountersTableForMapAttachment(sqlite);
   migrateCombatantsTableForHpModel(sqlite);
+  migrateCombatantsTableForTokenPosition(sqlite);
   migrateQuestsTableForHidden(sqlite);
   migrateNpcsTableForHidden(sqlite);
   migrateAttachmentsTableForHidden(sqlite);

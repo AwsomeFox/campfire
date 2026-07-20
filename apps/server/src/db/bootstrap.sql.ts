@@ -448,6 +448,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   round INTEGER NOT NULL DEFAULT 0,
   turn_index INTEGER NOT NULL DEFAULT 0,
   current_combatant_id INTEGER,
+  map_attachment_id INTEGER,
   ended_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -532,7 +533,9 @@ CREATE TABLE IF NOT EXISTS combatants (
   death_save_failures INTEGER NOT NULL DEFAULT 0,
   conditions TEXT NOT NULL DEFAULT '[]',
   rule_entry_id INTEGER,
-  sort_order INTEGER NOT NULL DEFAULT 0
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  token_x REAL,
+  token_y REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
