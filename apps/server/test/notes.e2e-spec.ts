@@ -141,6 +141,137 @@ describe('notes privacy (e2e)', () => {
 });
 
 /**
+ * Issue #5: entity-anchored notes carry the anchored entity's display name
+ * (entityName) so list views can show "The Sunken Crypt" instead of "Quest #12".
+ * Resolved server-side at read time, never stored; null when unanchored, when the
+ * entity was deleted, and for entity ids belonging to another campaign (no leak).
+ */
+describe('notes entityName resolution (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let questId: number;
+  let npcId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'EntityName Campaign' });
+    campaignId = campRes.body.id;
+
+    const questRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'The Sunken Crypt' });
+    questId = questRes.body.id;
+
+    const npcRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'Mira the Fence' });
+    npcId = npcRes.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('quest-anchored note resolves the quest title on create, list, and get', async () => {
+    const server = ctx.app.getHttpServer();
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'Bring rope next time', visibility: 'party_shared', entityType: 'quest', entityId: questId });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.entityName).toBe('The Sunken Crypt');
+
+    const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/notes`).set(authorPlayer);
+    const listed = listRes.body.find((n: { id: number }) => n.id === createRes.body.id);
+    expect(listed.entityName).toBe('The Sunken Crypt');
+
+    const getRes = await request(server).get(`/api/v1/notes/${createRes.body.id}`).set(authorPlayer);
+    expect(getRes.body.entityName).toBe('The Sunken Crypt');
+  });
+
+  it('unanchored note has entityName null', async () => {
+    const server = ctx.app.getHttpServer();
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'Free-floating thought' });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.entityName).toBeNull();
+  });
+
+  it('patching the anchor resolves the new entity name (npc)', async () => {
+    const server = ctx.app.getHttpServer();
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'She knows a buyer' });
+    const patchRes = await request(server)
+      .patch(`/api/v1/notes/${createRes.body.id}`)
+      .set(authorPlayer)
+      .send({ entityType: 'npc', entityId: npcId });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.entityName).toBe('Mira the Fence');
+  });
+
+  it('untitled session falls back to "Session <number>"; campaign anchor resolves campaign name', async () => {
+    const server = ctx.app.getHttpServer();
+    const sessionRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 7 });
+    const noteRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'That fight was rough', entityType: 'session', entityId: sessionRes.body.id });
+    expect(noteRes.body.entityName).toBe('Session 7');
+
+    const campNoteRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'Campaign-wide reminder', entityType: 'campaign', entityId: campaignId });
+    expect(campNoteRes.body.entityName).toBe('EntityName Campaign');
+  });
+
+  it('deleted entity: entityName degrades to null', async () => {
+    const server = ctx.app.getHttpServer();
+    const questRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Doomed Quest' });
+    const noteRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'Anchored to a doomed quest', entityType: 'quest', entityId: questRes.body.id });
+    expect(noteRes.body.entityName).toBe('Doomed Quest');
+
+    await request(server).delete(`/api/v1/quests/${questRes.body.id}`).set(dm);
+
+    const getRes = await request(server).get(`/api/v1/notes/${noteRes.body.id}`).set(authorPlayer);
+    expect(getRes.status).toBe(200);
+    expect(getRes.body.entityName).toBeNull();
+  });
+
+  it("does not leak another campaign's entity name", async () => {
+    const server = ctx.app.getHttpServer();
+    const otherCampRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Campaign' });
+    const foreignQuestRes = await request(server)
+      .post(`/api/v1/campaigns/${otherCampRes.body.id}/quests`)
+      .set(dm)
+      .send({ title: 'Secret Foreign Quest' });
+
+    const noteRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'Pointing across campaigns', entityType: 'quest', entityId: foreignQuestRes.body.id });
+    expect(noteRes.status).toBe(201);
+    expect(noteRes.body.entityName).toBeNull();
+  });
+});
+
+/**
  * Punch list item 8, real-session variant: proves the authorName override isn't a
  * dev-auth-only artifact — a real logged-in user's displayName wins over a spoofed
  * client-supplied authorName too.
