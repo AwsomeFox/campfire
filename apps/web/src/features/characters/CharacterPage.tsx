@@ -193,8 +193,8 @@ export default function CharacterPage() {
         <div className="h-14 w-14 shrink-0 rounded-full bg-[var(--color-accent-900)] text-[var(--color-accent-200)] flex items-center justify-center text-[17px] font-semibold">
           {initials(character.name)}
         </div>
-        <div>
-          <h1 className="text-2xl font-extrabold text-white leading-tight">{character.name}</h1>
+        <div className="min-w-0">
+          <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{character.name}</h1>
           <p className="text-sm text-slate-400">
             {character.className || 'Unknown class'} · Level {character.level} · played by{' '}
             {character.ownerUserId ? ownerLabel(character.ownerUserId) : 'DM'}

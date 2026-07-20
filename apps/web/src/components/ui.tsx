@@ -107,7 +107,7 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
 
 export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div className="cf-inset p-3 text-sm text-[var(--color-neutral-400)]">
+    <div role="alert" className="cf-inset p-3 text-sm text-[var(--color-neutral-400)]">
       {message}{' '}
       {onRetry && (
         <button onClick={onRetry} className="font-semibold text-[var(--cf-accent)] hover:underline">

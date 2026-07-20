@@ -840,7 +840,7 @@ export const AdminTokenCreate = z.object({
 export type AdminTokenCreate = z.infer<typeof AdminTokenCreate>;
 
 // ---------- proposals (AI/collab writes pending DM approval) ----------
-export const ProposalAction = z.enum(['create', 'update']);
+export const ProposalAction = z.enum(['create', 'update', 'delete']);
 export const ProposalStatus = z.enum(['pending', 'approved', 'rejected']);
 
 export const Proposal = z.object({
@@ -862,6 +862,23 @@ export const Proposal = z.object({
 });
 export type Proposal = z.infer<typeof Proposal>;
 export const ProposalResolve = z.object({ note: z.string().max(1000).optional() });
+// Approve may carry an amended `payload` (edit-before-approve): the DM tweaks the
+// proposed create/update body before it's applied through the normal write path.
+// Ignored for `delete` proposals (which carry no payload). Omit `payload` to apply
+// the proposal exactly as submitted.
+export const ProposalApprove = z.object({
+  note: z.string().max(1000).optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
+});
+export type ProposalApprove = z.infer<typeof ProposalApprove>;
+// Batch resolve: approve or reject up to 100 pending proposals in one request. Each
+// id is resolved independently through the same atomic approve/reject path, so the
+// response reports per-id success/failure rather than failing the whole batch.
+export const ProposalBatchResolve = z.object({
+  ids: z.array(Id).min(1).max(100),
+  note: z.string().max(1000).optional(),
+});
+export type ProposalBatchResolve = z.infer<typeof ProposalBatchResolve>;
 
 // ---------- attachments (uploaded images: character portraits, campaign maps) ----------
 export const AttachmentKind = z.enum(['portrait', 'map', 'image']);

@@ -204,6 +204,7 @@ function AwardXpForm({
           <TextInput
             type="number"
             min={1}
+            aria-label="XP to award each character"
             placeholder="XP each"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
@@ -269,10 +270,10 @@ function NewCharacterForm({
       <h2 className="font-bold text-white text-sm">New character</h2>
       {error && <p className="text-sm text-rose-400">{error}</p>}
       <form onSubmit={submit} className="space-y-3">
-        <TextInput placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+        <TextInput aria-label="Character name" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
         <div className="grid grid-cols-2 gap-3">
-          <TextInput placeholder="Species" value={species} onChange={(e) => setSpecies(e.target.value)} />
-          <TextInput placeholder="Class" value={className} onChange={(e) => setClassName(e.target.value)} />
+          <TextInput aria-label="Species" placeholder="Species" value={species} onChange={(e) => setSpecies(e.target.value)} />
+          <TextInput aria-label="Class" placeholder="Class" value={className} onChange={(e) => setClassName(e.target.value)} />
         </div>
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1">
@@ -281,6 +282,7 @@ function NewCharacterForm({
               type="number"
               min={1}
               max={20}
+              aria-label="Level"
               placeholder="Level"
               value={level}
               onChange={(e) => setLevel(e.target.value)}
