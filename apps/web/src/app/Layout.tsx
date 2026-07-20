@@ -273,6 +273,7 @@ export function Layout() {
         { key: 'world', label: 'World', to: `/c/${campaignId}/locations` },
         { key: 'npcs', label: 'NPCs', to: `/c/${campaignId}/npcs` },
         { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
+        { key: 'inventory', label: 'Inventory', to: `/c/${campaignId}/inventory` },
         { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
         { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
         { key: 'compendium', label: 'Compendium', to: `/c/${campaignId}/compendium` },
