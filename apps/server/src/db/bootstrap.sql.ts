@@ -123,6 +123,17 @@ CREATE TABLE IF NOT EXISTS timeline_calendars (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_zero (
+  campaign_id INTEGER PRIMARY KEY,
+  lines TEXT NOT NULL DEFAULT '[]',
+  veils TEXT NOT NULL DEFAULT '[]',
+  safety_tools TEXT NOT NULL DEFAULT '[]',
+  house_rules TEXT NOT NULL DEFAULT '',
+  tone_and_expectations TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS npcs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
@@ -173,6 +184,15 @@ CREATE TABLE IF NOT EXISTS session_shares (
   token_prefix TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_attendees (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  character_id INTEGER NOT NULL,
+  character_name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(session_id, character_id)
 );
 
 CREATE TABLE IF NOT EXISTS scheduled_sessions (
@@ -491,6 +511,10 @@ CREATE TABLE IF NOT EXISTS combatants (
   init_mod INTEGER NOT NULL DEFAULT 0,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
+  hp_temp INTEGER NOT NULL DEFAULT 0,
+  death_state TEXT NOT NULL DEFAULT 'none',
+  death_save_successes INTEGER NOT NULL DEFAULT 0,
+  death_save_failures INTEGER NOT NULL DEFAULT 0,
   conditions TEXT NOT NULL DEFAULT '[]',
   rule_entry_id INTEGER,
   sort_order INTEGER NOT NULL DEFAULT 0
@@ -509,6 +533,8 @@ CREATE INDEX IF NOT EXISTS idx_npcs_campaign ON npcs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_campaign ON locations(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_parent ON locations(parent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_session_attendees_session ON session_attendees(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_attendees_character ON session_attendees(character_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_session ON session_shares(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign ON scheduled_sessions(campaign_id);

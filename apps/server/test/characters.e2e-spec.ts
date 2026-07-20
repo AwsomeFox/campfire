@@ -404,6 +404,73 @@ describe('characters (e2e)', () => {
     expect(removeRes.body.conditions).toEqual(['poisoned']);
   });
 
+  // Issue #129: a player may own more than one character (backup PC, familiar, companion) —
+  // the API always allowed it, and now the owner (not just the dm) can delete their own.
+  describe('multi-character ownership & owner delete (issue #129)', () => {
+    it('a player may create a second owned character', async () => {
+      const server = ctx.app.getHttpServer();
+      const first = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Main PC' });
+      expect(first.status).toBe(201);
+      expect(first.body.ownerUserId).toBe('dev:owner-1');
+
+      const second = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Pip the Familiar' });
+      expect(second.status).toBe(201);
+      expect(second.body.ownerUserId).toBe('dev:owner-1');
+      expect(second.body.id).not.toBe(first.body.id);
+    });
+
+    it('an owner may delete their own character', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Backup Barbarian' });
+      expect(created.status).toBe(201);
+      const backupId = created.body.id;
+
+      const delRes = await request(server).delete(`/api/v1/characters/${backupId}`).set(owner);
+      expect(delRes.status).toBe(200);
+
+      const getAfter = await request(server).get(`/api/v1/characters/${backupId}`).set(owner);
+      expect(getAfter.status).toBe(404);
+    });
+
+    it("a non-owner player cannot delete someone else's character (403)", async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Not Yours' });
+      expect(created.status).toBe(201);
+      const otherId = created.body.id;
+
+      const delRes = await request(server).delete(`/api/v1/characters/${otherId}`).set(nonOwner);
+      expect(delRes.status).toBe(403);
+
+      // still there
+      const getAfter = await request(server).get(`/api/v1/characters/${otherId}`).set(owner);
+      expect(getAfter.status).toBe(200);
+    });
+
+    it('the dm may still delete any character', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'DM Can Remove Me' });
+      expect(created.status).toBe(201);
+
+      const delRes = await request(server).delete(`/api/v1/characters/${created.body.id}`).set(dm);
+      expect(delRes.status).toBe(200);
+    });
+  });
+
   // Issue #96: deleting a character must unlink any combatant that references it, so
   // combatants.characterId never dangles (combat HP-sync silently no-ops on a ghost id).
   // The combatant stays in the fight — only the link is cleared.

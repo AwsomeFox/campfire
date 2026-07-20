@@ -1,7 +1,9 @@
 /**
  * Party roster — mirrors design/claude-design/Campfire.dc.html "Party roster" (~701-717):
  * a card grid, avatar + name/class/level/owner, HP bar, condition tags. Links to the sheet.
- * "+ New character" is offered to players without a character yet, and always to the DM.
+ * "+ New character" is offered to every player and the DM. Players may own more than one
+ * character (backup PC, familiar, companion) — the API allows it, so the UI no longer
+ * silently caps a player at a single owned character (issue #129).
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useParams, Link } from 'react-router-dom';
@@ -67,8 +69,9 @@ export default function PartyPage() {
   }
 
   const myUserId = me?.user.id;
-  const hasOwnCharacter = characters.some((c) => c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId));
-  const canCreate = isDm || (role === 'player' && !hasOwnCharacter);
+  // A player may own multiple characters (backup PC, familiar, companion) — the API
+  // allows it, so don't cap the button at one owned character (issue #129).
+  const canCreate = isDm || role === 'player';
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
@@ -305,6 +308,30 @@ function NewCharacterForm({
   const [level, setLevel] = useState('1');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ddbRef, setDdbRef] = useState('');
+  const [importing, setImporting] = useState(false);
+
+  // Import a PUBLIC D&D Beyond sheet (issue #18): POST the id or character URL and let the
+  // server fetch + map it into a character. The sheet must be set to Public on D&D Beyond;
+  // private/not-found sheets come back as a clean 400/404 the ApiError message surfaces.
+  async function importFromDdb() {
+    const ref = ddbRef.trim();
+    if (!ref) return;
+    setImporting(true);
+    setError(null);
+    try {
+      // Send `url` when it looks like a link, else the bare id — the server accepts either.
+      const body = /^\d+$/.test(ref) ? { ddbId: ref } : { url: ref };
+      await api.post(`${API}/campaigns/${campaignId}/characters/import-ddb`, body);
+      setDdbRef('');
+      onCancel?.();
+      onCreated();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't import from D&D Beyond.");
+    } finally {
+      setImporting(false);
+    }
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -335,6 +362,31 @@ function NewCharacterForm({
     <Card className="space-y-3">
       <h2 className="font-bold text-white text-sm">New character</h2>
       {error && <p className="text-sm text-rose-400">{error}</p>}
+
+      {/* Import from D&D Beyond (issue #18) — read-only, public sheets only. */}
+      <div className="space-y-2 rounded-md border border-slate-700/60 p-3">
+        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Import from D&amp;D Beyond</span>
+        <div className="flex gap-2">
+          <TextInput
+            aria-label="D&D Beyond character id or URL"
+            placeholder="D&D Beyond id or character URL"
+            value={ddbRef}
+            onChange={(e) => setDdbRef(e.target.value)}
+            maxLength={500}
+          />
+          <Btn type="button" onClick={importFromDdb} disabled={importing || !ddbRef.trim()}>
+            {importing ? 'Importing…' : 'Import'}
+          </Btn>
+        </div>
+        <p className="text-xs text-slate-500">The sheet must be set to Public on D&amp;D Beyond.</p>
+      </div>
+
+      <div className="flex items-center gap-2 text-xs text-slate-600">
+        <span className="h-px flex-1 bg-slate-700/60" />
+        or create manually
+        <span className="h-px flex-1 bg-slate-700/60" />
+      </div>
+
       <form onSubmit={submit} className="space-y-3">
         <TextInput aria-label="Character name" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} autoFocus />
         <div className="grid grid-cols-2 gap-3">
