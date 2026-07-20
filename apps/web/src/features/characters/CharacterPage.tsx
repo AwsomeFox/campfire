@@ -18,8 +18,9 @@
  */
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { Attachment, Character, CharacterAction, CampaignMember, SkillRank } from '@campfire/schema';
+import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpForLevel, CONDITIONS } from '@campfire/schema';
+import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
@@ -209,7 +210,10 @@ export default function CharacterPage() {
           {initials(character.name)}
         </div>
         <div className="min-w-0">
-          <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{character.name}</h1>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{character.name}</h1>
+            {character.status !== 'active' && <StatusTag status={character.status} />}
+          </div>
           <p className="text-sm text-slate-400">
             {character.className || 'Unknown class'} · Level {character.level} · played by{' '}
             {character.ownerUserId ? ownerLabel(character.ownerUserId) : 'DM'}
@@ -381,6 +385,7 @@ function SheetEditForm({
   const [level, setLevel] = useState(String(character.level));
   const [ac, setAc] = useState(character.ac != null ? String(character.ac) : '');
   const [hpMax, setHpMax] = useState(String(character.hpMax));
+  const [status, setStatus] = useState<CharacterStatus>(character.status);
   const [stats, setStats] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
     for (const k of ABILITY_KEYS) init[k] = String(abilityScore(character, k));
@@ -403,6 +408,7 @@ function SheetEditForm({
         level: Math.max(1, Math.min(20, Number(level) || 1)),
         ac: ac.trim() === '' ? null : Number(ac),
         hpMax: Math.max(1, Number(hpMax) || 1),
+        status,
         stats: statNums,
       });
       onSaved();
@@ -436,6 +442,22 @@ function SheetEditForm({
             title="Current HP is clamped to the new max automatically."
           />
         </div>
+        <label className="space-y-1 col-span-2">
+          <span className="text-[10px] text-slate-500 font-bold uppercase">Status</span>
+          <select
+            className="cf-select w-full"
+            aria-label="Character status"
+            value={status}
+            onChange={(e) => setStatus(e.target.value as CharacterStatus)}
+            title="Only active characters are auto-added to new encounters. Dead/retired/inactive PCs stay on the roster."
+          >
+            {CHARACTER_STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {STATUS_LABEL[s]}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
       <div className="grid grid-cols-3 gap-2.5">
         {ABILITY_KEYS.map((k) => (

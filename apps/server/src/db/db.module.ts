@@ -289,6 +289,27 @@ function migrateCharactersTableForXp(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before character lifecycle status (issue #115):
+ * `characters.status` didn't exist, so a dead/retired PC couldn't be marked and
+ * was force-added to every new encounter. Plain NOT NULL DEFAULT 'active' ADD
+ * COLUMN — every existing character becomes 'active' (preserving today's auto-add
+ * behavior), no table rebuild needed, same as migrateCharactersTableForXp above.
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCharactersTableForStatus(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  const hasStatus = columns.some((c) => c.name === 'status');
+  if (hasStatus) return;
+
+  sqlite.exec("ALTER TABLE characters ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+}
+
+/**
  * Migration for DBs created before characters/sessions gained DM-only secrets
  * (issue #59): `characters.dm_secret` and `sessions.dm_secret` didn't exist —
  * quests/NPCs/locations had dmSecret from day one, but a DM couldn't attach a
@@ -457,6 +478,7 @@ export function openDatabase(dataDir: string): {
   migrateCampaignsTableForIcsToken(sqlite);
   migrateCampaignsTableForStorageQuota(sqlite);
   migrateCharactersTableForXp(sqlite);
+  migrateCharactersTableForStatus(sqlite);
   migrateCharactersTableForDmSecret(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);

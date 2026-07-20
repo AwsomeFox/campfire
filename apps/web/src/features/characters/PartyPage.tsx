@@ -11,6 +11,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { avatarTone, initials } from './avatar';
+import { StatusTag } from './status';
 
 export default function PartyPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -135,11 +136,14 @@ function CharacterCard({
 }) {
   const tone = avatarTone(index);
   const hpPct = character.hpMax > 0 ? Math.max(0, Math.min(100, (character.hpCurrent / character.hpMax) * 100)) : 0;
+  // Dead/retired/inactive PCs (issue #115) are muted so a fallen or shelved character
+  // is visually distinct from the live party, while staying fully viewable.
+  const isActive = character.status === 'active';
   // The card stays a single click target to the sheet, but the quick-HP steppers
   // are siblings of the Link (not nested inside it) — nesting <button> inside an
   // <a> is invalid and would hijack the navigation click (issue #68).
   return (
-    <div className="cf-card p-3.5 space-y-2.5 hover:border-amber-500/50 transition-colors">
+    <div className={`cf-card p-3.5 space-y-2.5 hover:border-amber-500/50 transition-colors ${isActive ? '' : 'opacity-60'}`}>
       <Link to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
         <div className="flex items-center gap-2.5">
           <div
@@ -148,7 +152,10 @@ function CharacterCard({
             {initials(character.name)}
           </div>
           <div className="flex-1 min-w-0">
-            <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
+            <div className="flex items-center gap-1.5">
+              <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
+              {!isActive && <StatusTag status={character.status} className="shrink-0" />}
+            </div>
             <p className="text-[11.5px] text-slate-500 truncate">
               {character.className || 'Unknown class'} · Lv {character.level}
               {ownerLabel && ` · ${ownerLabel}`}

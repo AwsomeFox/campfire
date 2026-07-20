@@ -52,6 +52,7 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     level: row.level,
     xp: row.xp,
     background: row.background,
+    status: row.status as Character['status'],
     // Fold to canonical uppercase keys so existing rows written with lowercase keys
     // (schema permits any case) still resolve on the sheet / initiative engine (issue #48).
     stats: normalizeStats(fromJsonText<Record<string, number>>(row.stats, {})),
@@ -150,6 +151,7 @@ export class CharactersService {
         level: input.level ?? 1,
         xp: input.xp ?? 0,
         background: input.background ?? '',
+        status: input.status ?? 'active',
         stats: toJsonText(normalizeStats(input.stats ?? {})),
         ac: clampAc(input.ac ?? null),
         hpCurrent,
@@ -192,6 +194,7 @@ export class CharactersService {
     if (input.level !== undefined) update.level = input.level;
     if (input.xp !== undefined) update.xp = input.xp;
     if (input.background !== undefined) update.background = input.background;
+    if (input.status !== undefined) update.status = input.status;
     if (input.stats !== undefined) update.stats = toJsonText(normalizeStats(input.stats));
     if (input.ac !== undefined) update.ac = clampAc(input.ac);
     if (input.hpMax !== undefined) update.hpMax = input.hpMax;

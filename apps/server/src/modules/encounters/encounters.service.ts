@@ -145,7 +145,7 @@ export class EncountersService {
     return row;
   }
 
-  /** Creates the encounter (preparing) and auto-adds every campaign character as a combatant. */
+  /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
   async create(campaignId: number, input: EncounterCreateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const ts = nowIso();
     const [encounterRow] = await this.db
@@ -162,7 +162,15 @@ export class EncountersService {
       })
       .returning();
 
-    const partyRows = await this.db.select().from(characters).where(eq(characters.campaignId, campaignId));
+    // Auto-add only ACTIVE characters (issue #115). Dead/retired/inactive PCs stay on
+    // the roster but are skipped here, so a long campaign's fallen and replaced
+    // characters stop being force-conscripted into every new fight. The DM can still
+    // add any of them manually via addCombatant. Legacy pre-migration rows all default
+    // to 'active', preserving prior behavior.
+    const partyRows = await this.db
+      .select()
+      .from(characters)
+      .where(and(eq(characters.campaignId, campaignId), eq(characters.status, 'active')));
     // Auto-add the whole party in ONE multi-row INSERT (#72) rather than one INSERT
     // per character — the row values (including the sequential sortOrder) are computed
     // in JS and handed to a single `.values([...])`. Behavior is identical to the old
