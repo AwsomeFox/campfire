@@ -120,8 +120,9 @@ running on 8080 — maps to the container's internal 8080).
 | `PORT` | `8080` | Port the server listens on inside the container |
 | `DATA_DIR` | `/data` | SQLite DB + attachment uploads live here (the volume mount point) |
 | `ORIGIN` | *(unset)* | Comma-separated allowed CORS origin(s). Leave unset for same-origin deployments (the default — SPA + API on one origin) |
-| `TRUST_PROXY` | `1` (trust one hop) | Express `trust proxy` setting — pass a hop count or `false`. Needed for rate limiting and `req.ip` to see the real client IP behind a reverse proxy (Traefik in the reference deployment) |
+| `TRUST_PROXY` | `1` (trust one hop) | Express `trust proxy` setting — pass a hop count (`1`, `2`, …), `false`, or an explicit IP/subnet allow-list. Needed for rate limiting and `req.ip` to see the real client IP behind a reverse proxy (Traefik in the reference deployment) |
 | `API_DOCS` | *(unset)* | Swagger UI (`/api/docs`) + OpenAPI JSON (`/api/openapi.json`) exposure. Unset: enabled in dev, **disabled in production**. Set `1` to force-enable (e.g. agent self-discovery on a trusted network) or `0` to force-disable |
+| `ALLOW_INSECURE_HTTP` | *(unset)* | Set to `1` for a no-TLS LAN/homelab deployment reached over plain HTTP (`http://192.168.1.x:8080`). Drops the HTTPS-assuming security headers (CSP `upgrade-insecure-requests`, HSTS) and issues the session cookie without `Secure` so login works. **Leave unset whenever you have TLS** |
 | `OIDC_ISSUER` | *(unset)* | OIDC provider issuer URL (enables SSO login when set, alongside local auth) |
 | `OIDC_CLIENT_ID` | *(unset)* | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | *(unset)* | OIDC client secret |

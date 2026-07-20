@@ -5,6 +5,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import { OidcService } from './oidc.service';
 import { AuthService } from './auth.service';
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, OIDC_FLOW_COOKIE_NAME, OIDC_FLOW_COOKIE_MAX_AGE_MS } from './auth.constants';
+import { resolveCookieSecure } from '../../common/security-config';
 
 function sessionCookieOptions() {
   return {
@@ -12,7 +13,8 @@ function sessionCookieOptions() {
     sameSite: 'lax' as const,
     path: '/',
     maxAge: SESSION_MAX_AGE_MS,
-    secure: process.env.NODE_ENV === 'production',
+    // See auth.controller.ts — Secure in production unless ALLOW_INSECURE_HTTP (issue #117).
+    secure: resolveCookieSecure(),
   };
 }
 
@@ -22,7 +24,7 @@ function flowCookieOptions() {
     sameSite: 'lax' as const,
     path: '/api/v1/auth/oidc',
     maxAge: OIDC_FLOW_COOKIE_MAX_AGE_MS,
-    secure: process.env.NODE_ENV === 'production',
+    secure: resolveCookieSecure(),
   };
 }
 

@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import type { INestApplication } from '@nestjs/common';
+import { Logger, type INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { patchNestJsSwagger } from 'nestjs-zod';
 import cookieParser from 'cookie-parser';
@@ -8,6 +8,7 @@ import helmet from 'helmet';
 import express from 'express';
 import { AppModule } from './app.module';
 import { SESSION_COOKIE_NAME } from './modules/auth/auth.constants';
+import { resolveTrustProxy, resolveAllowInsecureHttp, isDevAuthActive } from './common/security-config';
 
 patchNestJsSwagger();
 
@@ -67,16 +68,31 @@ export function configureApp(app: INestApplication): void {
   // Required for ThrottlerGuard's per-IP rate limiting (P2 DoS fix) to see the real client
   // IP rather than bucketing every request under the reverse proxy's own address; also
   // makes req.ip/req.secure correct generally. TRUST_PROXY env overrides the Express
-  // setting value directly (e.g. a hop count, or 'false' to disable) for deployments
-  // behind more than one proxy hop; defaults to trusting exactly one hop.
+  // setting for deployments behind more than one proxy hop; defaults to trusting exactly
+  // one hop. resolveTrustProxy() coerces the string env into what Express expects — a
+  // NUMBER for a hop count, boolean for true/false — since Express reads a raw string as
+  // an IP allow-list, so `"2"` would silently disable trust (issue #165).
   // Goes through the underlying Express instance (rather than the NestExpressApplication-only
   // app.set() wrapper) so this works against the plain INestApplication type this function is
   // typed with — same type test/main-hardening.e2e-spec.ts builds against.
-  const trustProxy = process.env.TRUST_PROXY;
   const expressInstance = app.getHttpAdapter().getInstance() as { set(key: string, value: unknown): void };
-  expressInstance.set('trust proxy', trustProxy !== undefined ? (trustProxy === 'false' ? false : trustProxy) : 1);
+  expressInstance.set('trust proxy', resolveTrustProxy(process.env.TRUST_PROXY));
 
-  app.use(helmet());
+  // Plain-HTTP LAN escape hatch (issue #117): when ALLOW_INSECURE_HTTP is set, drop the two
+  // helmet defaults that break a no-TLS homelab deployment — CSP `upgrade-insecure-requests`
+  // (which rewrites every subresource/`/api` request to https://… where nothing listens) and
+  // HSTS. Default (unset) is unchanged: full helmet defaults, secure for TLS deployments.
+  app.use(
+    resolveAllowInsecureHttp()
+      ? helmet({
+          contentSecurityPolicy: {
+            useDefaults: true,
+            directives: { upgradeInsecureRequests: null },
+          },
+          hsts: false,
+        })
+      : helmet(),
+  );
   app.use(cookieParser());
   // Explicit body-size cap on JSON/urlencoded bodies — unbounded request bodies are a
   // resource-exhaustion vector on any authenticated (or unauthenticated, e.g. /auth/login)
@@ -127,13 +143,20 @@ export function setupApiDocs(app: INestApplication): void {
     return;
   }
 
+  // Only advertise the dev-auth headers in the docs when dev auth is actually active
+  // (DEV_AUTH=1 and non-production) — no point documenting a bypass that the guard
+  // hard-disables in production (issue #119).
+  const devAuth = isDevAuthActive();
+
   const config = new DocumentBuilder()
     .setTitle('Campfire API')
     .setDescription(
       'Self-hosted D&D campaign tracker API. Real local auth via httpOnly session cookie ' +
-        `(${SESSION_COOKIE_NAME}) — see /api/v1/auth/status, /auth/setup, /auth/login. ` +
-        'Dev auth (opt-in, DEV_AUTH=1 env): pass x-dev-role (dm|player|viewer, default dm) and ' +
-        'x-dev-user (default dev-user) headers when no session cookie is present — used by e2e tests only.',
+        `(${SESSION_COOKIE_NAME}) — see /api/v1/auth/status, /auth/setup, /auth/login.` +
+        (devAuth
+          ? ' Dev auth (active — DEV_AUTH=1, non-production): pass x-dev-role (dm|player|viewer, default dm) and ' +
+            'x-dev-user (default dev-user) headers when no session cookie is present — used by e2e tests only.'
+          : ''),
     )
     .setVersion('0.1.0')
     .addTag('auth')
@@ -154,15 +177,20 @@ export function setupApiDocs(app: INestApplication): void {
     .addTag('export')
     .addTag('health')
     .addCookieAuth(SESSION_COOKIE_NAME, { type: 'apiKey', in: 'cookie', name: SESSION_COOKIE_NAME })
-    .addApiKey({ type: 'apiKey', name: 'x-dev-role', in: 'header', description: 'dev-auth only (DEV_AUTH=1): dm | player | viewer (default dm)' }, 'x-dev-role')
-    .addApiKey({ type: 'apiKey', name: 'x-dev-user', in: 'header', description: 'dev-auth only (DEV_AUTH=1): dev user id (default dev-user)' }, 'x-dev-user')
     .addBearerAuth(
       { type: 'http', scheme: 'bearer', bearerFormat: 'cf_pat_<48 hex>', description: 'Personal access token — Authorization: Bearer cf_pat_...' },
       'bearer',
-    )
-    .build();
+    );
 
-  const document = SwaggerModule.createDocument(app, config);
+  if (devAuth) {
+    config
+      .addApiKey({ type: 'apiKey', name: 'x-dev-role', in: 'header', description: 'dev-auth only (DEV_AUTH=1): dm | player | viewer (default dm)' }, 'x-dev-role')
+      .addApiKey({ type: 'apiKey', name: 'x-dev-user', in: 'header', description: 'dev-auth only (DEV_AUTH=1): dev user id (default dev-user)' }, 'x-dev-user');
+  }
+
+  const builtConfig = config.build();
+
+  const document = SwaggerModule.createDocument(app, builtConfig);
   SwaggerModule.setup('api/docs', app, document, {
     jsonDocumentUrl: 'api/openapi.json',
   });
@@ -179,6 +207,20 @@ async function bootstrap() {
 
   configureApp(app);
   setupApiDocs(app);
+
+  // Loud boot-time warning whenever the DEV_AUTH bypass is live (issue #119): it turns
+  // every uncredentialed request into a synthetic server-admin, so an operator must never
+  // hit it by accident. (The guard hard-disables it in production regardless — this warns
+  // for the non-production case where it IS active, e.g. a homelab left in dev mode.)
+  if (isDevAuthActive()) {
+    new Logger('Bootstrap').warn(
+      'DEV_AUTH=1 is ACTIVE — authentication is bypassed and every uncredentialed request ' +
+        'is granted server-admin. This is for e2e tests/local dev only; NEVER enable it on a ' +
+        'reachable server. (Ignored entirely when NODE_ENV=production.)',
+    );
+  } else if (process.env.DEV_AUTH === '1') {
+    new Logger('Bootstrap').warn('DEV_AUTH=1 is set but IGNORED because NODE_ENV=production (issue #119).');
+  }
 
   const port = process.env.PORT ? Number(process.env.PORT) : 8080;
   await app.listen(port);
