@@ -62,6 +62,7 @@ documented in [Authentication](../administration/authentication.md).
 | `ORIGIN` | *(unset)* | Only needed if you split the SPA onto a different origin; leave unset for the single-image deployment |
 | `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | *(unset)* | Enable SSO — see [Authentication](../administration/authentication.md) |
 | `OIDC_ADMIN_GROUP` | *(unset)* | Members of this IdP group become server admins on login |
+| `OIDC_ALLOWED_GROUP` | *(unset)* | Restrict sign-in to members of this IdP group — see [Authentication](../administration/authentication.md) |
 
 Local username/password auth works out of the box; OIDC is entirely optional and
 layered on when those variables are set.

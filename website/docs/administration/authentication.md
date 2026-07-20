@@ -20,11 +20,19 @@ Set these environment variables and restart:
 | `OIDC_CLIENT_SECRET` | The OAuth client secret |
 | `OIDC_REDIRECT_URI` | `https://<your-host>/api/v1/auth/oidc/callback` |
 | `OIDC_ADMIN_GROUP` | *(optional)* members of this group become **server admins** |
+| `OIDC_ALLOWED_GROUP` | *(optional)* only members of this group may **sign in at all** |
 
 When these are set, the login page offers **Sign in with <provider>**. On first
 login a Campfire account is provisioned automatically from the token's claims;
 membership in `OIDC_ADMIN_GROUP` grants the server-admin role. Campaign roles
 (dm/player/viewer) are still assigned inside Campfire.
+
+By default **any** user who can authenticate at your IdP gets a Campfire account
+on first login. On a shared corporate or family IdP that's usually too broad —
+set `OIDC_ALLOWED_GROUP` to an IdP group (e.g. `campfire-users`) and Campfire
+will refuse sign-in (and skip account provisioning) for anyone outside it. The
+check runs on every login, so removing someone from the group locks them out the
+next time they sign in. Members of `OIDC_ADMIN_GROUP` can always sign in.
 
 ### Authentik quick setup
 
