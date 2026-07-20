@@ -7,7 +7,8 @@ one.
 ## MCP server
 
 - **Endpoint:** `https://<your-host>/mcp` (stateless streamable HTTP, JSON-RPC).
-- **Auth:** `Authorization: Bearer cf_pat_…`.
+- **Auth:** `Authorization: Bearer cf_pat_…` (personal access token), **or** an
+  OAuth access token from the connector flow below.
 - **Tools:** 64 covering campaigns, quests, objectives, NPCs, locations, characters,
   encounters and combatants, dice, sessions, notes, the inbox, proposals, members,
   rule packs, audit, and export. Call `tools/list` for the live catalogue with full
@@ -22,6 +23,27 @@ claude mcp add --transport http campfire \
   https://<your-host>/mcp \
   --header "Authorization: Bearer cf_pat_…"
 ```
+
+### OAuth connector flow (no copied token)
+
+Campfire is also its own OAuth 2.1 authorization server, so `/mcp` can be added
+as a Claude **custom connector** without a hand-copied token — see
+[Connect an AI](connect.md#add-campfire-as-a-claude-connector-oauth-no-token-to-copy).
+An unauthenticated `POST /mcp` returns `401` with a
+`WWW-Authenticate: Bearer resource_metadata="…"` challenge, which kicks off
+discovery. The relevant endpoints (all at the server root, outside `/api/v1`):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /.well-known/oauth-protected-resource` | RFC 9728 protected-resource metadata (advertises the authorization server). |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 authorization-server metadata (endpoints, PKCE, grants). |
+| `POST /oauth/register` | RFC 7591 Dynamic Client Registration. |
+| `GET`/`POST /oauth/authorize` | Login + consent; issues an authorization code (PKCE, `code_challenge_method=S256`). |
+| `POST /oauth/token` | `authorization_code` and `refresh_token` grants. |
+| `POST /oauth/revoke` | RFC 7009 token revocation. |
+
+Issued tokens honour the same scope/role caps as PATs (DM/Player/Viewer,
+optional single-campaign binding) and never carry server-admin power.
 
 ## REST API
 
