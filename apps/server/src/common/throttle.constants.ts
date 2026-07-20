@@ -37,6 +37,18 @@ export const SHARE_THROTTLE_LIMIT = 30;
 export const SHARE_THROTTLE_TTL_MS = 60_000;
 
 /**
+ * Strict-ish: the public ICS calendar feed (GET /calendar/:token.ics) is
+ * unauthenticated by design (capability-URL secret, see crypto.ts
+ * generateIcsFeedToken). Real calendar clients poll at most every few
+ * minutes; 30/min/IP is generous for them and shuts down token-guessing or
+ * scrape floods. Applied per-route via @Throttle({auth: {...}}) reusing the
+ * `auth` named throttler — ThrottlerGuard keys counters per route+IP, so this
+ * bucket never interferes with the login/token/setup counters.
+ */
+export const ICS_THROTTLE_LIMIT = 30;
+export const ICS_THROTTLE_TTL_MS = 60_000;
+
+/**
  * Test-env escape hatch: e2e suites legitimately fire many rapid auth calls
  * across a single jest file (e.g. auth.e2e-spec.ts's ~28 login/setup calls in
  * one run) — real per-test-file throttling would make those suites flaky
