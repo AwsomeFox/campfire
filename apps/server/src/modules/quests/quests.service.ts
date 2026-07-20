@@ -291,6 +291,9 @@ export class QuestsService {
       entityType: 'quest',
       entityId: id,
       campaignId: existing.campaignId,
+      // #161: record the changed fields so the audit log is a real delta channel
+      // (empty detail before). Matches the characters/encounters/members convention.
+      detail: JSON.stringify(input),
     });
     return redactSecret(toDomain(row), role);
   }

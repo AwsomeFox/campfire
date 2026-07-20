@@ -626,15 +626,34 @@ export class McpToolsService {
     this.tool(
       server,
       'read_audit_log',
-      'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven actions.',
-      { campaignId: CampaignIdArg, limit: LimitArg(500, 100), offset: OffsetArg },
-      async ({ campaignId, limit, offset }) => {
+      'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven ' +
+        'actions. For a "what changed since last session" delta, pass `sinceId` (the highest id you saw last time) ' +
+        'to get only newer entries — one call, no client-side re-filtering — then keep the first row\'s id as the ' +
+        'next cursor. `sinceTs` (ISO timestamp) is a wall-clock alternative. Narrow with `action` (e.g. "npc.update") ' +
+        'or `entityType` (e.g. "quest"). Update entries carry the changed fields in `detail`.',
+      {
+        campaignId: CampaignIdArg,
+        limit: LimitArg(500, 100),
+        offset: OffsetArg,
+        sinceId: z.number().int().positive().optional().describe('Delta cursor: only entries with id greater than this (highest id from your last read)'),
+        sinceTs: z.string().min(1).optional().describe('Only entries created strictly after this ISO-8601 timestamp'),
+        action: z.string().min(1).optional().describe('Filter to a single action, e.g. "npc.update" or "quest.status"'),
+        entityType: z.string().min(1).optional().describe('Filter to a single entity type, e.g. "npc", "quest", "session"'),
+      },
+      async ({ campaignId, limit, offset, sinceId, sinceTs, action, entityType }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         // issue #71: offset pages back through history the cap-100 previously hid.
+        // issue #161: sinceId/sinceTs + action/entityType turn this into a real delta channel.
         return this.audit.listForCampaign(
           campaignId as number,
           (limit as number | undefined) ?? 100,
           (offset as number | undefined) ?? 0,
+          {
+            sinceId: sinceId as number | undefined,
+            sinceTs: sinceTs as string | undefined,
+            action: action as string | undefined,
+            entityType: entityType as string | undefined,
+          },
         );
       },
     );
@@ -979,9 +998,11 @@ export class McpToolsService {
     this.tool(
       server,
       'upsert_npc',
-      'Create an NPC (omit npcId) or update one (pass npcId). DM; with propose:true any member may submit a ' +
-        'proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads), an optional ' +
-        'locationId, and a hidden flag (true = excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
+      'Create or update an NPC. Pass npcId to update a specific NPC; omit it and an existing NPC with the same ' +
+        'name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical re-run is ' +
+        'idempotent rather than duplicating. A genuinely new name creates a new NPC. DM; with propose:true any ' +
+        'member may submit a proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads), ' +
+        'an optional locationId, and a hidden flag (true = excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
       {
         campaignId: CampaignIdArg,
         npcId: Id.optional().describe('Existing NPC id (update); omit to create'),
@@ -1004,6 +1025,20 @@ export class McpToolsService {
           return this.npcs.update(npcId as number, validated, user, role);
         }
         const validated = NpcCreate.parse(fields); // name required on create
+        // #159: real upsert. With no npcId, match an existing NPC by (campaignId, name)
+        // case-insensitively and UPDATE it instead of creating a duplicate — so an AI
+        // scribe's identical re-run (timeout-after-commit, or a re-issued prompt) is
+        // idempotent. A genuinely different name still creates a new NPC.
+        const existingByName = await this.npcs.findRowByName(campaignId as number, validated.name);
+        if (existingByName) {
+          if (propose) {
+            const role = await this.access.requireMember(user, existingByName.campaignId, { write: true });
+            const proposal = await this.proposalRecords.create(existingByName.campaignId, 'npc', existingByName.id, 'update', validated, user, role);
+            return { proposal };
+          }
+          const role = await this.access.requireRole(user, existingByName.campaignId, 'dm');
+          return this.npcs.update(existingByName.id, validated, user, role);
+        }
         if (propose) {
           const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'npc', null, 'create', validated, user, role);
@@ -1035,9 +1070,11 @@ export class McpToolsService {
     this.tool(
       server,
       'upsert_location',
-      'Create a location (omit locationId) or update one (pass locationId). DM; with propose:true any member may ' +
-        'submit a proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads). Use ' +
-        'set_location_discovery to change `status` with the "current location" demotion side-effect.',
+      'Create or update a location. Pass locationId to update a specific location; omit it and an existing location ' +
+        'with the same name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical ' +
+        're-run is idempotent rather than duplicating. A genuinely new name creates a new location. DM; with ' +
+        'propose:true any member may submit a proposal instead. Supports a dmSecret field (DM-only text, stripped ' +
+        'from non-DM reads). Use set_location_discovery to change `status` with the "current location" demotion side-effect.',
       {
         campaignId: CampaignIdArg,
         locationId: Id.optional().describe('Existing location id (update); omit to create'),
@@ -1060,6 +1097,20 @@ export class McpToolsService {
           return this.locations.update(locationId as number, validated, user, role);
         }
         const validated = LocationCreate.parse(fields); // name required on create
+        // #159: real upsert. With no locationId, match an existing location by
+        // (campaignId, name) case-insensitively and UPDATE it instead of creating a
+        // duplicate — so an AI scribe's identical re-run is idempotent. A genuinely
+        // different name still creates a new location.
+        const existingByName = await this.locations.findRowByName(campaignId as number, validated.name);
+        if (existingByName) {
+          if (propose) {
+            const role = await this.access.requireMember(user, existingByName.campaignId, { write: true });
+            const proposal = await this.proposalRecords.create(existingByName.campaignId, 'location', existingByName.id, 'update', validated, user, role);
+            return { proposal };
+          }
+          const role = await this.access.requireRole(user, existingByName.campaignId, 'dm');
+          return this.locations.update(existingByName.id, validated, user, role);
+        }
         if (propose) {
           const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'location', null, 'create', validated, user, role);

@@ -698,6 +698,105 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(deleteNoteResult.isError).toBeFalsy();
   });
 
+  it('#159: a second identical upsert_npc updates in place instead of duplicating', async () => {
+    const client = await mcpClient(dmToken);
+    const name = 'R5 Tavernkeeper Test';
+
+    const first = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name, role: 'Keeper' } });
+    const npc1 = parseResult(first) as { id: number; role: string };
+    expect(npc1.role).toBe('Keeper');
+
+    // Identical re-run (the scribe timeout/retry scenario) must NOT create a second NPC.
+    const second = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name, role: 'Keeper' } });
+    const npc2 = parseResult(second) as { id: number };
+    expect(npc2.id).toBe(npc1.id);
+
+    // Case-insensitive re-run with a changed field updates the SAME row.
+    const third = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: name.toUpperCase(), disposition: 'friendly' } });
+    const npc3 = parseResult(third) as { id: number; disposition: string };
+    expect(npc3.id).toBe(npc1.id);
+    expect(npc3.disposition).toBe('friendly');
+
+    // Exactly one NPC by that name exists.
+    const listResult = await client.callTool({ name: 'list_npcs', arguments: { campaignId } });
+    const matches = (parseResult(listResult) as { id: number; name: string }[]).filter(
+      (n) => n.name.toLowerCase() === name.toLowerCase(),
+    );
+    expect(matches).toHaveLength(1);
+
+    // A genuinely different name still creates a new NPC.
+    const other = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'A Different NPC' } });
+    expect((parseResult(other) as { id: number }).id).not.toBe(npc1.id);
+  });
+
+  it('#159: a second identical upsert_location updates in place instead of duplicating', async () => {
+    const client = await mcpClient(dmToken);
+    const name = 'R5 Sunken Grotto Test';
+
+    const first = await client.callTool({ name: 'upsert_location', arguments: { campaignId, name, kind: 'cave' } });
+    const loc1 = parseResult(first) as { id: number; kind: string };
+    expect(loc1.kind).toBe('cave');
+
+    const second = await client.callTool({ name: 'upsert_location', arguments: { campaignId, name: name.toLowerCase(), body: 'damp and dark' } });
+    const loc2 = parseResult(second) as { id: number; body: string };
+    expect(loc2.id).toBe(loc1.id);
+    expect(loc2.body).toBe('damp and dark');
+
+    const listResult = await client.callTool({ name: 'list_locations', arguments: { campaignId } });
+    const matches = (parseResult(listResult) as { id: number; name: string }[]).filter(
+      (l) => l.name.toLowerCase() === name.toLowerCase(),
+    );
+    expect(matches).toHaveLength(1);
+  });
+
+  it('#161: read_audit_log sinceId returns only newer entries, and npc/quest/session updates record non-empty detail', async () => {
+    const client = await mcpClient(dmToken);
+
+    // Bookmark: the highest audit id right now.
+    const before = (await client.callTool({ name: 'read_audit_log', arguments: { campaignId, limit: 1 } }));
+    const beforeRows = parseResult(before) as { id: number }[];
+    const sinceId = beforeRows.length ? beforeRows[0].id : 0;
+
+    // Generate a few new auditable actions.
+    const npc = parseResult(await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'Delta NPC' } })) as { id: number };
+    await client.callTool({ name: 'upsert_npc', arguments: { campaignId, npcId: npc.id, disposition: 'hostile' } });
+    const quest = parseResult(await client.callTool({ name: 'create_quest', arguments: { campaignId, title: 'Delta Quest' } })) as { id: number };
+    await client.callTool({ name: 'update_quest', arguments: { questId: quest.id, status: 'active' } });
+    const session = parseResult(await client.callTool({ name: 'add_session_recap', arguments: { campaignId, recap: 'delta recap' } })) as { id: number };
+    await client.callTool({ name: 'update_session', arguments: { sessionId: session.id, title: 'Delta Session' } });
+
+    // Delta read: only entries strictly newer than the bookmark.
+    const deltaResult = await client.callTool({ name: 'read_audit_log', arguments: { campaignId, sinceId, limit: 500 } });
+    const delta = parseResult(deltaResult) as { id: number; action: string; entityType: string; detail: string }[];
+    expect(delta.length).toBeGreaterThan(0);
+    expect(delta.every((r) => r.id > sinceId)).toBe(true);
+
+    // The update entries now carry a real detail payload (was '' before #161).
+    const npcUpdate = delta.find((r) => r.action === 'npc.update');
+    expect(npcUpdate).toBeDefined();
+    expect(npcUpdate!.detail).not.toBe('');
+    expect(JSON.parse(npcUpdate!.detail)).toMatchObject({ disposition: 'hostile' });
+
+    const questUpdate = delta.find((r) => r.action === 'quest.update');
+    expect(questUpdate).toBeDefined();
+    expect(questUpdate!.detail).not.toBe('');
+    expect(JSON.parse(questUpdate!.detail)).toMatchObject({ status: 'active' });
+
+    const sessionUpdate = delta.find((r) => r.action === 'session.update');
+    expect(sessionUpdate).toBeDefined();
+    expect(sessionUpdate!.detail).not.toBe('');
+    expect(JSON.parse(sessionUpdate!.detail)).toMatchObject({ title: 'Delta Session' });
+
+    // action + entityType filters narrow the delta.
+    const filteredResult = await client.callTool({
+      name: 'read_audit_log',
+      arguments: { campaignId, sinceId, action: 'npc.update', entityType: 'npc', limit: 500 },
+    });
+    const filtered = parseResult(filteredResult) as { action: string; entityType: string }[];
+    expect(filtered.length).toBeGreaterThan(0);
+    expect(filtered.every((r) => r.action === 'npc.update' && r.entityType === 'npc')).toBe(true);
+  });
+
   it('submit_inbox_item (player-role) is visible via read_inbox (dm-role)', async () => {
     const dmClient = await mcpClient(dmToken);
     const inboxResult = await dmClient.callTool({
