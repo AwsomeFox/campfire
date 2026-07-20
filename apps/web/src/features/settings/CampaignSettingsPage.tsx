@@ -90,6 +90,14 @@ export default function CampaignSettingsPage() {
               void refreshCampaigns();
             }}
           />
+          <StatusCard
+            campaignId={id}
+            campaign={campaign}
+            onSaved={(c) => {
+              setCampaign(c);
+              void refreshCampaigns();
+            }}
+          />
           <RuleSystemCard
             campaignId={id}
             campaign={campaign}
@@ -191,6 +199,71 @@ function GeneralCard({
         </button>
         {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
       </div>
+    </div>
+  );
+}
+
+const STATUSES: Campaign['status'][] = ['active', 'paused', 'completed'];
+
+/**
+ * Archive control (issue #16). Status is PATCHed on its own — the server
+ * rejects any other field on an archived (paused/completed) campaign, so this
+ * card is the one switch that always works, both ways.
+ */
+function StatusCard({
+  campaignId,
+  campaign,
+  onSaved,
+}: {
+  campaignId: number;
+  campaign: Campaign;
+  onSaved: (c: Campaign) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function changeStatus(value: Campaign['status']) {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { status: value });
+      onSaved(updated);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't change the campaign status.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const archived = campaign.status !== 'active';
+
+  return (
+    <div className="card elev-sm">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="card-kicker" style={{ margin: 0 }}>Status &amp; archive</span>
+        {archived && <span className="tag tag-neutral" style={{ fontSize: 10 }}>read-only</span>}
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Paused and completed campaigns are archived: read-only for everyone (quests, notes, rolls — everything)
+        and grouped under Archive on the campaign hub. Set the status back to Active to resume play.
+      </p>
+      <div className="field" style={{ maxWidth: 200 }}>
+        <label htmlFor="settings-status">Campaign status</label>
+        <select
+          id="settings-status"
+          className="input"
+          value={campaign.status}
+          disabled={saving}
+          onChange={(e) => void changeStatus(e.target.value as Campaign['status'])}
+        >
+          {STATUSES.map((status) => (
+            <option key={status} value={status}>
+              {status.charAt(0).toUpperCase() + status.slice(1)}
+            </option>
+          ))}
+        </select>
+      </div>
+      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
     </div>
   );
 }

@@ -38,18 +38,22 @@ export class CampaignsController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a campaign', description: 'dm role required.' })
+  @ApiOperation({ summary: 'Update a campaign', description: 'dm role required. On a paused/completed (archived, read-only) campaign only `status` may be changed — everything else requires un-archiving first.' })
   @ApiResponse({ status: 200, description: 'Updated campaign.' })
+  @ApiResponse({ status: 403, description: 'Campaign is archived and the patch touches more than `status`.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: CampaignUpdateDto, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'dm');
+    // allowArchived: this is the un-archive path (PATCH {status:'active'}) —
+    // CampaignsService.update() restricts an archived campaign to status-only patches.
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
     return this.campaigns.update(id, body, user);
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a campaign', description: 'dm role required.' })
+  @ApiOperation({ summary: 'Delete a campaign', description: 'dm role required. Allowed even when the campaign is archived (paused/completed).' })
   @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'dm');
+    // allowArchived: deleting an archived campaign must not require un-archiving it first.
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
     return this.campaigns.remove(id, user);
   }
 
