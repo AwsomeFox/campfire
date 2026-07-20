@@ -13,14 +13,17 @@ top bar and is visible only to server admins.
   can't demote, disable, or delete your way into a locked-out server, and you can't
   delete a user who is the **sole DM** of a campaign without reassigning first.
 
-_(Accounts also get created when someone accepts a DM **invite link** — see
-[Admin vs DM](access-model.md). Optional open self-service signup is still on the
-[roadmap](../reference/roadmap.md).)_
+_(Accounts also get created when someone accepts a DM **invite link**, or — if you
+enable it — when someone signs themselves up. See [Admin vs DM](access-model.md).)_
 
 ## Server settings (Admin → Settings)
 
 - **Allow username/password sign-in** — toggle local login for non-admins. Admins can
   always sign in locally, so you can't lock yourself out.
+- **Self-service signup** — toggle open registration. Off by default; when on, anyone
+  who can reach the server can create their own account (which then has to be added to
+  campaigns). Leave it off if you'd rather gate accounts behind admin-created logins or
+  DM invite links.
 
 ## Rule systems (Admin → Rule systems)
 
