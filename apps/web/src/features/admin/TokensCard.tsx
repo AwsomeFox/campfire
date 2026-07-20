@@ -225,7 +225,7 @@ function NewTokenForm({
   const [saving, setSaving] = useState(false);
 
   async function create() {
-    if (!name.trim()) return;
+    if (saving || !name.trim()) return;
     setSaving(true);
     onError(null);
     try {
@@ -249,8 +249,13 @@ function NewTokenForm({
         <TextInput
           className="!min-h-0 !py-2 text-sm"
           placeholder="Name, e.g. claude-scribe"
+          aria-label="Token name (required)"
           value={name}
           onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void create();
+          }}
+          autoFocus
         />
         <select
           className="cf-select !min-h-0 !py-2 text-sm"
@@ -275,11 +280,17 @@ function NewTokenForm({
         </select>
       </div>
       <p className="text-[11px] text-slate-500">{SCOPE_HELP[scope]}</p>
-      <div className="flex gap-2 justify-end">
+      <div className="flex items-center gap-2 justify-end">
+        {!name.trim() && <p className="text-[11px] text-slate-500 mr-auto">Name your token to enable Create.</p>}
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={create} disabled={saving || !name.trim()}>
+        <Btn
+          className="!min-h-0 !py-1.5 text-xs"
+          onClick={create}
+          disabled={saving || !name.trim()}
+          title={!name.trim() ? 'Enter a token name first' : undefined}
+        >
           Create
         </Btn>
       </div>

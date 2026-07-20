@@ -35,6 +35,9 @@ const SECTION_OPTIONS: { value: Section; label: string }[] = [
   { value: 'monsters', label: 'Monsters' },
   { value: 'items', label: 'Items' },
   { value: 'conditions', label: 'Conditions' },
+  { value: 'classes', label: 'Classes' },
+  { value: 'races', label: 'Races' },
+  { value: 'feats', label: 'Feats' },
 ];
 
 const SECTION_LABEL: Record<Section, string> = {
@@ -42,6 +45,9 @@ const SECTION_LABEL: Record<Section, string> = {
   monsters: 'Monsters',
   items: 'Items',
   conditions: 'Conditions',
+  classes: 'Classes',
+  races: 'Races',
+  feats: 'Feats',
 };
 
 export function RulePacksCard() {

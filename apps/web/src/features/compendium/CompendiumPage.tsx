@@ -18,6 +18,9 @@ const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
   { key: 'monster', label: 'Monsters' },
   { key: 'item', label: 'Items' },
   { key: 'condition', label: 'Conditions' },
+  { key: 'class', label: 'Classes' },
+  { key: 'race', label: 'Races' },
+  { key: 'feat', label: 'Feats' },
 ];
 
 function useDebounced<T>(value: T, delayMs: number): T {

@@ -10,6 +10,7 @@ import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { api, ApiError, API } from '../lib/api';
 import { Btn, Card, TextInput } from '../components/ui';
+import { NotificationsBell } from '../features/notifications/NotificationsBell';
 
 function initials(name: string): string {
   const trimmed = name.trim();
@@ -220,7 +221,8 @@ export function Layout() {
 
   // me.memberships is fetched once at login, so it's stale the moment a DM changes
   // someone's access mid-session. Once the campaign list has loaded, if this campaign
-  // isn't in it (removed, or never was — for a non-admin) treat it as lost access:
+  // isn't in it (removed, or never was — server admins included, since admin ≠
+  // auto-DM) treat it as lost access:
   // refresh both auth + campaigns once (covers the "promoted" case too, since a
   // promoted player's next campaign entry will now show DM nav) and bounce home.
   useEffect(() => {
@@ -235,13 +237,13 @@ export function Layout() {
     // of lost access, just that we couldn't check. Re-check per distinct campaignId.
     if (campaignsLoading || campaignsError || staleCheckedIdRef.current === campaignId) return;
     staleCheckedIdRef.current = campaignId;
-    const stillHasAccess = isAdmin || campaigns.some((c) => c.id === campaignId);
+    const stillHasAccess = campaigns.some((c) => c.id === campaignId);
     setLostAccess(!stillHasAccess);
     if (!stillHasAccess) {
       void refreshAuth();
       void refreshCampaigns();
     }
-  }, [campaignId, campaignsLoading, campaignsError, campaigns, isAdmin, lostAccess, refreshAuth, refreshCampaigns]);
+  }, [campaignId, campaignsLoading, campaignsError, campaigns, lostAccess, refreshAuth, refreshCampaigns]);
 
   useEffect(() => {
     function onClick(e: MouseEvent) {
@@ -271,6 +273,7 @@ export function Layout() {
         { key: 'world', label: 'World', to: `/c/${campaignId}/locations` },
         { key: 'npcs', label: 'NPCs', to: `/c/${campaignId}/npcs` },
         { key: 'party', label: 'Party', to: `/c/${campaignId}/party` },
+        { key: 'inventory', label: 'Inventory', to: `/c/${campaignId}/inventory` },
         { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
         { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
         { key: 'compendium', label: 'Compendium', to: `/c/${campaignId}/compendium` },
@@ -320,22 +323,25 @@ export function Layout() {
           className="hidden md:flex w-[230px] shrink-0 sticky top-0 flex-col gap-1.5 h-screen p-3.5 border-r"
           style={{ borderColor: 'var(--color-divider)' }}
         >
-          <Link
-            to="/"
-            className="flex items-center gap-2.5 px-2 py-1.5 mb-2 rounded-md"
-            style={{ borderRadius: 'var(--radius-md)' }}
-          >
-            <FlameMark size={22} />
-            <span className="min-w-0 leading-tight">
-              <span
-                className="block truncate text-[15px]"
-                style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, color: 'var(--color-text)' }}
-              >
-                {campaign?.name ?? 'Campfire'}
+          <div className="flex items-center gap-1 mb-2">
+            <Link
+              to="/"
+              className="flex flex-1 min-w-0 items-center gap-2.5 px-2 py-1.5 rounded-md"
+              style={{ borderRadius: 'var(--radius-md)' }}
+            >
+              <FlameMark size={22} />
+              <span className="min-w-0 leading-tight">
+                <span
+                  className="block truncate text-[15px]"
+                  style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, color: 'var(--color-text)' }}
+                >
+                  {campaign?.name ?? 'Campfire'}
+                </span>
+                <span className="block text-[11px] text-muted">Switch campaign</span>
               </span>
-              <span className="block text-[11px] text-muted">Switch campaign</span>
-            </span>
-          </Link>
+            </Link>
+            <NotificationsBell />
+          </div>
 
           <nav className="flex flex-col gap-0.5">
             {mainNav.map((item) => (
@@ -413,6 +419,7 @@ export function Layout() {
             </div>
           </div>
           <div className="flex-1" />
+          <NotificationsBell />
           {campaignId !== undefined && roleLabel && (
             <button
               className="tag tag-outline cursor-pointer"
@@ -452,6 +459,7 @@ export function Layout() {
             </Link>
             <span className="tag tag-outline" style={{ fontSize: 10 }}>self-hosted</span>
             <div className="flex-1" />
+            <NotificationsBell />
             {isAdmin && (
               <Link to="/admin" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
                 Admin
@@ -465,6 +473,22 @@ export function Layout() {
               Sign out
             </button>
           </header>
+        )}
+
+        {/* Archived (paused/completed) campaigns are read-only server-side — surface it on every campaign page. */}
+        {campaign && campaign.status !== 'active' && (
+          <div
+            className="px-4 py-2 text-center"
+            style={{
+              fontSize: 12.5,
+              color: 'var(--color-accent-200)',
+              background: 'color-mix(in srgb, var(--color-accent) 10%, transparent)',
+              borderBottom: '1px solid var(--color-divider)',
+            }}
+          >
+            This campaign is {campaign.status} — archived and read-only.
+            {isDm ? ' Set its status back to active in Settings to make changes.' : ''}
+          </div>
         )}
 
         <main className="flex-1 w-full pb-20 md:pb-10">

@@ -43,7 +43,7 @@ export class CampaignNotesController {
     @Body() body: NoteCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.notes.create(campaignId, body, user, role);
   }
 
@@ -55,16 +55,22 @@ export class CampaignNotesController {
     @Body() body: InboxCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.notes.createInbox(campaignId, body, user, role);
   }
 
   @Get('inbox')
-  @ApiOperation({ summary: 'List unresolved inbox items', description: 'dm role required.' })
+  @ApiOperation({ summary: 'List inbox items', description: 'dm role required. Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest resolution first), including any entity link each item was resolved into.' })
+  @ApiQuery({ name: 'resolved', required: false, type: Boolean, description: 'If true, list resolved items instead of open ones.' })
   @ApiResponse({ status: 200, description: 'Inbox items.' })
-  async listInbox(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, campaignId, 'dm');
-    return this.notes.listInbox(campaignId);
+  async listInbox(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('resolved') resolved?: string,
+  ) {
+    // allowArchived: listing the inbox is a read — fine on an archived campaign.
+    await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
+    return this.notes.listInbox(campaignId, resolved === 'true');
   }
 }
 
@@ -90,7 +96,7 @@ export class NotesController {
   @ApiResponse({ status: 200, description: 'Updated note.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: NoteUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
     return this.notes.update(id, body, user, role);
   }
 
@@ -99,12 +105,12 @@ export class NotesController {
   @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
     return this.notes.remove(id, user, role);
   }
 
   @Post(':id/resolve')
-  @ApiOperation({ summary: 'Resolve an inbox item', description: 'dm role required.' })
+  @ApiOperation({ summary: 'Resolve an inbox item', description: 'dm role required. Optionally link the entity the item became (entityType + entityId, provided together) — surfaced in the resolved history.' })
   @ApiResponse({ status: 201, description: 'Resolved inbox item.' })
   async resolve(@Param('id', ParseIntPipe) id: number, @Body() body: InboxResolveDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);

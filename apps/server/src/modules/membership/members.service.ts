@@ -4,9 +4,10 @@ import type { z } from 'zod';
 import { MemberCreate, MemberUpdate } from '@campfire/schema';
 import type { CampaignMember } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, users, characters } from '../../db/schema';
+import { campaignMembers, campaigns, users, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -18,6 +19,7 @@ export class MembersService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async listForCampaign(campaignId: number): Promise<CampaignMember[]> {
@@ -92,6 +94,35 @@ export class MembersService {
     if (!row) throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
   }
 
+  /**
+   * Issue #32: linking a member to a character grants that player edit rights by syncing
+   * characters.ownerUserId (the string form of users.id — see UserIdRef in @campfire/schema;
+   * campaignMembers.userId is the raw integer) instead of requiring the DM to also PATCH
+   * the character's ownerUserId by hand. Unlinking (or re-linking to another character)
+   * clears ownership only when the character is still owned by this member, so an explicit
+   * DM reassignment via PATCH /characters/:id is never clobbered.
+   */
+  private async syncCharacterOwnership(
+    userId: number,
+    previousCharacterId: number | null,
+    nextCharacterId: number | null,
+  ): Promise<void> {
+    if (previousCharacterId === nextCharacterId) return;
+    const ownerUserId = String(userId);
+    if (previousCharacterId != null) {
+      await this.db
+        .update(characters)
+        .set({ ownerUserId: null, updatedAt: nowIso() })
+        .where(and(eq(characters.id, previousCharacterId), eq(characters.ownerUserId, ownerUserId)));
+    }
+    if (nextCharacterId != null) {
+      await this.db
+        .update(characters)
+        .set({ ownerUserId, updatedAt: nowIso() })
+        .where(eq(characters.id, nextCharacterId));
+    }
+  }
+
   async create(campaignId: number, input: MemberCreateInput, actor: RequestUser): Promise<CampaignMember> {
     const [existing] = await this.db
       .select()
@@ -114,6 +145,8 @@ export class MembersService {
       })
       .returning();
 
+    await this.syncCharacterOwnership(input.userId, null, input.characterId ?? null);
+
     await this.audit.log({
       actor: auditActor(actor),
       actorRole: 'dm',
@@ -122,6 +155,20 @@ export class MembersService {
       entityId: row.id,
       campaignId,
       detail: `user=${input.userId} role=${input.role}`,
+    });
+
+    // Notify the added user (not the acting DM). Best-effort inside NotificationsService.
+    const [campaign] = await this.db
+      .select({ name: campaigns.name })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    await this.notifications.notifyUser(input.userId, campaignId, actor, {
+      type: 'added_to_campaign',
+      title: `You were added to ${campaign?.name ?? 'a campaign'} as ${input.role}`,
+      entityType: 'campaign',
+      entityId: campaignId,
+      actorName: actor.name,
     });
 
     const [full] = await this.listForCampaign(campaignId).then((all) => all.filter((m) => m.id === row.id));
@@ -145,6 +192,10 @@ export class MembersService {
     if (input.characterId !== undefined) update.characterId = input.characterId;
 
     await this.db.update(campaignMembers).set(update).where(eq(campaignMembers.id, memberId));
+
+    if (input.characterId !== undefined) {
+      await this.syncCharacterOwnership(existing.userId, existing.characterId, input.characterId);
+    }
 
     await this.audit.log({
       actor: auditActor(actor),

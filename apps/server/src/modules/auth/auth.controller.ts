@@ -11,7 +11,16 @@ import { OidcService } from './oidc.service';
 import { SettingsService } from '../settings/settings.service';
 import { UsersService } from '../users/users.service';
 import { TokensService } from '../tokens/tokens.service';
-import { SetupRequestDto, LoginRequestDto, PasswordChangeDto, AuthTokenRequestDto } from './auth.dto';
+import { PasswordResetService } from './password-reset.service';
+import {
+  SetupRequestDto,
+  LoginRequestDto,
+  SignupRequestDto,
+  PasswordChangeDto,
+  AuthTokenRequestDto,
+  PasswordResetRequestCreateDto,
+  PasswordResetConfirmDto,
+} from './auth.dto';
 import { PreferencesUpdateDto } from '../users/users.dto';
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, VERSION } from './auth.constants';
 import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
@@ -42,6 +51,7 @@ export class AuthController {
     private readonly settings: SettingsService,
     private readonly oidc: OidcService,
     private readonly tokens: TokensService,
+    private readonly passwordReset: PasswordResetService,
   ) {}
 
   @Public()
@@ -49,13 +59,17 @@ export class AuthController {
   @ApiOperation({ summary: 'Server auth status', description: 'Whether first-run setup is required, whether local (non-admin) login is enabled, and whether OIDC SSO is configured. Unauthenticated.' })
   @ApiResponse({ status: 200, description: 'Current auth status.' })
   async status(): Promise<AuthStatus> {
-    const [setupRequired, allowLocalLogin] = await Promise.all([
+    const [setupRequired, allowLocalLogin, allowSignup] = await Promise.all([
       this.auth.setupRequired(),
       this.settings.getAllowLocalLogin(),
+      this.settings.getAllowSignup(),
     ]);
     return {
       setupRequired,
       localLoginEnabled: allowLocalLogin,
+      // Effective flag (mirrors AuthService.signup()'s gates) so the login page
+      // only advertises signup when POST /auth/signup would actually accept it.
+      signupEnabled: allowSignup && allowLocalLogin && !setupRequired,
       oidcEnabled: this.oidc.isEnabled(),
       version: VERSION,
     };
@@ -69,6 +83,23 @@ export class AuthController {
   @ApiResponse({ status: 409, description: 'Setup already completed.' })
   async setup(@Body() body: SetupRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
     const { token, me } = await this.auth.setup(body);
+    res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
+    return me;
+  }
+
+  /**
+   * Same scrypt-DoS surface as setup()/login() (hashPassword on an
+   * unauthenticated route), so it carries the same strict AUTH_THROTTLE.
+   */
+  @Public()
+  @AUTH_THROTTLE
+  @Post('signup')
+  @ApiOperation({ summary: 'Self-service signup', description: 'Creates a regular (non-admin) user account and starts a session. Only available when the server-admin allowSignup setting is on (and local login is enabled) — 403 otherwise. Check GET /auth/status `signupEnabled` first.' })
+  @ApiResponse({ status: 201, description: 'Account created; session cookie set.' })
+  @ApiResponse({ status: 403, description: 'Self-service signup is disabled.' })
+  @ApiResponse({ status: 409, description: 'Username already taken, or first-run setup not completed yet.' })
+  async signup(@Body() body: SignupRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
+    const { token, me } = await this.auth.signup(body);
     res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
     return me;
   }
@@ -119,6 +150,47 @@ export class AuthController {
     return this.tokens.mintFor(owner, row.id, body);
   }
 
+  /**
+   * Forgot-password step 1 (admin-approved flow — see PasswordResetService).
+   * ALWAYS answers 202 with the same body, whether or not the username exists
+   * (no user-enumeration signal). Throttled like login: unauthenticated,
+   * writes a row per unknown-to-attacker username.
+   */
+  @Public()
+  @AUTH_THROTTLE
+  @Post('reset-request')
+  @HttpCode(202)
+  @ApiOperation({
+    summary: 'Request a password reset (forgot password)',
+    description:
+      'Files a self-service reset request for a server admin to approve — this server may have no mail transport, so the admin relays the one-time reset code out-of-band. ' +
+      'Always returns 202 with the same body whether or not the account exists.',
+  })
+  @ApiResponse({ status: 202, description: 'Accepted (regardless of whether the account exists).' })
+  async resetRequest(@Body() body: PasswordResetRequestCreateDto): Promise<{ message: string }> {
+    await this.passwordReset.request(body.username);
+    return { message: 'Request received. Ask your server admin to approve it — they will give you a one-time reset code.' };
+  }
+
+  /**
+   * Forgot-password step 2: redeem the admin-issued one-time code. Single-use;
+   * kills every session for the account on success. Generic 400 for every
+   * failure mode (unknown/expired code) — the code is the only credential.
+   */
+  @Public()
+  @AUTH_THROTTLE
+  @Post('reset-confirm')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: 'Redeem a password-reset code',
+    description: 'Sets a new password using the one-time code an admin approved. Single-use, expires after 1 hour; all existing sessions for the account are revoked.',
+  })
+  @ApiResponse({ status: 204, description: 'Password reset; log in with the new password.' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired reset code (generic — no detail leaked).' })
+  async resetConfirm(@Body() body: PasswordResetConfirmDto): Promise<void> {
+    await this.passwordReset.confirm(body.code, body.newPassword);
+  }
+
   @Post('logout')
   @HttpCode(204)
   @ApiCookieAuth('campfire_session')
@@ -156,6 +228,7 @@ export class MeController {
           serverRole: user.serverRole,
           disabled: false,
           accentColor: null,
+          textSize: 'default',
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },
@@ -188,7 +261,7 @@ export class MeController {
   }
 
   @Patch('preferences')
-  @ApiOperation({ summary: 'Update own preferences', description: 'Self-service display name / accent color update.' })
+  @ApiOperation({ summary: 'Update own preferences', description: 'Self-service display name / accent color / text size update.' })
   @ApiResponse({ status: 200, description: 'Updated user profile.' })
   async updatePreferences(@Body() body: PreferencesUpdateDto, @CurrentUser() user: RequestUser): Promise<User> {
     if (user.id.startsWith('dev:')) {

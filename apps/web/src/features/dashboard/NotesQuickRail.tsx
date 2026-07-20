@@ -34,7 +34,11 @@ export function NotesQuickRail({
   const [error, setError] = useState<string | null>(null);
   const [quickNote, setQuickNote] = useState('');
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  // Where the quick capture goes: a private note, or straight to the DM's scribe inbox.
+  // The inbox option is player-facing (the DM already owns the inbox), but the server
+  // allows any member to submit, so we simply hide it for the DM rather than gate it.
+  const [dest, setDest] = useState<'private' | 'inbox'>('private');
+  const [savedTo, setSavedTo] = useState<'private' | 'inbox' | null>(null);
 
   const load = useCallback(async () => {
     // Server allows private notes for every role, including viewers.
@@ -55,15 +59,23 @@ export function NotesQuickRail({
     if (!quickNote.trim()) return;
     setSaving(true);
     setError(null);
-    setSaved(false);
+    setSavedTo(null);
     try {
-      // Personal quick capture — a private note, same as MyNotesPage's quickCapture.
-      await api.post(`${API}/campaigns/${campaignId}/notes`, { body: quickNote.trim(), visibility: 'private' });
-      setQuickNote('');
-      setSaved(true);
-      await load();
+      if (dest === 'inbox') {
+        // Player-facing scribe-inbox submission — the server stamps the author from
+        // the session, so only the body is needed (POST /campaigns/:id/inbox).
+        await api.post(`${API}/campaigns/${campaignId}/inbox`, { body: quickNote.trim() });
+        setQuickNote('');
+        setSavedTo('inbox');
+      } else {
+        // Personal quick capture — a private note, same as MyNotesPage's quickCapture.
+        await api.post(`${API}/campaigns/${campaignId}/notes`, { body: quickNote.trim(), visibility: 'private' });
+        setQuickNote('');
+        setSavedTo('private');
+        await load();
+      }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save the note.");
+      setError(err instanceof ApiError ? err.message : dest === 'inbox' ? "Couldn't send to the DM's inbox." : "Couldn't save the note.");
     } finally {
       setSaving(false);
     }
@@ -111,24 +123,36 @@ export function NotesQuickRail({
         ))
       )}
 
+      {!isDm && (
+        <div className="flex gap-1.5 pt-1">
+          <button type="button" onClick={() => setDest('private')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
+            <Chip variant={dest === 'private' ? 'active' : 'private'}>🔒 Private note</Chip>
+          </button>
+          <button type="button" onClick={() => setDest('inbox')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
+            <Chip variant={dest === 'inbox' ? 'active' : 'dm'}>✉️ To DM inbox</Chip>
+          </button>
+        </div>
+      )}
+
       <form className="flex gap-2 pt-1" onSubmit={saveQuickNote}>
         <TextInput
           style={{ minHeight: 0, paddingTop: 8, paddingBottom: 8 }}
-          placeholder="Quick note… (private, just for you)"
+          placeholder={dest === 'inbox' ? 'Leave a note for the DM… goes to their inbox' : 'Quick note… (private, just for you)'}
           value={quickNote}
           onChange={(e) => {
             setQuickNote(e.target.value);
-            setSaved(false);
+            setSavedTo(null);
           }}
         />
         <Btn type="submit" className="!min-h-0 !py-2 text-sm shrink-0" disabled={saving || !quickNote.trim()}>
-          Save
+          {dest === 'inbox' ? 'Send' : 'Save'}
         </Btn>
       </form>
-      {saved && <p className="text-[11px] text-emerald-400">Saved to your notes.</p>}
+      {savedTo === 'private' && <p className="text-[11px] text-emerald-400">Saved to your notes.</p>}
+      {savedTo === 'inbox' && <p className="text-[11px] text-emerald-400">Sent to the DM&apos;s inbox.</p>}
       {!isDm && (
         <Link to={`/c/${campaignId}/notes`} className="text-[11px]" style={{ color: 'var(--color-accent-300)' }}>
-          Want the DM to see something? Open My Notes → share a note with the DM →
+          Want to share a longer note with the DM or party? Open My Notes →
         </Link>
       )}
     </div>

@@ -18,12 +18,13 @@ import type {
   Combatant,
   CombatantKind,
   EncounterWithCombatants,
-  RollResult,
   RuleEntry,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
+import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
@@ -110,26 +111,24 @@ export default function RunSessionPage() {
     };
   }, [cid]);
 
-  // Poll while preparing or running (and the tab is visible) — players waiting for the
-  // DM to hit "Start" need to see it happen without a manual reload. Stop once ended.
-  useEffect(() => {
-    if (!encounter || encounter.status === 'ended') return;
-    let cancelled = false;
-    const tick = async () => {
-      if (document.visibilityState !== 'visible') return;
-      try {
-        const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
-        if (!cancelled) setEncounter(data);
-      } catch {
-        /* keep last-known state; next tick retries */
-      }
-    };
-    const handle = setInterval(tick, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(handle);
-    };
-  }, [eid, encounter?.status]);
+  // Live updates over SSE (replaces the old 5s poll) — players waiting for the DM to
+  // hit "Start" (or take a turn, adjust HP, …) see it pushed instantly. On a remote
+  // delete, bounce back to the encounters list rather than surfacing a 404.
+  useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
+    onEvent: useCallback(
+      (event) => {
+        if (event.encounterId !== eid) return;
+        if (event.type === 'encounter.deleted') {
+          navigate(`/c/${cid}/encounters`);
+          return;
+        }
+        void load();
+      },
+      [eid, cid, navigate, load],
+    ),
+    // The stream was down for a while — refetch to catch anything missed.
+    onReconnect: useCallback(() => void load(), [load]),
+  });
 
   const myUserId = me?.user.id;
   const ownedCharacterIds = useMemo(
@@ -363,7 +362,7 @@ export default function RunSessionPage() {
         />
       )}
 
-      <DiceLog campaignId={cid} />
+      <SharedDiceLog campaignId={cid} />
 
       {confirmEnd && (
         <ConfirmDialog
@@ -848,67 +847,5 @@ function AddCombatantPanel({
   );
 }
 
-// ---------------------------------------------------------------------------
-
-function DiceLog({ campaignId }: { campaignId: number }) {
-  const [expr, setExpr] = useState('1d20');
-  const [rolling, setRolling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [rolls, setRolls] = useState<RollResult[]>([]);
-
-  async function roll(e: FormEvent) {
-    e.preventDefault();
-    if (!expr.trim()) return;
-    setRolling(true);
-    setError(null);
-    try {
-      const result = await api.post<RollResult>(`${API}/campaigns/${campaignId}/roll`, { expr: expr.trim() });
-      setRolls((prev) => [result, ...prev].slice(0, 5));
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't roll.");
-    } finally {
-      setRolling(false);
-    }
-  }
-
-  return (
-    <Card className="space-y-2.5">
-      <span className="card-kicker">Dice log</span>
-      <form onSubmit={roll} className="flex gap-2 items-end flex-wrap">
-        <div className="field" style={{ flex: 1, minWidth: 120 }}>
-          <label>Expression</label>
-          <TextInput placeholder="1d20+3" value={expr} onChange={(e) => setExpr(e.target.value)} />
-        </div>
-        <Btn type="submit" disabled={rolling || !expr.trim()}>
-          {rolling ? 'Rolling…' : 'Roll'}
-        </Btn>
-      </form>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
-      {rolls.length > 0 && (
-        <div className="flex flex-col gap-1">
-          {rolls.map((r, i) => (
-            <div
-              key={`${r.expr}-${i}-${r.total}`}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 32 }}
-            >
-              <span style={{ flex: 1, minWidth: 0, fontSize: 12.5 }}>{r.expr}</span>
-              <span className="text-muted" style={{ fontSize: 11 }}>
-                [{r.rolls.join(', ')}]
-              </span>
-              <span
-                style={{
-                  fontFamily: 'var(--font-heading)',
-                  fontSize: 18,
-                  color: 'var(--color-accent)',
-                  flex: 'none',
-                }}
-              >
-                {r.total}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </Card>
-  );
-}
+// DiceLog moved to features/dice/SharedDiceLog — rolls are now persisted
+// server-side and shared by the whole table (issue #35).

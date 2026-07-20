@@ -51,7 +51,7 @@ export class CampaignQuestsController {
     @Res({ passthrough: true }) res: Response,
   ) {
     if (isProposed(proposed)) {
-      const role = await this.access.requireMember(user, campaignId);
+      const role = await this.access.requireMember(user, campaignId, { write: true });
       const validated = QuestCreate.parse(body);
       const proposal = await this.proposals.create(campaignId, 'quest', null, 'create', validated, user, role);
       res.status(202);
@@ -95,7 +95,7 @@ export class QuestsController {
   ) {
     const row = await this.quests.getRowOrThrow(id);
     if (isProposed(proposed)) {
-      const role = await this.access.requireMember(user, row.campaignId);
+      const role = await this.access.requireMember(user, row.campaignId, { write: true });
       const validated = QuestUpdate.parse(body);
       const proposal = await this.proposals.create(row.campaignId, 'quest', id, 'update', validated, user, role);
       res.status(202);

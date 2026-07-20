@@ -1,7 +1,18 @@
 import { createZodDto } from 'nestjs-zod';
-import { SetupRequest, LoginRequest, PasswordChange, AuthTokenRequest } from '@campfire/schema';
+import {
+  SetupRequest,
+  LoginRequest,
+  SignupRequest,
+  PasswordChange,
+  AuthTokenRequest,
+  PasswordResetRequestCreate,
+  PasswordResetConfirm,
+} from '@campfire/schema';
 
 export class SetupRequestDto extends createZodDto(SetupRequest) {}
 export class LoginRequestDto extends createZodDto(LoginRequest) {}
+export class SignupRequestDto extends createZodDto(SignupRequest) {}
 export class PasswordChangeDto extends createZodDto(PasswordChange) {}
 export class AuthTokenRequestDto extends createZodDto(AuthTokenRequest) {}
+export class PasswordResetRequestCreateDto extends createZodDto(PasswordResetRequestCreate) {}
+export class PasswordResetConfirmDto extends createZodDto(PasswordResetConfirm) {}

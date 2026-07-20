@@ -62,7 +62,7 @@ export class TokensService {
    * `caller` (the authenticated RequestUser, distinct from `userId` — the
    * numeric id the new token will be owned by, always the caller's own per
    * the controller) must have a real BASE effective role — membership row or
-   * admin/devRole, never a token's own campaignId cap — on `input.campaignId`
+   * devRole, never a token's own campaignId cap — on `input.campaignId`
    * when it's non-null. Without this, a user with no relationship to a
    * campaign could mint a token scoped to it and use that token's mere
    * existence to read the campaign's metadata back out (GET /campaigns /

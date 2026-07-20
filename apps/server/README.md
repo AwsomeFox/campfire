@@ -36,7 +36,7 @@ src/
     campaigns/                campaigns CRUD (user-scoped list) + GET :id/summary (aggregate);
                                DELETE cascades every child table + the on-disk upload dir —
                                see CampaignsService.remove()'s doc comment
-    characters/                campaign-scoped + /characters/:id, hp, conditions
+    characters/                campaign-scoped + /characters/:id, hp, conditions, xp, level-up
     quests/                    campaign-scoped + /quests/:id, status, objectives
     npcs/                      campaign-scoped + /npcs/:id
     locations/                 campaign-scoped + /locations/:id, discover
@@ -495,6 +495,8 @@ combat — over MCP alone.
   (`number` defaults to max+1), `update_session`.
 - **Write — characters:** `upsert_character` (player owner or dm),
   `update_character_hp` (exactly one of `delta`|`set`),
+  `award_xp` (single character: owner or dm; party-wide/subset: dm),
+  `level_up_character` (owner or dm — +1 level, optional new `hpMax`),
   `set_character_conditions` (add/remove).
 - **Write — notes & inbox:** `add_note`, `update_note`/`delete_note`
   (author only — dm may NOT edit/delete another member's note),

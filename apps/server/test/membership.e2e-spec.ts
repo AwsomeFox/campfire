@@ -93,13 +93,14 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
     expect(demoteRes.status).toBe(409);
   });
 
-  it('GET /campaigns scoping: admin sees all, user B sees only campaigns they are a member of', async () => {
-    // A second campaign created by admin — B is not a member.
+  it('GET /campaigns scoping: everyone — the server admin included — sees only campaigns they are a member of', async () => {
+    // A second campaign created by admin — the admin is auto-dm of THIS one (creator),
+    // but holds no role at all in user A's campaign (admin ≠ auto-DM, issue #9).
     const otherCampaign = await adminAgent.post('/api/v1/campaigns').send({ name: 'Admin-only campaign' });
     expect(otherCampaign.status).toBe(201);
 
     const adminList = await adminAgent.get('/api/v1/campaigns');
-    expect(adminList.body.some((c: { id: number }) => c.id === campaignId)).toBe(true);
+    expect(adminList.body.some((c: { id: number }) => c.id === campaignId)).toBe(false);
     expect(adminList.body.some((c: { id: number }) => c.id === otherCampaign.body.id)).toBe(true);
 
     const bList = await userB.get('/api/v1/campaigns');
@@ -166,6 +167,104 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
 
       const res = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${playerMember.id}`).send({ characterId: 999999 });
       expect(res.status).toBe(400);
+    });
+  });
+
+  // Issue #32: linking a member to a character must grant that player edit rights by
+  // syncing characters.ownerUserId (string form of the integer users.id) — previously the
+  // DM had to also PATCH the character's ownerUserId by hand.
+  describe('Issue #32: member↔character link grants ownership', () => {
+    let memberBId: number;
+    let heroId: number;
+    let altId: number;
+
+    beforeAll(async () => {
+      const membersRes = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      memberBId = membersRes.body.find((m: { userId: number }) => m.userId === userBId).id;
+
+      const heroRes = await userA.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Linked Hero' });
+      heroId = heroRes.body.id;
+      const altRes = await userA.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Alt Hero' });
+      altId = altRes.body.id;
+    });
+
+    it('unlinked character: player B cannot edit (403), ownerUserId is null', async () => {
+      const getRes = await userB.get(`/api/v1/characters/${heroId}`);
+      expect(getRes.body.ownerUserId).toBeNull();
+
+      const patchRes = await userB.patch(`/api/v1/characters/${heroId}`).send({ notes: 'should fail' });
+      expect(patchRes.status).toBe(403);
+    });
+
+    it('PATCH member {characterId} sets ownerUserId and lets the player edit', async () => {
+      const linkRes = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${memberBId}`).send({ characterId: heroId });
+      expect(linkRes.status).toBe(200);
+
+      const getRes = await userB.get(`/api/v1/characters/${heroId}`);
+      expect(getRes.body.ownerUserId).toBe(String(userBId));
+
+      const patchRes = await userB.patch(`/api/v1/characters/${heroId}`).send({ notes: 'my character now' });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.notes).toBe('my character now');
+    });
+
+    it('re-linking to another character transfers ownership (old cleared, new granted)', async () => {
+      const relinkRes = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${memberBId}`).send({ characterId: altId });
+      expect(relinkRes.status).toBe(200);
+
+      const oldChar = await userA.get(`/api/v1/characters/${heroId}`);
+      expect(oldChar.body.ownerUserId).toBeNull();
+      const newChar = await userA.get(`/api/v1/characters/${altId}`);
+      expect(newChar.body.ownerUserId).toBe(String(userBId));
+
+      expect((await userB.patch(`/api/v1/characters/${heroId}`).send({ notes: 'no longer mine' })).status).toBe(403);
+      expect((await userB.patch(`/api/v1/characters/${altId}`).send({ notes: 'mine now' })).status).toBe(200);
+    });
+
+    it('unlinking (characterId: null) revokes ownership', async () => {
+      const unlinkRes = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${memberBId}`).send({ characterId: null });
+      expect(unlinkRes.status).toBe(200);
+
+      const charRes = await userA.get(`/api/v1/characters/${altId}`);
+      expect(charRes.body.ownerUserId).toBeNull();
+
+      expect((await userB.patch(`/api/v1/characters/${altId}`).send({ notes: 'revoked' })).status).toBe(403);
+    });
+
+    it('POST member with characterId (create path) also grants ownership', async () => {
+      const createD = await adminAgent.post('/api/v1/users').send({ username: 'user-d', password: 'password-d-1', serverRole: 'user' });
+      const userDId = createD.body.id;
+      const userD = request.agent(ctx.app.getHttpServer());
+      await userD.post('/api/v1/auth/login').send({ username: 'user-d', password: 'password-d-1' });
+
+      const charRes = await userA.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Preseated Hero' });
+      const addRes = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: userDId, role: 'player', characterId: charRes.body.id });
+      expect(addRes.status).toBe(201);
+
+      const getRes = await userD.get(`/api/v1/characters/${charRes.body.id}`);
+      expect(getRes.body.ownerUserId).toBe(String(userDId));
+
+      expect((await userD.patch(`/api/v1/characters/${charRes.body.id}`).send({ notes: 'seated and owned' })).status).toBe(200);
+    });
+
+    it('id-type reconciliation: DM may set ownerUserId with a numeric userId (coerced to string); an explicit reassignment is not clobbered by unlink', async () => {
+      // Link B to hero, then DM explicitly reassigns ownership passing the RAW NUMBER
+      // (CampaignMember.userId shape) — the schema now coerces it to the canonical string.
+      await userA.patch(`/api/v1/campaigns/${campaignId}/members/${memberBId}`).send({ characterId: heroId });
+
+      const usersRes = await adminAgent.get('/api/v1/users');
+      const userD = usersRes.body.find((u: { username: string }) => u.username === 'user-d');
+      const reassignRes = await userA.patch(`/api/v1/characters/${heroId}`).send({ ownerUserId: userD.id });
+      expect(reassignRes.status).toBe(200);
+      expect(reassignRes.body.ownerUserId).toBe(String(userD.id));
+
+      // Unlinking B must NOT clear D's ownership — the character is no longer B's.
+      const unlinkRes = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${memberBId}`).send({ characterId: null });
+      expect(unlinkRes.status).toBe(200);
+      const charRes = await userA.get(`/api/v1/characters/${heroId}`);
+      expect(charRes.body.ownerUserId).toBe(String(userD.id));
     });
   });
 });

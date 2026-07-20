@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER,
+  ics_token TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -25,12 +26,17 @@ CREATE TABLE IF NOT EXISTS characters (
   species TEXT NOT NULL DEFAULT '',
   class_name TEXT NOT NULL DEFAULT '',
   level INTEGER NOT NULL DEFAULT 1,
+  xp INTEGER NOT NULL DEFAULT 0,
   background TEXT NOT NULL DEFAULT '',
   stats TEXT NOT NULL DEFAULT '{}',
   ac INTEGER,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
   conditions TEXT NOT NULL DEFAULT '[]',
+  save_proficiencies TEXT NOT NULL DEFAULT '[]',
+  skills TEXT NOT NULL DEFAULT '{}',
+  actions TEXT NOT NULL DEFAULT '[]',
+  spell_slots TEXT NOT NULL DEFAULT '{}',
   portrait_url TEXT,
   ddb_id TEXT,
   notes TEXT NOT NULL DEFAULT '',
@@ -99,6 +105,41 @@ CREATE TABLE IF NOT EXISTS sessions (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_shares (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL UNIQUE,
+  token_prefix TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scheduled_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  scheduled_at TEXT NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 240,
+  title TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_rsvps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scheduled_session_id INTEGER NOT NULL,
+  user_id TEXT NOT NULL,
+  user_name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(scheduled_session_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
@@ -136,6 +177,7 @@ CREATE TABLE IF NOT EXISTS users (
   disabled INTEGER NOT NULL DEFAULT 0,
   oidc_sub TEXT,
   accent_color TEXT,
+  text_size TEXT NOT NULL DEFAULT 'default',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -147,6 +189,17 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  code_hash TEXT UNIQUE,
+  requested_at TEXT NOT NULL,
+  approved_at TEXT,
+  approved_by TEXT NOT NULL DEFAULT '',
+  expires_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -163,6 +216,19 @@ CREATE TABLE IF NOT EXISTS campaign_members (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(campaign_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS campaign_invites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  code TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL,
+  created_by_user_id INTEGER,
+  expires_at TEXT NOT NULL,
+  max_uses INTEGER,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
@@ -210,6 +276,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   entity_id INTEGER,
   action TEXT NOT NULL,
   payload TEXT NOT NULL DEFAULT '{}',
+  snapshot TEXT,
   proposer TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   resolved_by TEXT NOT NULL DEFAULT '',
@@ -242,6 +309,53 @@ CREATE TABLE IF NOT EXISTS encounters (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dice_rolls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  roller_user_id TEXT NOT NULL,
+  roller_name TEXT NOT NULL DEFAULT '',
+  expr TEXT NOT NULL,
+  rolls TEXT NOT NULL DEFAULT '[]',
+  total INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  entity_type TEXT,
+  entity_id INTEGER,
+  actor_name TEXT NOT NULL DEFAULT '',
+  read_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS inventory_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  owner_type TEXT NOT NULL DEFAULT 'party',
+  character_id INTEGER,
+  name TEXT NOT NULL,
+  qty INTEGER NOT NULL DEFAULT 1,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS party_treasury (
+  campaign_id INTEGER PRIMARY KEY,
+  cp INTEGER NOT NULL DEFAULT 0,
+  sp INTEGER NOT NULL DEFAULT 0,
+  ep INTEGER NOT NULL DEFAULT 0,
+  gp INTEGER NOT NULL DEFAULT 0,
+  pp INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL,
@@ -264,11 +378,18 @@ CREATE INDEX IF NOT EXISTS idx_quest_objectives_quest ON quest_objectives(quest_
 CREATE INDEX IF NOT EXISTS idx_npcs_campaign ON npcs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_campaign ON locations(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_session_shares_session ON session_shares(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign ON scheduled_sessions(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_session_rsvps_schedule ON session_rsvps(scheduled_session_id);
+CREATE INDEX IF NOT EXISTS idx_campaigns_ics_token ON campaigns(ics_token);
 CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_audit_campaign ON audit_log(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_invites_campaign ON campaign_invites(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_campaign ON proposals(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
@@ -279,6 +400,10 @@ CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
+CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
 `;
 
 /**

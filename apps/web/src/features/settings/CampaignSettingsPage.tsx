@@ -10,7 +10,7 @@
  */
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { Campaign, DangerLevel, RulePack } from '@campfire/schema';
+import type { Campaign, CampaignCloneMode, DangerLevel, RulePack } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
@@ -90,6 +90,14 @@ export default function CampaignSettingsPage() {
               void refreshCampaigns();
             }}
           />
+          <StatusCard
+            campaignId={id}
+            campaign={campaign}
+            onSaved={(c) => {
+              setCampaign(c);
+              void refreshCampaigns();
+            }}
+          />
           <RuleSystemCard
             campaignId={id}
             campaign={campaign}
@@ -97,6 +105,13 @@ export default function CampaignSettingsPage() {
             onSaved={(c) => setCampaign(c)}
           />
           <ExportCard campaignId={id} />
+          <CloneCard
+            campaign={campaign}
+            onCloned={(c) => {
+              void refreshCampaigns();
+              navigate(`/c/${c.id}`);
+            }}
+          />
           <DangerZoneCard
             campaign={campaign}
             onDeleted={() => {
@@ -191,6 +206,71 @@ function GeneralCard({
         </button>
         {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
       </div>
+    </div>
+  );
+}
+
+const STATUSES: Campaign['status'][] = ['active', 'paused', 'completed'];
+
+/**
+ * Archive control (issue #16). Status is PATCHed on its own — the server
+ * rejects any other field on an archived (paused/completed) campaign, so this
+ * card is the one switch that always works, both ways.
+ */
+function StatusCard({
+  campaignId,
+  campaign,
+  onSaved,
+}: {
+  campaignId: number;
+  campaign: Campaign;
+  onSaved: (c: Campaign) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function changeStatus(value: Campaign['status']) {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { status: value });
+      onSaved(updated);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't change the campaign status.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const archived = campaign.status !== 'active';
+
+  return (
+    <div className="card elev-sm">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="card-kicker" style={{ margin: 0 }}>Status &amp; archive</span>
+        {archived && <span className="tag tag-neutral" style={{ fontSize: 10 }}>read-only</span>}
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Paused and completed campaigns are archived: read-only for everyone (quests, notes, rolls — everything)
+        and grouped under Archive on the campaign hub. Set the status back to Active to resume play.
+      </p>
+      <div className="field" style={{ maxWidth: 200 }}>
+        <label htmlFor="settings-status">Campaign status</label>
+        <select
+          id="settings-status"
+          className="input"
+          value={campaign.status}
+          disabled={saving}
+          onChange={(e) => void changeStatus(e.target.value as Campaign['status'])}
+        >
+          {STATUSES.map((status) => (
+            <option key={status} value={status}>
+              {status.charAt(0).toUpperCase() + status.slice(1)}
+            </option>
+          ))}
+        </select>
+      </div>
+      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
     </div>
   );
 }
@@ -317,6 +397,67 @@ function ExportCard({ campaignId }: { campaignId: number }) {
         <a className="btn btn-secondary" style={{ fontSize: 12.5 }} href={`${API}/campaigns/${campaignId}/export?format=mdzip`}>
           ⬇ Markdown zip
         </a>
+      </div>
+    </div>
+  );
+}
+
+function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: Campaign) => void }) {
+  const [name, setName] = useState(`${campaign.name} (copy)`);
+  const [mode, setMode] = useState<CampaignCloneMode>('full');
+  const [cloning, setCloning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function clone() {
+    setCloning(true);
+    setError(null);
+    try {
+      const created = await api.post<Campaign>(`${API}/campaigns/${campaign.id}/clone`, {
+        name: name.trim() || undefined,
+        mode,
+      });
+      onCloned(created);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't duplicate the campaign.");
+      setCloning(false);
+    }
+  }
+
+  return (
+    <div className="card elev-sm">
+      <span className="card-kicker">Duplicate campaign</span>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Reuse your prep. A full copy duplicates everything — quests, NPCs, locations, characters, sessions, notes and
+        encounters. A template copies the world only and resets progress: quests back to available, objectives
+        unchecked, no sessions or play state. Members aren't copied — you become the new campaign's DM.
+      </p>
+      <div className="field">
+        <label htmlFor="settings-clone-name">New campaign name</label>
+        <input
+          id="settings-clone-name"
+          className="input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={`${campaign.name} (copy)`}
+        />
+      </div>
+      <div className="field" style={{ maxWidth: 260 }}>
+        <label htmlFor="settings-clone-mode">What to copy</label>
+        <select
+          id="settings-clone-mode"
+          className="input"
+          value={mode}
+          onChange={(e) => setMode(e.target.value as CampaignCloneMode)}
+        >
+          <option value="full">Full copy — everything</option>
+          <option value="template">Template — prep only, progress reset</option>
+        </select>
+      </div>
+      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+      <div className="flex gap-2 items-center">
+        <button className="btn btn-secondary" style={{ fontSize: 12.5 }} disabled={cloning} onClick={clone}>
+          {cloning ? 'Duplicating…' : mode === 'template' ? 'Create from template' : 'Duplicate campaign'}
+        </button>
       </div>
     </div>
   );

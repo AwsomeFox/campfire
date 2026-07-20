@@ -2,13 +2,15 @@ import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundEx
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest } from '@campfire/schema';
-import type { Combatant, Encounter, EncounterStatus, EncounterWithCombatants, Role, RollResult } from '@campfire/schema';
+import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters, combatants, encounters, ruleEntries } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
+import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -72,7 +74,14 @@ export class EncountersService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly events: CampaignEventsService,
+    private readonly rolls: RollsService,
   ) {}
+
+  /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
+  private emitEncounterEvent(type: 'encounter.updated' | 'encounter.deleted', campaignId: number, encounterId: number): void {
+    this.events.emit({ type, campaignId, encounterId });
+  }
 
   async getRowOrThrow(id: number) {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
@@ -159,6 +168,8 @@ export class EncountersService {
       campaignId,
       detail: `${partyRows.length} party member(s) auto-added`,
     });
+
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id);
 
     return this.getWithCombatantsOrThrow(encounterRow.id);
   }
@@ -264,6 +275,8 @@ export class EncountersService {
       detail: name,
     });
 
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
     return combatantToDomain(row);
   }
 
@@ -340,6 +353,8 @@ export class EncountersService {
       detail: JSON.stringify(patch),
     });
 
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
     return combatantToDomain(row);
   }
 
@@ -358,6 +373,8 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
       detail: existing.name,
     });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
   }
 
   /** Rolls d20+initMod for every combatant that doesn't already have an initiative. */
@@ -379,6 +396,8 @@ export class EncountersService {
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
     });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId);
   }
@@ -409,6 +428,8 @@ export class EncountersService {
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
     });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId);
   }
@@ -443,6 +464,8 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
       detail: `round ${round}, turn ${turnIndex}`,
     });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId);
   }
@@ -482,6 +505,8 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
     });
 
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
     return this.getWithCombatantsOrThrow(encounterId);
   }
 
@@ -498,11 +523,20 @@ export class EncountersService {
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
     });
+
+    this.emitEncounterEvent('encounter.deleted', encounterRow.campaignId, encounterId);
   }
 
-  /** Rolls an arbitrary dice expression for a campaign — any member may roll; result is audited. */
-  async rollDiceForCampaign(campaignId: number, input: RollRequestInput, user: RequestUser, role: Role): Promise<RollResult> {
+  /**
+   * Rolls an arbitrary dice expression for a campaign — any member may roll; result is
+   * audited AND persisted to the shared per-campaign dice log (issue #35), so every
+   * member sees the same roll feed via GET /campaigns/:id/rolls. Returns the persisted
+   * DiceRoll — a superset of the old RollResult shape (expr/rolls/total), so existing
+   * clients keep working unchanged.
+   */
+  async rollDiceForCampaign(campaignId: number, input: RollRequestInput, user: RequestUser, role: Role): Promise<DiceRoll> {
     const result = rollDice(input.expr);
+    const persisted = await this.rolls.record(campaignId, result, user);
 
     await this.audit.log({
       actor: auditActor(user),
@@ -514,6 +548,6 @@ export class EncountersService {
       detail: `${result.expr} = ${result.total}`,
     });
 
-    return result;
+    return persisted;
   }
 }
