@@ -16,6 +16,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { DiceTray } from './DiceTray';
+import { RolledDice } from './RolledDice';
 
 const POLL_MS = 5000;
 
@@ -74,7 +75,12 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         // Prepend own roll immediately (dedupe by id — the next poll returns it too).
         setRolls((prev) => [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit));
         // Announce the result — the roll feed is otherwise visual-only (issue #93).
-        announce(`Rolled ${result.expr}: ${result.total} (${result.rolls.join(', ')})`);
+        const keptSaid = result.kept ? `, kept ${result.kept.join(', ')}` : '';
+        const checkSaid =
+          result.dc != null ? `, ${result.success ? 'success' : 'fail'} vs DC ${result.dc}` : '';
+        announce(
+          `Rolled ${result.label ? `${result.label} ` : ''}${result.expr}: ${result.total} (${result.rolls.join(', ')}${keptSaid})${checkSaid}`,
+        );
         return result;
       } catch (err) {
         const message = err instanceof ApiError ? err.message : "Couldn't roll.";
@@ -107,7 +113,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
             <TextInput
               id={exprId}
               aria-label="Dice expression"
-              placeholder="1d20+3"
+              placeholder="1d20+3 or 4d6dl1"
               value={expr}
               onChange={(e) => setExpr(e.target.value)}
             />
@@ -121,8 +127,8 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       {rolls.length === 0 ? (
         <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
           {compact
-            ? 'Roll anytime — not just in combat. Try 1d20, 2d6+4, or 4d6.'
-            : 'No rolls yet — the whole table sees this log. Try 1d20, 2d6+4, or 4d6.'}
+            ? 'Roll anytime — not just in combat. Try 1d20, 2d6+4, or 2d20kh1 (advantage).'
+            : 'No rolls yet — the whole table sees this log. Try 1d20, 2d6+4, or 2d20kh1 (advantage).'}
         </p>
       ) : (
         <div className="flex flex-col gap-1">
@@ -136,11 +142,25 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                 <span className="text-muted" style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {r.rollerName || r.rollerUserId}
                 </span>
-                <span style={{ whiteSpace: 'nowrap' }}>{r.expr}</span>
+                <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {r.label ? `${r.label}: ` : ''}
+                  {r.expr}
+                  {r.dc != null ? ` vs DC ${r.dc}` : ''}
+                </span>
               </span>
-              <span className="text-muted" style={{ fontSize: 11 }}>
-                [{r.rolls.join(', ')}]
-              </span>
+              <RolledDice rolls={r.rolls} kept={r.kept} />
+              {r.dc != null && (
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    flex: 'none',
+                    color: r.success ? 'var(--color-success, #4ade80)' : 'var(--color-danger, #f87171)',
+                  }}
+                >
+                  {r.success ? 'PASS' : 'FAIL'}
+                </span>
+              )}
               <span
                 style={{
                   fontFamily: 'var(--font-heading)',
