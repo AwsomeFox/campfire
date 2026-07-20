@@ -1241,6 +1241,37 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'get_session_attendance',
+      'List the characters that played a session (issue #121) — the West Marches "who was there" record. Ids come ' +
+        'from get_session_recaps / get_session. Empty when attendance was never recorded.',
+      { sessionId: Id.describe('Session id — from get_session_recaps') },
+      async ({ sessionId }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        await this.access.requireMember(user, row.campaignId);
+        return this.sessions.getAttendance(sessionId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'set_session_attendance',
+      'DM only: record who played a session (issue #121). Replaces the session\'s attendance with exactly ' +
+        '`characterIds` — pass the full set each time (an empty array clears it). Every id must be a character in the ' +
+        'session\'s own campaign (character ids come from get_campaign_summary / list). Lets an AI scribe log the ' +
+        'rotating cast of a West Marches outing.',
+      {
+        sessionId: Id.describe('Session id — from get_session_recaps'),
+        characterIds: z.array(Id).max(500).describe('The full set of characters that attended; replaces any prior attendance'),
+      },
+      async ({ sessionId, characterIds }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.sessions.setAttendance(sessionId as number, characterIds as number[], user, role);
+      },
+    );
+
+    this.tool(
+      server,
       'upsert_character',
       'Create a character (omit characterId) or update one (pass characterId). player may create/update their own ' +
         'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
