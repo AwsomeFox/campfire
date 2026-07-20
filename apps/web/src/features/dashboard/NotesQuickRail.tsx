@@ -9,6 +9,7 @@ const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string }> 
   private: { chip: 'private', label: '🔒 Private' },
   dm_shared: { chip: 'dm', label: '🎩 DM' },
   party_shared: { chip: 'party', label: '👥 Party' },
+  whisper: { chip: 'whisper', label: '🤫 Whisper' },
 };
 
 function timeAgo(iso: string): string {

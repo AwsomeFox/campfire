@@ -213,22 +213,48 @@ export class MembersService {
     return updated;
   }
 
-  async remove(campaignId: number, memberId: number, actor: RequestUser): Promise<void> {
+  /**
+   * Removes a membership. Two callers, gated in the controller:
+   *  - a dm removing anyone (`selfLeave` unset) — the pre-existing behavior, and
+   *  - a member removing THEIR OWN seat (self-leave, issue #128 player data rights).
+   *
+   * The last-dm guard applies to both: a sole dm can neither be removed nor
+   * self-leave without first handing dm off (409), so a campaign is never
+   * orphaned dm-less.
+   *
+   * Owned characters are DE-LINKED, never deleted: the character sheet stays in
+   * the campaign (the party/DM keep the PC record) but the departing member's
+   * edit rights — characters.ownerUserId, the string form of users.id — are
+   * cleared, so a closed seat can no longer mutate its sheet. This mirrors the
+   * unlink half of syncCharacterOwnership(). Authored notes/proposals are left
+   * intact and attributed (history preserved, not orphaned or hard-deleted —
+   * never destroy other people's data).
+   */
+  async remove(campaignId: number, memberId: number, actor: RequestUser, opts?: { selfLeave?: boolean }): Promise<void> {
     const existing = await this.getRowOrThrow(campaignId, memberId);
 
     if (existing.role === 'dm') {
       const remaining = await this.dmCount(campaignId, memberId);
       if (remaining === 0) {
-        throw new ConflictException('Cannot remove the last dm of this campaign');
+        throw new ConflictException(
+          opts?.selfLeave
+            ? 'You are the last dm of this campaign — hand dm off to someone else before leaving'
+            : 'Cannot remove the last dm of this campaign',
+        );
       }
     }
 
     await this.db.delete(campaignMembers).where(eq(campaignMembers.id, memberId));
 
+    await this.db
+      .update(characters)
+      .set({ ownerUserId: null, updatedAt: nowIso() })
+      .where(and(eq(characters.campaignId, campaignId), eq(characters.ownerUserId, String(existing.userId))));
+
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
-      action: 'member.delete',
+      actorRole: opts?.selfLeave ? (existing.role as CampaignMember['role']) : 'dm',
+      action: opts?.selfLeave ? 'member.leave' : 'member.delete',
       entityType: 'campaign_member',
       entityId: memberId,
       campaignId,

@@ -312,6 +312,89 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
 });
 
 /**
+ * Issue #128 (player data rights): a member may remove their OWN seat (self-leave)
+ * without the dm role — but only their own, and a sole dm still can't leave without
+ * handing dm off. Owned character sheets are de-linked (kept in the campaign, but
+ * ownerUserId cleared), never hard-deleted.
+ */
+describe('self-leave a campaign (e2e, issue #128)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let playerAgent: ReturnType<typeof request.agent>;
+  let otherPlayerAgent: ReturnType<typeof request.agent>;
+  let playerId: number;
+  let otherPlayerId: number;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'leave-dm', password: 'dm-password-1' });
+
+    const createPlayer = await dmAgent.post('/api/v1/users').send({ username: 'leave-player', password: 'player-password-1', serverRole: 'user' });
+    playerId = createPlayer.body.id;
+    playerAgent = request.agent(server);
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'leave-player', password: 'player-password-1' });
+
+    const createOther = await dmAgent.post('/api/v1/users').send({ username: 'leave-other', password: 'other-password-1', serverRole: 'user' });
+    otherPlayerId = createOther.body.id;
+    otherPlayerAgent = request.agent(server);
+    await otherPlayerAgent.post('/api/v1/auth/login').send({ username: 'leave-other', password: 'other-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Leave Me Campaign' });
+    campaignId = campRes.body.id;
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: otherPlayerId, role: 'player' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a player cannot remove ANOTHER member (403)', async () => {
+    const members = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
+    const otherMember = members.body.find((m: { userId: number }) => m.userId === otherPlayerId);
+    const res = await playerAgent.delete(`/api/v1/campaigns/${campaignId}/members/${otherMember.id}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('a player CAN remove their own membership — self-leave (204), and owned character is de-linked but kept', async () => {
+    // DM gives the player a character and links it (grants ownership).
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Departing Hero' });
+    const charId = charRes.body.id;
+    const members = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
+    const myMember = members.body.find((m: { userId: number }) => m.userId === playerId);
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}/members/${myMember.id}`).send({ characterId: charId });
+
+    // Player leaves their own seat.
+    const leaveRes = await playerAgent.delete(`/api/v1/campaigns/${campaignId}/members/${myMember.id}`);
+    expect(leaveRes.status).toBe(204);
+
+    // They are no longer a member (403 on read).
+    const afterRead = await playerAgent.get(`/api/v1/campaigns/${campaignId}`);
+    expect(afterRead.status).toBe(403);
+
+    // Character SHEET survives (not hard-deleted) but is un-owned now.
+    const charAfter = await dmAgent.get(`/api/v1/characters/${charId}`);
+    expect(charAfter.status).toBe(200);
+    expect(charAfter.body.ownerUserId).toBeNull();
+
+    // The member seat is gone from the roster.
+    const rosterAfter = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
+    expect(rosterAfter.body.some((m: { userId: number }) => m.userId === playerId)).toBe(false);
+  });
+
+  it('the sole dm cannot self-leave without handing dm off (409)', async () => {
+    const members = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
+    const dmMember = members.body.find((m: { role: string }) => m.role === 'dm');
+    const res = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/members/${dmMember.id}`);
+    expect(res.status).toBe(409);
+  });
+});
+
+/**
  * Punch list item 2: deleting a user (admin-only DELETE /users/:id) used to cascade
  * campaign_members without the same last-dm guard MembersService's own DELETE endpoint
  * enforces (see the "removing the last dm is refused (409)" test above) — so deleting the

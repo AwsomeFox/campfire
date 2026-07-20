@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, HttpCode, Patch, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Patch, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiCookieAuth } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
@@ -278,5 +278,38 @@ export class MeController {
       throw new UnauthorizedException('Preferences are not available for dev-auth users');
     }
     return this.usersService.updatePreferences(Number(user.id), body);
+  }
+
+  /**
+   * Self-delete (issue #128 player data rights): an authenticated user deletes
+   * THEIR OWN account. Reuses UsersService.remove(), so it runs the exact same
+   * cleanup and safety guards as the admin DELETE /users/:id:
+   *  - cascades sessions, personal access tokens, campaign memberships and open
+   *    password-reset requests;
+   *  - de-links (never deletes) owned character sheets — ownerUserId cleared;
+   *  - refuses (409) if you are the last enabled server admin, or the sole dm of
+   *    any campaign — hand off admin / dm (or delete the campaign) first, so the
+   *    server is never left admin-less and no campaign is orphaned dm-less.
+   * The session cookie is cleared on success. No password re-prompt here (SSO
+   * accounts have none); the type-to-confirm gate lives in the web client.
+   */
+  @Delete()
+  @HttpCode(204)
+  @ApiCookieAuth('campfire_session')
+  @ApiOperation({
+    summary: 'Delete your own account',
+    description:
+      'Self-service account deletion. Cascades sessions, API tokens, campaign memberships and password-reset requests; ' +
+      'de-links (does not delete) owned character sheets; leaves authored notes attributed. ' +
+      'Refuses (409) if you are the last enabled admin or the sole dm of a campaign.',
+  })
+  @ApiResponse({ status: 204, description: 'Account deleted; session cleared.' })
+  @ApiResponse({ status: 409, description: 'You are the last enabled admin, or the sole dm of one or more campaigns.' })
+  async deleteOwnAccount(@CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response): Promise<void> {
+    if (user.id.startsWith('dev:')) {
+      throw new UnauthorizedException('Account deletion is not available for dev-auth users');
+    }
+    await this.usersService.remove(Number(user.id));
+    res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
   }
 }
