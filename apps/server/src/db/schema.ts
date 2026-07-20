@@ -89,6 +89,30 @@ export const questObjectives = sqliteTable('quest_objectives', {
   sortOrder: integer('sort_order').notNull().default(0),
 });
 
+// ---------- storylines (issue #27) — DM-only branching arc/beat planner ----------
+export const storyArcs = sqliteTable('story_arcs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  title: text('title').notNull(),
+  summary: text('summary').notNull().default(''),
+  status: text('status').notNull().default('planned'),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const storyBeats = sqliteTable('story_beats', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  arcId: integer('arc_id').notNull(),
+  title: text('title').notNull(),
+  body: text('body').notNull().default(''),
+  status: text('status').notNull().default('planned'),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 // Timeline (in-world calendar / campaign timeline) — issue #63. Standalone module.
 export const timelineEvents = sqliteTable('timeline_events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -102,6 +126,15 @@ export const timelineEvents = sqliteTable('timeline_events', {
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+// A branch is a labelled, ordered edge FROM a beat TO an optional next beat.
+export const storyBranches = sqliteTable('story_branches', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  beatId: integer('beat_id').notNull(),
+  toBeatId: integer('to_beat_id'),
+  label: text('label').notNull(),
+  sortOrder: integer('sort_order').notNull().default(0),
 });
 
 // One "current in-world date" row per campaign (the issue's honest v0). campaignId
