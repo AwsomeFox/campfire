@@ -125,11 +125,40 @@ function EncounterCard({ campaignId, encounter }: { campaignId: number; encounte
   );
 }
 
+/** Minimal shapes for the link-picker option lists. */
+type NamedRow = { id: number; name?: string; title?: string; number?: number };
+
 function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCancel: () => void }) {
   const navigate = useNavigate();
   const [name, setName] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Optional where/why/when links (issue #126). Loaded lazily so opening the form
+  // doesn't block on three list fetches — empty selects just show "— none —".
+  const [locations, setLocations] = useState<NamedRow[]>([]);
+  const [quests, setQuests] = useState<NamedRow[]>([]);
+  const [sessions, setSessions] = useState<NamedRow[]>([]);
+  const [locationId, setLocationId] = useState('');
+  const [questId, setQuestId] = useState('');
+  const [sessionId, setSessionId] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      api.get<NamedRow[]>(`${API}/campaigns/${campaignId}/locations`).catch(() => []),
+      api.get<NamedRow[]>(`${API}/campaigns/${campaignId}/quests`).catch(() => []),
+      api.get<NamedRow[]>(`${API}/campaigns/${campaignId}/sessions`).catch(() => []),
+    ]).then(([locs, qs, sess]) => {
+      if (cancelled) return;
+      setLocations(locs);
+      setQuests(qs);
+      setSessions(sess);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -137,7 +166,12 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
     setSaving(true);
     setError(null);
     try {
-      const created = await api.post<Encounter>(`${API}/campaigns/${campaignId}/encounters`, { name: name.trim() });
+      const created = await api.post<Encounter>(`${API}/campaigns/${campaignId}/encounters`, {
+        name: name.trim(),
+        locationId: locationId ? Number(locationId) : undefined,
+        questId: questId ? Number(questId) : undefined,
+        sessionId: sessionId ? Number(sessionId) : undefined,
+      });
       navigate(`/c/${campaignId}/encounters/${created.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create the encounter.");
@@ -157,6 +191,41 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
           maxLength={120}
           autoFocus
         />
+        <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
+          <label className="text-xs text-slate-400 space-y-1">
+            <span>🗺 Location</span>
+            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+              <option value="">— none —</option>
+              {locations.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name ?? `#${l.id}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-slate-400 space-y-1">
+            <span>📜 Quest</span>
+            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={questId} onChange={(e) => setQuestId(e.target.value)}>
+              <option value="">— none —</option>
+              {quests.map((q) => (
+                <option key={q.id} value={q.id}>
+                  {q.title ?? `#${q.id}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-slate-400 space-y-1">
+            <span>📓 Session</span>
+            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
+              <option value="">— none —</option>
+              {sessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title || `Session ${s.number ?? s.id}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         <div className="flex gap-2 justify-end">
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>
             Cancel

@@ -573,9 +573,11 @@ export const encounters = sqliteTable('encounters', {
   // Identity-based turn pointer (issue #49) — the combatant whose turn it is,
   // independent of positional shuffling on add/remove. null when not running/empty.
   currentCombatantId: integer('current_combatant_id'),
-  // Optional battle map (issue #39) — attachment (kind='map'|'image') rendered as the
-  // run-session background. Nullable; added by migration on older DBs — see
-  // db/db.module.ts migrateEncountersTableForMapAttachment. null = no map.
+  // Optional where/why/when links (issue #126) + battle map (issue #39). Nullable;
+  // added by migration on older DBs (see db/db.module.ts).
+  locationId: integer('location_id'),
+  questId: integer('quest_id'),
+  sessionId: integer('session_id'),
   mapAttachmentId: integer('map_attachment_id'),
   endedAt: text('ended_at'),
   createdAt: text('created_at').notNull(),

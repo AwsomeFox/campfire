@@ -22,6 +22,7 @@ const ATTACHABLE: { value: EntityTypeValue; label: string; listPath: string }[] 
   { value: 'location', label: '🗺 Location', listPath: 'locations' },
   { value: 'session', label: '📓 Session', listPath: 'sessions' },
   { value: 'character', label: '🛡 Character', listPath: 'characters' },
+  { value: 'encounter', label: '⚔️ Encounter', listPath: 'encounters' },
 ];
 
 interface EntityOption {

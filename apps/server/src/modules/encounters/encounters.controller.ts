@@ -88,15 +88,28 @@ export class EncountersController {
     return this.encounters.getWithCombatantsOrThrow(id, role);
   }
 
+  @Get(':id/difficulty')
+  @ApiOperation({
+    summary: 'Estimate encounter difficulty (5e XP budget)',
+    description:
+      'Requires campaign membership. Read-only: computes an Easy/Medium/Hard/Deadly band from the party PCs\' levels vs the combatant monsters\' CRs (issue #58). No state change.',
+  })
+  @ApiResponse({ status: 200, description: 'Difficulty band with the party thresholds and adjusted monster XP.' })
+  async difficulty(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    await this.access.requireMember(user, row.campaignId);
+    return this.encounters.getDifficulty(id);
+  }
+
   @Patch(':id')
-  @ApiOperation({ summary: 'Update an encounter', description: 'dm role required. Attach (or clear) the battle map via mapAttachmentId — an uploaded image (attachment kind map|image) rendered as the run-session background.' })
-  @ApiResponse({ status: 200, description: 'Updated encounter, with combatants.' })
+  @ApiOperation({
+    summary: 'Update an encounter',
+    description: "dm role required. Edit the name, attach/clear a location/quest/session link (issue #126), and/or attach/clear the battle map via mapAttachmentId (issue #39).",
+  })
+  @ApiResponse({ status: 200, description: 'Updated encounter with combatants.' })
   @ApiResponse({ status: 400, description: 'mapAttachmentId does not exist in this campaign.' })
-  async update(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() body: EncounterUpdateDto,
-    @CurrentUser() user: RequestUser,
-  ) {
+  @ApiResponse({ status: 404, description: 'A linked location/quest/session id is not in this encounter\'s campaign.' })
+  async update(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.encounters.updateEncounter(id, body, user, role);

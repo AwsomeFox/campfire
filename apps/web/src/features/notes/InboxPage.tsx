@@ -27,6 +27,7 @@ const entityRoute: Record<EntityTypeValue, string | null> = {
   location: 'locations',
   character: 'characters',
   session: 'sessions',
+  encounter: 'encounters',
   campaign: null,
 };
 
@@ -36,6 +37,7 @@ const entityIcon: Record<EntityTypeValue, string> = {
   location: '🗺',
   character: '🛡',
   session: '📓',
+  encounter: '⚔️',
   campaign: '🔥',
 };
 
