@@ -26,7 +26,7 @@ src/
     json.ts                  TEXT<->JSON (de)serialization for stats/conditions
     time.ts                  nowIso()
   modules/
-    health/                  GET /healthz (no prefix, no auth)
+    health/                  GET /healthz (liveness) + GET /readyz (readiness, SELECT 1 vs SQLite) — no prefix, no auth
     auth/                    AuthService (setup/login/logout/session resolution) + /auth/*, /me, /me/password;
                               OidcService/OidcController (env-gated OIDC/SSO login) — see "OIDC / SSO login"
     users/                   admin user CRUD (/users) + /users/lookup (any authenticated user)
