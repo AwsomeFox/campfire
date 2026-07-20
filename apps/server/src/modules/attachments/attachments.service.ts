@@ -133,6 +133,36 @@ export class AttachmentsService {
     return row;
   }
 
+  /**
+   * All attachment rows for a campaign, oldest first (metadata only — no bytes).
+   * Used by the export module to enumerate maps/portraits/images so the export can
+   * embed the actual files rather than dangling references (issue #87).
+   */
+  async listRowsForCampaign(campaignId: number) {
+    return this.db.select().from(attachments).where(eq(attachments.campaignId, campaignId)).orderBy(attachments.id);
+  }
+
+  /** True when the attachment's bytes exist on disk (cheap stat, no read). */
+  hasBytesOnDisk(row: { campaignId: number; id: number; mime: string }): boolean {
+    return fs.existsSync(this.filePath(row));
+  }
+
+  /**
+   * Read the stored bytes for an attachment row, or `null` when the file is missing
+   * on disk (row-without-file — the same shape #84 guards the GET route against).
+   * Callers embedding attachments in an export use this to skip missing files
+   * gracefully instead of crashing.
+   */
+  readBytesIfPresent(row: { campaignId: number; id: number; mime: string }): Buffer | null {
+    const filePath = this.filePath(row);
+    if (!fs.existsSync(filePath)) return null;
+    try {
+      return fs.readFileSync(filePath);
+    } catch {
+      return null;
+    }
+  }
+
   async getOrThrow(id: number): Promise<Attachment> {
     const row = await this.getRowOrThrow(id);
     return toDomain(row);
