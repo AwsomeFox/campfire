@@ -162,7 +162,7 @@ export default function RunSessionPage() {
   // Announce turn/round changes and HP mutations for screen readers (issue #93).
   // Diffing the encounter (rather than hooking each action) covers every source —
   // own edits, other members' edits, and SSE-pushed updates — with one code path.
-  const prevAnnounceRef = useRef<{ hp: Map<number, number>; turnKey: string } | null>(null);
+  const prevAnnounceRef = useRef<{ hp: Map<number, number | null>; turnKey: string } | null>(null);
   useEffect(() => {
     if (!encounter) return;
     const currentId = encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
@@ -346,6 +346,15 @@ export default function RunSessionPage() {
         <div className="flex-1" />
         {isDm && (
           <div className="flex gap-2 flex-wrap">
+            {/* Cast the secret-free player display to the table (issue #60). */}
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={() => navigate(`/c/${cid}/screen`)}
+              title="Open the player display — initiative + revealed info, no secrets"
+            >
+              📺 Cast
+            </Btn>
             {encounter.status === 'preparing' && (
               <>
                 <Btn ghost disabled={busy} onClick={rollInitiative}>

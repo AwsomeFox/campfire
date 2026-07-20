@@ -130,9 +130,19 @@ export function StatusHeader({
           )}
         </span>
         {isDm && (
-          <Btn ghost style={{ fontSize: 12 }} title="DM only" onClick={startEdit}>
-            ✎ Edit
-          </Btn>
+          <>
+            <Link
+              to={`/c/${campaignId}/screen`}
+              className="btn btn-ghost"
+              style={{ fontSize: 12, textDecoration: 'none' }}
+              title="Open the player display — a secret-free view to cast to a TV"
+            >
+              📺 Cast
+            </Link>
+            <Btn ghost style={{ fontSize: 12 }} title="DM only" onClick={startEdit}>
+              ✎ Edit
+            </Btn>
+          </>
         )}
       </div>
       {error && <p className="text-xs text-rose-400" style={{ width: '100%', margin: 0 }}>{error}</p>}
