@@ -273,6 +273,34 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
+// ---------- notifications (in-app) ----------
+// Per-user notification rows written by the server when something a member cares
+// about happens while they're not looking: a session recap is posted, someone
+// replies on a shared note thread (or the DM answers an inbox item), they're
+// added to a campaign, or the next session gets scheduled. Read via
+// GET /notifications (own rows only); real-time push can layer on later — the
+// store is plain rows, transport-agnostic.
+export const NotificationType = z.enum(['recap_posted', 'note_reply', 'added_to_campaign', 'session_scheduled']);
+export type NotificationType = z.infer<typeof NotificationType>;
+
+export const Notification = z.object({
+  id: Id,
+  userId: Id, // recipient (users.id) — never exposed to anyone but the recipient
+  campaignId: Id,
+  type: NotificationType,
+  title: z.string().min(1).max(200),
+  body: z.string().max(1000).default(''), // short excerpt/context, plain text
+  entityType: EntityType.nullable().default(null), // deep-link target (e.g. session), if any
+  entityId: Id.nullable().default(null),
+  actorName: z.string().max(120).default(''), // display name of who triggered it
+  readAt: IsoDate.nullable().default(null), // null = unread
+  createdAt: IsoDate,
+});
+export type Notification = z.infer<typeof Notification>;
+
+export const NotificationUnreadCount = z.object({ count: z.number().int().nonnegative() });
+export type NotificationUnreadCount = z.infer<typeof NotificationUnreadCount>;
+
 // ---------- rule packs (Compendium backend) ----------
 // Installed, server-wide rules content (spells/monsters/items/…) imported from
 // an open-licensed source (currently Open5e). Read by any authed user;

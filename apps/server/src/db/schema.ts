@@ -336,6 +336,23 @@ export const diceRolls = sqliteTable('dice_rolls', {
   createdAt: text('created_at').notNull(),
 });
 
+// In-app notifications — one row per recipient per event (see modules/notifications).
+// Written by domain services (sessions/notes/membership) on the triggering event;
+// read/marked-read only by the recipient. `read_at` null = unread.
+export const notifications = sqliteTable('notifications', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(), // recipient users.id
+  campaignId: integer('campaign_id').notNull(),
+  type: text('type').notNull(), // NotificationType in @campfire/schema
+  title: text('title').notNull(),
+  body: text('body').notNull().default(''),
+  entityType: text('entity_type'),
+  entityId: integer('entity_id'),
+  actorName: text('actor_name').notNull().default(''),
+  readAt: text('read_at'),
+  createdAt: text('created_at').notNull(),
+});
+
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),
