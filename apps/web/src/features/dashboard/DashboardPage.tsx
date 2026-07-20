@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { CampaignSummary, Encounter } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { useCampaignAccessError } from '../../app/useCampaignAccessError';
@@ -55,23 +56,28 @@ export default function DashboardPage() {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
 
-  // After the summary loads, check for a running encounter to surface a "Live" chip.
+  // Check for a running encounter to surface a "Live" chip.
   // Best-effort: an empty/failed lookup just means no chip, not a page error.
+  const refreshLiveEncounter = useCallback(async () => {
+    if (!Number.isFinite(id)) return;
+    try {
+      const running = await api.get<Encounter[]>(`${API}/campaigns/${id}/encounters?status=running`);
+      setLiveEncounter(running[0] ?? null);
+    } catch {
+      setLiveEncounter(null);
+    }
+  }, [id]);
+
   useEffect(() => {
-    if (!summary || !Number.isFinite(id)) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const running = await api.get<Encounter[]>(`${API}/campaigns/${id}/encounters?status=running`);
-        if (!cancelled) setLiveEncounter(running[0] ?? null);
-      } catch {
-        if (!cancelled) setLiveEncounter(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [summary, id]);
+    if (summary) void refreshLiveEncounter();
+  }, [summary, refreshLiveEncounter]);
+
+  // Live updates over SSE (replaces polling, issue #4): keep the "Live" chip in sync
+  // the moment the DM starts/ends/deletes an encounter, without a manual reload.
+  useCampaignEvents(Number.isFinite(id) ? id : undefined, {
+    onEvent: useCallback(() => void refreshLiveEncounter(), [refreshLiveEncounter]),
+    onReconnect: useCallback(() => void refreshLiveEncounter(), [refreshLiveEncounter]),
+  });
 
   if (!Number.isFinite(id)) {
     return (

@@ -9,6 +9,7 @@ import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
 import { AuditService } from '../audit/audit.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -72,7 +73,13 @@ export class EncountersService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly events: CampaignEventsService,
   ) {}
+
+  /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
+  private emitEncounterEvent(type: 'encounter.updated' | 'encounter.deleted', campaignId: number, encounterId: number): void {
+    this.events.emit({ type, campaignId, encounterId });
+  }
 
   async getRowOrThrow(id: number) {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
@@ -159,6 +166,8 @@ export class EncountersService {
       campaignId,
       detail: `${partyRows.length} party member(s) auto-added`,
     });
+
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id);
 
     return this.getWithCombatantsOrThrow(encounterRow.id);
   }
@@ -264,6 +273,8 @@ export class EncountersService {
       detail: name,
     });
 
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
     return combatantToDomain(row);
   }
 
@@ -340,6 +351,8 @@ export class EncountersService {
       detail: JSON.stringify(patch),
     });
 
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
     return combatantToDomain(row);
   }
 
@@ -358,6 +371,8 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
       detail: existing.name,
     });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
   }
 
   /** Rolls d20+initMod for every combatant that doesn't already have an initiative. */
@@ -379,6 +394,8 @@ export class EncountersService {
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
     });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId);
   }
@@ -409,6 +426,8 @@ export class EncountersService {
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
     });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId);
   }
@@ -443,6 +462,8 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
       detail: `round ${round}, turn ${turnIndex}`,
     });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId);
   }
@@ -482,6 +503,8 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
     });
 
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
     return this.getWithCombatantsOrThrow(encounterId);
   }
 
@@ -498,6 +521,8 @@ export class EncountersService {
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
     });
+
+    this.emitEncounterEvent('encounter.deleted', encounterRow.campaignId, encounterId);
   }
 
   /** Rolls an arbitrary dice expression for a campaign — any member may roll; result is audited. */
