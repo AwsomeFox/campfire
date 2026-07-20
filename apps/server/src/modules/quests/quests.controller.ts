@@ -39,6 +39,23 @@ export class CampaignQuestsController {
     return this.quests.listForCampaignByStatusWithObjectives(campaignId, status, role);
   }
 
+  @Get('changes')
+  @ApiOperation({
+    summary: "What changed since last session",
+    description:
+      'Requires campaign membership. Returns `{ since, quests }` — the visible quests whose updatedAt is at/after `since`, in board order. `since` defaults to the campaign\'s latest session date; pass `?since=<ISO>` to diff against a different instant (e.g. the player\'s last visit). `since` is null (and quests empty) when the campaign has no sessions. Hidden quests are excluded and dmSecret stripped for non-dm.',
+  })
+  @ApiQuery({ name: 'since', required: false, type: String, description: 'ISO-8601 instant to diff against. Defaults to the latest session date.' })
+  @ApiResponse({ status: 200, description: 'Changed quests plus the reference instant.' })
+  async changes(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Query('since') since: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    return this.quests.changesSince(campaignId, since, role);
+  }
+
   @Post()
   @ApiOperation({ summary: 'Create a quest', description: 'dm role required, unless `?proposed=true` — then any member may submit it as a pending proposal.' })
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })

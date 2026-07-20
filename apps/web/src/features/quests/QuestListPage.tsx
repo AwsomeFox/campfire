@@ -9,10 +9,38 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { Quest } from '@campfire/schema';
+import type { Quest, QuestChanges } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+
+// "Updated Xd ago", mirroring the dashboard's NotesQuickRail phrasing so relative
+// times read consistently across the app.
+function timeAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
+  if (days <= 0) return 'today';
+  if (days === 1) return '1d ago';
+  if (days < 7) return `${days}d ago`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return `${weeks}w ago`;
+  const months = Math.floor(days / 30);
+  return `${months}mo ago`;
+}
+
+// What changed since the last session (#66): the /quests/changes endpoint returns
+// the reference instant plus the changed quests. A quest created at/after that
+// instant is NEW; one merely edited since is CHANGED. Keyed by id for O(1) lookup
+// while rendering the board.
+type ChangeKind = 'new' | 'changed';
+function buildChangeMap(changes: QuestChanges | null): Map<number, ChangeKind> {
+  const map = new Map<number, ChangeKind>();
+  if (!changes || changes.since == null) return map;
+  for (const q of changes.quests) {
+    map.set(q.id, q.createdAt >= changes.since ? 'new' : 'changed');
+  }
+  return map;
+}
 
 const STATUS_GLYPH: Record<Quest['status'], { glyph: string; color: string }> = {
   available: { glyph: '○', color: 'var(--color-neutral-500)' },
@@ -35,6 +63,22 @@ const STATUS_TAG_CLASS: Record<Quest['status'], string> = {
   failed: 'tag tag-neutral',
 };
 
+// NEW / CHANGED marker for a quest touched since the last session (#66), plus the
+// "updated Xd ago" relative time. Renders nothing when the quest hasn't changed.
+function ChangeBadge({ quest, kind }: { quest: Quest; kind: ChangeKind | undefined }) {
+  if (!kind) return null;
+  const label = kind === 'new' ? 'NEW' : 'CHANGED';
+  return (
+    <span
+      className="tag tag-accent"
+      style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.3 }}
+      title={`${label} since your last session — updated ${timeAgo(quest.updatedAt)}`}
+    >
+      {label} · {timeAgo(quest.updatedAt)}
+    </span>
+  );
+}
+
 // Quest objectives aren't included on the list endpoint (GET /campaigns/:id/quests returns
 // bare Quest rows, no `objectives`) — the design's per-quest objective checklist on this
 // screen can't be rendered here without an extra fetch. We show status + subquests only;
@@ -48,6 +92,8 @@ export default function QuestListPage() {
   const isDm = role === 'dm';
 
   const [quests, setQuests] = useState<Quest[]>([]);
+  const [changes, setChanges] = useState<Map<number, ChangeKind>>(new Map());
+  const [changesSince, setChangesSince] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
@@ -57,8 +103,16 @@ export default function QuestListPage() {
     setError(null);
     setForbidden(false);
     try {
-      const list = await api.get<Quest[]>(`${API}/campaigns/${cid}/quests`);
+      // The "what changed since last session" diff is a nicety layered onto the
+      // board — never let it fail the whole page, so it's fetched alongside but
+      // its own failure just drops the badges (empty change map).
+      const [list, changeRes] = await Promise.all([
+        api.get<Quest[]>(`${API}/campaigns/${cid}/quests`),
+        api.get<QuestChanges>(`${API}/campaigns/${cid}/quests/changes`).catch(() => null),
+      ]);
       setQuests(list);
+      setChanges(buildChangeMap(changeRes));
+      setChangesSince(changeRes?.since ?? null);
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
@@ -124,6 +178,12 @@ export default function QuestListPage() {
         )}
       </div>
 
+      {changesSince && changes.size > 0 && (
+        <p className="text-muted" style={{ margin: '-6px 0 0', fontSize: 12 }}>
+          {changes.size === 1 ? '1 quest' : `${changes.size} quests`} changed since your last session ({timeAgo(changesSince)}).
+        </p>
+      )}
+
       {error && <ErrorNote message={error} onRetry={load} />}
 
       {loading && !quests.length ? (
@@ -156,6 +216,7 @@ export default function QuestListPage() {
                 <span className={STATUS_TAG_CLASS[q.status]} style={{ fontSize: 10 }}>
                   {STATUS_LABEL[q.status]}
                 </span>
+                <ChangeBadge quest={q} kind={changes.get(q.id)} />
                 {isDm && q.hidden && (
                   <span className="tag tag-outline" style={{ fontSize: 10 }} title="Hidden from players">
                     🙈 Hidden
@@ -180,6 +241,7 @@ export default function QuestListPage() {
                   <span className="tag tag-neutral" style={{ fontSize: 10 }}>
                     {STATUS_LABEL[s.status]}
                   </span>
+                  <ChangeBadge quest={s} kind={changes.get(s.id)} />
                 </div>
               ))}
             </div>
