@@ -8,6 +8,7 @@ import { useParams, Link } from 'react-router-dom';
 import type { Character, CampaignMember } from '@campfire/schema';
 import { levelForXp } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { avatarTone, initials } from './avatar';
@@ -47,6 +48,9 @@ export default function PartyPage() {
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  // Keep party HP live at the table (issue #113): poll ~5s while the tab is visible.
+  usePollWhileVisible(() => void load(), 5000, Number.isFinite(id));
 
   function ownerLabel(ownerUserId: string | null): string | null {
     if (!ownerUserId) return null;

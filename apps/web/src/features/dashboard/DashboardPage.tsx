@@ -7,6 +7,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { CampaignSummary, Encounter } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { useCampaignAccessError } from '../../app/useCampaignAccessError';
@@ -21,6 +22,10 @@ import { SessionLog } from './SessionLog';
 import { NotesQuickRail } from './NotesQuickRail';
 import { DiceWidget } from './DiceWidget';
 import { HandoutsCard } from './HandoutsCard';
+
+// Slow poll so the summary (quests, party HP, notes, NPCs) picks up other
+// players' edits at the table without a manual reload; SSE only covers combat.
+const POLL_MS = 5000;
 
 export default function DashboardPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -56,6 +61,10 @@ export default function DashboardPage() {
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  // Keep the summary live while the tab is open (issue #113): the quest/party/notes
+  // cards have no SSE event, so poll them ~5s and pause when the tab is hidden.
+  usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(id));
 
   // Check for a running encounter to surface a "Live" chip.
   // Best-effort: an empty/failed lookup just means no chip, not a page error.
