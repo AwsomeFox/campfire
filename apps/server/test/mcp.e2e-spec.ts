@@ -47,6 +47,8 @@ const ALL_TOOLS = [
   'read_audit_log',
   'export_campaign',
   'get_ai_dm_seat',
+  'list_attachments',
+  'get_attachment',
   // write
   'create_campaign',
   'delete_campaign',
@@ -75,7 +77,9 @@ const ALL_TOOLS = [
   'set_location_discovery',
   'add_session_recap',
   'update_session',
+  'delete_session',
   'upsert_character',
+  'delete_character',
   'update_character_hp',
   'award_xp',
   'level_up_character',
@@ -87,6 +91,7 @@ const ALL_TOOLS = [
   'submit_inbox_item',
   'resolve_inbox_item',
   'update_campaign_status',
+  'update_campaign',
   'approve_proposal',
   'reject_proposal',
   'withdraw_proposal',
@@ -94,6 +99,7 @@ const ALL_TOOLS = [
   'update_member',
   'remove_member',
   'install_rule_pack',
+  'uninstall_rule_pack',
   'roll_dice',
   'create_encounter',
   'add_combatant',
@@ -103,6 +109,7 @@ const ALL_TOOLS = [
   'begin_encounter',
   'next_turn',
   'end_encounter',
+  'delete_encounter',
   'ai_dm_narrate',
 ];
 
@@ -179,7 +186,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(87);
+    expect(tools).toHaveLength(94);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -1118,6 +1125,149 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(auditPage.map((r) => r.id)).toEqual(auditAll.slice(1, 3).map((r) => r.id));
   });
 
+  it('delete_encounter removes an encounter via MCP (dm), and a viewer PAT is denied (issue #76)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const created = parseResult(
+      await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Doomed Fight' } }),
+    ) as { id: number };
+
+    // A viewer-scoped PAT cannot delete.
+    const viewerClient = await mcpClient(viewerToken);
+    const denied = await viewerClient.callTool({ name: 'delete_encounter', arguments: { encounterId: created.id } });
+    expect(denied.isError).toBe(true);
+
+    const removed = await dmClient.callTool({ name: 'delete_encounter', arguments: { encounterId: created.id } });
+    expect(removed.isError).toBeFalsy();
+    expect(parseResult(removed)).toMatchObject({ ok: true, encounterId: created.id });
+
+    // Verify via REST that it's gone (a GET 404s).
+    const restGet = await dmAgent.get(`/api/v1/encounters/${created.id}`);
+    expect(restGet.status).toBe(404);
+
+    // A second delete over MCP now 404s.
+    const again = await dmClient.callTool({ name: 'delete_encounter', arguments: { encounterId: created.id } });
+    expect(again.isError).toBe(true);
+  });
+
+  it('delete_character removes a character via MCP (dm), and a viewer PAT is denied (issue #76)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const created = parseResult(
+      await dmClient.callTool({ name: 'upsert_character', arguments: { campaignId, name: 'Doomed Hero' } }),
+    ) as { id: number };
+
+    const viewerClient = await mcpClient(viewerToken);
+    const denied = await viewerClient.callTool({ name: 'delete_character', arguments: { characterId: created.id } });
+    expect(denied.isError).toBe(true);
+
+    // Still present after the denied attempt.
+    expect((await dmAgent.get(`/api/v1/characters/${created.id}`)).status).toBe(200);
+
+    const removed = await dmClient.callTool({ name: 'delete_character', arguments: { characterId: created.id } });
+    expect(removed.isError).toBeFalsy();
+    expect(parseResult(removed)).toMatchObject({ ok: true, characterId: created.id });
+    expect((await dmAgent.get(`/api/v1/characters/${created.id}`)).status).toBe(404);
+  });
+
+  it('delete_session removes a session recap via MCP (dm); propose:true yields a proposal a dm can approve (issue #76)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Session Delete' });
+    const delCampaign = campRes.body.id as number;
+
+    const s1 = parseResult(
+      await dmClient.callTool({ name: 'add_session_recap', arguments: { campaignId: delCampaign, recap: 'first' } }),
+    ) as { id: number };
+    const s2 = parseResult(
+      await dmClient.callTool({ name: 'add_session_recap', arguments: { campaignId: delCampaign, recap: 'second' } }),
+    ) as { id: number };
+
+    // Direct dm delete of s1.
+    const removed = await dmClient.callTool({ name: 'delete_session', arguments: { sessionId: s1.id } });
+    expect(removed.isError).toBeFalsy();
+    expect(parseResult(removed)).toMatchObject({ ok: true, sessionId: s1.id });
+    expect((await dmAgent.get(`/api/v1/sessions/${s1.id}`)).status).toBe(404);
+
+    // propose:true delete of s2 does NOT remove it until approved.
+    const proposed = await dmClient.callTool({ name: 'delete_session', arguments: { sessionId: s2.id, propose: true } });
+    expect(proposed.isError).toBeFalsy();
+    const { proposal } = parseResult(proposed) as { proposal: { id: number; status: string } };
+    expect(proposal.status).toBe('pending');
+    expect((await dmAgent.get(`/api/v1/sessions/${s2.id}`)).status).toBe(200);
+
+    const approved = await dmClient.callTool({ name: 'approve_proposal', arguments: { proposalId: proposal.id } });
+    expect(approved.isError).toBeFalsy();
+    expect((await dmAgent.get(`/api/v1/sessions/${s2.id}`)).status).toBe(404);
+  });
+
+  it('update_campaign edits general fields (name/description) via MCP (dm), and a viewer PAT is denied (issue #76)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Rename Me' });
+    const upCampaign = campRes.body.id as number;
+
+    // A viewer-scoped PAT cannot update. (viewerToken is unscoped-to-campaign; it is a
+    // viewer on every campaign the admin owns, so it resolves to viewer here.)
+    const viewerClient = await mcpClient(viewerToken);
+    const denied = await viewerClient.callTool({
+      name: 'update_campaign',
+      arguments: { campaignId: upCampaign, name: 'Hacked' },
+    });
+    expect(denied.isError).toBe(true);
+
+    const updated = await dmClient.callTool({
+      name: 'update_campaign',
+      arguments: { campaignId: upCampaign, name: 'Renamed Realm', description: 'A general-field update over MCP.' },
+    });
+    expect(updated.isError).toBeFalsy();
+    const result = parseResult(updated) as { name: string; description: string };
+    expect(result.name).toBe('Renamed Realm');
+    expect(result.description).toBe('A general-field update over MCP.');
+
+    // Verify via REST.
+    const restGet = await dmAgent.get(`/api/v1/campaigns/${upCampaign}`);
+    expect(restGet.body.name).toBe('Renamed Realm');
+    expect(restGet.body.description).toBe('A general-field update over MCP.');
+
+    // Empty patch is rejected.
+    const empty = await dmClient.callTool({ name: 'update_campaign', arguments: { campaignId: upCampaign } });
+    expect(empty.isError).toBe(true);
+  });
+
+  it('list_attachments / get_attachment return metadata; a hidden attachment is DM-only (issue #76)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    // Upload a DM-only 'map' (defaults hidden=true) via REST multipart.
+    // Valid 8-byte PNG signature (content sniff checks only these) + filler bytes; the
+    // metadata tools never read the bytes back, so a well-formed header is enough.
+    const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
+    const uploadRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'map')
+      .attach('file', pngBytes, { filename: 'secret-map.png', contentType: 'image/png' });
+    expect(uploadRes.status).toBe(201);
+    const mapId = uploadRes.body.id as number;
+    expect(uploadRes.body.hidden).toBe(true);
+
+    // DM sees it in the list and can fetch its metadata.
+    const dmList = parseResult(
+      await dmClient.callTool({ name: 'list_attachments', arguments: { campaignId } }),
+    ) as Array<{ id: number; kind: string; filename: string }>;
+    const found = dmList.find((a) => a.id === mapId);
+    expect(found).toBeDefined();
+    expect(found?.kind).toBe('map');
+    expect(found?.filename).toBe('secret-map.png');
+
+    const dmGet = await dmClient.callTool({ name: 'get_attachment', arguments: { attachmentId: mapId } });
+    expect(dmGet.isError).toBeFalsy();
+    expect((parseResult(dmGet) as { id: number }).id).toBe(mapId);
+
+    // A viewer PAT: the hidden map is omitted from the list and 404s on get.
+    const viewerClient = await mcpClient(viewerToken);
+    const viewerList = parseResult(
+      await viewerClient.callTool({ name: 'list_attachments', arguments: { campaignId } }),
+    ) as Array<{ id: number }>;
+    expect(viewerList.some((a) => a.id === mapId)).toBe(false);
+    const viewerGet = await viewerClient.callTool({ name: 'get_attachment', arguments: { attachmentId: mapId } });
+    expect(viewerGet.isError).toBe(true);
+  });
+
   it('resources/list exposes the static index + a summary/party/recaps URI per accessible campaign (issue #26)', async () => {
     const client = await mcpClient(dmToken);
 
@@ -1204,6 +1354,44 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const text = (result.messages[0].content as { type: string; text: string }).text;
     expect(text).toContain(`campfire://campaign/${campaignId}/summary`);
     expect(text).toContain('read_inbox');
+  });
+
+  // Runs late on purpose: it uninstalls the shared open5e-srd pack, so it must come
+  // after every pack-dependent test (lookup_rule, monster combatants) above.
+  it('uninstall_rule_pack removes a pack (adminEnabled token only); a plain dm PAT is denied (issue #76)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const packs = parseResult(
+      await dmClient.callTool({ name: 'list_rule_packs', arguments: {} }),
+    ) as Array<{ id: number; slug: string }>;
+    const pack = packs.find((p) => p.slug === 'open5e-srd');
+    expect(pack).toBeDefined();
+    const packId = pack!.id;
+
+    // A plain dm-scoped PAT (even the server admin's own) carries NO server-admin power
+    // unless minted adminEnabled — so uninstall is denied, matching install_rule_pack.
+    const denied = await dmClient.callTool({ name: 'uninstall_rule_pack', arguments: { packId } });
+    expect(denied.isError).toBe(true);
+    // Still installed.
+    expect(
+      (parseResult(await dmClient.callTool({ name: 'list_rule_packs', arguments: {} })) as Array<{ id: number }>).some(
+        (p) => p.id === packId,
+      ),
+    ).toBe(true);
+
+    // An adminEnabled token minted by the server admin DOES carry server-admin power.
+    const adminTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-admin-enabled', scope: 'dm', adminEnabled: true });
+    expect(adminTokenRes.status).toBe(201);
+    expect(adminTokenRes.body.apiToken.adminEnabled).toBe(true);
+    const adminClient = await mcpClient(adminTokenRes.body.token);
+
+    const removed = await adminClient.callTool({ name: 'uninstall_rule_pack', arguments: { packId } });
+    expect(removed.isError).toBeFalsy();
+    expect(parseResult(removed)).toMatchObject({ ok: true, packId });
+
+    const after = parseResult(
+      await adminClient.callTool({ name: 'list_rule_packs', arguments: {} }),
+    ) as Array<{ id: number }>;
+    expect(after.some((p) => p.id === packId)).toBe(false);
   });
 
   it('request without Authorization gets 401; GET gets 405', async () => {

@@ -5,18 +5,28 @@ items, and conditions — that a DM can look up and drop straight into play.
 
 ## Installing content
 
-A **server admin** installs rule packs under **Admin → Rule systems**. Today the
-source is **Open5e** (the D&D 5e SRD, open-licensed). Tick the sections you want —
-**Conditions**, **Monsters**, **Magic items**, **Spells** — and install. Conditions
-are near-instant; the full monster and spell lists take up to a minute each.
+Rule packs install under **Admin → Rule systems**. Installing is open to a **server
+admin _or_ the DM of any campaign** — packs are server-wide, so a DM setting up their
+table can add content without a server-admin round-trip. (Removing a pack stays
+server-admin only, since it affects every campaign that selected it.)
 
-Installs are **incremental**: add a section later and it merges in without
-reinstalling what's already there.
+The built-in source is **Open5e** (the D&D 5e SRD, open-licensed): tick the sections
+you want — **Conditions**, **Monsters**, **Magic items**, **Spells** — and install.
+Every install runs as a **background job**: the screen shows per-section progress
+while it works, so you can keep building. Installs are also **incremental** — add a
+section later and it merges in without reinstalling what's already there.
+
+### Upload another system
+
+Beyond Open5e, you can **upload a generic open-licensed dataset** for any system as a
+JSON rule pack. The pack must declare an **open license** (OGL, ORC, Creative Commons,
+or public domain) — anything else is rejected before the import starts. Uploads run as
+the same kind of background job as an Open5e install.
 
 !!! note "Which systems?"
-    Only Open5e / D&D 5e SRD is wired today. Multi-system support (e.g. Pathfinder
-    via uploaded datasets) is on the [roadmap](../reference/roadmap.md). Content
-    installs server-wide and a campaign points at it via its rule system.
+    D&D 5e (via Open5e) has a built-in one-click importer; any other system comes in
+    through an uploaded dataset. Content installs server-wide, and a campaign points at
+    it via its rule system.
 
 ## Using it
 

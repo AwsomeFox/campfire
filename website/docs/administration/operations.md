@@ -48,12 +48,18 @@ Off by default. Set `BACKUP_SCHEDULE_ENABLED=1` and Campfire writes a fresh arch
 `$DATA_DIR/backups`) every `BACKUP_INTERVAL_HOURS` (default `24`). Because these land
 on the same volume, copy them off-box for real disaster recovery.
 
-## Per-campaign export
+## Per-campaign export & import
 
 Any DM can export their campaign from **Campaign settings → Export** as **JSON**
 (complete, machine-readable) or a **Markdown zip** (human-readable). Good for
 archiving a finished campaign or moving it — but it is per-campaign, not a
 whole-server backup.
+
+The **JSON** export round-trips: any authenticated user can **import** it
+(`POST /api/v1/campaigns/import`, or from the campaign hub) to recreate the campaign
+with fresh ids and every internal reference remapped, becoming its DM. Imported player
+characters come in unowned, and members, audit history and proposals are not carried
+over. This is how you move a campaign between servers.
 
 ## Upgrading
 
