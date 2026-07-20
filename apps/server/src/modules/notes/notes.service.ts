@@ -9,6 +9,7 @@ import { nowIso } from '../../common/time';
 import { applyPage } from '../../common/pagination';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -80,6 +81,7 @@ export class NotesService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /**
@@ -428,12 +430,22 @@ export class NotesService {
   }
 
   /** author only; dm may NOT edit others' notes */
-  async update(id: number, input: NoteUpdateInput, user: RequestUser, role: Role): Promise<Note> {
+  async update(
+    id: number,
+    input: NoteUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<Note> {
     const existing = await this.getRowOrThrow(id);
     if (!canSee(existing, user, role)) throw new NotFoundException(`Note ${id} not found`);
     if (existing.authorUserId !== user.id) {
       throw new ForbiddenException('Only the author may edit this note');
     }
+    // Optimistic concurrency (#157): a co-author's stale save 409s instead of clobbering.
+    // Notes get the concurrency guard but NOT the revision-history layer — their per-note
+    // visibility/author-only model makes a generic revision endpoint a redaction hazard.
+    this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
 
     // Recompute the whisper target from the RESULTING visibility + recipient: switching
     // away from whisper clears the recipient, switching into whisper (or re-targeting)

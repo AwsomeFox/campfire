@@ -10,6 +10,7 @@ import { applyPage } from '../../common/pagination';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -115,6 +116,7 @@ export class SessionsService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /**
@@ -318,10 +320,30 @@ export class SessionsService {
     return redactSecret(toDomain(row), role);
   }
 
-  async update(id: number, input: SessionUpdateInput, user: RequestUser, role: Role): Promise<Session> {
+  async update(
+    id: number,
+    input: SessionUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<Session> {
     const existing = await this.getRowOrThrow(id);
+    // Optimistic concurrency (#157): 409 if the caller's expectedUpdatedAt is stale,
+    // BEFORE any write or revision snapshot, so a losing writer never clobbers.
+    this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
     if (input.number !== undefined) {
       await this.assertNumberAvailable(existing.campaignId, input.number, id);
+    }
+    // Snapshot the PRIOR recap into revision history when the recap actually changes,
+    // so a subsequent overwrite is recoverable (#157). Bounded to committed edits.
+    if (input.recap !== undefined && input.recap !== existing.recap) {
+      await this.revisions.record({
+        entityType: 'session',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.recap,
+        user,
+      });
     }
     const [row] = await this.db
       .update(sessions)
@@ -379,6 +401,9 @@ export class SessionsService {
     // Attendance rows point only at this session — drop them so the join table
     // doesn't accumulate orphans after a session is deleted.
     await this.db.delete(sessionAttendees).where(eq(sessionAttendees.sessionId, id));
+    // Revision history is a polymorphic (soft) reference with no FK cascade — drop this
+    // session's revisions explicitly so a single delete leaves no orphan (#157).
+    await this.revisions.removeForEntity('session', id);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

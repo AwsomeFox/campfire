@@ -11,6 +11,7 @@ import {
   EncounterUpdate,
   DangerLevel,
   EntityType,
+  ExpectedUpdatedAt,
   Id,
   LocationCreate,
   LocationStatus,
@@ -841,8 +842,8 @@ export class McpToolsService {
       'Update a quest (DM). With propose:true any member may submit the change as a proposal instead. Supports ' +
         'subquests via parentId, an optional giverNpcId, a dmSecret field (DM-only text), and a hidden flag ' +
         '(set hidden=false to reveal a previously-hidden quest to players).',
-      { questId: Id.describe('Quest id'), propose: ProposeArg, ...QuestUpdate.shape },
-      async ({ questId, propose, ...fields }) => {
+      { questId: Id.describe('Quest id'), propose: ProposeArg, expectedUpdatedAt: ExpectedUpdatedAt, ...QuestUpdate.shape },
+      async ({ questId, propose, expectedUpdatedAt, ...fields }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
         const validated = QuestUpdate.parse(fields);
         if (requireWriteMode(user, propose)) {
@@ -851,7 +852,7 @@ export class McpToolsService {
           return { proposal };
         }
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.quests.update(questId as number, validated, user, role);
+        return this.quests.update(questId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
       },
     );
 
@@ -1127,9 +1128,10 @@ export class McpToolsService {
         campaignId: CampaignIdArg,
         npcId: Id.optional().describe('Existing NPC id (update); omit to create'),
         propose: ProposeArg,
+        expectedUpdatedAt: ExpectedUpdatedAt,
         ...NpcUpdate.shape,
       },
-      async ({ campaignId, npcId, propose, ...fields }) => {
+      async ({ campaignId, npcId, propose, expectedUpdatedAt, ...fields }) => {
         if (npcId !== undefined) {
           const row = await this.npcs.getRowOrThrow(npcId as number);
           if (row.campaignId !== (campaignId as number)) {
@@ -1142,7 +1144,7 @@ export class McpToolsService {
             return { proposal };
           }
           const role = await this.access.requireRole(user, row.campaignId, 'dm');
-          return this.npcs.update(npcId as number, validated, user, role);
+          return this.npcs.update(npcId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
         }
         const validated = NpcCreate.parse(fields); // name required on create
         // #159: real upsert. With no npcId, match an existing NPC by (campaignId, name)
@@ -1201,9 +1203,10 @@ export class McpToolsService {
         campaignId: CampaignIdArg,
         locationId: Id.optional().describe('Existing location id (update); omit to create'),
         propose: ProposeArg,
+        expectedUpdatedAt: ExpectedUpdatedAt,
         ...LocationUpdate.shape,
       },
-      async ({ campaignId, locationId, propose, ...fields }) => {
+      async ({ campaignId, locationId, propose, expectedUpdatedAt, ...fields }) => {
         if (locationId !== undefined) {
           const row = await this.locations.getRowOrThrow(locationId as number);
           if (row.campaignId !== (campaignId as number)) {
@@ -1216,7 +1219,7 @@ export class McpToolsService {
             return { proposal };
           }
           const role = await this.access.requireRole(user, row.campaignId, 'dm');
-          return this.locations.update(locationId as number, validated, user, role);
+          return this.locations.update(locationId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
         }
         const validated = LocationCreate.parse(fields); // name required on create
         // #159: real upsert. With no locationId, match an existing location by
@@ -1330,8 +1333,9 @@ export class McpToolsService {
         playedAt: z.string().nullable().optional().describe('ISO date the session was played'),
         dmSecret: z.string().max(20_000).optional().describe('DM-only prep notes — stripped from non-DM reads'),
         propose: ProposeArg,
+        expectedUpdatedAt: ExpectedUpdatedAt,
       },
-      async ({ sessionId, title, recap, playedAt, dmSecret, propose }) => {
+      async ({ sessionId, title, recap, playedAt, dmSecret, propose, expectedUpdatedAt }) => {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
         const validated = SessionUpdate.parse({
           ...(title !== undefined ? { title } : {}),
@@ -1345,7 +1349,7 @@ export class McpToolsService {
           return { proposal };
         }
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.sessions.update(sessionId as number, validated, user, role);
+        return this.sessions.update(sessionId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
       },
     );
 
@@ -1629,8 +1633,9 @@ export class McpToolsService {
           .nullable()
           .optional()
           .describe('Whisper target member id — required alongside visibility "whisper"; ignored for other visibilities'),
+        expectedUpdatedAt: ExpectedUpdatedAt,
       },
-      async ({ noteId, body, visibility, recipientUserId }) => {
+      async ({ noteId, body, visibility, recipientUserId, expectedUpdatedAt }) => {
         const row = await this.notes.getRowOrThrow(noteId as number);
         const role = await this.access.requireMember(user, row.campaignId, { write: true });
         return this.notes.update(
@@ -1642,6 +1647,7 @@ export class McpToolsService {
           },
           user,
           role,
+          { expectedUpdatedAt: expectedUpdatedAt as string | undefined },
         );
       },
     );

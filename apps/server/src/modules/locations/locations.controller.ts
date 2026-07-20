@@ -94,7 +94,9 @@ export class LocationsController {
       return { proposal };
     }
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.locations.update(id, body, user, role);
+    // Split off the optimistic-concurrency guard (#157) from the entity fields.
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.locations.update(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Delete(':id')

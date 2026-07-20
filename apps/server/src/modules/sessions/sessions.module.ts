@@ -3,6 +3,7 @@ import { AuditModule } from '../audit/audit.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { ProposalRecordsModule } from '../proposals/proposal-records.module';
+import { RevisionsModule } from '../revisions/revisions.module';
 import { SessionsService } from './sessions.service';
 import { SessionSharesService } from './session-shares.service';
 import { SchedulingService } from './scheduling.service';
@@ -16,7 +17,7 @@ import {
 } from './scheduling.controller';
 
 @Module({
-  imports: [AuditModule, NotificationsModule, RoleAccessModule, ProposalRecordsModule],
+  imports: [AuditModule, NotificationsModule, RoleAccessModule, ProposalRecordsModule, RevisionsModule],
   controllers: [
     CampaignSessionsController,
     SessionsController,
