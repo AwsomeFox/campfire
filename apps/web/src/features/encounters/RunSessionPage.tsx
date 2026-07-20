@@ -372,6 +372,15 @@ export default function RunSessionPage() {
         <div className="flex-1" />
         {isDm && (
           <div className="flex gap-2 flex-wrap">
+            {/* Cast the secret-free player display to the table (issue #60). */}
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={() => navigate(`/c/${cid}/screen`)}
+              title="Open the player display — initiative + revealed info, no secrets"
+            >
+              📺 Cast
+            </Btn>
             {encounter.status === 'preparing' && (
               <>
                 <Btn ghost disabled={busy} onClick={rollInitiative}>
