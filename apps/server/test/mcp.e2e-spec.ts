@@ -144,8 +144,21 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // mcp-dm is the first user created via /auth/setup, so it's also the server admin —
     // install a rule pack from the fake Open5e server for the lookup_rule smoke test below.
     fakeOpen5e = await startFakeOpen5e();
+    // Install is now a non-blocking background job (issue #20): POST returns 202 with a
+    // job; poll it to completion so the pack is present for the lookup_rule smoke test.
     const installRes = await dmAgent.post('/api/v1/rules/packs/install').send({ source: 'open5e', url: fakeOpen5e.baseUrl });
-    expect(installRes.status).toBe(201);
+    expect(installRes.status).toBe(202);
+    const jobId = installRes.body.id;
+    const start = Date.now();
+    for (;;) {
+      const jobRes = await dmAgent.get(`/api/v1/rules/packs/install-jobs/${jobId}`);
+      if (jobRes.body.status === 'completed' || jobRes.body.status === 'failed') {
+        expect(jobRes.body.status).toBe('completed');
+        break;
+      }
+      if (Date.now() - start > 15_000) throw new Error(`rule-pack install job did not finish (last ${jobRes.body.status})`);
+      await new Promise((r) => setTimeout(r, 25));
+    }
   });
 
   afterAll(async () => {
