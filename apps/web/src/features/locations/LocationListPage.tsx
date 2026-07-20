@@ -21,6 +21,36 @@ const statusLabel: Record<Location['status'], string> = {
   current: '📍 Current',
 };
 
+/**
+ * Flatten the location hierarchy (#99) into render order: each root followed by its
+ * descendants depth-first, carrying a `depth` for indentation. Locations whose parent
+ * isn't in the visible set (e.g. an unexplored parent hidden from a player) surface as
+ * roots so nothing silently disappears. A `seen` guard keeps a cyclic legacy row from
+ * looping forever.
+ */
+function toTree(locations: Location[]): Array<{ loc: Location; depth: number }> {
+  const byParent = new Map<number | null, Location[]>();
+  const ids = new Set(locations.map((l) => l.id));
+  for (const loc of locations) {
+    const parent = loc.parentId != null && ids.has(loc.parentId) ? loc.parentId : null;
+    const bucket = byParent.get(parent) ?? [];
+    bucket.push(loc);
+    byParent.set(parent, bucket);
+  }
+  const out: Array<{ loc: Location; depth: number }> = [];
+  const seen = new Set<number>();
+  const walk = (parentId: number | null, depth: number) => {
+    for (const loc of byParent.get(parentId) ?? []) {
+      if (seen.has(loc.id)) continue;
+      seen.add(loc.id);
+      out.push({ loc, depth });
+      walk(loc.id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return out;
+}
+
 export default function LocationListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
@@ -36,6 +66,7 @@ export default function LocationListPage() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newKind, setNewKind] = useState('');
+  const [newParentId, setNewParentId] = useState('');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -60,9 +91,14 @@ export default function LocationListPage() {
     setSaving(true);
     setCreateError(null);
     try {
-      const loc = await api.post<Location>(`${API}/campaigns/${id}/locations`, { name: newName.trim(), kind: newKind.trim() });
+      const loc = await api.post<Location>(`${API}/campaigns/${id}/locations`, {
+        name: newName.trim(),
+        kind: newKind.trim(),
+        parentId: newParentId ? Number(newParentId) : null,
+      });
       setNewName('');
       setNewKind('');
+      setNewParentId('');
       setCreating(false);
       await load();
       navigate(`/c/${id}/locations/${loc.id}`);
@@ -121,6 +157,19 @@ export default function LocationListPage() {
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="Location name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} autoFocus />
             <TextInput aria-label="Location kind" placeholder="Kind (e.g. town, dungeon, region)" value={newKind} onChange={(e) => setNewKind(e.target.value)} />
+            <select
+              aria-label="Parent location"
+              className="cf-input text-sm"
+              value={newParentId}
+              onChange={(e) => setNewParentId(e.target.value)}
+            >
+              <option value="">No parent (top level)</option>
+              {locations.map((loc) => (
+                <option key={loc.id} value={loc.id}>
+                  Inside: {loc.name}
+                </option>
+              ))}
+            </select>
             <div className="flex items-center justify-end gap-2">
               <Btn
                 ghost
@@ -129,6 +178,7 @@ export default function LocationListPage() {
                   setCreating(false);
                   setNewName('');
                   setNewKind('');
+                  setNewParentId('');
                   setCreateError(null);
                 }}
               >
@@ -145,7 +195,7 @@ export default function LocationListPage() {
           <EmptyState icon="🗺" title="No locations yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any locations yet.'} />
         ) : (
           <div className="flex flex-col gap-2.5" style={{ maxWidth: 720 }}>
-            {locations.map((loc) => (
+            {toTree(locations).map(({ loc, depth }) => (
               <a
                 key={loc.id}
                 href={`/c/${id}/locations/${loc.id}`}
@@ -154,7 +204,9 @@ export default function LocationListPage() {
                   navigate(`/c/${id}/locations/${loc.id}`);
                 }}
                 className="cf-card flex items-center gap-3 p-3.5 hover:border-amber-500/50"
+                style={depth > 0 ? { marginLeft: depth * 20 } : undefined}
               >
+                {depth > 0 && <span className="text-slate-600 shrink-0" aria-hidden>↳</span>}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
