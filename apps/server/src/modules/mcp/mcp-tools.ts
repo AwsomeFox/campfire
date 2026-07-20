@@ -127,6 +127,45 @@ function paginate<T>(rows: T[], limit: number | undefined, offset: number | unde
 }
 
 /**
+ * Deep-clone a zod schema so every node gets a fresh `_def` object.
+ *
+ * Why: the MCP SDK serializes each tool's inputSchema for `tools/list` with
+ * zod-to-json-schema, which tracks visited `_def`s by object identity and emits
+ * any SECOND occurrence as a local `$ref` instead of inlining it. Shared
+ * singletons in @campfire/schema (e.g. `Id`, reused by CombatantCreate's
+ * `characterId` AND `ruleEntryId`) therefore surfaced as sibling-property refs
+ * like `{"$ref":"#/properties/characterId"}` — valid JSON Schema, but many MCP
+ * clients don't resolve refs between sibling properties, and the field's own
+ * type/description metadata was dropped (issue #31; also hit create_quest/
+ * update_quest `giverNpcId`, upsert_npc `locationId`, add_member `characterId`).
+ * Cloning (zod's own `.describe()` clone pattern, applied recursively) keeps
+ * validation behavior identical while guaranteeing every property serializes
+ * inline.
+ */
+function inlineClone<T extends z.ZodTypeAny>(schema: T): T {
+  const def = schema._def as Record<string, unknown>;
+  const next: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(def)) {
+    if (value instanceof z.ZodType) {
+      // wrapper/composite nodes: optional/nullable/default `innerType`, array element `type`, effects `schema`, object `catchall`, …
+      next[key] = inlineClone(value);
+    } else if (Array.isArray(value) && value.length > 0 && value.every((v) => v instanceof z.ZodType)) {
+      next[key] = value.map((v) => inlineClone(v as z.ZodTypeAny)); // union options / tuple items
+    } else {
+      next[key] = value; // plain metadata (typeName, checks, description, defaultValue, enum values, …)
+    }
+  }
+  if (typeof def.shape === 'function') {
+    // ZodObject exposes its shape lazily through a function — rebuild it over cloned properties.
+    const shape = (def.shape as () => z.ZodRawShape)();
+    const clonedShape: z.ZodRawShape = {};
+    for (const [key, value] of Object.entries(shape)) clonedShape[key] = inlineClone(value);
+    next.shape = () => clonedShape;
+  }
+  return new (schema.constructor as new (d: Record<string, unknown>) => T)(next);
+}
+
+/**
  * Builds a per-request McpServer whose tools are bound to the authenticated
  * RequestUser. Stateless: one server + transport per POST /mcp.
  *
@@ -209,8 +248,9 @@ export class McpToolsService {
     // ZodRawShape); passing a prebuilt ZodObject instance (rather than the raw shape) is
     // an officially supported `inputSchema` form and is what carries `.strict()` through
     // to both `tools/list`'s JSON schema (additionalProperties:false) and the per-call
-    // validation the SDK runs before invoking our handler.
-    const strictShape = z.object(shape).strict();
+    // validation the SDK runs before invoking our handler. inlineClone() breaks shared
+    // zod-instance identity so no property serializes as a sibling $ref (see above).
+    const strictShape = inlineClone(z.object(shape).strict());
     const register = server.registerTool.bind(server) as (
       name: string,
       config: { description: string; inputSchema: z.ZodTypeAny },
@@ -1109,7 +1149,13 @@ export class McpToolsService {
       '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
         'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted.',
-      { encounterId: Id.describe('Encounter id — from list_encounters'), ...CombatantCreate.shape },
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        ...CombatantCreate.shape,
+        // Same constraints as CombatantCreate (Id, optional) but described for tools/list.
+        characterId: Id.optional().describe('Character id — links a party member and pulls name/hp/initMod from their sheet when omitted'),
+        ruleEntryId: Id.optional().describe('Monster statblock rule entry id — from lookup_rule/get_rule_entry'),
+      },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
