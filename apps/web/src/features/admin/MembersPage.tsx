@@ -1,20 +1,18 @@
 /**
  * Campaign members & roles — /c/:campaignId/members.
  * Mirrors design/claude-design/Campfire.dc.html "Players" (~1508-1559): an invite-link
- * card, pending invites, and a members table (role select + character link + remove).
+ * card, live invite links, and a members table (role select + character link + remove).
  *
- * Design gap: the invite-link card (generate/copy/regenerate a join link, "joins as"
- * role picker) and the pending-invites list have NO backing API — there is no invite/join
- * -token mechanism anywhere in apps/server (members are added today by looking up an
- * existing user's account and adding them directly, which IS wired below). The invite
- * card is rendered disabled with a "soon" tag rather than inventing an endpoint; pending
- * invites are omitted entirely since there's no way to have any. See report for details.
+ * The invite card is backed by the campaign-invites API (issue #7): a DM generates a
+ * /join/<code> link at a chosen role (player/viewer — never dm), copies it, and can
+ * revoke it any time. Whoever opens the link creates their own account (or joins with
+ * an existing one) and lands in this campaign — no server admin involved per player.
  *
  * Audit log kept (existing functionality, not in this design block).
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import type { Character, CampaignMember, Role, AuditEntry } from '@campfire/schema';
+import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -30,7 +28,7 @@ const ROLE_LABEL: Record<Role, string> = { dm: 'DM', player: 'Player', viewer: '
 export default function MembersPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const { roleIn, isAdmin } = useAuth();
+  const { roleIn } = useAuth();
   const role = roleIn(id);
 
   const [members, setMembers] = useState<CampaignMember[] | null>(null);
@@ -124,16 +122,7 @@ export default function MembersPage() {
       <h1 className="text-xl font-extrabold text-white m-0">Members</h1>
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {!isAdmin && (
-        <div className="cf-inset border-amber-500/30 p-3.5">
-          <p className="text-[12.5px] text-amber-200/90 m-0">
-            <strong>Players need an account first</strong> — ask a server admin to create one at Admin → Users,
-            then add them here by username.
-          </p>
-        </div>
-      )}
-
-      <InviteCard />
+      <InviteCard campaignId={id} />
 
       <MembersCard campaignId={id} members={members ?? []} characters={characters} onChange={load} />
 
@@ -145,37 +134,120 @@ export default function MembersPage() {
   );
 }
 
+function inviteLinkFor(code: string): string {
+  return `${window.location.origin}/join/${code}`;
+}
+
+/** "expires in 6d" / "expires in 3h" — invites are short-lived, no need for finer grain. */
+function expiresIn(iso: string): string {
+  const msLeft = new Date(iso).getTime() - Date.now();
+  if (msLeft <= 0) return 'expired';
+  const hours = Math.ceil(msLeft / 3_600_000);
+  if (hours < 24) return `expires in ${hours}h`;
+  return `expires in ${Math.ceil(hours / 24)}d`;
+}
+
 /**
- * Invite-link generation ("+ Invite to <campaign>") — no backing API. There is no
- * join-token/invite mechanism anywhere in apps/server/src; members are added today via
- * direct username/display-name lookup (see MembersCard/AddMemberForm below, which IS wired).
- * Rendered disabled with a "soon" tag rather than inventing an endpoint.
+ * Invite-link generation + live links list, backed by /campaigns/:id/invites.
+ * Anyone with a link self-onboards at the chosen role via /join/<code> (see
+ * features/auth/JoinPage.tsx) — revoke a link here if it leaks.
  */
-function InviteCard() {
+function InviteCard({ campaignId }: { campaignId: number }) {
+  const [invites, setInvites] = useState<CampaignInvite[]>([]);
+  const [role, setRole] = useState<InviteRole>('player');
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setInvites(await api.get<CampaignInvite[]>(`${API}/campaigns/${campaignId}/invites`));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load invites.");
+    }
+  }, [campaignId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function create() {
+    setCreating(true);
+    setError(null);
+    try {
+      await api.post<CampaignInvite>(`${API}/campaigns/${campaignId}/invites`, { role });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't create the invite.");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function revoke(inviteId: number) {
+    setError(null);
+    try {
+      await api.delete(`${API}/campaigns/${campaignId}/invites/${inviteId}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't revoke the invite.");
+    }
+  }
+
+  async function copy(invite: CampaignInvite) {
+    try {
+      await navigator.clipboard.writeText(inviteLinkFor(invite.code));
+      setCopiedId(invite.id);
+      setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
+    } catch {
+      setError('Clipboard blocked — copy the link from the field instead.');
+    }
+  }
+
   return (
     <Card className="space-y-2.5">
-      <div className="flex items-center gap-2">
-        <p className="card-kicker mb-0">Invite</p>
-        <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
-      </div>
-      <div className="flex gap-2 flex-wrap items-end opacity-50 pointer-events-none">
-        <div className="field" style={{ flex: 1, minWidth: 190 }}>
-          <label>Invite link</label>
-          <input className="input" disabled value="Invite links aren't available yet" />
-        </div>
+      <p className="card-kicker mb-0">Invite</p>
+      <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ minWidth: 110 }}>
           <label>Joins as</label>
-          <select className="input" disabled>
-            <option>player</option>
-            <option>viewer</option>
+          <select className="input" value={role} onChange={(e) => setRole(e.target.value as InviteRole)}>
+            <option value="player">player</option>
+            <option value="viewer">viewer</option>
           </select>
         </div>
-        <button className="btn btn-primary" disabled style={{ minHeight: 36 }}>
-          Copy link
+        <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={create} disabled={creating}>
+          {creating ? 'Generating…' : 'Generate invite link'}
         </button>
       </div>
+
+      {error && <p className="text-xs text-rose-400 m-0">{error}</p>}
+
+      {invites.map((invite) => (
+        <div key={invite.id} className="flex gap-2 flex-wrap items-center">
+          <input
+            className="input"
+            style={{ flex: 1, minWidth: 190 }}
+            readOnly
+            value={inviteLinkFor(invite.code)}
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <span className={`cf-chip ${ROLE_CHIP[invite.role]}`}>{ROLE_LABEL[invite.role]}</span>
+          <span className="text-muted text-[11px] whitespace-nowrap">
+            {expiresIn(invite.expiresAt)} · used {invite.useCount}
+            {invite.maxUses != null ? `/${invite.maxUses}` : '×'}
+          </span>
+          <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={() => copy(invite)}>
+            {copiedId === invite.id ? 'Copied!' : 'Copy link'}
+          </button>
+          <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
+            Revoke
+          </button>
+        </div>
+      ))}
+
       <p className="text-muted text-[11.5px] m-0">
-        Add players below by looking up their existing account — invite links are on the roadmap.
+        Anyone with a link creates their own account (or signs in) and joins as the chosen role — no server
+        admin needed. Links expire after 7 days; revoke one any time if it leaks.
       </p>
     </Card>
   );
@@ -442,8 +514,8 @@ function AddMemberForm({
     <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
       <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Add member</p>
       <p className="text-[12px] text-amber-200/90 cf-inset !border-amber-500/20 px-2.5 py-2">
-        Accounts are created by a server admin (Admin → Users). Once an account exists, add it to this campaign
-        below by username.
+        Add someone who already has an account on this server by username. To bring in someone new, send them
+        an invite link from the Invite card above instead.
       </p>
       {selected ? (
         <div className="flex items-center justify-between gap-2 flex-wrap">

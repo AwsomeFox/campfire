@@ -13,6 +13,7 @@ import { SetupPage } from '../features/auth/SetupPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { SignupPage } from '../features/auth/SignupPage';
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage';
+import { JoinPage } from '../features/auth/JoinPage';
 import { HomePage } from '../features/home/HomePage';
 import { NotFoundPage } from '../features/home/NotFoundPage';
 
@@ -53,6 +54,11 @@ export const router = createBrowserRouter([
   {
     path: '/reset-password',
     element: page(<ResetPasswordPage />),
+  },
+  {
+    // Invite landing page — public on purpose: the invited person has no account yet.
+    path: '/join/:code',
+    element: page(<JoinPage />),
   },
   {
     element: <AuthedLayout />,

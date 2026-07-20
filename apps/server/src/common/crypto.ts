@@ -79,3 +79,16 @@ export function apiTokenPrefix(token: string): string {
 export function looksLikeApiToken(token: string): boolean {
   return /^cf_pat_[0-9a-f]{48}$/.test(token);
 }
+
+/**
+ * Campaign invite join code: 16 random bytes base64url (~22 chars, 128 bits —
+ * unguessable). Stored PLAINTEXT in campaign_invites (unlike sessions/PATs,
+ * which store sha256): the code is a shareable capability the DM re-displays
+ * and re-copies from the UI, and it can only create a NEW membership at a
+ * capped role (never dm) — it cannot impersonate an existing user. Codes are
+ * always expiring, optionally use-capped, and revocable. See
+ * modules/membership/invites.service.ts.
+ */
+export function generateInviteCode(): string {
+  return randomBytes(16).toString('base64url');
+}
