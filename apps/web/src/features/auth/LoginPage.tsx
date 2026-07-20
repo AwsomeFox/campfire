@@ -6,7 +6,7 @@
  * when it's on.
  */
 import { useState, type FormEvent } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -92,10 +92,36 @@ function LocalLoginForm({
   );
 }
 
+/**
+ * Open-redirect guard: only honor same-origin, in-app absolute paths. Rejects
+ * protocol-relative (`//evil.com`), backslash tricks (`/\evil.com`), and
+ * anything not rooted at a single `/`. Returns null when unsafe.
+ */
+function safeInternalPath(raw: string | null | undefined): string | null {
+  if (!raw || !raw.startsWith('/')) return null;
+  if (raw.startsWith('//') || raw.startsWith('/\\')) return null;
+  // Never bounce back into an auth screen (would loop or hide the target).
+  if (/^\/(login|setup|signup|reset-password)(\/|\?|#|$)/.test(raw)) return null;
+  return raw;
+}
+
 export function LoginPage() {
   const { status, loading } = useAuthStatus();
   const { refresh } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Where to land after a successful sign-in: prefer an explicit `?redirect=`
+  // (survives full-page navigations), then the location AuthedLayout bounced us
+  // from (SPA redirect state), else the campaign list. All validated same-origin.
+  const fromState = (location.state as { from?: { pathname?: string; search?: string; hash?: string } } | null)?.from;
+  const fromStatePath = fromState
+    ? `${fromState.pathname ?? ''}${fromState.search ?? ''}${fromState.hash ?? ''}`
+    : null;
+  const redirectTo =
+    safeInternalPath(new URLSearchParams(location.search).get('redirect')) ??
+    safeInternalPath(fromStatePath) ??
+    '/';
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -114,7 +140,7 @@ export function LoginPage() {
     try {
       await api.post<Me>(`${API}/auth/login`, { username, password });
       await refresh();
-      navigate('/', { replace: true });
+      navigate(redirectTo, { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
         setError('Local sign-in is disabled — ask your server admin.');
@@ -131,6 +157,13 @@ export function LoginPage() {
   }
 
   const oidcEnabled = Boolean(status?.oidcEnabled);
+  // Forward the intended target through SSO. The OIDC flow is a full-page server
+  // round-trip (callback currently always redirects to `/`), so honoring this
+  // needs matching backend support; the local form already returns to it.
+  const oidcLoginHref =
+    redirectTo === '/'
+      ? '/api/v1/auth/oidc/login'
+      : `/api/v1/auth/oidc/login?redirect=${encodeURIComponent(redirectTo)}`;
   const signupEnabled = Boolean(status?.signupEnabled);
   const installHint = typeof window !== 'undefined'
     && !window.matchMedia('(display-mode: standalone)').matches
@@ -156,7 +189,7 @@ export function LoginPage() {
 
           {oidcEnabled ? (
             <>
-              <a href="/api/v1/auth/oidc/login" className="btn btn-primary btn-block" style={{ minHeight: 44 }}>
+              <a href={oidcLoginHref} className="btn btn-primary btn-block" style={{ minHeight: 44 }}>
                 Sign in with Authentik
               </a>
               <p className="text-muted" style={{ margin: '2px 0 0', fontSize: 11 }}>

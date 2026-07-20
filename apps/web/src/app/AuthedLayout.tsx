@@ -3,7 +3,7 @@
  * centered splash while the first /me fetch is in flight, and wraps children
  * in CampaignProvider so campaign-scoped nav/pages can resolve names.
  */
-import { Navigate, Outlet } from 'react-router-dom';
+import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from './auth';
 import { CampaignProvider } from './CampaignContext';
 import { useAuthStatus } from './AuthStatusGate';
@@ -34,6 +34,7 @@ function ConnectionErrorScreen({ onRetry }: { onRetry: () => void }) {
 export function AuthedLayout() {
   const { me, ready, connectionError, refresh } = useAuth();
   const { status, loading: statusLoading } = useAuthStatus();
+  const location = useLocation();
 
   if (!ready || statusLoading) {
     return <Splash />;
@@ -51,7 +52,10 @@ export function AuthedLayout() {
   }
 
   if (!me) {
-    return <Navigate to="/login" replace />;
+    // Carry the deep link we bounced from so LoginPage can return to it after
+    // sign-in (issue #148). Without this a shared `/c/1/quests/5` link lands on
+    // the campaign list. `from` is a same-origin Location, validated on read.
+    return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
   return (
