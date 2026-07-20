@@ -44,10 +44,19 @@ export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updated
 export const CampaignUpdate = CampaignCreate.partial();
 
 // ---------- character ----------
+// characters.ownerUserId is stored as TEXT (it must also hold 'dev:<name>' dev-auth ids)
+// while users.id / CampaignMember.userId are integers — the historical type mismatch of
+// issue #32. Inputs accept either shape and normalize to the canonical string form
+// (String(users.id)), so a DM can pass a member's numeric userId straight through.
+export const UserIdRef = z.union([z.string().max(120), Id.transform((n) => String(n))]);
+
 export const Character = z.object({
   id: Id,
   campaignId: Id,
-  ownerUserId: z.string().max(120).nullable().default(null), // OIDC sub; null = DM-managed
+  // Owning player's user id as a string — String(users.id) for real accounts, 'dev:<name>'
+  // under DEV_AUTH; null = DM-managed. Kept in sync with CampaignMember.characterId links
+  // (linking a member to a character grants them ownership — see MembersService).
+  ownerUserId: UserIdRef.nullable().default(null),
   name: z.string().min(1).max(120),
   species: z.string().max(80).default(''),
   className: z.string().max(80).default(''),
