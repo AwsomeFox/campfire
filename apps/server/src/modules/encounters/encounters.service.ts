@@ -81,6 +81,23 @@ export class EncountersService {
     this.events.emit({ type, campaignId, encounterId });
   }
 
+  /**
+   * Reject a combat write against an 'ended' encounter (issue #163). `end()` was
+   * carefully guarded against double-firing, but per-combatant writes (add / update /
+   * remove / roll-initiative) never checked status — so after a fight was over any
+   * owning player or DM could keep editing the historical record, and every combatant
+   * HP patch ALSO rewrote the linked character's live sheet HP through the write-through
+   * in updateCombatant, corrupting current HP outside any session context. An ended
+   * encounter's combatant rows are a frozen historical snapshot; mutating them is a
+   * state conflict (409). Viewing stays allowed (getWithCombatantsOrThrow is untouched),
+   * and /reopen is the supported path back to a mutable 'running' encounter.
+   */
+  private assertMutable(encounterRow: typeof encounters.$inferSelect): void {
+    if (encounterRow.status === 'ended') {
+      throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before modifying combatants`);
+    }
+  }
+
   async getRowOrThrow(id: number) {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Encounter ${id} not found`);
@@ -196,6 +213,7 @@ export class EncountersService {
    */
   async addCombatant(encounterId: number, input: CombatantCreateInput, user: RequestUser, role: Role): Promise<Combatant> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
 
     let name = input.name;
     let hpMax = input.hpMax;
@@ -331,6 +349,7 @@ export class EncountersService {
     role: Role,
   ): Promise<Combatant> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
     const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
     if (role !== 'dm') {
@@ -383,12 +402,18 @@ export class EncountersService {
     // leave the two HP copies disagreeing mid-fight, and the mirror reads the
     // atomically-clamped result (`updated.hpCurrent`) rather than a value computed
     // from a stale read.
+    //
+    // The character HP mirror is additionally gated on a still-live (non-'ended')
+    // encounter (issue #163). assertMutable() above already rejects an ended encounter
+    // outright, so this is defense-in-depth: post-combat combatant rows must never leak
+    // back onto the live character sheet even if that guard is ever relaxed.
+    const mirrorHp = existing.kind === 'character' && existing.characterId !== null && hpChanged && encounterRow.status !== 'ended';
     let row!: typeof combatants.$inferSelect;
     this.db.transaction((tx) => {
       const [updated] = tx.update(combatants).set(update).where(eq(combatants.id, combatantId)).returning().all();
       row = updated;
-      if (existing.kind === 'character' && existing.characterId !== null && hpChanged) {
-        tx.update(characters).set({ hpCurrent: updated.hpCurrent, updatedAt: nowIso() }).where(eq(characters.id, existing.characterId)).run();
+      if (mirrorHp) {
+        tx.update(characters).set({ hpCurrent: updated.hpCurrent, updatedAt: nowIso() }).where(eq(characters.id, existing.characterId!)).run();
       }
     });
 
@@ -418,6 +443,7 @@ export class EncountersService {
 
   async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role): Promise<void> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
     const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
     // Decide the new turn pointer BEFORE deleting (issue #49). Removing a combatant
@@ -463,6 +489,7 @@ export class EncountersService {
   /** Rolls d20+initMod for every combatant that doesn't already have an initiative. */
   async rollInitiative(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
     const rows = await this.listCombatantRows(encounterId);
 
     // Roll each un-set combatant's initiative in JS, then apply them all in ONE
