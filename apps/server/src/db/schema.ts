@@ -523,7 +523,12 @@ export const diceRolls = sqliteTable('dice_rolls', {
   rollerName: text('roller_name').notNull().default(''),
   expr: text('expr').notNull(),
   rolls: text('rolls').notNull().default('[]'),
+  // JSON array of the kept dice (issue #130) — null when no keep/drop clause applied.
+  kept: text('kept'),
   total: integer('total').notNull(),
+  // Optional check context (issue #130): label + difficulty class. success is derived.
+  label: text('label'),
+  dc: integer('dc'),
   createdAt: text('created_at').notNull(),
 });
 

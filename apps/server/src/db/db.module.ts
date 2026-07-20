@@ -456,6 +456,26 @@ function migrateRuleEntriesTableForSource(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Migration for DBs created before dice keep/drop + check context (issue #130):
+ * `dice_rolls` gained `kept` (JSON of the kept dice), `label`, and `dc`. Plain nullable
+ * ADD COLUMNs — no table rebuild needed, same shape as migrateLocationsTableForParentId
+ * above. Existing rolls get NULL for all three (== no keep/drop, no check context),
+ * preserving their meaning. New DBs never hit this path — BOOTSTRAP_SQL declares them.
+ */
+function migrateDiceRollsTableForKeepDrop(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('kept')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN kept TEXT');
+  if (!has('label')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN label TEXT');
+  if (!has('dc')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN dc INTEGER');
+}
+
 /** Absolute path to the SQLite DB file for a given data dir. */
 export function dbFilePath(dataDir: string): string {
   return path.join(dataDir, 'campfire.db');
@@ -499,6 +519,7 @@ export function openDatabase(dataDir: string): {
   migrateAttachmentsTableForHidden(sqlite);
   migrateLocationsTableForParentId(sqlite);
   migrateRuleEntriesTableForSource(sqlite);
+  migrateDiceRollsTableForKeepDrop(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync. This is
   // also how index-only migrations reach existing DBs: e.g. #74's
