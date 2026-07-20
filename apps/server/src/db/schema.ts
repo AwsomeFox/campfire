@@ -147,6 +147,22 @@ export const timelineCalendars = sqliteTable('timeline_calendars', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Session zero / table charter (safety tools & expectations) — issue #122. One row
+// per campaign (campaignId PK), upserted like timeline_calendars. lines/veils/
+// safetyTools are string arrays stored as JSON text (see common/json.ts); the rest is
+// markdown. Member-readable, DM-authored — no dmSecret (a safety record the whole
+// table must see).
+export const sessionZero = sqliteTable('session_zero', {
+  campaignId: integer('campaign_id').primaryKey(),
+  lines: text('lines').notNull().default('[]'),
+  veils: text('veils').notNull().default('[]'),
+  safetyTools: text('safety_tools').notNull().default('[]'),
+  houseRules: text('house_rules').notNull().default(''),
+  toneAndExpectations: text('tone_and_expectations').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const npcs = sqliteTable('npcs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
@@ -618,6 +634,12 @@ export const combatants = sqliteTable('combatants', {
   initMod: integer('init_mod').notNull().default(0),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
+  // Temp HP + death-save subsystem (issue #57). Added by migration on older DBs;
+  // see db/db.module.ts migrateCombatantsTableForHpModel().
+  hpTemp: integer('hp_temp').notNull().default(0),
+  deathState: text('death_state').notNull().default('none'), // 'none' | 'dying' | 'stable' | 'dead'
+  deathSaveSuccesses: integer('death_save_successes').notNull().default(0),
+  deathSaveFailures: integer('death_save_failures').notNull().default(0),
   conditions: text('conditions').notNull().default('[]'),
   ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
   sortOrder: integer('sort_order').notNull().default(0),
