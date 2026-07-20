@@ -94,4 +94,81 @@ describe('npcs (e2e)', () => {
       .send({ name: 'Should fail' });
     expect(res.status).toBe(403);
   });
+
+  // Issue #96: npc.locationId is an FK-shaped field that must resolve to a real location
+  // IN THE SAME campaign, or 400 — mirroring quest giverNpcId / member characterId guards.
+  describe('FK validation: npc.locationId (issue #96)', () => {
+    it('POST npc with a nonexistent locationId -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Ghost-pinned', locationId: 99999 });
+      expect(res.status).toBe(400);
+    });
+
+    it('POST npc with a cross-campaign locationId -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const otherCamp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other NPC Campaign' });
+      const locRes = await request(server)
+        .post(`/api/v1/campaigns/${otherCamp.body.id}/locations`)
+        .set(dm)
+        .send({ name: 'Foreign Keep' });
+      expect(locRes.status).toBe(201);
+
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Cross-pinned', locationId: locRes.body.id });
+      expect(res.status).toBe(400);
+    });
+
+    it('POST/PATCH npc with a valid same-campaign locationId -> 201/200', async () => {
+      const server = ctx.app.getHttpServer();
+      const locRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'Home Village' });
+      expect(locRes.status).toBe(201);
+
+      const createRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Villager', locationId: locRes.body.id });
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.locationId).toBe(locRes.body.id);
+
+      const patchBad = await request(server).patch(`/api/v1/npcs/${createRes.body.id}`).set(dm).send({ locationId: 99999 });
+      expect(patchBad.status).toBe(400);
+    });
+  });
+
+  // Issue #96: deleting an NPC must null out any quest that credits it as giver, so the
+  // quest never dangles on a deleted giverNpcId.
+  describe('delete cleanup: npc giver on quests (issue #96)', () => {
+    it('deleting an NPC nulls quests.giverNpcId', async () => {
+      const server = ctx.app.getHttpServer();
+      const npcRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Quest Giver' });
+      expect(npcRes.status).toBe(201);
+      const npcId = npcRes.body.id;
+
+      const questRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Slay the beast', giverNpcId: npcId });
+      expect(questRes.status).toBe(201);
+      expect(questRes.body.giverNpcId).toBe(npcId);
+      const questId = questRes.body.id;
+
+      const delRes = await request(server).delete(`/api/v1/npcs/${npcId}`).set(dm);
+      expect(delRes.status).toBe(200);
+
+      const questAfter = await request(server).get(`/api/v1/quests/${questId}`).set(dm);
+      expect(questAfter.status).toBe(200);
+      expect(questAfter.body.giverNpcId).toBeNull();
+    });
+  });
 });
