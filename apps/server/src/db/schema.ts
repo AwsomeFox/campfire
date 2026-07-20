@@ -21,6 +21,11 @@ export const campaigns = sqliteTable('campaigns', {
   // Attachment (kind='map') rendered as the campaign map background on Dashboard/Location detail.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   mapAttachmentId: integer('map_attachment_id'),
+  // Unguessable capability secret (cf_ics_<48 hex>) for the public ICS calendar feed,
+  // or null when the feed is disabled. Stored plaintext (unlike session/PAT hashes) so
+  // the feed URL can be re-displayed to members — see modules/sessions/scheduling.
+  // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  icsToken: text('ics_token'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -103,6 +108,33 @@ export const sessions = sqliteTable('sessions', {
   title: text('title').notNull().default(''),
   playedAt: text('played_at'),
   recap: text('recap').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Planned (future) game nights — distinct from `sessions` above, which are play
+// logs of sessions that already happened. See modules/sessions/scheduling.
+export const scheduledSessions = sqliteTable('scheduled_sessions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  scheduledAt: text('scheduled_at').notNull(), // ISO UTC (normalized on write)
+  durationMinutes: integer('duration_minutes').notNull().default(240),
+  title: text('title').notNull().default(''),
+  location: text('location').notNull().default(''),
+  notes: text('notes').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Per-member availability for a scheduled session. One row per (schedule, user) —
+// upserted on PUT /schedule/:id/rsvp. userId is TEXT like notes.author_user_id.
+export const sessionRsvps = sqliteTable('session_rsvps', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  scheduledSessionId: integer('scheduled_session_id').notNull(),
+  userId: text('user_id').notNull(),
+  userName: text('user_name').notNull().default(''),
+  status: text('status').notNull(), // 'yes' | 'no' | 'maybe'
+  note: text('note').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

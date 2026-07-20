@@ -63,3 +63,21 @@ export function apiTokenPrefix(token: string): string {
 export function looksLikeApiToken(token: string): boolean {
   return /^cf_pat_[0-9a-f]{48}$/.test(token);
 }
+
+/**
+ * Campaign ICS feed token: `cf_ics_<48 hex chars>` (24 random bytes) — the
+ * capability secret in a campaign's public calendar-feed URL. Unlike session
+ * tokens and PATs it is stored PLAINTEXT (campaigns.ics_token): the feed URL
+ * must be re-displayable to members (calendar apps need it copy-pasted, and
+ * "shown once" would be hostile UX for a read-only schedule feed). Same
+ * entropy as a PAT, so it is equally unguessable.
+ */
+const ICS_TOKEN_PREFIX = 'cf_ics_';
+
+export function generateIcsFeedToken(): string {
+  return `${ICS_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
+}
+
+export function looksLikeIcsFeedToken(token: string): boolean {
+  return /^cf_ics_[0-9a-f]{48}$/.test(token);
+}

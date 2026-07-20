@@ -8,6 +8,9 @@
  * Design shows "Encounters" and "Rolls" tabs alongside the log — the design itself marks
  * Encounters "Proposed · post-v1" and there is no dice/roll or encounter API on the server,
  * so only the Log tab (the MVP scope) is implemented here. See report for details.
+ *
+ * Issue #13 adds a "Schedule" tab (?tab=schedule): planned sessions + availability + ICS
+ * calendar feed — see SchedulePanel.tsx.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
@@ -17,6 +20,7 @@ import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { SchedulePanel } from './SchedulePanel';
 
 export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -27,6 +31,16 @@ export default function SessionsPage() {
   const isDm = role === 'dm';
 
   const selectedId = searchParams.get('session');
+  const tab: 'log' | 'schedule' = searchParams.get('tab') === 'schedule' ? 'schedule' : 'log';
+
+  function setTab(next: 'log' | 'schedule') {
+    setSearchParams((prev) => {
+      const params = new URLSearchParams(prev);
+      if (next === 'schedule') params.set('tab', 'schedule');
+      else params.delete('tab');
+      return params;
+    });
+  }
 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,7 +80,7 @@ export default function SessionsPage() {
   // URL points at a session that's gone) — otherwise the detail pane sat on a
   // misleading "No sessions yet" empty state even with sessions in the list.
   useEffect(() => {
-    if (sessions.length > 0 && !selected) {
+    if (tab === 'log' && sessions.length > 0 && !selected) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -76,7 +90,7 @@ export default function SessionsPage() {
         { replace: true },
       );
     }
-  }, [sessions, selected, setSearchParams]);
+  }, [tab, sessions, selected, setSearchParams]);
 
   function selectSession(id: number) {
     setSearchParams((prev) => {
@@ -143,7 +157,7 @@ export default function SessionsPage() {
       <div className="flex items-center gap-2.5">
         <h1 className="text-2xl font-extrabold text-white">Sessions</h1>
         <div className="flex-1" />
-        {isDm && (
+        {isDm && tab === 'log' && (
           <Btn
             className="!min-h-0 !py-1.5 text-xs"
             onClick={() => {
@@ -157,11 +171,29 @@ export default function SessionsPage() {
       </div>
 
       <div className="seg self-start inline-flex">
-        <button style={{ padding: '8px 16px', fontSize: 13, border: 0, background: 'transparent', color: 'var(--color-accent)', boxShadow: 'inset 0 0 0 1px var(--color-accent)', minHeight: 40 }}>
-          Log
-        </button>
+        {(['log', 'schedule'] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            style={{
+              padding: '8px 16px',
+              fontSize: 13,
+              border: 0,
+              background: 'transparent',
+              cursor: 'pointer',
+              color: tab === t ? 'var(--color-accent)' : 'var(--color-neutral-500)',
+              boxShadow: tab === t ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
+              minHeight: 40,
+            }}
+          >
+            {t === 'log' ? 'Log' : 'Schedule'}
+          </button>
+        ))}
       </div>
 
+      {tab === 'schedule' ? (
+        <SchedulePanel campaignId={cid} isDm={isDm} />
+      ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Timeline list */}
         <aside className={showDetailOnMobile ? 'hidden lg:block' : ''}>
@@ -244,6 +276,7 @@ export default function SessionsPage() {
           )}
         </main>
       </div>
+      )}
     </div>
   );
 }
