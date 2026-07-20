@@ -343,15 +343,24 @@ export class EncountersService {
         .where(eq(characters.id, existing.characterId));
     }
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'encounter.combatant.update',
-      entityType: 'combatant',
-      entityId: combatantId,
-      campaignId: encounterRow.campaignId,
-      detail: JSON.stringify(patch),
-    });
+    // #74: don't audit-log pure HP ticks. A single combat generates hundreds of
+    // ±1 HP updates (every hit, heal, temp-hp adjust); auditing each one was the
+    // dominant source of unbounded audit_log growth for zero forensic value. We
+    // still log the meaningful state changes — conditions applied/removed and
+    // initiative edits — which are rare and worth a trail. An update that ONLY
+    // touched hpCurrent is skipped.
+    const changedNonHp = update.conditions !== undefined || update.initiative !== undefined;
+    if (changedNonHp) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.combatant.update',
+        entityType: 'combatant',
+        entityId: combatantId,
+        campaignId: encounterRow.campaignId,
+        detail: JSON.stringify(patch),
+      });
+    }
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
