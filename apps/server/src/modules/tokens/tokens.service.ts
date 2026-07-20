@@ -193,6 +193,18 @@ export class TokensService {
   }
 
   /**
+   * Revokes EVERY PAT owned by `userId` in one shot. Admin lifecycle only
+   * (DELETE /users/:id/tokens — compromise response: "cut off everything this
+   * account's leaked tokens can do"), never exposed self-service. Returns the
+   * number of tokens revoked so the caller can report it. Idempotent — zero
+   * tokens is not an error.
+   */
+  async removeAllFor(userId: number): Promise<number> {
+    const rows = await this.db.delete(apiTokens).where(eq(apiTokens.userId, userId)).returning();
+    return rows.length;
+  }
+
+  /**
    * Called from SessionAuthGuard. Looks up a raw Bearer token by its sha256
    * hash; if found (and the owning user is not disabled), returns a
    * RequestUser resolved from the OWNING user plus a TokenContext capturing
