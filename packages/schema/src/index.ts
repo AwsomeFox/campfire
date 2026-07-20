@@ -1300,20 +1300,35 @@ export type AdminTokenCreate = z.infer<typeof AdminTokenCreate>;
 
 // ---------- proposals (AI/collab writes pending DM approval) ----------
 export const ProposalAction = z.enum(['create', 'update', 'delete']);
-export const ProposalStatus = z.enum(['pending', 'approved', 'rejected']);
+// `withdrawn` is a self-service terminal state (issue #124): the proposer pulled
+// their own still-pending proposal before the DM acted. Distinct from `rejected`
+// (a DM decision) so provenance/history stays honest about who ended it.
+export const ProposalStatus = z.enum(['pending', 'approved', 'rejected', 'withdrawn']);
 
 export const Proposal = z.object({
   id: Id,
   campaignId: Id,
   entityType: EntityType,
-  entityId: Id.nullable().default(null), // null for creates
+  // For creates this is null at propose time; once an approved create-proposal has
+  // been applied it is backfilled with the created row's id, so the record's
+  // provenance points at the entity it produced (issue #124).
+  entityId: Id.nullable().default(null),
   action: ProposalAction,
   payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
   // The target entity's state captured at propose time (update proposals only; null for
   // creates) — lets the DM review UI render a real before/after diff even if the entity
   // changes between propose and review.
   snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
-  proposer: z.string().max(200), // user id or token name
+  // Human-readable attribution: the display name of the USER who submitted, even when
+  // the write came in over a PAT (resolved to the token's owning user — issue #124).
+  proposer: z.string().max(200),
+  // Stable id of the submitting user (String(users.id), or `dev:<name>` under DEV_AUTH).
+  // Powers the proposer self-view: a non-DM member lists only proposals where this
+  // matches them. Empty string on rows written before this column existed.
+  proposerUserId: z.string().max(200).default(''),
+  // Secondary provenance: the token name when submitted via a PAT, else null. Lets the
+  // DM see "acting as <user> via token <name>" without losing the human attribution.
+  proposerToken: z.string().max(200).nullable().default(null),
   status: ProposalStatus.default('pending'),
   resolvedBy: z.string().max(200).default(''),
   note: z.string().max(1000).default(''),
@@ -1321,6 +1336,11 @@ export const Proposal = z.object({
 });
 export type Proposal = z.infer<typeof Proposal>;
 export const ProposalResolve = z.object({ note: z.string().max(1000).optional() });
+// Revise a still-pending proposal (issue #124): the proposer amends their own
+// proposed create/update body before the DM acts. Validated against the target
+// entity's Create/Update schema server-side, same as an edit-before-approve.
+export const ProposalRevise = z.object({ payload: z.record(z.string(), z.unknown()) });
+export type ProposalRevise = z.infer<typeof ProposalRevise>;
 // Approve may carry an amended `payload` (edit-before-approve): the DM tweaks the
 // proposed create/update body before it's applied through the normal write path.
 // Ignored for `delete` proposals (which carry no payload). Omit `payload` to apply
