@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { LocationCreate, LocationUpdate } from '@campfire/schema';
 import type { Location, Role } from '@campfire/schema';
@@ -111,6 +111,24 @@ export class LocationsService {
     return row;
   }
 
+  /**
+   * #159: case-insensitive name lookup within one campaign — the basis for real
+   * upsert semantics. `upsert_location` with no id looks here first; a hit updates
+   * the existing location instead of creating a duplicate, so a scribe's identical
+   * re-run (timeout-after-commit, or a re-issued prompt) is idempotent. Scoped to
+   * the campaign, so same-named locations in different campaigns never collide.
+   * Returns the oldest match (lowest id) if legacy duplicates already exist.
+   */
+  async findRowByName(campaignId: number, name: string) {
+    const [row] = await this.db
+      .select()
+      .from(locations)
+      .where(and(eq(locations.campaignId, campaignId), sql`lower(${locations.name}) = lower(${name})`))
+      .orderBy(locations.id)
+      .limit(1);
+    return row;
+  }
+
   async getOrThrow(id: number, role: Role): Promise<Location> {
     const row = await this.getRowOrThrow(id);
     // Unexplored location → 404 for non-DM, so its existence isn't leaked (issue #42).
@@ -163,6 +181,9 @@ export class LocationsService {
       entityType: 'location',
       entityId: id,
       campaignId: existing.campaignId,
+      // #161: record the changed fields so the audit log is a real delta channel
+      // (empty detail before). Matches the characters/encounters/members convention.
+      detail: JSON.stringify(input),
     });
     return redactSecret(toDomain(row), role);
   }

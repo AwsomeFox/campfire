@@ -84,6 +84,21 @@ export function buildRecapDraft(source: RecapDraftSource): string {
   return draft;
 }
 
+/**
+ * #161: shape a session update patch for the audit `detail` payload. The recap
+ * body can be ~100KB, so instead of stringifying it into every audit row (which
+ * would reopen the #74 audit-growth problem), we substitute a compact
+ * `{ recapChars }` marker — the delta reader learns the recap changed and its
+ * size, then fetches the session itself for the text. Every other field is
+ * recorded verbatim.
+ */
+function auditableSessionPatch(input: SessionUpdateInput): Record<string, unknown> {
+  const { recap, ...rest } = input;
+  const patch: Record<string, unknown> = { ...rest };
+  if (recap !== undefined) patch.recapChars = recap.length;
+  return patch;
+}
+
 @Injectable()
 export class SessionsService {
   constructor(
@@ -311,6 +326,11 @@ export class SessionsService {
       entityType: 'session',
       entityId: id,
       campaignId: existing.campaignId,
+      // #161: record which fields changed so the audit log is a real delta channel
+      // (empty detail before). Matches the characters/encounters/members convention.
+      // The recap body can be large, so log its length instead of the full text —
+      // the delta reader only needs to know recap changed, then fetch the session.
+      detail: JSON.stringify(auditableSessionPatch(input)),
     });
 
     // recap_posted fires only on the empty -> non-empty transition (posting the
