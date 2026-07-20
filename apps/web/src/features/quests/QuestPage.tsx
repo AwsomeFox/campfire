@@ -440,6 +440,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   checked={o.done}
                   onChange={() => toggleObjective(o)}
                   disabled={!canToggleObjectives || !!pendingObjectives[o.id]}
+                  title={!canToggleObjectives ? 'Only the DM and players can check off objectives.' : undefined}
                   label={o.done ? `Mark "${o.text}" not done` : `Mark "${o.text}" done`}
                   size={17}
                 />

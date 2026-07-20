@@ -146,6 +146,31 @@ export const ConditionsPatch = z.object({
   add: z.array(z.string().max(40)).optional(),
   remove: z.array(z.string().max(40)).optional(),
 });
+/**
+ * Canonical 5e condition vocabulary — the single source of truth shared across
+ * the character sheet, the encounter tracker, and the compendium (issue #111).
+ * Conditions stay free-text on the wire (homebrew is allowed), but these are the
+ * standard names surfaced as suggestions so the three surfaces speak the same
+ * vocabulary instead of each hardcoding its own list.
+ */
+export const CONDITIONS = [
+  'Blinded',
+  'Charmed',
+  'Deafened',
+  'Exhaustion',
+  'Frightened',
+  'Grappled',
+  'Incapacitated',
+  'Invisible',
+  'Paralyzed',
+  'Petrified',
+  'Poisoned',
+  'Prone',
+  'Restrained',
+  'Stunned',
+  'Unconscious',
+] as const;
+export type ConditionName = (typeof CONDITIONS)[number];
 /** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
