@@ -22,6 +22,22 @@ const entityRoute: Record<EntityType, string | null> = {
   campaign: null,
 };
 
+/**
+ * Absolute in-app path to a proposal's target entity, or null when it has no
+ * detail view. Must be absolute + campaign-scoped: a relative `../route/id`
+ * resolves against the route tree, not the URL, and drops the campaignId
+ * (landing on `/route/id` → Page not found — issue #144).
+ */
+function targetHref(entityType: EntityType, entityId: number | null, campaignId: number): string | null {
+  if (entityId == null || !Number.isFinite(campaignId)) return null;
+  const route = entityRoute[entityType];
+  if (route === null) return null;
+  // Sessions have no `/:id` detail route — the list page selects a session via
+  // a `?session=` query param, so link there instead of `/sessions/:id` (404).
+  if (entityType === 'session') return `/c/${campaignId}/sessions?session=${entityId}`;
+  return `/c/${campaignId}/${route}/${entityId}`;
+}
+
 const entityIcon: Record<EntityType, string> = {
   quest: '📜',
   npc: '🤝',
@@ -204,6 +220,7 @@ export default function ProposalsPage() {
             <ProposalCard
               key={p.id}
               proposal={p}
+              campaignId={cid}
               expanded={expandedId === p.id}
               selected={selected.has(p.id)}
               onSelectChange={() => toggleSelected(p.id)}
@@ -293,6 +310,7 @@ function BatchBar({
 
 function ProposalCard({
   proposal,
+  campaignId,
   expanded,
   selected,
   onSelectChange,
@@ -301,6 +319,7 @@ function ProposalCard({
   onReject,
 }: {
   proposal: Proposal;
+  campaignId: number;
   expanded: boolean;
   selected: boolean;
   onSelectChange: () => void;
@@ -313,8 +332,7 @@ function ProposalCard({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
-  const route = entityRoute[proposal.entityType];
-  const href = route && proposal.entityId ? `../${route}/${proposal.entityId}` : null;
+  const href = targetHref(proposal.entityType, proposal.entityId, campaignId);
   const isDelete = proposal.action === 'delete';
   // Edit-before-approve is meaningful only for create/update (delete carries no payload).
   const canEdit = !isDelete;
@@ -367,7 +385,7 @@ function ProposalCard({
           </div>
           <p className="text-muted text-xs m-0 mt-0.5">
             {actionVerb[proposal.action]} {proposal.entityType}
-            {proposal.entityId && href ? (
+            {href ? (
               <>
                 {' '}
                 · <Link to={href} className="text-purple-400 hover:underline">view target</Link>
