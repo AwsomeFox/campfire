@@ -339,6 +339,7 @@ export function Layout() {
 
   const dmNav: NavItem[] = campaignId !== undefined && isDm
     ? [
+        { key: 'storylines', label: 'Storylines', to: `/c/${campaignId}/storylines` },
         { key: 'settings', label: 'Settings', to: `/c/${campaignId}/settings` },
         { key: 'inbox', label: 'Scribe inbox', to: `/c/${campaignId}/inbox`, badge: inboxCount },
         { key: 'proposals', label: 'Proposals', to: `/c/${campaignId}/proposals` },

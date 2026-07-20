@@ -92,6 +92,10 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/quests/QuestPage')),
           },
           {
+            path: '/c/:campaignId/storylines',
+            element: lazyPage(() => import('../features/storylines/StorylinesPage')),
+          },
+          {
             path: '/c/:campaignId/npcs',
             element: lazyPage(() => import('../features/npcs/NpcListPage')),
           },

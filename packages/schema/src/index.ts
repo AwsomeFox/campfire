@@ -250,6 +250,77 @@ export const QuestChanges = z.object({
 });
 export type QuestChanges = z.infer<typeof QuestChanges>;
 
+// ---------- storylines (issue #27) ----------
+// A branching story/arc planner for the DM to plan FUTURE beats with branching
+// options. An Arc groups ordered Beats; each Beat carries ordered Branches, where
+// a branch is a labelled next-option (trigger label + optional target beat). The
+// whole surface is DM-only — it is prep/planning content, never exposed to players.
+export const ArcStatus = z.enum(['planned', 'active', 'resolved', 'abandoned']);
+export type ArcStatus = z.infer<typeof ArcStatus>;
+
+export const BeatStatus = z.enum(['planned', 'active', 'done', 'skipped']);
+export type BeatStatus = z.infer<typeof BeatStatus>;
+
+// A branch is a directed, labelled edge FROM a beat TO an optional next beat.
+// `toBeatId` is nullable so the DM can sketch an option ("players betray the king")
+// before its destination beat exists; `label` is the trigger/condition text.
+export const StoryBranch = z.object({
+  id: Id,
+  beatId: Id,
+  toBeatId: Id.nullable().default(null),
+  label: z.string().min(1).max(200),
+  sortOrder: z.number().int().default(0),
+});
+export type StoryBranch = z.infer<typeof StoryBranch>;
+export const StoryBranchCreate = z.object({
+  toBeatId: Id.nullable().optional(),
+  label: z.string().min(1).max(200),
+  sortOrder: z.number().int().optional(),
+});
+export type StoryBranchCreate = z.infer<typeof StoryBranchCreate>;
+
+export const StoryBeat = z.object({
+  id: Id,
+  campaignId: Id,
+  arcId: Id,
+  title: z.string().min(1).max(200),
+  body: z.string().max(50_000).default(''), // markdown — the DM's notes for the beat
+  status: BeatStatus.default('planned'),
+  sortOrder: z.number().int().default(0),
+  ...timestamps,
+});
+export type StoryBeat = z.infer<typeof StoryBeat>;
+// arcId is set from the create URL, never the body.
+export const StoryBeatCreate = StoryBeat.omit({ id: true, campaignId: true, arcId: true, createdAt: true, updatedAt: true }).partial().required({ title: true });
+export type StoryBeatCreate = z.infer<typeof StoryBeatCreate>;
+export const StoryBeatUpdate = StoryBeatCreate.partial();
+export type StoryBeatUpdate = z.infer<typeof StoryBeatUpdate>;
+export const StoryBeatStatusPatch = z.object({ status: BeatStatus });
+export type StoryBeatStatusPatch = z.infer<typeof StoryBeatStatusPatch>;
+
+export const StoryArc = z.object({
+  id: Id,
+  campaignId: Id,
+  title: z.string().min(1).max(200),
+  summary: z.string().max(50_000).default(''), // markdown
+  status: ArcStatus.default('planned'),
+  sortOrder: z.number().int().default(0),
+  ...timestamps,
+});
+export type StoryArc = z.infer<typeof StoryArc>;
+export const StoryArcCreate = StoryArc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ title: true });
+export type StoryArcCreate = z.infer<typeof StoryArcCreate>;
+export const StoryArcUpdate = StoryArcCreate.partial();
+export type StoryArcUpdate = z.infer<typeof StoryArcUpdate>;
+export const StoryArcStatusPatch = z.object({ status: ArcStatus });
+export type StoryArcStatusPatch = z.infer<typeof StoryArcStatusPatch>;
+
+// Read shapes: a beat embeds its branches; an arc embeds its beats (each with branches).
+export const StoryBeatWithBranches = StoryBeat.extend({ branches: z.array(StoryBranch) });
+export type StoryBeatWithBranches = z.infer<typeof StoryBeatWithBranches>;
+export const StoryArcWithBeats = StoryArc.extend({ beats: z.array(StoryBeatWithBranches) });
+export type StoryArcWithBeats = z.infer<typeof StoryArcWithBeats>;
+
 // ---------- npc ----------
 export const Npc = z.object({
   id: Id,

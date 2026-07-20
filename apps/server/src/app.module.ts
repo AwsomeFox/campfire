@@ -25,6 +25,7 @@ import { MembershipModule } from './modules/membership/membership.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { CharactersModule } from './modules/characters/characters.module';
 import { QuestsModule } from './modules/quests/quests.module';
+import { StorylinesModule } from './modules/storylines/storylines.module';
 import { NpcsModule } from './modules/npcs/npcs.module';
 import { LocationsModule } from './modules/locations/locations.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
@@ -124,6 +125,7 @@ function serveStaticImports(): DynamicModule[] {
     CampaignsModule,
     CharactersModule,
     QuestsModule,
+    StorylinesModule,
     NpcsModule,
     LocationsModule,
     SessionsModule,

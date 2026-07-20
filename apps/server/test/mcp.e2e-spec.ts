@@ -20,6 +20,9 @@ const ALL_TOOLS = [
   'get_campaign_summary',
   'get_quest',
   'list_quests',
+  'list_arcs',
+  'get_arc',
+  'get_beat',
   'get_npc',
   'list_npcs',
   'get_location',
@@ -51,6 +54,16 @@ const ALL_TOOLS = [
   'update_objective',
   'check_objective',
   'remove_objective',
+  'create_arc',
+  'update_arc',
+  'set_arc_status',
+  'delete_arc',
+  'create_beat',
+  'update_beat',
+  'set_beat_status',
+  'delete_beat',
+  'add_branch',
+  'remove_branch',
   'upsert_npc',
   'delete_npc',
   'upsert_location',
@@ -146,7 +159,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(67);
+    expect(tools).toHaveLength(80);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -209,6 +222,50 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       (a: { action: string; entityId: number }) => a.action === 'quest.create' && a.entityId === quest.id,
     );
     expect(entry.actor).toBe('token:mcp-dm-token');
+  });
+
+  it('storylines: create_arc -> create_beat x2 -> add_branch -> set_beat_status -> list_arcs graph, DM-only (issue #27)', async () => {
+    const client = await mcpClient(dmToken);
+
+    const arcRes = await client.callTool({ name: 'create_arc', arguments: { campaignId, title: 'MCP Arc' } });
+    expect(arcRes.isError).toBeFalsy();
+    const arc = parseResult(arcRes) as { id: number; status: string };
+    expect(arc.status).toBe('planned');
+
+    const beat1Res = await client.callTool({ name: 'create_beat', arguments: { arcId: arc.id, title: 'Beat one' } });
+    const beat1 = parseResult(beat1Res) as { id: number };
+    const beat2Res = await client.callTool({ name: 'create_beat', arguments: { arcId: arc.id, title: 'Beat two' } });
+    const beat2 = parseResult(beat2Res) as { id: number };
+
+    const branchRes = await client.callTool({
+      name: 'add_branch',
+      arguments: { beatId: beat1.id, label: 'if they press on', toBeatId: beat2.id },
+    });
+    expect(branchRes.isError).toBeFalsy();
+    const branch = parseResult(branchRes) as { toBeatId: number };
+    expect(branch.toBeatId).toBe(beat2.id);
+
+    // Bad toBeatId is a validation-style error, not a silent store.
+    const badBranch = await client.callTool({
+      name: 'add_branch',
+      arguments: { beatId: beat1.id, label: 'nowhere', toBeatId: 999999 },
+    });
+    expect(badBranch.isError).toBe(true);
+
+    const statusRes = await client.callTool({ name: 'set_beat_status', arguments: { beatId: beat1.id, status: 'active' } });
+    expect((parseResult(statusRes) as { status: string }).status).toBe('active');
+
+    const listRes = await client.callTool({ name: 'list_arcs', arguments: { campaignId } });
+    const arcs = parseResult(listRes) as Array<{ id: number; beats: Array<{ id: number; branches: unknown[] }> }>;
+    const found = arcs.find((a) => a.id === arc.id)!;
+    expect(found.beats).toHaveLength(2);
+    expect(found.beats[0].branches).toHaveLength(1);
+
+    // DM-only: a viewer-scoped PAT cannot even list arcs.
+    const viewerClient = await mcpClient(viewerToken);
+    const denied = await viewerClient.callTool({ name: 'list_arcs', arguments: { campaignId } });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('403');
   });
 
   it('viewer-scoped PAT: create_quest is a 403-equivalent isError, but add_note works', async () => {

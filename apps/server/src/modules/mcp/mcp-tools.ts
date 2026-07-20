@@ -22,6 +22,12 @@ import {
   QuestCreate,
   QuestStatus,
   QuestUpdate,
+  ArcStatus,
+  BeatStatus,
+  StoryArcCreate,
+  StoryArcUpdate,
+  StoryBeatCreate,
+  StoryBeatUpdate,
   Role,
   RollRequest,
   RulePackInstall,
@@ -35,6 +41,7 @@ import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
+import { StorylinesService } from '../storylines/storylines.service';
 import { NpcsService } from '../npcs/npcs.service';
 import { LocationsService } from '../locations/locations.service';
 import { SessionsService, buildRecapDraft } from '../sessions/sessions.service';
@@ -183,6 +190,7 @@ export class McpToolsService {
     private readonly access: CampaignAccessService,
     private readonly campaigns: CampaignsService,
     private readonly quests: QuestsService,
+    private readonly storylines: StorylinesService,
     private readonly npcs: NpcsService,
     private readonly locations: LocationsService,
     private readonly sessions: SessionsService,
@@ -337,6 +345,43 @@ export class McpToolsService {
       async ({ campaignId, status }) => {
         const role = await this.access.requireMember(user, campaignId as number);
         return this.quests.listForCampaignByStatus(campaignId as number, status as string | undefined, role);
+      },
+    );
+
+    // ---------- storylines (issue #27) — DM-only branching arc/beat planner ----------
+    this.tool(
+      server,
+      'list_arcs',
+      'DM only: list a campaign\'s story arcs, each embedding its ordered beats (each beat embeds its ordered ' +
+        'branches). Story arcs are the DM\'s branching plan of FUTURE beats — never visible to players.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        return this.storylines.listArcsWithBeats(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_arc',
+      'DM only: get one story arc (with its beats and branches) by id. Ids come from list_arcs.',
+      { arcId: Id.describe('Story arc id') },
+      async ({ arcId }) => {
+        const row = await this.storylines.getArcRowOrThrow(arcId as number);
+        await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
+        return this.storylines.getArcWithBeatsOrThrow(arcId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_beat',
+      'DM only: get one story beat (with its branches) by id. Ids come from list_arcs or get_arc.',
+      { beatId: Id.describe('Story beat id') },
+      async ({ beatId }) => {
+        const row = await this.storylines.getBeatRowOrThrow(beatId as number);
+        await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
+        return this.storylines.getBeatWithBranchesOrThrow(beatId as number);
       },
     );
 
@@ -754,6 +799,151 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.quests.removeObjective(questId as number, objectiveId as number, user, role);
         return { ok: true, questId, objectiveId };
+      },
+    );
+
+    // ---------- storylines (issue #27) — DM-only branching arc/beat planner ----------
+    this.tool(
+      server,
+      'create_arc',
+      'DM only: create a story arc — the top-level container for a branching plan of future beats. Status defaults ' +
+        'to "planned" (planned | active | resolved | abandoned).',
+      { campaignId: CampaignIdArg, ...StoryArcCreate.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = StoryArcCreate.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.storylines.createArc(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'update_arc',
+      'DM only: update a story arc\'s title, summary, status, or sortOrder.',
+      { arcId: Id.describe('Story arc id'), ...StoryArcUpdate.shape },
+      async ({ arcId, ...fields }) => {
+        const row = await this.storylines.getArcRowOrThrow(arcId as number);
+        const validated = StoryArcUpdate.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.storylines.updateArc(arcId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'set_arc_status',
+      'DM only: set a story arc status: planned | active | resolved | abandoned.',
+      { arcId: Id.describe('Story arc id'), status: ArcStatus },
+      async ({ arcId, status }) => {
+        const row = await this.storylines.getArcRowOrThrow(arcId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.storylines.setArcStatus(arcId as number, { status: status as z.infer<typeof ArcStatus> }, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'delete_arc',
+      'DM only: delete a story arc and ALL of its beats, plus any branch pointing at or out of those beats. Irreversible.',
+      { arcId: Id.describe('Story arc id') },
+      async ({ arcId }) => {
+        const row = await this.storylines.getArcRowOrThrow(arcId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.storylines.removeArc(arcId as number, user, role);
+        return { ok: true, arcId };
+      },
+    );
+
+    this.tool(
+      server,
+      'create_beat',
+      'DM only: add a beat to a story arc. A beat is one planned story moment; it defaults to sortOrder = end of the ' +
+        'arc and status "planned" (planned | active | done | skipped). Wire beats together with add_branch.',
+      { arcId: Id.describe('Story arc id — from list_arcs/get_arc'), ...StoryBeatCreate.shape },
+      async ({ arcId, ...fields }) => {
+        const row = await this.storylines.getArcRowOrThrow(arcId as number);
+        const validated = StoryBeatCreate.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.storylines.addBeat(arcId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'update_beat',
+      'DM only: update a beat\'s title, body, status, or sortOrder.',
+      { beatId: Id.describe('Story beat id'), ...StoryBeatUpdate.shape },
+      async ({ beatId, ...fields }) => {
+        const row = await this.storylines.getBeatRowOrThrow(beatId as number);
+        const validated = StoryBeatUpdate.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.storylines.updateBeat(beatId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'set_beat_status',
+      'DM only: set a beat status: planned | active | done | skipped.',
+      { beatId: Id.describe('Story beat id'), status: BeatStatus },
+      async ({ beatId, status }) => {
+        const row = await this.storylines.getBeatRowOrThrow(beatId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.storylines.setBeatStatus(beatId as number, { status: status as z.infer<typeof BeatStatus> }, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'delete_beat',
+      'DM only: delete a beat, plus any branch pointing at or out of it.',
+      { beatId: Id.describe('Story beat id') },
+      async ({ beatId }) => {
+        const row = await this.storylines.getBeatRowOrThrow(beatId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.storylines.removeBeat(beatId as number, user, role);
+        return { ok: true, beatId };
+      },
+    );
+
+    this.tool(
+      server,
+      'add_branch',
+      'DM only: add a branch (a labelled, ordered next-option) FROM a beat. `label` is the trigger/condition ' +
+        '(e.g. "if the party spares the goblin"); optional `toBeatId` targets another beat in the same campaign, or ' +
+        'omit it to sketch an option whose destination beat does not exist yet. Branches order by sortOrder (appended by default).',
+      {
+        beatId: Id.describe('Source beat id'),
+        label: z.string().min(1).max(200).describe('Trigger/condition label for this option'),
+        toBeatId: Id.optional().describe('Target beat id (same campaign); omit for an open-ended option'),
+        sortOrder: z.number().int().optional().describe('Explicit order; defaults to end'),
+      },
+      async ({ beatId, label, toBeatId, sortOrder }) => {
+        const row = await this.storylines.getBeatRowOrThrow(beatId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.storylines.addBranch(
+          beatId as number,
+          {
+            label: label as string,
+            ...(toBeatId !== undefined ? { toBeatId: toBeatId as number } : {}),
+            ...(sortOrder !== undefined ? { sortOrder: sortOrder as number } : {}),
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.tool(
+      server,
+      'remove_branch',
+      'DM only: delete a branch from a beat.',
+      { beatId: Id.describe('Source beat id'), branchId: Id.describe('Branch id') },
+      async ({ beatId, branchId }) => {
+        const row = await this.storylines.getBeatRowOrThrow(beatId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.storylines.removeBranch(beatId as number, branchId as number, user, role);
+        return { ok: true, beatId, branchId };
       },
     );
 
