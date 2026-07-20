@@ -644,6 +644,91 @@ function migrateDiceRollsTableForKeepDrop(sqlite: Database.Database): void {
   if (!has('dc')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN dc INTEGER');
 }
 
+/**
+ * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
+ * entry is applied at most once and its name is recorded in the `__migrations`
+ * schema-version table, replacing the previous "call every migrate* fn on every
+ * boot and trust it to self-probe" arrangement. The functions themselves remain
+ * individually idempotent (they still PRAGMA table_info before touching anything),
+ * so an old DB that predates the `__migrations` table — where the applied-set is
+ * empty and every migration re-runs — is brought fully up to shape without harm.
+ *
+ * The ORDER is load-bearing and must never be reordered or have entries removed:
+ * it is the canonical sequence in which an old-shaped DB is upgraded (mirrors the
+ * historical call order in openDatabase). Append new migrations to the END only.
+ */
+const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
+  { name: '0001_users_oidc', run: migrateUsersTableForOidc },
+  { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
+  { name: '0003_users_accent_color', run: migrateUsersTableForAccentColor },
+  { name: '0004_users_text_size', run: migrateUsersTableForTextSize },
+  { name: '0005_campaigns_map_attachment', run: migrateCampaignsTableForMapAttachment },
+  { name: '0006_api_tokens_admin_enabled', run: migrateApiTokensTableForAdminEnabled },
+  { name: '0007_api_tokens_write_scope', run: migrateApiTokensTableForWriteScope },
+  { name: '0008_proposals_snapshot', run: migrateProposalsTableForSnapshot },
+  { name: '0009_proposals_attribution', run: migrateProposalsTableForAttribution },
+  { name: '0010_characters_sheet_depth', run: migrateCharactersTableForSheetDepth },
+  { name: '0011_campaigns_ics_token', run: migrateCampaignsTableForIcsToken },
+  { name: '0012_campaigns_storage_quota', run: migrateCampaignsTableForStorageQuota },
+  { name: '0013_characters_xp', run: migrateCharactersTableForXp },
+  { name: '0014_characters_status', run: migrateCharactersTableForStatus },
+  { name: '0015_characters_dm_secret', run: migrateCharactersTableForDmSecret },
+  { name: '0016_notes_recipient', run: migrateNotesTableForRecipient },
+  { name: '0017_sessions_dm_secret', run: migrateSessionsTableForDmSecret },
+  { name: '0018_encounters_current_combatant', run: migrateEncountersTableForCurrentCombatant },
+  { name: '0019_encounters_links', run: migrateEncountersTableForLinks },
+  { name: '0020_encounters_map_attachment', run: migrateEncountersTableForMapAttachment },
+  { name: '0021_combatants_hp_model', run: migrateCombatantsTableForHpModel },
+  { name: '0022_combatants_token_position', run: migrateCombatantsTableForTokenPosition },
+  { name: '0023_quests_hidden', run: migrateQuestsTableForHidden },
+  { name: '0024_npcs_hidden', run: migrateNpcsTableForHidden },
+  { name: '0025_attachments_hidden', run: migrateAttachmentsTableForHidden },
+  { name: '0026_locations_parent_id', run: migrateLocationsTableForParentId },
+  { name: '0027_rule_entries_source', run: migrateRuleEntriesTableForSource },
+  { name: '0028_dice_rolls_keep_drop', run: migrateDiceRollsTableForKeepDrop },
+];
+
+/**
+ * Create the schema-version table if absent. `__migrations` records the name of
+ * every applied migration so the ordered steps in MIGRATIONS become recorded,
+ * idempotent, run-once operations instead of unconditional every-boot probes.
+ */
+function ensureMigrationsTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS __migrations (
+      name TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+  `);
+}
+
+/**
+ * Apply every not-yet-recorded migration in order, recording each in
+ * `__migrations` as it succeeds. Runs BEFORE BOOTSTRAP_SQL (some migrations, e.g.
+ * the users 12-step rebuild, must reshape an existing table before the CREATE
+ * TABLE IF NOT EXISTS statements would otherwise leave it in the old shape). Must
+ * be called with `foreign_keys` OFF (the default at open time) so a table rebuild
+ * is never blocked by a constraint mid-flight — openDatabase turns enforcement on
+ * only afterwards. A fresh DB records all migrations as applied even though each
+ * is a no-op (the tables don't exist yet), which is correct: the bootstrap schema
+ * already includes everything the migrations would add.
+ */
+/** The ordered migration names recorded in `__migrations` (exported for tests). */
+export const MIGRATION_NAMES: ReadonlyArray<string> = MIGRATIONS.map((m) => m.name);
+
+function runMigrations(sqlite: Database.Database): void {
+  ensureMigrationsTable(sqlite);
+  const applied = new Set(
+    (sqlite.prepare('SELECT name FROM __migrations').all() as Array<{ name: string }>).map((r) => r.name),
+  );
+  const record = sqlite.prepare('INSERT OR IGNORE INTO __migrations (name, applied_at) VALUES (?, ?)');
+  for (const migration of MIGRATIONS) {
+    if (applied.has(migration.name)) continue;
+    migration.run(sqlite);
+    record.run(migration.name, new Date().toISOString());
+  }
+}
+
 /** Absolute path to the SQLite DB file for a given data dir. */
 export function dbFilePath(dataDir: string): string {
   return path.join(dataDir, 'campfire.db');
@@ -668,40 +753,31 @@ export function openDatabase(dataDir: string): {
   fs.mkdirSync(dataDir, { recursive: true });
   const sqlite = new Database(dbFilePath(dataDir));
   sqlite.pragma('journal_mode = WAL');
-  migrateUsersTableForOidc(sqlite);
-  migrateCampaignsTableForRuleSystem(sqlite);
-  migrateUsersTableForAccentColor(sqlite);
-  migrateUsersTableForTextSize(sqlite);
-  migrateCampaignsTableForMapAttachment(sqlite);
-  migrateApiTokensTableForAdminEnabled(sqlite);
-  migrateApiTokensTableForWriteScope(sqlite);
-  migrateProposalsTableForSnapshot(sqlite);
-  migrateProposalsTableForAttribution(sqlite);
-  migrateCharactersTableForSheetDepth(sqlite);
-  migrateCampaignsTableForIcsToken(sqlite);
-  migrateCampaignsTableForStorageQuota(sqlite);
-  migrateCharactersTableForXp(sqlite);
-  migrateCharactersTableForStatus(sqlite);
-  migrateCharactersTableForDmSecret(sqlite);
-  migrateNotesTableForRecipient(sqlite);
-  migrateSessionsTableForDmSecret(sqlite);
-  migrateEncountersTableForCurrentCombatant(sqlite);
-  migrateEncountersTableForLinks(sqlite);
-  migrateEncountersTableForMapAttachment(sqlite);
-  migrateCombatantsTableForHpModel(sqlite);
-  migrateCombatantsTableForTokenPosition(sqlite);
-  migrateQuestsTableForHidden(sqlite);
-  migrateNpcsTableForHidden(sqlite);
-  migrateAttachmentsTableForHidden(sqlite);
-  migrateLocationsTableForParentId(sqlite);
-  migrateRuleEntriesTableForSource(sqlite);
-  migrateDiceRollsTableForKeepDrop(sqlite);
+
+  // Foreign-key enforcement is OFF here (SQLite's default at open) so the ordered
+  // migrations below — some of which rebuild a table via the 12-step DROP/CREATE
+  // pattern — are never blocked by a constraint mid-rebuild. It is turned ON at the
+  // end, after the schema is settled, for all of the app's runtime writes.
+  runMigrations(sqlite);
+
   sqlite.exec(BOOTSTRAP_SQL);
-  // after the rebuild is safe and keeps idx_users_oidc_sub in sync. This is
-  // also how index-only migrations reach existing DBs: e.g. #74's
-  // idx_audit_campaign_id_desc / idx_audit_created_at are picked up on the
-  // next boot with no bespoke ALTER migration needed.
+  // BOOTSTRAP_SQL runs AFTER the migrations so a just-rebuilt table (e.g. users) is
+  // recreated in its modern shape via CREATE TABLE IF NOT EXISTS only when missing,
+  // and keeps idx_users_oidc_sub in sync. This is also how index-only migrations
+  // reach existing DBs: e.g. #74's idx_audit_campaign_id_desc / idx_audit_created_at
+  // are picked up on the next boot with no bespoke ALTER migration needed.
   const ftsAvailable = setupRuleEntriesFts(sqlite);
+
+  // Enable foreign-key enforcement for every subsequent write on this connection
+  // (issue #69). Fresh DBs created from BOOTSTRAP_SQL now carry the declared
+  // ON DELETE CASCADE / SET NULL constraints; databases created before this change
+  // keep no FK constraints (SQLite can't ALTER-ADD one, and BOOTSTRAP_SQL's
+  // IF NOT EXISTS never rewrites an existing table) and continue to rely on the
+  // service-layer manual cascades — enabling the pragma is harmless for them since
+  // there are no constraints to enforce. Per-connection, so DbHolder.reopen /
+  // withDatabaseClosed re-applies it through this same openDatabase path.
+  sqlite.pragma('foreign_keys = ON');
+
   return { sqlite, orm: drizzle(sqlite, { schema }), ftsAvailable };
 }
 

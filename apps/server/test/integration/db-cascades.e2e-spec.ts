@@ -70,6 +70,41 @@ describe('campaign delete cascade (real SQLite, no orphan rows)', () => {
     }
   });
 
+  it('nulls a deleted character\'s soft refs (combatant + member) rather than dangling them', async () => {
+    const server = ctx.app.getHttpServer();
+    const { campaignId, encounterId, characterId } = await seedFullCampaign(server, 'Character Delete Campaign');
+
+    // Link the character into the fight (a combatant) and give the DM a member row
+    // whose characterId points at it, so both inbound soft refs exist before delete.
+    await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'pc', name: 'Cascade Hero', characterId, hpMax: 20, hpCurrent: 20 });
+
+    const before = openRawDb(ctx.dataDir);
+    try {
+      expect(countRows(before, 'combatants', `character_id = ${characterId}`)).toBe(1);
+    } finally {
+      before.close();
+    }
+
+    const del = await request(server).delete(`/api/v1/characters/${characterId}`).set(dm);
+    expect(del.status).toBe(200);
+
+    const after = openRawDb(ctx.dataDir);
+    try {
+      // Character gone...
+      expect(countRows(after, 'characters', `id = ${characterId}`)).toBe(0);
+      // ...but the combatant row SURVIVES with a nulled character_id — no dangling ref
+      // to a ghost id (issue #69: this was the reported bug). Same for any member row.
+      expect(countRows(after, 'combatants', `character_id = ${characterId}`)).toBe(0);
+      expect(countRows(after, 'combatants', `character_id IS NULL`)).toBeGreaterThanOrEqual(1);
+      expect(countRows(after, 'campaign_members', `character_id = ${characterId}`)).toBe(0);
+    } finally {
+      after.close();
+    }
+  });
+
   it('deletes only the target campaign — a sibling campaign is untouched', async () => {
     const server = ctx.app.getHttpServer();
     const doomed = await seedFullCampaign(server, 'Sacrificial Campaign');
