@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { openDatabase } from '../../src/db/db.module';
+import { openDatabase, MIGRATION_NAMES } from '../../src/db/db.module';
 import { makeTempDataDir, writeOldSchemaDb, columnNames, countRows } from './fixtures';
 
 /**
@@ -153,6 +153,135 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'users')).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  // ── schema-version table (issue #69) ────────────────────────────────────────
+
+  it('records every applied migration in the __migrations version table', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir); // old-shaped DB with none of the migrations recorded yet.
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      // The version table exists and lists exactly the ordered migration registry —
+      // every hand-rolled migrate* step is now a recorded, run-once operation.
+      const recorded = (sqlite.prepare('SELECT name FROM __migrations ORDER BY name').all() as Array<{ name: string }>).map(
+        (r) => r.name,
+      );
+      expect(recorded).toEqual([...MIGRATION_NAMES].sort());
+      // Each carries an applied_at timestamp (non-empty ISO string).
+      const rows = sqlite.prepare('SELECT name, applied_at FROM __migrations').all() as Array<{ applied_at: string }>;
+      expect(rows.every((r) => typeof r.applied_at === 'string' && r.applied_at.length > 0)).toBe(true);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('does not re-run or duplicate recorded migrations on a second open', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const first = openDatabase(dataDir);
+    const countAfterFirst = countRows(first.sqlite, '__migrations');
+    first.sqlite.close();
+
+    // A fresh DB records all of them too (each is a no-op — the tables don't exist
+    // when it runs — but the bootstrap schema already includes what they'd add).
+    expect(countAfterFirst).toBe(MIGRATION_NAMES.length);
+
+    const second = openDatabase(dataDir);
+    try {
+      // Re-opening records nothing new (no duplicate rows, PRIMARY KEY on name).
+      expect(countRows(second.sqlite, '__migrations')).toBe(countAfterFirst);
+    } finally {
+      second.sqlite.close();
+    }
+  });
+
+  // ── foreign-key enforcement on FRESH DBs (issue #69) ────────────────────────
+
+  it('enforces foreign keys on a fresh DB and CASCADEs children on a campaign delete', () => {
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      // Enforcement is turned on by openDatabase.
+      expect(sqlite.pragma('foreign_keys', { simple: true })).toBe(1);
+
+      const now = '2026-01-01T00:00:00.000Z';
+      sqlite.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'FK Camp', ?, ?)").run(now, now);
+      sqlite
+        .prepare("INSERT INTO characters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Hero', ?, ?)")
+        .run(now, now);
+      sqlite
+        .prepare("INSERT INTO encounters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Fight', ?, ?)")
+        .run(now, now);
+      sqlite
+        .prepare("INSERT INTO combatants (id, encounter_id, character_id, kind, name) VALUES (1, 1, 1, 'pc', 'Hero')")
+        .run();
+      sqlite.prepare("INSERT INTO quests (id, campaign_id, title, created_at, updated_at) VALUES (1, 1, 'Q', ?, ?)").run(now, now);
+      sqlite.prepare("INSERT INTO quest_objectives (id, quest_id, text) VALUES (1, 1, 'do it')").run();
+
+      // Deleting the campaign ROW alone — no manual child deletes — must cascade to
+      // every strict child AND the two-hop children (combatants off encounters,
+      // quest_objectives off quests). This proves the constraints, not the service.
+      sqlite.prepare('DELETE FROM campaigns WHERE id = 1').run();
+
+      expect(countRows(sqlite, 'characters')).toBe(0);
+      expect(countRows(sqlite, 'encounters')).toBe(0);
+      expect(countRows(sqlite, 'combatants')).toBe(0);
+      expect(countRows(sqlite, 'quests')).toBe(0);
+      expect(countRows(sqlite, 'quest_objectives')).toBe(0);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('SET NULLs a soft reference (combatant.character_id) when a character is deleted', () => {
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const now = '2026-01-01T00:00:00.000Z';
+      sqlite.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'FK Camp', ?, ?)").run(now, now);
+      sqlite
+        .prepare("INSERT INTO characters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Hero', ?, ?)")
+        .run(now, now);
+      sqlite
+        .prepare("INSERT INTO encounters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Fight', ?, ?)")
+        .run(now, now);
+      sqlite
+        .prepare("INSERT INTO combatants (id, encounter_id, character_id, kind, name) VALUES (1, 1, 1, 'pc', 'Hero')")
+        .run();
+      sqlite
+        .prepare('INSERT INTO campaign_members (id, campaign_id, user_id, role, character_id, created_at, updated_at) VALUES (1, 1, 7, \'player\', 1, ?, ?)')
+        .run(now, now);
+
+      // Deleting the character must NOT delete the combatant / member — their soft
+      // link is nulled and the rows stay (no dangling reference to a ghost id).
+      sqlite.prepare('DELETE FROM characters WHERE id = 1').run();
+
+      expect(countRows(sqlite, 'combatants')).toBe(1);
+      expect((sqlite.prepare('SELECT character_id FROM combatants WHERE id = 1').get() as { character_id: unknown }).character_id).toBeNull();
+      expect(countRows(sqlite, 'campaign_members')).toBe(1);
+      expect((sqlite.prepare('SELECT character_id FROM campaign_members WHERE id = 1').get() as { character_id: unknown }).character_id).toBeNull();
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('rejects an insert that violates a foreign key on a fresh DB', () => {
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      // A character referencing a non-existent campaign must be rejected outright —
+      // enforcement is genuinely ON, not merely declared.
+      expect(() =>
+        sqlite
+          .prepare("INSERT INTO characters (campaign_id, name, created_at, updated_at) VALUES (999, 'Orphan', '', '')")
+          .run(),
+      ).toThrow(/FOREIGN KEY/i);
     } finally {
       sqlite.close();
     }

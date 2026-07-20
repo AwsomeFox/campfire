@@ -1,6 +1,32 @@
 /**
  * Bootstrap DDL, executed on boot via better-sqlite3 `.exec()`.
- * Simple CREATE TABLE IF NOT EXISTS statements — no migration files for this milestone.
+ * Simple CREATE TABLE IF NOT EXISTS statements.
+ *
+ * Foreign keys (issue #69). Every CREATE TABLE below declares the referential
+ * integrity for its relationships:
+ *   - `ON DELETE CASCADE` for STRICT children — a row that has no meaning without
+ *     its parent (quest_objectives→quests, combatants→encounters, every
+ *     campaign_id→campaigns, etc.). Deleting the parent removes them automatically.
+ *   - `ON DELETE SET NULL` for SOFT references — a row that survives its referent
+ *     losing it (combatants.character_id→characters, campaign_members.character_id,
+ *     encounters.location_id/quest_id/session_id, npcs.location_id,
+ *     quests.giver_npc_id, campaigns.current_location_id, …). The column is nulled,
+ *     the row stays.
+ *
+ * Campaign is the root of the graph: almost every table cascades from campaigns(id),
+ * so a single `DELETE FROM campaigns` tears down the whole tree. Enforcement is
+ * turned on per-connection via `PRAGMA foreign_keys = ON` in db.module's openDatabase.
+ *
+ * IMPORTANT — fresh DBs only: SQLite cannot ADD a foreign key to an existing table
+ * (there is no `ALTER TABLE … ADD CONSTRAINT`, and these CREATE TABLE statements are
+ * `IF NOT EXISTS`, so a table that already exists is never rewritten). Therefore FK
+ * ENFORCEMENT applies to databases first created from this bootstrap. Databases that
+ * predate this change keep working exactly as before via the hand-written cascades in
+ * the service layer (CampaignsService.remove et al.), which delete children in
+ * FK-safe (child-first) order and are a strict superset of what the constraints do.
+ * See the migration notes in db.module.ts. Forward references (a table referencing one
+ * created later in this script, e.g. campaigns→locations) are permitted by SQLite —
+ * FK targets are only resolved at write time, not at CREATE TABLE time.
  */
 export const BOOTSTRAP_SQL = `
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -8,11 +34,11 @@ CREATE TABLE IF NOT EXISTS campaigns (
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active',
-  current_location_id INTEGER,
+  current_location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
   danger_level TEXT NOT NULL DEFAULT 'low',
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
-  map_attachment_id INTEGER,
+  map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,
   storage_quota_bytes INTEGER,
   created_at TEXT NOT NULL,
@@ -21,7 +47,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
 
 CREATE TABLE IF NOT EXISTS characters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   owner_user_id TEXT,
   name TEXT NOT NULL,
   species TEXT NOT NULL DEFAULT '',
@@ -49,12 +75,12 @@ CREATE TABLE IF NOT EXISTS characters (
 
 CREATE TABLE IF NOT EXISTS quests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
-  parent_id INTEGER,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  parent_id INTEGER REFERENCES quests(id) ON DELETE SET NULL,
   title TEXT NOT NULL,
   body TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'available',
-  giver_npc_id INTEGER,
+  giver_npc_id INTEGER REFERENCES npcs(id) ON DELETE SET NULL,
   reward TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
@@ -65,7 +91,7 @@ CREATE TABLE IF NOT EXISTS quests (
 
 CREATE TABLE IF NOT EXISTS quest_objectives (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  quest_id INTEGER NOT NULL,
+  quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
   text TEXT NOT NULL,
   done INTEGER NOT NULL DEFAULT 0,
   sort_order INTEGER NOT NULL DEFAULT 0
@@ -73,7 +99,7 @@ CREATE TABLE IF NOT EXISTS quest_objectives (
 
 CREATE TABLE IF NOT EXISTS story_arcs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   summary TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'planned',
@@ -84,8 +110,8 @@ CREATE TABLE IF NOT EXISTS story_arcs (
 
 CREATE TABLE IF NOT EXISTS story_beats (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
-  arc_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  arc_id INTEGER NOT NULL REFERENCES story_arcs(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   body TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'planned',
@@ -96,15 +122,15 @@ CREATE TABLE IF NOT EXISTS story_beats (
 
 CREATE TABLE IF NOT EXISTS story_branches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  beat_id INTEGER NOT NULL,
-  to_beat_id INTEGER,
+  beat_id INTEGER NOT NULL REFERENCES story_beats(id) ON DELETE CASCADE,
+  to_beat_id INTEGER REFERENCES story_beats(id) ON DELETE SET NULL,
   label TEXT NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS timeline_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   in_world_date TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL DEFAULT '',
@@ -117,7 +143,7 @@ CREATE TABLE IF NOT EXISTS timeline_events (
 );
 
 CREATE TABLE IF NOT EXISTS timeline_calendars (
-  campaign_id INTEGER PRIMARY KEY,
+  campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
   current_date TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -125,7 +151,7 @@ CREATE TABLE IF NOT EXISTS timeline_calendars (
 );
 
 CREATE TABLE IF NOT EXISTS session_zero (
-  campaign_id INTEGER PRIMARY KEY,
+  campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
   lines TEXT NOT NULL DEFAULT '[]',
   veils TEXT NOT NULL DEFAULT '[]',
   safety_tools TEXT NOT NULL DEFAULT '[]',
@@ -137,11 +163,11 @@ CREATE TABLE IF NOT EXISTS session_zero (
 
 CREATE TABLE IF NOT EXISTS npcs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT '',
   disposition TEXT NOT NULL DEFAULT 'neutral',
-  location_id INTEGER,
+  location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
   body TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
@@ -151,8 +177,8 @@ CREATE TABLE IF NOT EXISTS npcs (
 
 CREATE TABLE IF NOT EXISTS locations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
-  parent_id INTEGER,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  parent_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'unexplored',
@@ -166,7 +192,7 @@ CREATE TABLE IF NOT EXISTS locations (
 
 CREATE TABLE IF NOT EXISTS sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   number INTEGER NOT NULL,
   title TEXT NOT NULL DEFAULT '',
   played_at TEXT,
@@ -178,8 +204,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS session_shares (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL,
-  campaign_id INTEGER NOT NULL,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   created_by TEXT NOT NULL DEFAULT '',
   token_hash TEXT NOT NULL UNIQUE,
   token_prefix TEXT NOT NULL,
@@ -189,8 +215,8 @@ CREATE TABLE IF NOT EXISTS session_shares (
 
 CREATE TABLE IF NOT EXISTS session_attendees (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL,
-  character_id INTEGER NOT NULL,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
   character_name TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   UNIQUE(session_id, character_id)
@@ -198,7 +224,7 @@ CREATE TABLE IF NOT EXISTS session_attendees (
 
 CREATE TABLE IF NOT EXISTS scheduled_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   scheduled_at TEXT NOT NULL,
   duration_minutes INTEGER NOT NULL DEFAULT 240,
   title TEXT NOT NULL DEFAULT '',
@@ -210,7 +236,7 @@ CREATE TABLE IF NOT EXISTS scheduled_sessions (
 
 CREATE TABLE IF NOT EXISTS session_rsvps (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  scheduled_session_id INTEGER NOT NULL,
+  scheduled_session_id INTEGER NOT NULL REFERENCES scheduled_sessions(id) ON DELETE CASCADE,
   user_id TEXT NOT NULL,
   user_name TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
@@ -222,7 +248,7 @@ CREATE TABLE IF NOT EXISTS session_rsvps (
 
 CREATE TABLE IF NOT EXISTS notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   author_user_id TEXT NOT NULL,
   author_name TEXT NOT NULL DEFAULT '',
   kind TEXT NOT NULL DEFAULT 'note',
@@ -239,10 +265,10 @@ CREATE TABLE IF NOT EXISTS notes (
 
 CREATE TABLE IF NOT EXISTS comments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   entity_type TEXT NOT NULL,
   entity_id INTEGER NOT NULL,
-  parent_id INTEGER,
+  parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
   author_user_id TEXT NOT NULL,
   author_name TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL,
@@ -251,6 +277,11 @@ CREATE TABLE IF NOT EXISTS comments (
   updated_at TEXT NOT NULL
 );
 
+-- audit_log deliberately carries NO foreign key on campaign_id (issue #69). Audit
+-- records must OUTLIVE the entities they describe: CampaignsService.remove writes its
+-- own campaign.delete row AFTER the campaign row is gone, so a REFERENCES campaigns(id)
+-- constraint (any action) would reject that very insert. The column stays a loose,
+-- historical reference by design; the retention sweep (issue #74) is what prunes it.
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER,
@@ -304,10 +335,10 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE TABLE IF NOT EXISTS campaign_members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL,
   role TEXT NOT NULL,
-  character_id INTEGER,
+  character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(campaign_id, user_id)
@@ -315,7 +346,7 @@ CREATE TABLE IF NOT EXISTS campaign_members (
 
 CREATE TABLE IF NOT EXISTS campaign_invites (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   code TEXT NOT NULL UNIQUE,
   role TEXT NOT NULL,
   created_by_user_id INTEGER,
@@ -332,7 +363,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   name TEXT NOT NULL,
   scope TEXT NOT NULL,
   write_scope TEXT NOT NULL DEFAULT 'direct',
-  campaign_id INTEGER,
+  campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
   admin_enabled INTEGER NOT NULL DEFAULT 0,
   token_hash TEXT NOT NULL UNIQUE,
   token_prefix TEXT NOT NULL,
@@ -343,6 +374,11 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 
 -- MCP OAuth (issue #37): Campfire as a minimal OAuth 2.1 authorization server so
 -- /mcp can be added as a Claude connector. See db/schema.ts for column docs.
+-- No foreign keys declared on the oauth_* tables (issue #69): they reference users by
+-- INTEGER user_id and clients by TEXT client_id and are governed by their own
+-- expiry/revocation lifecycle rather than the campaign graph — an expired or campaign-
+-- scoped grant is cleaned by the OAuth service, not by a cascade. Kept FK-free to avoid
+-- coupling token issuance to row-existence checks on a hot auth path.
 CREATE TABLE IF NOT EXISTS oauth_clients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client_id TEXT NOT NULL UNIQUE,
@@ -400,7 +436,7 @@ CREATE TABLE IF NOT EXISTS rule_packs (
 
 CREATE TABLE IF NOT EXISTS rule_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  pack_id INTEGER NOT NULL,
+  pack_id INTEGER NOT NULL REFERENCES rule_packs(id) ON DELETE CASCADE,
   slug TEXT NOT NULL,
   name TEXT NOT NULL,
   type TEXT NOT NULL,
@@ -414,7 +450,7 @@ CREATE TABLE IF NOT EXISTS rule_entries (
 
 CREATE TABLE IF NOT EXISTS proposals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   entity_type TEXT NOT NULL,
   entity_id INTEGER,
   action TEXT NOT NULL,
@@ -432,7 +468,7 @@ CREATE TABLE IF NOT EXISTS proposals (
 
 CREATE TABLE IF NOT EXISTS attachments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   uploader_user_id TEXT NOT NULL,
   kind TEXT NOT NULL,
   filename TEXT NOT NULL,
@@ -445,16 +481,16 @@ CREATE TABLE IF NOT EXISTS attachments (
 
 CREATE TABLE IF NOT EXISTS encounters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'preparing',
   round INTEGER NOT NULL DEFAULT 0,
   turn_index INTEGER NOT NULL DEFAULT 0,
-  current_combatant_id INTEGER,
-  location_id INTEGER,
-  quest_id INTEGER,
-  session_id INTEGER,
-  map_attachment_id INTEGER,
+  current_combatant_id INTEGER REFERENCES combatants(id) ON DELETE SET NULL,
+  location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
+  quest_id INTEGER REFERENCES quests(id) ON DELETE SET NULL,
+  session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+  map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ended_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -462,7 +498,7 @@ CREATE TABLE IF NOT EXISTS encounters (
 
 CREATE TABLE IF NOT EXISTS dice_rolls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   roller_user_id TEXT NOT NULL,
   roller_name TEXT NOT NULL DEFAULT '',
   expr TEXT NOT NULL,
@@ -477,7 +513,7 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
 CREATE TABLE IF NOT EXISTS notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   type TEXT NOT NULL,
   title TEXT NOT NULL,
   body TEXT NOT NULL DEFAULT '',
@@ -490,9 +526,9 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE TABLE IF NOT EXISTS inventory_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   owner_type TEXT NOT NULL DEFAULT 'party',
-  character_id INTEGER,
+  character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   qty INTEGER NOT NULL DEFAULT 1,
   notes TEXT NOT NULL DEFAULT '',
@@ -501,7 +537,7 @@ CREATE TABLE IF NOT EXISTS inventory_items (
 );
 
 CREATE TABLE IF NOT EXISTS party_treasury (
-  campaign_id INTEGER PRIMARY KEY,
+  campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
   cp INTEGER NOT NULL DEFAULT 0,
   sp INTEGER NOT NULL DEFAULT 0,
   ep INTEGER NOT NULL DEFAULT 0,
@@ -511,7 +547,7 @@ CREATE TABLE IF NOT EXISTS party_treasury (
 );
 
 CREATE TABLE IF NOT EXISTS ai_dm_seats (
-  campaign_id INTEGER PRIMARY KEY,
+  campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
   enabled INTEGER NOT NULL DEFAULT 0,
   model TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '',
@@ -525,9 +561,9 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
 
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  encounter_id INTEGER NOT NULL,
+  encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
-  character_id INTEGER,
+  character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   initiative INTEGER,
   init_mod INTEGER NOT NULL DEFAULT 0,
@@ -538,7 +574,7 @@ CREATE TABLE IF NOT EXISTS combatants (
   death_save_successes INTEGER NOT NULL DEFAULT 0,
   death_save_failures INTEGER NOT NULL DEFAULT 0,
   conditions TEXT NOT NULL DEFAULT '[]',
-  rule_entry_id INTEGER,
+  rule_entry_id INTEGER REFERENCES rule_entries(id) ON DELETE SET NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
   token_x REAL,
   token_y REAL
@@ -550,7 +586,7 @@ CREATE TABLE IF NOT EXISTS combatants (
 -- so listing it to a non-DM can't leak issue #43's redaction.
 CREATE TABLE IF NOT EXISTS encounter_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  encounter_id INTEGER NOT NULL,
+  encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
   round INTEGER NOT NULL DEFAULT 0,
   type TEXT NOT NULL,
   actor TEXT,
