@@ -104,6 +104,10 @@ export const npcs = sqliteTable('npcs', {
 export const locations = sqliteTable('locations', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
+  // Self-referencing parent for location nesting (region→city→dungeon→room, #99).
+  // Nullable/absent in older DBs pre-migration; see db/db.module.ts
+  // migrateLocationsTableForParentId().
+  parentId: integer('parent_id'),
   name: text('name').notNull(),
   kind: text('kind').notNull().default(''),
   status: text('status').notNull().default('unexplored'),

@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS npcs (
 CREATE TABLE IF NOT EXISTS locations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
+  parent_id INTEGER,
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'unexplored',
@@ -383,6 +384,7 @@ CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quest_objectives_quest ON quest_objectives(quest_id);
 CREATE INDEX IF NOT EXISTS idx_npcs_campaign ON npcs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_campaign ON locations(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_locations_parent ON locations(parent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_session ON session_shares(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaign_id);

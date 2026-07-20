@@ -280,6 +280,7 @@ export const LocationStatus = z.enum(['unexplored', 'explored', 'current']);
 export const Location = z.object({
   id: Id,
   campaignId: Id,
+  parentId: Id.nullable().default(null), // nesting: region→city→dungeon→room (#99)
   name: z.string().min(1).max(120),
   kind: z.string().max(80).default(''), // town, dungeon, region…
   status: LocationStatus.default('unexplored'),
