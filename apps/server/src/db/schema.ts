@@ -194,6 +194,18 @@ export const sessions = sqliteTable('sessions', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Per-session attendance (issue #121) — which characters played a given session.
+// West Marches / rotating-cast tables need a "who was there" record instead of the
+// party being all-or-nothing. One row per (session, character); the set is replaced
+// wholesale on write. character_name is denormalized so recaps/cards don't join.
+export const sessionAttendees = sqliteTable('session_attendees', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  sessionId: integer('session_id').notNull(),
+  characterId: integer('character_id').notNull(),
+  characterName: text('character_name').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
 // Read-only recap share links (see modules/sessions/session-shares.service.ts).
 // DB stores sha256(token) only — the raw token lives in the shared URL and is
 // shown once at creation. Deleting a row revokes the link.

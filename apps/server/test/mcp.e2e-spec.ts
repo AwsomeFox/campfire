@@ -31,6 +31,8 @@ const ALL_TOOLS = [
   'get_party',
   'get_session_recaps',
   'get_session',
+  'get_session_attendance',
+  'set_session_attendance',
   'draft_session_recap',
   'read_inbox',
   'list_proposals',
@@ -174,7 +176,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(82);
+    expect(tools).toHaveLength(84);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -767,6 +769,20 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const getSessionResult = await client.callTool({ name: 'get_session', arguments: { sessionId: session.id } });
     expect(getSessionResult.isError).toBeFalsy();
     expect((parseResult(getSessionResult) as { title: string }).title).toBe('The Beginning');
+
+    // Attendance (issue #121): set then get round-trips over MCP (the AI-scribe path).
+    const attendeeChar = parseResult(
+      await client.callTool({ name: 'upsert_character', arguments: { campaignId, name: 'Scribe Recorded' } }),
+    ) as { id: number };
+    const setAttendanceResult = await client.callTool({
+      name: 'set_session_attendance',
+      arguments: { sessionId: session.id, characterIds: [attendeeChar.id] },
+    });
+    expect(setAttendanceResult.isError).toBeFalsy();
+    expect((parseResult(setAttendanceResult) as { characterId: number }[]).map((a) => a.characterId)).toEqual([attendeeChar.id]);
+    const getAttendanceResult = await client.callTool({ name: 'get_session_attendance', arguments: { sessionId: session.id } });
+    expect(getAttendanceResult.isError).toBeFalsy();
+    expect((parseResult(getAttendanceResult) as { characterName: string }[])[0].characterName).toBe('Scribe Recorded');
 
     const noteResult = await client.callTool({ name: 'add_note', arguments: { campaignId, body: 'A note to edit' } });
     const note = parseResult(noteResult) as { id: number };
