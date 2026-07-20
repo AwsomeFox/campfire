@@ -25,13 +25,25 @@ dev-server:
 dev-web:
     npm run dev -w apps/web
 
-# All tests
+# Server suite: unit (test/unit) + API e2e (test/*.e2e-spec)
 test:
     npm run test
 
-# API e2e tests only, watch mode
+# Server suite, watch mode
 test-watch:
     npm run test:watch -w apps/server
+
+# Browser E2E across roles (Playwright — builds the app, needs chromium: just e2e-install)
+test-e2e:
+    npm run test:e2e
+
+# Whole regression safety net: lint + server unit/e2e + web build + Playwright
+test-all:
+    npm run test:all
+
+# One-time: fetch the Playwright chromium browser
+e2e-install:
+    npm run e2e:install -w apps/web
 
 # Type-check + production build of every workspace
 build:
