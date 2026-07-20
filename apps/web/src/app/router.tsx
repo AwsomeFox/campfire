@@ -132,6 +132,10 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/timeline/TimelinePage')),
           },
           {
+            path: '/c/:campaignId/session-zero',
+            element: lazyPage(() => import('../features/session-zero/SessionZeroPage')),
+          },
+          {
             path: '/c/:campaignId/encounters',
             element: lazyPage(() => import('../features/encounters/EncounterListPage')),
           },
