@@ -156,6 +156,57 @@ export type Session = z.infer<typeof Session>;
 export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
 export const SessionUpdate = SessionCreate.partial();
 
+// ---------- session scheduling (next session + availability + ICS feed) ----------
+// A ScheduledSession is a *future* (planned) game night — distinct from Session
+// above, which is the play log/recap of a session that already happened.
+const IsoDateTime = z
+  .string()
+  .max(40)
+  .refine((v) => !Number.isNaN(Date.parse(v)), 'expected an ISO-8601 date-time'); // normalized to UTC server-side
+
+export const ScheduledSession = z.object({
+  id: Id,
+  campaignId: Id,
+  scheduledAt: IsoDateTime, // when the session starts (stored as ISO UTC)
+  durationMinutes: z.number().int().min(15).max(24 * 60).default(240), // drives DTEND in the ICS feed
+  title: z.string().max(200).default(''),
+  location: z.string().max(200).default(''), // "Sam's place", a VTT link…
+  notes: z.string().max(5000).default(''),
+  ...timestamps,
+});
+export type ScheduledSession = z.infer<typeof ScheduledSession>;
+export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ scheduledAt: true });
+export const ScheduledSessionUpdate = ScheduledSessionCreate.partial();
+
+export const RsvpStatus = z.enum(['yes', 'no', 'maybe']);
+export type RsvpStatus = z.infer<typeof RsvpStatus>;
+
+export const SessionRsvp = z.object({
+  id: Id,
+  scheduledSessionId: Id,
+  userId: z.string().max(120), // same shape as Note.authorUserId (String(users.id) or dev user)
+  userName: z.string().max(120).default(''), // denormalized for display
+  status: RsvpStatus,
+  note: z.string().max(500).default(''), // "might be 30min late"
+  ...timestamps,
+});
+export type SessionRsvp = z.infer<typeof SessionRsvp>;
+export const RsvpSet = z.object({ status: RsvpStatus, note: z.string().max(500).optional() });
+export type RsvpSet = z.infer<typeof RsvpSet>;
+
+export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
+export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+// Per-campaign ICS calendar feed. `token` is an unguessable capability secret
+// (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
+// may read it (the feed only exposes schedule data members already see);
+// enable/rotate/disable is DM-only.
+export const CalendarFeed = z.object({
+  token: z.string().nullable(),
+  url: z.string().nullable(), // relative feed path, e.g. /api/v1/calendar/<token>.ics
+});
+export type CalendarFeed = z.infer<typeof CalendarFeed>;
+
 // ---------- notes ----------
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
 export const NoteKind = z.enum(['note', 'inbox']);
