@@ -7,9 +7,15 @@ uploaded images (portraits, maps) — lives under the **data volume** (`DATA_DIR
 default `/data`). Back up that one path and you have the whole server.
 
 !!! warning "Back up consistently"
-    SQLite runs in WAL mode, so a naive `cp` of a live database can catch a torn
-    write. Use one of the consistent methods below (the built-in backup archive,
-    or `sqlite3 <db> ".backup <dest>"`), or stop the container before copying.
+    SQLite runs in WAL mode, so a naive `cp` of a **live** database can catch a torn
+    write — and can miss data entirely: recent writes live in the `campfire.db-wal`
+    sidecar until they're checkpointed into the main file, so copying `campfire.db`
+    on its own can hand you a near-empty database. The built-in backup archive (or
+    `sqlite3 <db> ".backup <dest>"`) is the recommended path — both are WAL-safe on a
+    running server. If you'd rather copy files directly, **stop the container first**:
+    Campfire checkpoints the WAL into `campfire.db` and closes the database on
+    graceful shutdown (`docker stop`/SIGTERM), so a plain copy of the stopped data
+    volume — `campfire.db` included — is complete and restorable.
 
 ## Whole-server backup & restore
 

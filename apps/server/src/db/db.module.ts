@@ -1,4 +1,4 @@
-import { Global, Injectable, Module } from '@nestjs/common';
+import { Global, Injectable, Logger, Module, type OnApplicationShutdown } from '@nestjs/common';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -481,9 +481,11 @@ export function openDatabase(dataDir: string): {
  * existing services transparently pick up the new database with no re-injection.
  */
 @Injectable()
-export class DbHolder {
+export class DbHolder implements OnApplicationShutdown {
+  private readonly logger = new Logger(DbHolder.name);
   private sqlite: Database.Database;
   private orm: DrizzleDb;
+  private closed = false;
   readonly ftsAvailable: boolean;
 
   /** Stable object handed to every DB consumer; forwards to the current `orm`. */
@@ -507,6 +509,45 @@ export class DbHolder {
   /** The raw better-sqlite3 handle (for VACUUM INTO backups). */
   get raw(): Database.Database {
     return this.sqlite;
+  }
+
+  /**
+   * The restore trap (issue #164): the DB is opened in WAL mode, so freshly
+   * written data lives in the `-wal` sidecar until a checkpoint folds it into
+   * the main `campfire.db` file. WAL's auto-checkpoint only fires once the log
+   * crosses ~1000 pages (~4MB), so on a small install the main file can stay a
+   * near-empty stub indefinitely — and because the handle was never closed, the
+   * checkpoint SQLite normally runs when the *last* connection closes never
+   * happened either. Result: `cp campfire.db` (without the `-wal`) produced a
+   * blank "no such table: users" database.
+   *
+   * NestJS calls this on SIGTERM/SIGINT (docker stop) because main.ts enables
+   * shutdown hooks. We force a TRUNCATE checkpoint — which both folds the WAL
+   * into the main file AND resets the `-wal` back to zero bytes — then close the
+   * handle. After a graceful shutdown, a plain copy of `campfire.db` alone is a
+   * complete, restorable database. (The `.backup`/`VACUUM INTO` path in
+   * BackupService is WAL-safe even while running and remains the recommended
+   * backup mechanism.)
+   */
+  onApplicationShutdown(): void {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      if (this.sqlite.open) {
+        this.sqlite.pragma('wal_checkpoint(TRUNCATE)');
+      }
+    } catch (err) {
+      // Best-effort: a failed checkpoint must not block shutdown. close() below
+      // still triggers SQLite's own last-connection checkpoint as a fallback.
+      this.logger.warn(`WAL checkpoint on shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      if (this.sqlite.open) {
+        this.sqlite.close();
+      }
+    } catch (err) {
+      this.logger.warn(`Closing SQLite handle on shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
