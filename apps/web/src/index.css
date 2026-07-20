@@ -334,6 +334,137 @@ h1, h2, h3, h4, h5, h6 {
   border-color: var(--color-accent);
 }
 
+/* --- Rendered markdown (Markdown.tsx emits `.cf-prose`) ---
+   Tailwind's preflight strips list markers (`ul,ol{list-style:none}`) and the
+   app's global `h1{…}` rule would balloon a markdown `#` heading, so rendered
+   markdown — the compendium reader, quest/npc/location bodies, session recaps —
+   needs its own contained type scale. Everything is expressed in --color-*/
+   --cf-* / --space-* tokens so it tracks whatever theme is active (light or
+   dark) rather than hard-coding colors. */
+.cf-prose {
+  overflow-wrap: anywhere; /* long URLs / unbroken strings wrap, don't overflow */
+  word-break: break-word;
+}
+.cf-prose > :first-child { margin-top: 0; }
+.cf-prose > :last-child { margin-bottom: 0; }
+
+.cf-prose h1,
+.cf-prose h2,
+.cf-prose h3,
+.cf-prose h4,
+.cf-prose h5,
+.cf-prose h6 {
+  color: var(--cf-ink-strong);
+  font-family: var(--font-heading);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.2em 0 0.5em;
+}
+.cf-prose h1 { font-size: 1.5rem; }
+.cf-prose h2 { font-size: 1.3rem; }
+.cf-prose h3 { font-size: 1.12rem; }
+.cf-prose h4 { font-size: 1rem; }
+.cf-prose h5,
+.cf-prose h6 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--cf-dim); }
+
+.cf-prose p { margin: 0.5em 0; }
+
+.cf-prose a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.cf-prose a:hover { color: var(--color-accent-300); }
+
+.cf-prose strong { color: var(--cf-ink); font-weight: 700; }
+
+/* Lists — restore the markers Tailwind's preflight removes. */
+.cf-prose ul,
+.cf-prose ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+.cf-prose ul { list-style: disc; }
+.cf-prose ol { list-style: decimal; }
+.cf-prose ul ul { list-style: circle; }
+.cf-prose li { margin: 0.25em 0; }
+.cf-prose li::marker { color: var(--cf-faint); }
+
+.cf-prose blockquote {
+  margin: 0.75em 0;
+  padding: 0.25em 0 0.25em 1em;
+  border-left: 3px solid var(--color-accent);
+  color: var(--cf-dim);
+}
+
+.cf-prose code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.85em;
+  background: color-mix(in srgb, var(--color-text) 10%, transparent);
+  padding: 0.12em 0.35em;
+  border-radius: var(--radius-sm);
+}
+.cf-prose pre {
+  margin: 0.75em 0;
+  padding: 0.85em 1em;
+  background: var(--color-neutral-900);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+.cf-prose pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.cf-prose hr {
+  border: 0;
+  border-top: 1px solid var(--color-divider);
+  margin: 1.2em 0;
+}
+
+.cf-prose img { max-width: 100%; height: auto; border-radius: var(--radius-md); }
+
+/* Tables — markdown emits a bare `<table>` (Nocturne only styles the `.table`
+   class), so give it borders + padding here. `display:block` + `overflow-x`
+   turns the table into its own horizontal-scroll container so wide SRD
+   class/monster tables scroll internally instead of forcing the whole page to
+   scroll at 375px. */
+.cf-prose table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.9em;
+  margin: 0.75em 0;
+}
+.cf-prose th,
+.cf-prose td {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-divider);
+  text-align: left;
+  vertical-align: top;
+}
+.cf-prose th {
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+  color: var(--cf-ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cf-prose tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--color-text) 3%, transparent);
+}
+
+/* Long unbroken titles / names must wrap inside their header or dialog rather
+   than overflow the bounds (issue #106). The dialog is width-constrained by
+   `.dialog`, and entity-title headings get `min-w-0 break-words` at the call
+   site so they can shrink inside their flex header. */
+.dialog-title,
+.dialog-body {
+  overflow-wrap: anywhere;
+}
+
 /* Mobile bottom tab bar */
 .cf-tabbar {
   position: fixed;

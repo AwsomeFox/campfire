@@ -4,7 +4,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalsService } from './proposals.service';
-import { ProposalResolveDto } from './proposals.dto';
+import { ProposalResolveDto, ProposalApproveDto, ProposalBatchResolveDto } from './proposals.dto';
 
 @ApiTags('proposals')
 @Controller('campaigns/:campaignId/proposals')
@@ -38,10 +38,41 @@ export class ProposalsController {
     private readonly access: CampaignAccessService,
   ) {}
 
+  @Post('batch/approve')
+  @ApiOperation({
+    summary: 'Approve many proposals at once',
+    description:
+      'dm role required (checked per proposal\'s campaign). Each id is applied through the same atomic approve path; one failure does not abort the rest. Returns a per-id result array.',
+  })
+  @ApiResponse({ status: 201, description: 'Per-id batch results ({ results: [{ id, ok, ... }] }).' })
+  async batchApprove(@Body() body: ProposalBatchResolveDto, @CurrentUser() user: RequestUser) {
+    const results = await this.proposals.resolveBatch(body.ids, 'approve', body.note, user, (campaignId) =>
+      this.access.requireRole(user, campaignId, 'dm'),
+    );
+    return { results };
+  }
+
+  @Post('batch/reject')
+  @ApiOperation({
+    summary: 'Reject many proposals at once',
+    description: 'dm role required (checked per proposal\'s campaign). No writes are applied. Returns a per-id result array.',
+  })
+  @ApiResponse({ status: 201, description: 'Per-id batch results ({ results: [{ id, ok, ... }] }).' })
+  async batchReject(@Body() body: ProposalBatchResolveDto, @CurrentUser() user: RequestUser) {
+    const results = await this.proposals.resolveBatch(body.ids, 'reject', body.note, user, (campaignId) =>
+      this.access.requireRole(user, campaignId, 'dm'),
+    );
+    return { results };
+  }
+
   @Post(':id/approve')
-  @ApiOperation({ summary: 'Approve a proposal', description: 'dm role required. Applies the pending create/update to the underlying entity.' })
+  @ApiOperation({
+    summary: 'Approve a proposal',
+    description:
+      'dm role required. Applies the pending create/update/delete to the underlying entity. Optionally pass an amended `payload` to edit the proposed create/update body before it is applied (edit-before-approve).',
+  })
   @ApiResponse({ status: 201, description: 'Approved proposal (with the write applied).' })
-  async approve(@Param('id', ParseIntPipe) id: number, @Body() body: ProposalResolveDto, @CurrentUser() user: RequestUser) {
+  async approve(@Param('id', ParseIntPipe) id: number, @Body() body: ProposalApproveDto, @CurrentUser() user: RequestUser) {
     const row = await this.proposals.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.proposals.approve(id, body, user, role);

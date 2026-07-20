@@ -10,10 +10,11 @@
  * refresh. When the SSE event stream lands (issue #4) the poll can be swapped for
  * a push without touching the rendering below.
  */
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useState, type FormEvent } from 'react';
 import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
+import { useAnnounce } from '../../components/Announcer';
 
 const POLL_MS = 5000;
 
@@ -33,6 +34,8 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const [rolling, setRolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rolls, setRolls] = useState<DiceRoll[]>([]);
+  const announce = useAnnounce();
+  const exprId = useId();
 
   const load = useCallback(async () => {
     try {
@@ -64,8 +67,12 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: expr.trim() });
       // Prepend own roll immediately (dedupe by id — the next poll returns it too).
       setRolls((prev) => [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit));
+      // Announce the result — the roll feed is otherwise visual-only (issue #93).
+      announce(`Rolled ${result.expr}: ${result.total} (${result.rolls.join(', ')})`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't roll.");
+      const message = err instanceof ApiError ? err.message : "Couldn't roll.";
+      setError(message);
+      announce(message, { assertive: true });
     } finally {
       setRolling(false);
     }
@@ -76,14 +83,20 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       <span className="card-kicker">{compact ? 'Dice' : 'Dice log'}</span>
       <form onSubmit={roll} className="flex gap-2 items-end flex-wrap">
         <div className="field" style={{ flex: 1, minWidth: compact ? 100 : 120 }}>
-          <label>Expression</label>
-          <TextInput placeholder="1d20+3" value={expr} onChange={(e) => setExpr(e.target.value)} />
+          <label htmlFor={exprId}>Expression</label>
+          <TextInput
+            id={exprId}
+            aria-label="Dice expression"
+            placeholder="1d20+3"
+            value={expr}
+            onChange={(e) => setExpr(e.target.value)}
+          />
         </div>
         <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
           {rolling ? 'Rolling…' : 'Roll'}
         </Btn>
       </form>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
       {rolls.length === 0 ? (
         <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
           {compact

@@ -11,6 +11,7 @@ import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
 import { Btn, Card, TextInput } from '../components/ui';
+import { useDialog } from '../components/useDialog';
 import { NotificationsBell } from '../features/notifications/NotificationsBell';
 
 function initials(name: string): string {
@@ -41,6 +42,9 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
+  // Escape-to-close (suppressed mid-save), focus trap, and focus restore to trigger.
+  const dialogRef = useDialog<HTMLDivElement>({ onClose, disabled: saving });
+  const titleId = 'change-password-title';
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -65,9 +69,16 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="dialog-backdrop" style={{ zIndex: 52 }} onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="dialog-title">Change password</div>
+    <div className="dialog-backdrop" style={{ zIndex: 52 }} onClick={() => !saving && onClose()}>
+      <div
+        ref={dialogRef}
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="dialog-title" id={titleId}>Change password</div>
         {done ? (
           <div className="space-y-3">
             <p className="text-sm" style={{ color: '#34d399' }}>Password updated.</p>
@@ -472,6 +483,8 @@ export function Layout() {
               className="tag tag-outline cursor-pointer"
               style={{ minHeight: 30, background: 'transparent', border: '1px solid var(--color-divider)', color: 'var(--color-text)' }}
               onClick={() => setMoreOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={moreOpen}
             >
               {roleLabel} ▾
             </button>
@@ -486,6 +499,9 @@ export function Layout() {
                   border: '1px solid var(--color-accent-800)',
                   color: 'var(--color-accent-200)',
                 }}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                aria-label="Account menu"
               >
                 {initials(displayName)}
               </button>
@@ -560,7 +576,7 @@ export function Layout() {
           <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
             <span className="ico">📝</span>Notes
           </NavLink>
-          <button onClick={() => setMoreOpen(true)}>
+          <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
             <span className="ico">⋯</span>More
           </button>
         </nav>
@@ -568,83 +584,118 @@ export function Layout() {
 
       {/* More sheet (mobile) */}
       {moreOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-end justify-center"
-          style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)' }}
-          onClick={() => setMoreOpen(false)}
-        >
-          <div
-            className="card elev-lg w-full flex flex-col"
-            style={{
-              maxWidth: 440,
-              maxHeight: 'calc(100dvh - 16px)',
-              borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
-              padding: '18px 18px calc(18px + env(safe-area-inset-bottom))',
-              gap: 4,
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div
-              className="mx-auto mb-2.5 shrink-0"
-              style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--color-neutral-700)' }}
-            />
-            <div className="flex items-start gap-2 shrink-0" style={{ padding: '0 6px 6px' }}>
-              <div className="text-muted flex-1 min-w-0" style={{ fontSize: 11 }}>
-                Signed in as {displayName}
-                {roleLabel ? ` · viewing as ${roleLabel}` : ''}
-              </div>
-              <button
-                type="button"
-                aria-label="Close menu"
-                onClick={() => setMoreOpen(false)}
-                className="shrink-0 -mt-1 -mr-1 flex items-center justify-center rounded-md"
-                style={{ width: 32, height: 32, color: 'var(--color-text)', fontSize: 18, lineHeight: 1 }}
-              >
-                ✕
-              </button>
-            </div>
-            <div className="flex flex-col overflow-y-auto" style={{ gap: 4, margin: '0 -4px', padding: '0 4px' }}>
-            {campaignId !== undefined && (
-              <MoreSheetItem
-                item={{ key: 'search', label: '🔍 Search', to: `/c/${campaignId}/search` }}
-                onNavigate={() => setMoreOpen(false)}
-              />
-            )}
-            {mainNav.map((item) => (
-              <MoreSheetItem key={item.key} item={item} onNavigate={() => setMoreOpen(false)} />
-            ))}
-            {dmNav.map((item) => (
-              <MoreSheetItem key={item.key} item={item} onNavigate={() => setMoreOpen(false)} />
-            ))}
-            {isAdmin && (
-              <MoreSheetItem item={{ key: 'admin', label: 'Admin', to: '/admin' }} onNavigate={() => setMoreOpen(false)} />
-            )}
-            <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={() => setMoreOpen(false)} />
-            <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={() => setMoreOpen(false)} />
-            <MoreSheetItem item={{ key: 'preferences', label: 'Preferences', to: '/preferences' }} onNavigate={() => setMoreOpen(false)} />
-            <button
-              className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
-              style={{ fontSize: 14.5, color: 'var(--color-text)' }}
-              onClick={() => {
-                setMoreOpen(false);
-                setShowPasswordModal(true);
-              }}
-            >
-              Change password
-            </button>
-            <button
-              className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full text-rose-400"
-              style={{ fontSize: 14.5 }}
-              onClick={onLogout}
-            >
-              Sign out
-            </button>
-            </div>
-          </div>
-        </div>
+        <MoreSheet
+          displayName={displayName}
+          roleLabel={roleLabel}
+          mainNav={mainNav}
+          dmNav={dmNav}
+          isAdmin={isAdmin}
+          onClose={() => setMoreOpen(false)}
+          onChangePassword={() => {
+            setMoreOpen(false);
+            setShowPasswordModal(true);
+          }}
+          onLogout={onLogout}
+        />
       )}
 
       {showPasswordModal && <ChangePasswordModal onClose={() => setShowPasswordModal(false)} />}
+    </div>
+  );
+}
+
+function MoreSheet({
+  displayName,
+  roleLabel,
+  mainNav,
+  dmNav,
+  isAdmin,
+  onClose,
+  onChangePassword,
+  onLogout,
+}: {
+  displayName: string;
+  roleLabel: string | null;
+  mainNav: NavItem[];
+  dmNav: NavItem[];
+  isAdmin: boolean;
+  onClose: () => void;
+  onChangePassword: () => void;
+  onLogout: () => void;
+}) {
+  // Escape-to-close, focus trap, and focus restore to the trigger (issue #92),
+  // combined with #104's positioning: capped height + internal scroll so a tall
+  // list never clips above the viewport, plus a visible close button.
+  const sheetRef = useDialog<HTMLDivElement>({ onClose });
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center"
+      style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)' }}
+      onClick={onClose}
+    >
+      <div
+        ref={sheetRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="More navigation"
+        className="card elev-lg w-full flex flex-col"
+        style={{
+          maxWidth: 440,
+          maxHeight: 'calc(100dvh - 16px)',
+          borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
+          padding: '18px 18px calc(18px + env(safe-area-inset-bottom))',
+          gap: 4,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          className="mx-auto mb-2.5 shrink-0"
+          style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--color-neutral-700)' }}
+        />
+        <div className="flex items-start gap-2 shrink-0" style={{ padding: '0 6px 6px' }}>
+          <div className="text-muted flex-1 min-w-0" style={{ fontSize: 11 }}>
+            Signed in as {displayName}
+            {roleLabel ? ` · viewing as ${roleLabel}` : ''}
+          </div>
+          <button
+            type="button"
+            aria-label="Close menu"
+            onClick={onClose}
+            className="shrink-0 -mt-1 -mr-1 flex items-center justify-center rounded-md"
+            style={{ width: 32, height: 32, color: 'var(--color-text)', fontSize: 18, lineHeight: 1 }}
+          >
+            ✕
+          </button>
+        </div>
+        <div className="flex flex-col overflow-y-auto" style={{ gap: 4, margin: '0 -4px', padding: '0 4px' }}>
+          {mainNav.map((item) => (
+            <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
+          ))}
+          {dmNav.map((item) => (
+            <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
+          ))}
+          {isAdmin && (
+            <MoreSheetItem item={{ key: 'admin', label: 'Admin', to: '/admin' }} onNavigate={onClose} />
+          )}
+          <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={onClose} />
+          <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={onClose} />
+          <MoreSheetItem item={{ key: 'preferences', label: 'Preferences', to: '/preferences' }} onNavigate={onClose} />
+          <button
+            className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
+            style={{ fontSize: 14.5, color: 'var(--color-text)' }}
+            onClick={onChangePassword}
+          >
+            Change password
+          </button>
+          <button
+            className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full text-rose-400"
+            style={{ fontSize: 14.5 }}
+            onClick={onLogout}
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -691,24 +742,31 @@ function UserMenu({
   onClose: () => void;
   onChangePassword: () => void;
 }) {
+  // Escape closes and restores focus to the trigger. Not a modal (Tab may fall
+  // through), so no focus trap — outside-click close is handled in Layout.
+  const menuRef = useDialog<HTMLDivElement>({ onClose, trapFocus: false });
   return (
     <div
+      ref={menuRef}
+      role="menu"
+      aria-label="Account menu"
       className="absolute right-0 top-11 w-56 card elev-md p-2 space-y-1 text-sm z-40"
       style={{ gap: 2 }}
     >
       <p className="px-2 py-1 text-xs text-muted truncate">{displayName}</p>
       {isAdmin && (
-        <Link to="/admin" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+        <Link to="/admin" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
           Admin
         </Link>
       )}
-      <Link to="/tokens" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+      <Link to="/tokens" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
         API tokens
       </Link>
-      <Link to="/preferences" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+      <Link to="/preferences" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
         Preferences
       </Link>
       <button
+        role="menuitem"
         className="w-full text-left px-2 py-1.5 rounded-md"
         style={{ color: 'var(--color-text)' }}
         onClick={() => {
@@ -718,7 +776,7 @@ function UserMenu({
       >
         Change password
       </button>
-      <button className="w-full text-left px-2 py-1.5 rounded-md text-rose-400" onClick={onLogout}>
+      <button role="menuitem" className="w-full text-left px-2 py-1.5 rounded-md text-rose-400" onClick={onLogout}>
         Logout
       </button>
     </div>
