@@ -463,6 +463,54 @@ export const CombatantUpdate = z.object({
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
+// ---------- inventory & loot (party treasury + per-character items) ----------
+export const ItemOwnerType = z.enum(['party', 'character']);
+export type ItemOwnerType = z.infer<typeof ItemOwnerType>;
+
+export const InventoryItem = z.object({
+  id: Id,
+  campaignId: Id,
+  ownerType: ItemOwnerType.default('party'),
+  characterId: Id.nullable().default(null), // set iff ownerType='character'
+  name: z.string().min(1).max(200),
+  qty: z.number().int().min(0).default(1),
+  notes: z.string().max(5_000).default(''),
+  ...timestamps,
+});
+export type InventoryItem = z.infer<typeof InventoryItem>;
+export const InventoryItemCreate = InventoryItem.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+export const InventoryItemUpdate = InventoryItemCreate.partial();
+
+// Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).
+const Coin = z.number().int().nonnegative();
+export const Treasury = z.object({
+  campaignId: Id,
+  cp: Coin.default(0),
+  sp: Coin.default(0),
+  ep: Coin.default(0),
+  gp: Coin.default(0),
+  pp: Coin.default(0),
+  updatedAt: IsoDate,
+});
+export type Treasury = z.infer<typeof Treasury>;
+// Union like HpPatch: { delta } (relative, may be negative but result must stay >= 0)
+// or { set } (absolute). Omitted denominations are left untouched.
+export const TreasuryPatch = z.union([
+  z.object({
+    delta: z.object({
+      cp: z.number().int().optional(),
+      sp: z.number().int().optional(),
+      ep: z.number().int().optional(),
+      gp: z.number().int().optional(),
+      pp: z.number().int().optional(),
+    }),
+  }),
+  z.object({
+    set: z.object({ cp: Coin.optional(), sp: Coin.optional(), ep: Coin.optional(), gp: Coin.optional(), pp: Coin.optional() }),
+  }),
+]);
+export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
+
 // ---------- dice rolling ----------
 // Safe, restricted dice expression: NdM optionally followed by +K or -K, e.g. "1d20+3", "2d6-1", "d20".
 export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*([+-]\s*\d{1,3})?\s*$/i;
