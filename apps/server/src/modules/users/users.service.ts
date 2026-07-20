@@ -1,16 +1,15 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, like, ne, or } from 'drizzle-orm';
 import type { z } from 'zod';
-import { UserCreate, UserUpdate, PasswordChange, PreferencesUpdate } from '@campfire/schema';
+import { UserCreate, UserUpdate, PreferencesUpdate } from '@campfire/schema';
 import type { User } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { users, userSessions, campaignMembers, campaigns, passwordResetRequests } from '../../db/schema';
+import { users, userSessions, apiTokens, campaignMembers, campaigns, passwordResetRequests } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
 
 type UserCreateInput = z.infer<typeof UserCreate>;
 type UserUpdateInput = z.infer<typeof UserUpdate>;
-type PasswordChangeInput = z.infer<typeof PasswordChange>;
 type PreferencesUpdateInput = z.infer<typeof PreferencesUpdate>;
 
 function toDomain(row: typeof users.$inferSelect): User {
@@ -225,25 +224,37 @@ export class UsersService {
       }
     }
 
-    // Cascade: sessions + campaign_members + open password-reset requests.
-    // Leave notes/characters — characters keep ownerUserId string.
+    // Cascade: sessions + api_tokens + campaign_members + open password-reset
+    // requests. Leave notes/characters — characters keep ownerUserId string.
+    // (Orphaned api_tokens rows would be dead anyway — resolveByRawToken() refuses
+    // tokens whose owner row is gone — but deleting them keeps hashes of once-live
+    // credentials out of the DB.)
     await this.db.delete(userSessions).where(eq(userSessions.userId, id));
+    await this.db.delete(apiTokens).where(eq(apiTokens.userId, id));
     await this.db.delete(passwordResetRequests).where(eq(passwordResetRequests.userId, id));
     await this.db.delete(campaignMembers).where(eq(campaignMembers.userId, id));
     await this.db.delete(users).where(eq(users.id, id));
   }
 
+  /**
+   * Admin password reset (POST /users/:id/password). A reset is a
+   * credential-compromise response — "this account's credentials may have
+   * leaked" — so it must cut off everything already issued, not just future
+   * logins: every session AND every personal access token is revoked
+   * alongside the hash update. (Previously only passwordHash changed, so a
+   * leaked `cf_pat_…` token or stolen cookie survived the reset — issue #44.)
+   * Self-service change (POST /me/password, AuthService.changeOwnPassword)
+   * deliberately differs: it keeps the CURRENT session and leaves PATs alone,
+   * since the user proves the old password and manages their own tokens.
+   */
   async setPassword(id: number, newPassword: string): Promise<void> {
     await this.getRowOrThrow(id);
     await this.db
       .update(users)
       .set({ passwordHash: hashPassword(newPassword), updatedAt: nowIso() })
       .where(eq(users.id, id));
-  }
-
-  /** Self-service password change: requires + verifies currentPassword (checked by caller). */
-  async changeOwnPassword(id: number, input: PasswordChangeInput): Promise<void> {
-    await this.setPassword(id, input.newPassword);
+    await this.db.delete(userSessions).where(eq(userSessions.userId, id));
+    await this.db.delete(apiTokens).where(eq(apiTokens.userId, id));
   }
 
   /** Kill every session for this user except `keepTokenHash` (if provided). */

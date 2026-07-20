@@ -55,8 +55,8 @@ export class ExportService {
         this.quests.listForCampaignWithObjectives(campaignId, role),
         this.npcs.listForCampaign(campaignId, role),
         this.locations.listForCampaign(campaignId, role),
-        this.sessions.listForCampaign(campaignId),
-        this.characters.listForCampaign(campaignId),
+        this.sessions.listForCampaign(campaignId, role),
+        this.characters.listForCampaign(campaignId, role),
         this.notes.listForCampaign(campaignId, user, role, {}),
         this.members.listForCampaign(campaignId),
         this.audit.listForCampaign(campaignId, 500),
@@ -234,6 +234,9 @@ export class ExportService {
       '',
       s.recap || '_none_',
     ];
+    if (s.dmSecret) {
+      lines.push('', '## DM Secret', '', s.dmSecret);
+    }
     return lines.join('\n') + '\n';
   }
 
@@ -252,6 +255,9 @@ export class ExportService {
       '',
       c.notes || '_none_',
     ];
+    if (c.dmSecret) {
+      lines.push('', '## DM Secret', '', c.dmSecret);
+    }
     return lines.join('\n') + '\n';
   }
 

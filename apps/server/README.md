@@ -26,7 +26,7 @@ src/
     json.ts                  TEXT<->JSON (de)serialization for stats/conditions
     time.ts                  nowIso()
   modules/
-    health/                  GET /healthz (no prefix, no auth)
+    health/                  GET /healthz (liveness) + GET /readyz (readiness, SELECT 1 vs SQLite) — no prefix, no auth
     auth/                    AuthService (setup/login/logout/session resolution) + /auth/*, /me, /me/password;
                               OidcService/OidcController (env-gated OIDC/SSO login) — see "OIDC / SSO login"
     users/                   admin user CRUD (/users) + /users/lookup (any authenticated user)
@@ -269,6 +269,7 @@ configure in the DB or admin UI. Implemented with `openid-client` v6
 | `OIDC_SCOPE` | no | `openid profile email` | Add `groups` (or your provider's scope name) here too if group membership isn't included by default. |
 | `OIDC_GROUPS_CLAIM` | no | `groups` | Name of the ID-token claim holding the user's group list. |
 | `OIDC_ADMIN_GROUP` | no | — (admin sync disabled) | Group name that grants `serverRole: 'admin'`. Applied on **every** login, both directions — added to the group -> promoted, removed -> demoted — except the last enabled admin is never demoted (a warn is logged and the role left as-is). |
+| `OIDC_ALLOWED_GROUP` | no | — (any authenticated IdP user may sign in) | Group name required to sign in at all. Checked on **every** login: without it the callback 403s, no account is auto-provisioned, and existing accounts get no session (removing the group at the IdP locks the user out on their next login). Members of `OIDC_ADMIN_GROUP` always have access, so setting only the admin group can't lock admins out. |
 | `APP_URL` | no | `http://localhost:8080` | Only used to build the default `OIDC_REDIRECT_URI`. |
 
 \* All three of `OIDC_ISSUER`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` must be
@@ -966,11 +967,16 @@ see "Tests" below):
   enabled at all** — the deployment plan is same-origin serving (the web build
   served by this same API process or a reverse proxy in front of both), so no
   cross-origin requests are expected unless an operator opts in via `ORIGIN`.
-- Swagger (`/api/docs`, `/api/openapi.json`) stays **public** in every
-  environment — a deliberate, accepted tradeoff for a self-hosted app where the
-  operator controls network exposure; if you're deploying Campfire on the open
-  internet, put it behind your reverse proxy's own auth or IP allowlist if you
-  don't want the API shape publicly browsable.
+- **Swagger exposure, env-driven (`resolveDocsEnabled()` in `main.ts`).**
+  `/api/docs` + `/api/openapi.json` are registered by `setupApiDocs()` only when
+  enabled: `API_DOCS` env takes priority whenever set (`1`/`true` force-enables,
+  `0`/`false` force-disables, in any environment); otherwise the docs are
+  enabled outside production and **disabled in production** (the routes simply
+  aren't registered, so they 404). The endpoints never leaked data — every real
+  route still enforces auth — but the full API surface being browsable by
+  anyone who can reach a production server was needless attack-surface
+  disclosure. Operators who want public docs (e.g. for agent self-discovery
+  against a trusted-network deployment) opt back in with `API_DOCS=1`.
 - **`app.set('trust proxy', ...)`** — trusts the first hop's `X-Forwarded-For`
   by default (override with `TRUST_PROXY`, e.g. a hop count or `false`),
   needed for the rate limiter below (and `req.ip`/`req.secure` generally) to
@@ -1000,7 +1006,9 @@ see "Tests" below):
 
 `SwaggerModule` mounts the UI at `/api/docs` and raw JSON at
 `/api/openapi.json` (both excluded from the global `api/v1` prefix, along
-with `/healthz`). Session-cookie auth is documented via `addCookieAuth`
+with `/healthz`). Registration is gated by `resolveDocsEnabled()` — enabled
+outside production, disabled in production, `API_DOCS` env overrides either
+way (see "Prod hardening" above). Session-cookie auth is documented via `addCookieAuth`
 (`campfire_session`); `x-dev-role`/`x-dev-user` are still documented as
 API-key-style header parameters (`addApiKey`), noted as DEV_AUTH-only. PAT
 bearer auth is documented via `addBearerAuth` (scheme id `bearer`,

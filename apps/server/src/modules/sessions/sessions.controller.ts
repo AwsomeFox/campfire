@@ -20,11 +20,11 @@ export class CampaignSessionsController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List sessions (play logs) in a campaign', description: 'Requires campaign membership.' })
+  @ApiOperation({ summary: 'List sessions (play logs) in a campaign', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
   @ApiResponse({ status: 200, description: 'Sessions in the campaign.' })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireMember(user, campaignId);
-    return this.sessions.listForCampaign(campaignId);
+    const role = await this.access.requireMember(user, campaignId);
+    return this.sessions.listForCampaign(campaignId, role);
   }
 
   @Post()
@@ -62,12 +62,12 @@ export class SessionsController {
   ) {}
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get a session log', description: 'Requires campaign membership.' })
+  @ApiOperation({ summary: 'Get a session log', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
   @ApiResponse({ status: 200, description: 'Session.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.sessions.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
-    return this.sessions.getOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.sessions.getOrThrow(id, role);
   }
 
   @Patch(':id')

@@ -1,12 +1,13 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { characters } from '../../db/schema';
+import { characters, combatants, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -31,7 +32,9 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     level: row.level,
     xp: row.xp,
     background: row.background,
-    stats: fromJsonText<Record<string, number>>(row.stats, {}),
+    // Fold to canonical uppercase keys so existing rows written with lowercase keys
+    // (schema permits any case) still resolve on the sheet / initiative engine (issue #48).
+    stats: normalizeStats(fromJsonText<Record<string, number>>(row.stats, {})),
     ac: row.ac,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
@@ -43,6 +46,7 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     portraitUrl: row.portraitUrl,
     ddbId: row.ddbId,
     notes: row.notes,
+    dmSecret: row.dmSecret,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -55,9 +59,9 @@ export class CharactersService {
     private readonly audit: AuditService,
   ) {}
 
-  async listForCampaign(campaignId: number): Promise<Character[]> {
+  async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
     const rows = await this.db.select().from(characters).where(eq(characters.campaignId, campaignId));
-    return rows.map(toDomain);
+    return redactSecrets(rows.map(toDomain), role);
   }
 
   async getRowOrThrow(id: number) {
@@ -66,9 +70,9 @@ export class CharactersService {
     return row;
   }
 
-  async getOrThrow(id: number): Promise<Character> {
+  async getOrThrow(id: number, role: Role): Promise<Character> {
     const row = await this.getRowOrThrow(id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   /** dm or owner may write; others 403 */
@@ -76,6 +80,33 @@ export class CharactersService {
     if (role === 'dm') return;
     if (row.ownerUserId && row.ownerUserId === user.id) return;
     throw new ForbiddenException('Only dm or the owning player may modify this character');
+  }
+
+  /**
+   * Mirror a character's HP into the combatant rows that link back to it in any
+   * still-live (not 'ended') encounter (issue #50). Combatant HP and character HP
+   * were previously dual sources of truth with only one-way sync (combatant→character
+   * at edit time and on end()), so a player healing on their sheet mid-fight had that
+   * healing silently reverted when the DM ended the encounter — the stale combatant
+   * row won. This closes the loop the other direction. Ended encounters are left
+   * untouched (their combatant rows are a historical snapshot). hpCurrent is clamped
+   * to the combatant's (possibly just-raised) hpMax, matching every other HP path.
+   */
+  private async syncActiveCombatants(characterId: number, hpCurrent: number, hpMax?: number): Promise<void> {
+    const rows = await this.db
+      .select({ combatant: combatants })
+      .from(combatants)
+      .innerJoin(encounters, eq(combatants.encounterId, encounters.id))
+      .where(and(eq(combatants.characterId, characterId), ne(encounters.status, 'ended')));
+
+    for (const { combatant } of rows) {
+      const nextMax = hpMax ?? combatant.hpMax;
+      const nextCurrent = Math.max(0, Math.min(nextMax, hpCurrent));
+      await this.db
+        .update(combatants)
+        .set({ hpCurrent: nextCurrent, hpMax: nextMax })
+        .where(eq(combatants.id, combatant.id));
+    }
   }
 
   async create(campaignId: number, input: CharacterCreateInput, user: RequestUser, role: Role): Promise<Character> {
@@ -94,7 +125,7 @@ export class CharactersService {
         level: input.level ?? 1,
         xp: input.xp ?? 0,
         background: input.background ?? '',
-        stats: toJsonText(input.stats ?? {}),
+        stats: toJsonText(normalizeStats(input.stats ?? {})),
         ac: input.ac ?? null,
         hpCurrent: input.hpCurrent ?? 10,
         hpMax: input.hpMax ?? 10,
@@ -106,6 +137,9 @@ export class CharactersService {
         portraitUrl: input.portraitUrl ?? null,
         ddbId: input.ddbId ?? null,
         notes: input.notes ?? '',
+        // Only dm may seed the DM-only secret — a player creating their own
+        // character can't smuggle content into a field they can never read back.
+        dmSecret: role === 'dm' ? (input.dmSecret ?? '') : '',
         createdAt: ts,
         updatedAt: ts,
       })
@@ -119,7 +153,7 @@ export class CharactersService {
       entityId: row.id,
       campaignId,
     });
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async update(id: number, input: CharacterUpdateInput, user: RequestUser, role: Role): Promise<Character> {
@@ -133,7 +167,7 @@ export class CharactersService {
     if (input.level !== undefined) update.level = input.level;
     if (input.xp !== undefined) update.xp = input.xp;
     if (input.background !== undefined) update.background = input.background;
-    if (input.stats !== undefined) update.stats = toJsonText(input.stats);
+    if (input.stats !== undefined) update.stats = toJsonText(normalizeStats(input.stats));
     if (input.ac !== undefined) update.ac = input.ac;
     if (input.hpMax !== undefined) update.hpMax = input.hpMax;
     // Clamp to [0, finalHpMax] whenever either hp field is touched — mirrors patchHp's
@@ -164,8 +198,18 @@ export class CharactersService {
     if (input.notes !== undefined) update.notes = input.notes;
     // Only dm may reassign ownership
     if (input.ownerUserId !== undefined && role === 'dm') update.ownerUserId = input.ownerUserId;
+    // Only dm may write the DM-only secret — the owning player can PATCH the rest
+    // of the sheet, but this field is invisible to them (redacted on every read),
+    // so a non-dm write is silently ignored, same as ownerUserId above.
+    if (input.dmSecret !== undefined && role === 'dm') update.dmSecret = input.dmSecret;
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
+
+    // Mirror HP/hpMax edits (e.g. a mid-session level-up) into any live encounter's
+    // combatant row (issue #50).
+    if (input.hpCurrent !== undefined || input.hpMax !== undefined) {
+      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax);
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -175,7 +219,7 @@ export class CharactersService {
       entityId: id,
       campaignId: existing.campaignId,
     });
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
@@ -211,6 +255,9 @@ export class CharactersService {
       .where(eq(characters.id, id))
       .returning();
 
+    // Keep any live encounter's combatant row in sync (issue #50).
+    await this.syncActiveCombatants(id, hpCurrent);
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -220,7 +267,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
     });
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async patchXp(id: number, patch: XpPatchInput, user: RequestUser, role: Role): Promise<Character> {
@@ -313,6 +360,11 @@ export class CharactersService {
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
+    // A mid-session level-up that raises hpMax should reflect on the combat tracker too (issue #50).
+    if (input.hpMax !== undefined) {
+      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax);
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -348,7 +400,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
     });
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   /** Spend (+delta) or restore (-delta) slots at one spell level; `used` is clamped to [0, max]. */

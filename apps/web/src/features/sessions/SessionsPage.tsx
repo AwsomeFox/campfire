@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionShare, SessionShareCreated } from '@campfire/schema';
+import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -368,7 +369,11 @@ function SessionDetail({
             <TextInput type="date" value={dateDraft} onChange={(e) => setDateDraft(e.target.value)} />
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Recap</label>
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Recap</label>
+              <div className="flex-1" />
+              <TemplateButton value={recapDraft} onInsert={setRecapDraft} />
+            </div>
             <TextArea
               style={{ minHeight: 200 }}
               value={recapDraft}
@@ -587,6 +592,11 @@ function AddRecapForm({
       {error && <ErrorNote message={error} onRetry={publish} />}
       <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder={'Title, e.g. "The Dragon’s Shadow"'} />
       <TextInput type="date" value={playedAt} onChange={(e) => setPlayedAt(e.target.value)} />
+      <div className="flex items-center gap-2">
+        <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Recap</label>
+        <div className="flex-1" />
+        <TemplateButton value={recap} onInsert={setRecap} />
+      </div>
       <TextArea
         className="!min-h-[100px]"
         value={recap}
@@ -595,7 +605,7 @@ function AddRecapForm({
       />
       <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] text-slate-500">
-          Tip: or just say <em>"sweep the inbox"</em> to your AI scribe.
+          Tip: start from the template, or ask your AI scribe to <em>"draft a recap from this session"</em>.
         </p>
         <div className="flex gap-2 shrink-0">
           {onCancel && (
@@ -613,6 +623,34 @@ function AddRecapForm({
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * "Insert template" affordance — scaffolds the blank recap box with the shared
+ * RECAP_TEMPLATE headings (Recap / Loot / NPCs met / Cliffhanger). Purely
+ * client-side (no LLM): it gives the human a structure to fill. For an
+ * AI-assisted draft seeded from this session's encounters + resolved inbox, the
+ * connected agent uses the `draft_session_recap` MCP tool. When the box already
+ * has content, the template is prepended rather than clobbering it.
+ */
+function TemplateButton({ value, onInsert }: { value: string; onInsert: (next: string) => void }) {
+  const alreadyScaffolded = value.includes('## Recap');
+  function insert() {
+    if (value.trim() === '') onInsert(RECAP_TEMPLATE);
+    else onInsert(`${RECAP_TEMPLATE}\n${value}`);
+  }
+  return (
+    <Btn
+      ghost
+      type="button"
+      className="!min-h-0 !py-1 text-xs"
+      onClick={insert}
+      disabled={alreadyScaffolded}
+      title="Insert the Recap / Loot / NPCs met / Cliffhanger headings"
+    >
+      {alreadyScaffolded ? 'Template inserted' : 'Insert template'}
+    </Btn>
+  );
+}
 
 function formatDate(iso: string | null): string {
   if (!iso) return 'Undated';

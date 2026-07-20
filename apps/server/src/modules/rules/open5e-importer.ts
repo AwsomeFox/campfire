@@ -41,7 +41,24 @@ import type { RuleEntryType } from '@campfire/schema';
 
 export const OPEN5E_DEFAULT_BASE_URL = 'https://api.open5e.com/v2';
 export const MAX_ENTRIES_PER_SECTION = 2000;
-const PAGE_LIMIT = 100;
+// Live sections are large: creatures ~3.5k, magicitems ~2.3k, spells ~2k entries
+// (verified against api.open5e.com 2026-07). Open5e's DRF pagination honours large
+// `limit` values and returns them in a SINGLE response (verified: `?limit=500` and
+// `?limit=1000` both return that many rows in one page), so pulling a section in
+// ~500-row pages needs only a handful of round-trips instead of 20-36. The old
+// PAGE_LIMIT of 100 forced 20+ serial fetches per large section; with seven sections
+// imported concurrently a full install ran for minutes and reliably exceeded client/
+// gateway timeouts, so only tiny single-page sections (conditions) ever landed — the
+// root cause of issue #53 (shipped pack had only the 21 conditions, no monsters/
+// spells/items). 500 keeps each capped section to <=4 pages while staying well under
+// any server-side page-size ceiling.
+const PAGE_LIMIT = 500;
+// Hard upper bound on how many pages we'll follow for one section, independent of the
+// entry cap. At PAGE_LIMIT=500 a capped section needs <=4 pages; even an upstream that
+// silently ignored `limit` and served 100/page would need ~20. 50 leaves generous head-
+// room for legitimate growth while guaranteeing the loop terminates if a misbehaving
+// upstream ever returns a `next` cycle or perpetually tiny pages.
+const MAX_PAGES_PER_SECTION = 50;
 // Real Open5e pages have been observed taking 6-11s to respond (large spell/creature
 // pages especially) — 10s was too tight and produced spurious timeouts. 30s gives
 // enough headroom while still bounding a truly hung request.
@@ -85,11 +102,15 @@ export interface ImportedEntry {
 /** Minimal structured logger so a summary can be asserted on in tests without console spying. */
 export interface Open5eImportLogger {
   warn(message: string): void;
+  /** Informational, non-problem events (e.g. the per-section import-count summary). */
+  info(message: string): void;
 }
 
 const consoleLogger: Open5eImportLogger = {
   // eslint-disable-next-line no-console
   warn: (message: string) => console.warn(message),
+  // eslint-disable-next-line no-console
+  info: (message: string) => console.info(message),
 };
 
 export interface Open5eSectionResult {
@@ -367,6 +388,11 @@ function isSameOrigin(origin: string, candidate: string): boolean {
  *  - **Retry on transient failure**: each page fetch gets up to 2 retries (1s, then 3s
  *    backoff) on a request timeout or HTTP 5xx before giving up — real Open5e pages have
  *    been observed taking 6-11s, and occasional 5xx blips shouldn't fail an entire import.
+ *  - **Page cap**: at most MAX_PAGES_PER_SECTION pages are followed regardless of the
+ *    entry cap, so a `next`-link cycle or perpetually tiny pages can't loop unbounded.
+ *  - **Per-section count log**: the number of entries (and pages) imported is logged for
+ *    every section via `logger.info`, so an empty/short section is visible in the logs
+ *    rather than silently absent (issue #53).
  */
 export async function fetchOpen5eSection(
   baseUrl: string,
@@ -377,9 +403,17 @@ export async function fetchOpen5eSection(
   const mapper = SECTION_MAPPER[section];
   const entries: ImportedEntry[] = [];
   let skippedCount = 0;
+  let pagesFetched = 0;
   let url: string | null = `${baseUrl.replace(/\/$/, '')}/${path}/?limit=${PAGE_LIMIT}`;
 
   while (url && entries.length < MAX_ENTRIES_PER_SECTION) {
+    if (pagesFetched >= MAX_PAGES_PER_SECTION) {
+      logger.warn(
+        `[open5e-importer] section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${entries.length} entries — stopping pagination`,
+      );
+      break;
+    }
+    pagesFetched += 1;
     let res: Response;
     try {
       res = await fetchPageWithRetry(url, section, logger);
@@ -419,6 +453,9 @@ export async function fetchOpen5eSection(
     }
   }
 
+  // Always report a per-section import count (issue #53: silent empty sections were the
+  // symptom — an explicit count per section makes an empty/short section visible in logs).
+  logger.info(`[open5e-importer] section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)`);
   if (skippedCount > 0) {
     logger.warn(`[open5e-importer] section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
   }

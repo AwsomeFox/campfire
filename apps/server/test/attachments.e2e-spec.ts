@@ -1,5 +1,57 @@
+import zlib from 'node:zlib';
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+
+// --- Test-only PNG builder: produces a real WxH 8-bit RGB PNG so we can exercise
+// the server's thumbnail downscaler on an image larger than the thumb cap. ---
+const PNG_CRC_TABLE: number[] = (() => {
+  const t = new Array<number>(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function pngCrc32(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = PNG_CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function pngChunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(pngCrc32(body), 0);
+  return Buffer.concat([len, body, crc]);
+}
+function makePng(width: number, height: number): Buffer {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // colour type: RGB
+  const stride = width * 3;
+  const raw = Buffer.alloc(height * (stride + 1));
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0; // filter: None
+    for (let x = 0; x < width; x++) {
+      const p = y * (stride + 1) + 1 + x * 3;
+      raw[p] = (x * 2) & 0xff;
+      raw[p + 1] = (y * 2) & 0xff;
+      raw[p + 2] = ((x + y) * 2) & 0xff;
+    }
+  }
+  return Buffer.concat([sig, pngChunk('IHDR', ihdr), pngChunk('IDAT', zlib.deflateSync(raw)), pngChunk('IEND', Buffer.alloc(0))]);
+}
+function pngWidth(buf: Buffer): number {
+  return buf.readUInt32BE(16); // IHDR width lives at offset 16 (8 sig + 8 chunk header)
+}
+function pngHeight(buf: Buffer): number {
+  return buf.readUInt32BE(20); // IHDR height directly follows width
+}
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'player-1' };
@@ -9,6 +61,21 @@ const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'viewer-1' };
 const TINY_PNG = Buffer.from(
   '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
     '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+  'hex',
+);
+
+// Minimal valid 1x1 JPEG (SOI + DQT + SOF + minimal scan + EOI).
+const TINY_JPEG = Buffer.from(
+  'ffd8ffdb004300030202020202030202020303030304060404040404080606' +
+    '050609080a0a090809090a0c0f0c0a0b0e0b09090d110d0e0f101011100a0c' +
+    '12131210130f101010ffc9000b080001000101011100ffcc000600101005ff' +
+    'da0008010100003f00d2cf20ffd9',
+  'hex',
+);
+
+// Minimal valid 1x1 WebP (RIFF container + lossy VP8 bitstream).
+const TINY_WEBP = Buffer.from(
+  '5249464624000000574542505650382018000000300100' + '9d012a0100010002003425a4000370' + '00fefbfd5000',
   'hex',
 );
 
@@ -99,6 +166,82 @@ describe('attachments (e2e)', () => {
       .attach('file', Buffer.from('not an image'), { filename: 'evil.svg', contentType: 'image/svg+xml' });
 
     expect(res.status).toBe(400);
+  });
+
+  // Issue #47 — the declared mimetype must match the actual file bytes (magic-byte
+  // sniffing in AttachmentsService.create); the multipart header alone is not trusted.
+  describe('content sniffing (magic bytes)', () => {
+    it('HTML bytes declared as image/png are rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', Buffer.from('<html><script>alert(1)</script></html>'), {
+          filename: 'sneaky.png',
+          contentType: 'image/png',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('does not match');
+    });
+
+    it('PNG bytes declared as image/jpeg are rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'notjpeg.jpg', contentType: 'image/jpeg' });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('JPEG bytes declared as image/webp are rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_JPEG, { filename: 'notwebp.webp', contentType: 'image/webp' });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('a real JPEG declared as image/jpeg is accepted', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_JPEG, { filename: 'real.jpg', contentType: 'image/jpeg' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.mime).toBe('image/jpeg');
+    });
+
+    it('a real WebP declared as image/webp is accepted', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_WEBP, { filename: 'real.webp', contentType: 'image/webp' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.mime).toBe('image/webp');
+    });
+
+    it('a buffer too short to carry any magic bytes is rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', Buffer.from([0x89]), { filename: 'stub.png', contentType: 'image/png' });
+
+      expect(res.status).toBe(400);
+    });
   });
 
   it('missing file is rejected (400)', async () => {
@@ -288,6 +431,105 @@ describe('attachments (e2e)', () => {
 
       const getRes = await request(server).get(`/api/v1/characters/${characterId}`).set(player);
       expect(getRes.body.portraitUrl).toBe(keepUrl);
+    });
+  });
+
+  // Issue #75 — attachment bytes are immutable per id, so responses must be
+  // cacheable (strong content-hash ETag + immutable Cache-Control) and revalidate
+  // to 304, and a `?size=thumb` variant serves a downscaled PNG preview.
+  describe('caching + thumbnails (issue #75)', () => {
+    let pngId: number; // a >thumb-cap PNG so the downscaler actually runs
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const big = makePng(800, 600); // 800px longest edge > 512 thumb cap
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', big, { filename: 'bigmap.png', contentType: 'image/png' });
+      expect(res.status).toBe(201);
+      pngId = res.body.id;
+    });
+
+    it('GET sets a strong ETag and immutable Cache-Control', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/attachments/${pngId}/file`).set(dm);
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).toContain('immutable');
+      expect(res.headers['cache-control']).toContain('max-age=31536000');
+      expect(res.headers['etag']).toMatch(/^"[0-9a-f]{64}"$/); // quoted sha256 hex
+    });
+
+    it('a matching If-None-Match yields 304 with no body', async () => {
+      const server = ctx.app.getHttpServer();
+      const first = await request(server).get(`/api/v1/attachments/${pngId}/file`).set(dm);
+      const etag = first.headers['etag'];
+      expect(etag).toBeTruthy();
+
+      const revalidate = await request(server)
+        .get(`/api/v1/attachments/${pngId}/file`)
+        .set(dm)
+        .set('If-None-Match', etag);
+      expect(revalidate.status).toBe(304);
+      expect(revalidate.headers['etag']).toBe(etag);
+      expect(revalidate.body).toEqual({}); // no bytes returned
+    });
+
+    it('a non-matching If-None-Match still returns 200 with bytes', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .get(`/api/v1/attachments/${pngId}/file`)
+        .set(dm)
+        .set('If-None-Match', '"deadbeef"');
+      expect(res.status).toBe(200);
+      expect(res.body.length).toBeGreaterThan(0);
+    });
+
+    it('?size=thumb serves a downscaled PNG (longest edge capped at 512px)', async () => {
+      const server = ctx.app.getHttpServer();
+      const full = await request(server).get(`/api/v1/attachments/${pngId}/file`).set(dm);
+      const thumb = await request(server).get(`/api/v1/attachments/${pngId}/file?size=thumb`).set(dm);
+
+      expect(thumb.status).toBe(200);
+      expect(thumb.headers['content-type']).toBe('image/png');
+      // The real thumbnail guarantee is fewer pixels: 800x600 -> 512x384 (longest
+      // edge = 512), a valid, materially smaller image than the 800x600 original.
+      expect(pngWidth(full.body)).toBe(800);
+      expect(pngWidth(thumb.body)).toBe(512);
+      expect(pngHeight(thumb.body)).toBe(384);
+      expect(Number(thumb.headers['content-length'])).toBe(thumb.body.length);
+      // Thumb has its own (distinct) strong ETag.
+      expect(thumb.headers['etag']).toMatch(/^"[0-9a-f]{64}"$/);
+      expect(thumb.headers['etag']).not.toBe(full.headers['etag']);
+    });
+
+    it('?size=thumb revalidates to 304 too', async () => {
+      const server = ctx.app.getHttpServer();
+      const first = await request(server).get(`/api/v1/attachments/${pngId}/file?size=thumb`).set(dm);
+      const res = await request(server)
+        .get(`/api/v1/attachments/${pngId}/file?size=thumb`)
+        .set(dm)
+        .set('If-None-Match', first.headers['etag']);
+      expect(res.status).toBe(304);
+    });
+
+    it('?size=thumb on an already-small image falls back to the original bytes', async () => {
+      const server = ctx.app.getHttpServer();
+      const up = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'tiny.png', contentType: 'image/png' });
+      const thumb = await request(server).get(`/api/v1/attachments/${up.body.id}/file?size=thumb`).set(dm);
+      expect(thumb.status).toBe(200);
+      expect(Buffer.compare(thumb.body, TINY_PNG)).toBe(0);
+    });
+
+    it('an unsupported size value is rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/attachments/${pngId}/file?size=huge`).set(dm);
+      expect(res.status).toBe(400);
     });
   });
 });

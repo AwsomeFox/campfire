@@ -1,11 +1,12 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, ne } from 'drizzle-orm';
 import type { z } from 'zod';
-import { SessionCreate, SessionUpdate } from '@campfire/schema';
-import type { Session, Role } from '@campfire/schema';
+import { SessionCreate, SessionUpdate, RECAP_TEMPLATE } from '@campfire/schema';
+import type { Session, Role, Note, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, sessionShares, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
@@ -22,9 +23,64 @@ export function toDomain(row: typeof sessions.$inferSelect): Session {
     title: row.title,
     playedAt: row.playedAt,
     recap: row.recap,
+    dmSecret: row.dmSecret,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/**
+ * The material an agent (or DM) can seed a recap from: the inbox threads
+ * resolved during play and the encounters that were run. This is deliberately
+ * NOT an LLM call — Campfire is MCP-first and self-hosted, so the server only
+ * assembles the structured source material + a scaffold; the connected agent
+ * (or the human) writes the prose.
+ */
+export interface RecapDraftSource {
+  resolvedInbox: Pick<Note, 'body' | 'resolvedNote' | 'entityName'>[];
+  encounters: Pick<EncounterWithCombatants, 'name' | 'status' | 'combatants'>[];
+}
+
+/** One line summarising an encounter for the Recap section seed. */
+function encounterLine(e: RecapDraftSource['encounters'][number]): string {
+  const foes = e.combatants.filter((c) => c.kind === 'monster').map((c) => c.name);
+  const foeText = foes.length ? ` vs ${foes.join(', ')}` : '';
+  return `- ${e.name}${foeText}`;
+}
+
+/**
+ * Build a recap draft from a session's source material — the shared
+ * `RECAP_TEMPLATE` scaffold, with the Recap section pre-seeded with the
+ * encounters that were run, plus a "Threads resolved this session" appendix
+ * built from resolved inbox items. Empty when there's no material — callers
+ * should still offer the bare template. Pure and deterministic (tested).
+ */
+export function buildRecapDraft(source: RecapDraftSource): string {
+  // Only fights that actually happened (running or ended) belong in a recap —
+  // a still-"preparing" encounter is prep, not play.
+  const fought = source.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
+  const encounterSeed = fought.length ? '\n' + fought.map(encounterLine).join('\n') : '';
+
+  // Seed the encounters under the "Recap" heading; leave the rest for the author.
+  let draft = RECAP_TEMPLATE.replace('## Recap\n', `## Recap\n${encounterSeed}\n`);
+
+  const threads = source.resolvedInbox
+    .map((n) => {
+      const detail = n.resolvedNote?.trim() ? ` — ${n.resolvedNote.trim()}` : '';
+      const link = n.entityName ? ` (→ ${n.entityName})` : '';
+      const body = n.body.trim().replace(/\s+/g, ' ');
+      return `- ${body}${detail}${link}`;
+    })
+    .filter(Boolean);
+  if (threads.length) {
+    draft +=
+      '\n\n---\n\n' +
+      '<!-- Source notes (from resolved player inbox items) — weave the relevant ones into the recap, then delete this block. -->\n' +
+      '## Threads resolved this session\n\n' +
+      threads.join('\n') +
+      '\n';
+  }
+  return draft;
 }
 
 @Injectable()
@@ -35,13 +91,13 @@ export class SessionsService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  async listForCampaign(campaignId: number): Promise<Session[]> {
+  async listForCampaign(campaignId: number, role: Role): Promise<Session[]> {
     const rows = await this.db
       .select()
       .from(sessions)
       .where(eq(sessions.campaignId, campaignId))
       .orderBy(desc(sessions.number));
-    return rows.map(toDomain);
+    return redactSecrets(rows.map(toDomain), role);
   }
 
   async getRowOrThrow(id: number) {
@@ -50,9 +106,9 @@ export class SessionsService {
     return row;
   }
 
-  async getOrThrow(id: number): Promise<Session> {
+  async getOrThrow(id: number, role: Role): Promise<Session> {
     const row = await this.getRowOrThrow(id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   /**
@@ -100,6 +156,7 @@ export class SessionsService {
         title: input.title ?? '',
         playedAt: input.playedAt ?? null,
         recap: input.recap ?? '',
+        dmSecret: input.dmSecret ?? '',
         createdAt: ts,
         updatedAt: ts,
       })
@@ -135,7 +192,7 @@ export class SessionsService {
         actorName: user.name,
       });
     }
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async update(id: number, input: SessionUpdateInput, user: RequestUser, role: Role): Promise<Session> {
@@ -180,7 +237,7 @@ export class SessionsService {
         actorName: user.name,
       });
     }
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {

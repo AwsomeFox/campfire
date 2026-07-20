@@ -93,6 +93,21 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(packSearchRes.status).toBe(200);
     expect(packSearchRes.body.some((e: { name: string }) => e.name === 'Goblin')).toBe(true);
 
+    // issue #53 regression: a DEFAULT install (all sections) must actually ship
+    // monsters, spells, AND magic items — not just conditions. Monster (Owlbear) and
+    // spell (Fireball) are asserted above; assert an item is searchable too.
+    const itemSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'bag of holding', type: 'item' }).set(dm);
+    expect(itemSearchRes.status).toBe(200);
+    for (const e of itemSearchRes.body) expect(e.type).toBe('item');
+    expect(itemSearchRes.body.some((e: { name: string }) => e.name === 'Bag of Holding')).toBe(true);
+
+    // issue #53 root cause was a pagination failure on large (multi-page) sections. The
+    // fake serves spells across TWO pages; Mage Armor lives on page 2, so finding it
+    // proves the importer followed the `next` link and imported page-2 entries.
+    const pagedSpellRes = await request(server).get('/api/v1/rules/search').query({ q: 'mage armor', type: 'spell' }).set(dm);
+    expect(pagedSpellRes.status).toBe(200);
+    expect(pagedSpellRes.body.some((e: { name: string }) => e.name === 'Mage Armor')).toBe(true);
+
     // search ranking (issue #33): "poisoned" matches both Poisoned (by name) and
     // Petrified (whose body mentions the Poisoned condition, and which was imported
     // first, so it has the lower rowid) — the exact-name match must rank first.

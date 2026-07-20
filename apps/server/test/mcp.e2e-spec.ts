@@ -28,6 +28,7 @@ const ALL_TOOLS = [
   'get_party',
   'get_session_recaps',
   'get_session',
+  'draft_session_recap',
   'read_inbox',
   'list_proposals',
   'lookup_rule',
@@ -145,7 +146,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(66);
+    expect(tools).toHaveLength(67);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -340,6 +341,67 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(endResult.isError).toBeFalsy();
     const ended = parseResult(endResult) as { status: string };
     expect(ended.status).toBe('ended');
+  });
+
+  it('draft_session_recap assembles the template scaffold + seeds encounters and resolved inbox threads (issue #62)', async () => {
+    const client = await mcpClient(dmToken);
+
+    // Seed a resolved inbox thread…
+    const submitted = await client.callTool({
+      name: 'submit_inbox_item',
+      arguments: { campaignId, body: 'Did the tavern keeper survive the fire?' },
+    });
+    expect(submitted.isError).toBeFalsy();
+    const inboxItem = parseResult(submitted) as { id: number };
+    const resolved = await client.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: inboxItem.id, resolvedNote: 'Yes — he fled out the back.' },
+    });
+    expect(resolved.isError).toBeFalsy();
+
+    // …and an encounter that was actually run (ended).
+    const enc = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'Bandit Ambush' } }),
+    ) as { id: number };
+    await client.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: enc.id, kind: 'monster', name: 'Bandit Captain', hpMax: 12 },
+    });
+    await client.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    await client.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
+    await client.callTool({ name: 'end_encounter', arguments: { encounterId: enc.id } });
+
+    const result = await client.callTool({ name: 'draft_session_recap', arguments: { campaignId } });
+    expect(result.isError).toBeFalsy();
+    const draft = parseResult(result) as {
+      template: string;
+      draft: string;
+      guidance: string;
+      sourceMaterial: {
+        resolvedInbox: Array<{ body: string; resolvedNote: string }>;
+        encounters: Array<{ name: string; status: string }>;
+      };
+    };
+
+    // The bare template carries the four canonical headings…
+    for (const heading of ['## Recap', '## Loot', '## NPCs met', '## Cliffhanger']) {
+      expect(draft.template).toContain(heading);
+      expect(draft.draft).toContain(heading);
+    }
+    // …the draft is seeded with the ended encounter and its foe…
+    expect(draft.draft).toContain('Bandit Ambush');
+    expect(draft.draft).toContain('Bandit Captain');
+    // …and the resolved inbox thread appears in the source-notes appendix.
+    expect(draft.draft).toContain('Did the tavern keeper survive the fire?');
+    expect(draft.draft).toContain('Threads resolved this session');
+    expect(draft.sourceMaterial.resolvedInbox.some((n) => n.resolvedNote.includes('fled out the back'))).toBe(true);
+    expect(draft.sourceMaterial.encounters.some((e) => e.name === 'Bandit Ambush' && e.status === 'ended')).toBe(true);
+  });
+
+  it('draft_session_recap is dm-only (viewer PAT is denied)', async () => {
+    const viewerClient = await mcpClient(viewerToken);
+    const denied = await viewerClient.callTool({ name: 'draft_session_recap', arguments: { campaignId } });
+    expect(denied.isError).toBe(true);
   });
 
   it('roll_dice rolls within range via dm PAT', async () => {

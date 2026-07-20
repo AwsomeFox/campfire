@@ -266,6 +266,63 @@ function migrateCharactersTableForXp(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE characters ADD COLUMN xp INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * Migration for DBs created before characters/sessions gained DM-only secrets
+ * (issue #59): `characters.dm_secret` and `sessions.dm_secret` didn't exist —
+ * quests/NPCs/locations had dmSecret from day one, but a DM couldn't attach a
+ * private note to a PC or keep prep notes on a session record. Plain NOT NULL
+ * DEFAULT '' ADD COLUMN — no table rebuild needed, same as
+ * migrateCampaignsTableForRuleSystem above. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares both columns.
+ */
+function migrateCharactersTableForDmSecret(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  const hasDmSecret = columns.some((c) => c.name === 'dm_secret');
+  if (hasDmSecret) return;
+
+  sqlite.exec("ALTER TABLE characters ADD COLUMN dm_secret TEXT NOT NULL DEFAULT ''");
+}
+
+/** See migrateCharactersTableForDmSecret above — same migration for the sessions table. */
+function migrateSessionsTableForDmSecret(sqlite: Database.Database): void {
+  const hasSessionsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+    .get();
+  if (!hasSessionsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+  const hasDmSecret = columns.some((c) => c.name === 'dm_secret');
+  if (hasDmSecret) return;
+
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN dm_secret TEXT NOT NULL DEFAULT ''");
+}
+
+/**
+ * Migration for DBs created before the identity-based turn pointer (issue #49):
+ * `encounters.current_combatant_id` didn't exist. Plain nullable ADD COLUMN — no
+ * table rebuild needed, same as migrateCampaignsTableForMapAttachment above.
+ * Pre-existing running encounters keep a NULL pointer until the next turn advance
+ * (nextTurn re-derives it from the sorted order). New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateEncountersTableForCurrentCombatant(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const hasCurrentCombatantId = columns.some((c) => c.name === 'current_combatant_id');
+  if (hasCurrentCombatantId) return;
+
+  sqlite.exec('ALTER TABLE encounters ADD COLUMN current_combatant_id INTEGER');
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -288,9 +345,15 @@ export function createDb(): DrizzleDb {
   migrateCharactersTableForSheetDepth(sqlite);
   migrateCampaignsTableForIcsToken(sqlite);
   migrateCharactersTableForXp(sqlite);
+  migrateCharactersTableForDmSecret(sqlite);
+  migrateSessionsTableForDmSecret(sqlite);
+  migrateEncountersTableForCurrentCombatant(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
-  // after the rebuild is safe and keeps idx_users_oidc_sub in sync.
+  // after the rebuild is safe and keeps idx_users_oidc_sub in sync. This is
+  // also how index-only migrations reach existing DBs: e.g. #74's
+  // idx_audit_campaign_id_desc / idx_audit_created_at are picked up on the
+  // next boot with no bespoke ALTER migration needed.
   ruleEntriesFtsAvailable = setupRuleEntriesFts(sqlite);
 
   return drizzle(sqlite, { schema });

@@ -69,7 +69,22 @@ const FEATS = [
 export async function startFakeOpen5e(): Promise<FakeOpen5e> {
   const app = express();
 
-  app.get('/v2/spells/', (_req, res) => res.json(page(SPELLS)));
+  // Spells are served ACROSS TWO PAGES to exercise the importer's pagination loop the
+  // way the live API paginates (issue #53): page 1 returns the first spell plus a
+  // same-origin `next` link to page 2 (mirroring Open5e's `?limit=&page=N` links), and
+  // page 2 returns the rest with `next: null`. Total imported is still SPELLS.length, so
+  // existing entryCount assertions hold — but now a test can prove page-2 entries (Mage
+  // Armor) actually get imported, which the old single-page fake never covered.
+  app.get('/v2/spells/', (req, res) => {
+    const pageNum = Number(req.query.page ?? '1') || 1;
+    const limit = req.query.limit ?? '';
+    if (pageNum <= 1) {
+      const next = `http://${req.get('host')}/v2/spells/?limit=${limit}&page=2`;
+      res.json({ count: SPELLS.length, next, previous: null, results: SPELLS.slice(0, 1) });
+      return;
+    }
+    res.json({ count: SPELLS.length, next: null, previous: null, results: SPELLS.slice(1) });
+  });
   app.get('/v2/creatures/', (_req, res) => res.json(page(CREATURES)));
   app.get('/v2/magicitems/', (_req, res) => res.json(page(MAGIC_ITEMS)));
   app.get('/v2/conditions/', (_req, res) => res.json(page(CONDITIONS)));
