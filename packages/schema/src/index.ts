@@ -468,6 +468,29 @@ export type SessionListItem = z.infer<typeof SessionListItem>;
 export const RECAP_HEADINGS = ['Recap', 'Loot', 'NPCs met', 'Cliffhanger'] as const;
 export const RECAP_TEMPLATE = RECAP_HEADINGS.map((h) => `## ${h}\n\n`).join('').trimEnd() + '\n';
 
+// ---------- session attendance (issue #121) ----------
+// Which characters played a given session. A session is otherwise all-or-nothing:
+// West Marches / rotating-cast tables (a big rostered party, only 4-6 of whom show
+// up each outing) need a per-session "who was there" record so recaps, per-attendee
+// context and "you weren't there" all become possible. One row per (session,
+// character); the set is REPLACED on write (PUT /sessions/:id/attendance), not
+// accumulated. characterName is denormalized for display.
+export const SessionAttendee = z.object({
+  id: Id,
+  sessionId: Id,
+  characterId: Id,
+  characterName: z.string().max(200).default(''),
+  createdAt: IsoDate,
+});
+export type SessionAttendee = z.infer<typeof SessionAttendee>;
+// Replace a session's attendance with exactly this set of characters. Each id must
+// be a character in the session's own campaign (else 400) — the honest analogue of
+// "only campaign members are valid attendees". Empty array clears attendance.
+export const SessionAttendanceSet = z.object({
+  characterIds: z.array(Id).max(500),
+});
+export type SessionAttendanceSet = z.infer<typeof SessionAttendanceSet>;
+
 // ---------- session share links (public read-only recap access) ----------
 // A DM-minted, unguessable capability URL for one session recap — viewable
 // without an account (absent players). The raw token is returned ONCE at

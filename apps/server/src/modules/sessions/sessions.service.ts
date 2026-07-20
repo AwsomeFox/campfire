@@ -1,10 +1,10 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, desc, eq, ne, sql } from 'drizzle-orm';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionCreate, SessionUpdate, RECAP_TEMPLATE } from '@campfire/schema';
-import type { Session, SessionListItem, Role, Note, EncounterWithCombatants, PageParams } from '@campfire/schema';
+import type { Session, SessionListItem, SessionAttendee, Role, Note, EncounterWithCombatants, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { sessions, sessionShares, campaigns } from '../../db/schema';
+import { sessions, sessionShares, sessionAttendees, characters, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { applyPage } from '../../common/pagination';
 import { redactSecret, redactSecrets } from '../../common/redact';
@@ -27,6 +27,16 @@ export function toDomain(row: typeof sessions.$inferSelect): Session {
     dmSecret: row.dmSecret,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+function attendeeToDomain(row: typeof sessionAttendees.$inferSelect): SessionAttendee {
+  return {
+    id: row.id,
+    sessionId: row.sessionId,
+    characterId: row.characterId,
+    characterName: row.characterName,
+    createdAt: row.createdAt,
   };
 }
 
@@ -366,6 +376,9 @@ export class SessionsService {
     // this just keeps the table from accumulating dead rows.
     await this.db.delete(sessionShares).where(eq(sessionShares.sessionId, id));
     await this.recomputeSessionCount(existing.campaignId);
+    // Attendance rows point only at this session — drop them so the join table
+    // doesn't accumulate orphans after a session is deleted.
+    await this.db.delete(sessionAttendees).where(eq(sessionAttendees.sessionId, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -374,5 +387,67 @@ export class SessionsService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+  }
+
+  // ----- attendance (issue #121): which characters played a session -----
+
+  /** The roster that played a session — characters, newest-added first. Any member may read. */
+  async getAttendance(sessionId: number): Promise<SessionAttendee[]> {
+    await this.getRowOrThrow(sessionId); // 404 for an unknown session
+    const rows = await this.db
+      .select()
+      .from(sessionAttendees)
+      .where(eq(sessionAttendees.sessionId, sessionId))
+      .orderBy(asc(sessionAttendees.characterName), asc(sessionAttendees.id));
+    return rows.map(attendeeToDomain);
+  }
+
+  /**
+   * Replace a session's attendance with exactly `characterIds` (idempotent set
+   * semantics — an empty array clears it). Every id must be a character in the
+   * session's OWN campaign: a character from another campaign (or a non-existent
+   * one) is rejected wholesale with a 400, so attendance can only ever name the
+   * campaign's own roster. dmSecret-bearing character fields are never touched;
+   * only id + name are read. dm-only at the controller/tool layer.
+   */
+  async setAttendance(sessionId: number, characterIds: number[], user: RequestUser, role: Role): Promise<SessionAttendee[]> {
+    const session = await this.getRowOrThrow(sessionId);
+    // De-dupe so a caller repeating an id doesn't trip the "unknown id" count check.
+    const wanted = [...new Set(characterIds)];
+
+    let valid: { id: number; name: string }[] = [];
+    if (wanted.length > 0) {
+      const found = await this.db
+        .select({ id: characters.id, name: characters.name })
+        .from(characters)
+        .where(and(eq(characters.campaignId, session.campaignId), inArray(characters.id, wanted)));
+      if (found.length !== wanted.length) {
+        const foundIds = new Set(found.map((c) => c.id));
+        const bad = wanted.filter((id) => !foundIds.has(id));
+        throw new BadRequestException(`Not characters in campaign ${session.campaignId}: ${bad.join(', ')}`);
+      }
+      valid = found;
+    }
+
+    const ts = nowIso();
+    this.db.transaction((tx) => {
+      tx.delete(sessionAttendees).where(eq(sessionAttendees.sessionId, sessionId)).run();
+      if (valid.length > 0) {
+        tx.insert(sessionAttendees)
+          .values(valid.map((c) => ({ sessionId, characterId: c.id, characterName: c.name, createdAt: ts })))
+          .run();
+      }
+    });
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'session.set_attendance',
+      entityType: 'session',
+      entityId: sessionId,
+      campaignId: session.campaignId,
+      detail: JSON.stringify({ characterIds: valid.map((c) => c.id) }),
+    });
+    return this.getAttendance(sessionId);
   }
 }
