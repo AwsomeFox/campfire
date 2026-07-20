@@ -110,6 +110,7 @@ export const Character = z.object({
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (a secret curse, hidden true identity…)
   ...timestamps,
 });
 export type Character = z.infer<typeof Character>;
@@ -245,6 +246,7 @@ export const Session = z.object({
   title: z.string().max(200).default(''),
   playedAt: IsoDate.nullable().default(null),
   recap: z.string().max(100_000).default(''), // markdown
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (session prep notes)
   ...timestamps,
 });
 export type Session = z.infer<typeof Session>;
