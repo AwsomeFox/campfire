@@ -224,6 +224,11 @@ export const QuestUpdate = QuestCreate.partial();
 export const QuestStatusPatch = z.object({ status: QuestStatus });
 export const ObjectiveCreate = z.object({ text: z.string().min(1).max(500), sortOrder: z.number().int().optional() });
 export const ObjectivePatch = z.object({ text: z.string().min(1).max(500).optional(), done: z.boolean().optional(), sortOrder: z.number().int().optional() });
+// Reorder a quest's objectives in one atomic call: `objectiveIds` must be a
+// permutation of exactly that quest's current objective ids; the server assigns
+// sortOrder by array index. Cleaner (and race-free) than N per-objective PATCHes.
+export const ObjectiveReorder = z.object({ objectiveIds: z.array(Id).min(1) });
+export type ObjectiveReorder = z.infer<typeof ObjectiveReorder>;
 
 // ---------- npc ----------
 export const Npc = z.object({

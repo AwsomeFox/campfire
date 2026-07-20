@@ -42,8 +42,23 @@ export function QuestsCard({
   const [error, setError] = useState<string | null>(null);
   const [localObjectives, setLocalObjectives] = useState<Record<number, boolean>>({});
 
-  const roots = quests.filter((q) => q.parentId == null);
-  const childrenOf = (parentId: number) => quests.filter((q) => q.parentId === parentId);
+  // Cycle-robust root/child partition (#95) — see QuestListPage for the rationale.
+  // Keeps quests visible even if legacy A↔B parent loops exist in the data.
+  const byId = new Map(quests.map((q) => [q.id, q]));
+  const isRoot = (q: QuestWithObjectives): boolean => {
+    if (q.parentId == null) return true;
+    const seen = new Set<number>([q.id]);
+    let cur = byId.get(q.parentId);
+    while (cur) {
+      if (seen.has(cur.id)) return true;
+      if (cur.parentId == null) return false;
+      seen.add(cur.id);
+      cur = byId.get(cur.parentId);
+    }
+    return true;
+  };
+  const roots = quests.filter(isRoot);
+  const childrenOf = (parentId: number) => quests.filter((q) => q.parentId === parentId && !isRoot(q));
 
   async function toggleObjective(obj: QuestObjective) {
     if (!canTick || pending[obj.id]) return;

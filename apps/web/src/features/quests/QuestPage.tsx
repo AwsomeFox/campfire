@@ -219,6 +219,27 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     }
   }
 
+  // Move an objective one slot up/down and persist the new order (#100). Sends the
+  // full reordered id list to the atomic reorder endpoint, then adopts the server's
+  // canonical ordering from the response.
+  async function reorderObjective(index: number, direction: -1 | 1) {
+    if (!quest) return;
+    const target = index + direction;
+    if (target < 0 || target >= quest.objectives.length) return;
+    const next = [...quest.objectives];
+    [next[index], next[target]] = [next[target], next[index]];
+    setQuest({ ...quest, objectives: next }); // optimistic
+    try {
+      const updated = await api.post<QuestObjective[]>(`${API}/quests/${quest.id}/objectives/reorder`, {
+        objectiveIds: next.map((o) => o.id),
+      });
+      setQuest((q) => (q ? { ...q, objectives: updated } : q));
+    } catch {
+      setError("Couldn't reorder objectives.");
+      void load();
+    }
+  }
+
   async function saveDmSecret() {
     if (!quest) return;
     setSavingDmSecret(true);
@@ -371,7 +392,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
             <span className="card-kicker">Objectives</span>
             {quest.objectives.length === 0 && <p className="text-xs text-slate-600">No objectives yet.</p>}
-            {quest.objectives.map((o) => (
+            {quest.objectives.map((o, i) => (
               <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 34 }}>
                 <Toggle
                   checked={o.done}
@@ -411,9 +432,27 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                       {o.text}
                     </span>
                     {isDm && (
-                      <button onClick={() => startEditObjective(o)} className="text-xs text-slate-500 hover:text-slate-300 shrink-0">
-                        ✎
-                      </button>
+                      <>
+                        <button
+                          onClick={() => reorderObjective(i, -1)}
+                          disabled={i === 0}
+                          aria-label={`Move "${o.text}" up`}
+                          className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-500 shrink-0"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          onClick={() => reorderObjective(i, 1)}
+                          disabled={i === quest.objectives.length - 1}
+                          aria-label={`Move "${o.text}" down`}
+                          className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-500 shrink-0"
+                        >
+                          ↓
+                        </button>
+                        <button onClick={() => startEditObjective(o)} className="text-xs text-slate-500 hover:text-slate-300 shrink-0">
+                          ✎
+                        </button>
+                      </>
                     )}
                   </>
                 )}
