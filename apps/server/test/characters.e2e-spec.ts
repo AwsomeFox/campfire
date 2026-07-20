@@ -4,6 +4,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const owner = { 'x-dev-role': 'player', 'x-dev-user': 'owner-1' };
 const nonOwner = { 'x-dev-role': 'player', 'x-dev-user': 'other-1' };
+const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
 
 describe('characters (e2e)', () => {
   let ctx: TestAppContext;
@@ -113,6 +114,83 @@ describe('characters (e2e)', () => {
     const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(dm).send({ hpCurrent: -50 });
     expect(res.status).toBe(200);
     expect(res.body.hpCurrent).toBe(0);
+  });
+
+  // Issue #59: characters carry a DM-only dmSecret (a secret curse, hidden true
+  // identity…) with the same strip-for-non-DM redaction as quests/NPCs/locations.
+  it('dmSecret visible to dm but absent for the owning player and viewer', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Cursed Knight', dmSecret: 'secretly a doppelganger', ownerUserId: 'dev:owner-1' });
+    expect(createRes.status).toBe(201);
+    const secretCharId = createRes.body.id;
+    expect(createRes.body.dmSecret).toBe('secretly a doppelganger');
+
+    const dmGet = await request(server).get(`/api/v1/characters/${secretCharId}`).set(dm);
+    expect(dmGet.body.dmSecret).toBe('secretly a doppelganger');
+
+    // Even the OWNING player never sees the secret on their own sheet.
+    const ownerGet = await request(server).get(`/api/v1/characters/${secretCharId}`).set(owner);
+    expect(ownerGet.status).toBe(200);
+    expect(ownerGet.body.dmSecret).toBeFalsy();
+
+    const viewerGet = await request(server).get(`/api/v1/characters/${secretCharId}`).set(viewer);
+    expect(viewerGet.status).toBe(200);
+    expect(viewerGet.body.dmSecret).toBeFalsy();
+
+    // list endpoint too
+    const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/characters`).set(nonOwner);
+    expect(playerList.status).toBe(200);
+    for (const c of playerList.body) {
+      expect(c.dmSecret).toBeFalsy();
+    }
+  });
+
+  it('owning player cannot write dmSecret (silently ignored), dm can', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Marked One', dmSecret: 'bears the lich mark', ownerUserId: 'dev:owner-1' });
+    const secretCharId = createRes.body.id;
+
+    // Owner PATCH with dmSecret: accepted (they may edit their sheet) but the
+    // secret write itself is ignored — same silent-ignore rule as ownerUserId.
+    const ownerPatch = await request(server)
+      .patch(`/api/v1/characters/${secretCharId}`)
+      .set(owner)
+      .send({ background: 'Folk hero', dmSecret: 'overwritten by player?' });
+    expect(ownerPatch.status).toBe(200);
+    expect(ownerPatch.body.background).toBe('Folk hero');
+    expect(ownerPatch.body.dmSecret).toBeFalsy(); // still redacted in the response
+
+    const dmGet = await request(server).get(`/api/v1/characters/${secretCharId}`).set(dm);
+    expect(dmGet.body.dmSecret).toBe('bears the lich mark'); // unchanged
+
+    // dm PATCH does write it
+    const dmPatch = await request(server)
+      .patch(`/api/v1/characters/${secretCharId}`)
+      .set(dm)
+      .send({ dmSecret: 'the mark is fading' });
+    expect(dmPatch.status).toBe(200);
+    expect(dmPatch.body.dmSecret).toBe('the mark is fading');
+  });
+
+  it('player creating their own character cannot seed dmSecret', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(owner)
+      .send({ name: 'Sneaky Bard', dmSecret: 'planted by player' });
+    expect(createRes.status).toBe(201);
+
+    const dmGet = await request(server).get(`/api/v1/characters/${createRes.body.id}`).set(dm);
+    expect(dmGet.body.dmSecret).toBe('');
   });
 
   it('conditions add/remove', async () => {

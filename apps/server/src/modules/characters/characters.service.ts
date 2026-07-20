@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -34,6 +35,7 @@ function toDomain(row: typeof characters.$inferSelect): Character {
     portraitUrl: row.portraitUrl,
     ddbId: row.ddbId,
     notes: row.notes,
+    dmSecret: row.dmSecret,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -46,9 +48,9 @@ export class CharactersService {
     private readonly audit: AuditService,
   ) {}
 
-  async listForCampaign(campaignId: number): Promise<Character[]> {
+  async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
     const rows = await this.db.select().from(characters).where(eq(characters.campaignId, campaignId));
-    return rows.map(toDomain);
+    return redactSecrets(rows.map(toDomain), role);
   }
 
   async getRowOrThrow(id: number) {
@@ -57,9 +59,9 @@ export class CharactersService {
     return row;
   }
 
-  async getOrThrow(id: number): Promise<Character> {
+  async getOrThrow(id: number, role: Role): Promise<Character> {
     const row = await this.getRowOrThrow(id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   /** dm or owner may write; others 403 */
@@ -92,6 +94,9 @@ export class CharactersService {
         portraitUrl: input.portraitUrl ?? null,
         ddbId: input.ddbId ?? null,
         notes: input.notes ?? '',
+        // Only dm may seed the DM-only secret — a player creating their own
+        // character can't smuggle content into a field they can never read back.
+        dmSecret: role === 'dm' ? (input.dmSecret ?? '') : '',
         createdAt: ts,
         updatedAt: ts,
       })
@@ -105,7 +110,7 @@ export class CharactersService {
       entityId: row.id,
       campaignId,
     });
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async update(id: number, input: CharacterUpdateInput, user: RequestUser, role: Role): Promise<Character> {
@@ -136,6 +141,10 @@ export class CharactersService {
     if (input.notes !== undefined) update.notes = input.notes;
     // Only dm may reassign ownership
     if (input.ownerUserId !== undefined && role === 'dm') update.ownerUserId = input.ownerUserId;
+    // Only dm may write the DM-only secret — the owning player can PATCH the rest
+    // of the sheet, but this field is invisible to them (redacted on every read),
+    // so a non-dm write is silently ignored, same as ownerUserId above.
+    if (input.dmSecret !== undefined && role === 'dm') update.dmSecret = input.dmSecret;
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
@@ -147,7 +156,7 @@ export class CharactersService {
       entityId: id,
       campaignId: existing.campaignId,
     });
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
@@ -192,7 +201,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
     });
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async patchConditions(id: number, patch: ConditionsPatchInput, user: RequestUser, role: Role): Promise<Character> {
@@ -218,6 +227,6 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
     });
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 }

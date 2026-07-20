@@ -360,6 +360,8 @@ function SessionDetail({
         </Card>
       )}
 
+      {isDm && <DmSecretPanel key={session.id} session={session} onChange={onChange} onError={setError} />}
+
       {isDm && !editing && (
         <div className="flex gap-2">
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
@@ -380,6 +382,92 @@ function SessionDetail({
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * DM-only prep notes on a session record — mirrors the QuestPage DM panel.
+ * Server strips `dmSecret` for non-DM reads (the recap itself stays fully
+ * player-visible), so this panel renders for the DM only. Keyed on session.id
+ * by the caller so drafts reset when another session is selected.
+ */
+function DmSecretPanel({
+  session,
+  onChange,
+  onError,
+}: {
+  session: Session;
+  onChange: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    onError(null);
+    try {
+      await api.patch<Session>(`${API}/sessions/${session.id}`, { dmSecret: draft });
+      setEditing(false);
+      onChange();
+    } catch {
+      onError("Couldn't save the DM notes.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!session.dmSecret && !editing) {
+    return (
+      <button
+        onClick={() => {
+          setDraft('');
+          setEditing(true);
+        }}
+        className="text-xs text-slate-500 hover:text-slate-300 block text-left"
+      >
+        + DM notes
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className="card"
+      style={{
+        border: '1px solid var(--color-accent-700)',
+        background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
+      }}
+    >
+      <span className="card-kicker">DM only — hidden from players</span>
+      {editing ? (
+        <div className="space-y-2">
+          <TextArea style={{ minHeight: 100 }} value={draft} onChange={(e) => setDraft(e.target.value)} />
+          <div className="flex gap-2 justify-end">
+            <Btn ghost onClick={() => setEditing(false)} className="!min-h-0 !py-1.5 text-xs">
+              Cancel
+            </Btn>
+            <Btn onClick={save} disabled={saving} className="!min-h-0 !py-1.5 text-xs">
+              {saving ? 'Saving…' : 'Save'}
+            </Btn>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-start justify-between gap-3">
+          <p style={{ margin: 0, fontSize: 13.5, color: 'var(--color-accent-200)', whiteSpace: 'pre-wrap' }}>{session.dmSecret}</p>
+          <button
+            onClick={() => {
+              setDraft(session.dmSecret);
+              setEditing(true);
+            }}
+            className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+          >
+            ✎ edit
+          </button>
+        </div>
       )}
     </div>
   );
