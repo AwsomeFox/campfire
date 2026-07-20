@@ -15,11 +15,11 @@ export class CampaignCharactersController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List characters in a campaign', description: 'Requires campaign membership.' })
+  @ApiOperation({ summary: 'List characters in a campaign', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
   @ApiResponse({ status: 200, description: 'Characters in the campaign.' })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireMember(user, campaignId);
-    return this.characters.listForCampaign(campaignId);
+    const role = await this.access.requireMember(user, campaignId);
+    return this.characters.listForCampaign(campaignId, role);
   }
 
   @Post()
@@ -57,16 +57,16 @@ export class CharactersController {
   ) {}
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get a character', description: 'Requires campaign membership.' })
+  @ApiOperation({ summary: 'Get a character', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
   @ApiResponse({ status: 200, description: 'Character.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.characters.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
-    return this.characters.getOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.characters.getOrThrow(id, role);
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a character', description: 'dm or the owning player may write; other players get 403.' })
+  @ApiOperation({ summary: 'Update a character', description: 'dm or the owning player may write; other players get 403. dmSecret is dm-writable only (silently ignored for the owning player).' })
   @ApiResponse({ status: 200, description: 'Updated character.' })
   @ApiResponse({ status: 403, description: 'Not the dm or owning player.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: CharacterUpdateDto, @CurrentUser() user: RequestUser) {

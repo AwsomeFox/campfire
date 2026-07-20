@@ -6,6 +6,7 @@ import type { Session, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, sessionShares, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
@@ -22,6 +23,7 @@ export function toDomain(row: typeof sessions.$inferSelect): Session {
     title: row.title,
     playedAt: row.playedAt,
     recap: row.recap,
+    dmSecret: row.dmSecret,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -35,13 +37,13 @@ export class SessionsService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  async listForCampaign(campaignId: number): Promise<Session[]> {
+  async listForCampaign(campaignId: number, role: Role): Promise<Session[]> {
     const rows = await this.db
       .select()
       .from(sessions)
       .where(eq(sessions.campaignId, campaignId))
       .orderBy(desc(sessions.number));
-    return rows.map(toDomain);
+    return redactSecrets(rows.map(toDomain), role);
   }
 
   async getRowOrThrow(id: number) {
@@ -50,9 +52,9 @@ export class SessionsService {
     return row;
   }
 
-  async getOrThrow(id: number): Promise<Session> {
+  async getOrThrow(id: number, role: Role): Promise<Session> {
     const row = await this.getRowOrThrow(id);
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   /**
@@ -100,6 +102,7 @@ export class SessionsService {
         title: input.title ?? '',
         playedAt: input.playedAt ?? null,
         recap: input.recap ?? '',
+        dmSecret: input.dmSecret ?? '',
         createdAt: ts,
         updatedAt: ts,
       })
@@ -135,7 +138,7 @@ export class SessionsService {
         actorName: user.name,
       });
     }
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async update(id: number, input: SessionUpdateInput, user: RequestUser, role: Role): Promise<Session> {
@@ -180,7 +183,7 @@ export class SessionsService {
         actorName: user.name,
       });
     }
-    return toDomain(row);
+    return redactSecret(toDomain(row), role);
   }
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS characters (
   portrait_url TEXT,
   ddb_id TEXT,
   notes TEXT NOT NULL DEFAULT '',
+  dm_secret TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -101,6 +102,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   title TEXT NOT NULL DEFAULT '',
   played_at TEXT,
   recap TEXT NOT NULL DEFAULT '',
+  dm_secret TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

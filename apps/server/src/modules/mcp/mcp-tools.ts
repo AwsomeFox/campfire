@@ -366,8 +366,8 @@ export class McpToolsService {
       { characterId: Id.describe('Character id') },
       async ({ characterId }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
-        await this.access.requireMember(user, row.campaignId);
-        return this.characters.getOrThrow(characterId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.characters.getOrThrow(characterId as number, role);
       },
     );
 
@@ -377,8 +377,8 @@ export class McpToolsService {
       'List all characters (the party) in a campaign.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.characters.listForCampaign(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.characters.listForCampaign(campaignId as number, role);
       },
     );
 
@@ -388,8 +388,8 @@ export class McpToolsService {
       'List session recaps for a campaign, newest first.',
       { campaignId: CampaignIdArg, limit: LimitArg(100, 100), offset: OffsetArg },
       async ({ campaignId, limit, offset }) => {
-        await this.access.requireMember(user, campaignId as number);
-        const list = await this.sessions.listForCampaign(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        const list = await this.sessions.listForCampaign(campaignId as number, role);
         return paginate(list, limit as number | undefined, offset as number | undefined);
       },
     );
@@ -401,8 +401,8 @@ export class McpToolsService {
       { sessionId: Id.describe('Session id — from get_session_recaps') },
       async ({ sessionId }) => {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
-        await this.access.requireMember(user, row.campaignId);
-        return this.sessions.getOrThrow(sessionId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.sessions.getOrThrow(sessionId as number, role);
       },
     );
 
@@ -820,27 +820,30 @@ export class McpToolsService {
     this.tool(
       server,
       'add_session_recap',
-      'Add a session recap (DM). number defaults to max existing session number + 1. With propose:true any member may submit a proposal instead.',
+      'Add a session recap (DM). number defaults to max existing session number + 1. Supports a dmSecret field ' +
+        '(DM-only prep notes, stripped from non-DM reads). With propose:true any member may submit a proposal instead.',
       {
         campaignId: CampaignIdArg,
         number: z.number().int().positive().optional().describe('Session number; defaults to max + 1'),
         title: z.string().max(200).optional().describe('Session title'),
         recap: z.string().max(100_000).describe('Session recap (markdown)'),
         playedAt: z.string().optional().describe('ISO date the session was played'),
+        dmSecret: z.string().max(20_000).optional().describe('DM-only prep notes — stripped from non-DM reads'),
         propose: ProposeArg,
       },
-      async ({ campaignId, number, title, recap, playedAt, propose }) => {
+      async ({ campaignId, number, title, recap, playedAt, dmSecret, propose }) => {
         // Membership is required even to compute the default number.
         const memberRole = await this.access.requireMember(user, campaignId as number, { write: true });
         let sessionNumber = number as number | undefined;
         if (sessionNumber === undefined) {
-          const existing = await this.sessions.listForCampaign(campaignId as number);
+          const existing = await this.sessions.listForCampaign(campaignId as number, memberRole);
           sessionNumber = existing.reduce((max, s) => Math.max(max, s.number), 0) + 1;
         }
         const validated = SessionCreate.parse({
           number: sessionNumber,
           ...(title !== undefined ? { title } : {}),
           ...(playedAt !== undefined ? { playedAt } : {}),
+          ...(dmSecret !== undefined ? { dmSecret } : {}),
           recap,
         });
         if (propose) {
@@ -855,20 +858,23 @@ export class McpToolsService {
     this.tool(
       server,
       'update_session',
-      'Update a session recap\'s title, recap text, and/or playedAt date (DM). With propose:true any member may submit the change as a proposal instead.',
+      'Update a session recap\'s title, recap text, playedAt date, and/or dmSecret (DM-only prep notes, stripped ' +
+        'from non-DM reads) (DM). With propose:true any member may submit the change as a proposal instead.',
       {
         sessionId: Id.describe('Session id'),
         title: z.string().max(200).optional().describe('Session title'),
         recap: z.string().max(100_000).optional().describe('Session recap (markdown)'),
         playedAt: z.string().nullable().optional().describe('ISO date the session was played'),
+        dmSecret: z.string().max(20_000).optional().describe('DM-only prep notes — stripped from non-DM reads'),
         propose: ProposeArg,
       },
-      async ({ sessionId, title, recap, playedAt, propose }) => {
+      async ({ sessionId, title, recap, playedAt, dmSecret, propose }) => {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
         const validated = SessionUpdate.parse({
           ...(title !== undefined ? { title } : {}),
           ...(recap !== undefined ? { recap } : {}),
           ...(playedAt !== undefined ? { playedAt } : {}),
+          ...(dmSecret !== undefined ? { dmSecret } : {}),
         });
         if (propose) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
@@ -884,7 +890,8 @@ export class McpToolsService {
       server,
       'upsert_character',
       'Create a character (omit characterId) or update one (pass characterId). player may create/update their own ' +
-        'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId.',
+        'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
+        'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise.',
       {
         campaignId: CampaignIdArg,
         characterId: Id.optional().describe('Existing character id (update); omit to create'),

@@ -30,7 +30,12 @@ describe('export (e2e, real cookie sessions)', () => {
       .send({ title: 'Secret Quest', dmSecret: 'the vault code is 1234' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({ name: 'Mysterious Stranger', dmSecret: 'is a dragon' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/locations`).send({ name: 'Hidden Cave', dmSecret: 'trap inside' });
-    await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The party arrived.' });
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .send({ number: 1, recap: 'The party arrived.', dmSecret: 'next week: the betrayal' });
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'Cursed Paladin', dmSecret: 'secretly cursed' });
 
     // Round-2 finding #6: export must include encounters (with combatants).
     const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Ambush at the Bridge' });
@@ -54,7 +59,10 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.body.quests[0].dmSecret).toBe('the vault code is 1234');
     expect(res.body.npcs[0].dmSecret).toBe('is a dragon');
     expect(res.body.locations[0].dmSecret).toBe('trap inside');
+    // Issue #59: characters and sessions carry dmSecret too — included in the dm export.
     expect(res.body.sessions.length).toBe(1);
+    expect(res.body.sessions[0].dmSecret).toBe('next week: the betrayal');
+    expect(res.body.characters[0].dmSecret).toBe('secretly cursed');
     expect(Array.isArray(res.body.members)).toBe(true);
     expect(Array.isArray(res.body.audit)).toBe(true);
     expect(Array.isArray(res.body.proposals)).toBe(true);
@@ -96,5 +104,18 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(content).toContain('Status:');
     expect(content).toContain('Round:');
     expect(content).toContain('Bridge Troll');
+
+    // Issue #59: session + character markdown carry their DM Secret sections in the dm export.
+    const sessionFile = zip.file('sessions/session-1.md');
+    expect(sessionFile).not.toBeNull();
+    const sessionContent = await sessionFile!.async('string');
+    expect(sessionContent).toContain('## DM Secret');
+    expect(sessionContent).toContain('next week: the betrayal');
+
+    const characterFile = zip.file('characters/cursed-paladin.md');
+    expect(characterFile).not.toBeNull();
+    const characterContent = await characterFile!.async('string');
+    expect(characterContent).toContain('## DM Secret');
+    expect(characterContent).toContain('secretly cursed');
   });
 });

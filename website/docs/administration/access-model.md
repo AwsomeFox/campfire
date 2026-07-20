@@ -43,7 +43,7 @@ memberships**. They don't imply each other:
 === "DM (per campaign)"
 
     - Everything inside their campaign: quests, NPCs, locations, sessions, the map
-    - See and edit **DM-only secrets** on quests, NPCs, and locations
+    - See and edit **DM-only secrets** on quests, NPCs, locations, characters, and sessions
     - Run encounters, manage the party, read the scribe inbox, approve AI proposals
     - **Invite players** to their campaign (see below) and assign roles
     - Export the campaign

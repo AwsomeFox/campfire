@@ -286,6 +286,8 @@ export default function CharacterPage() {
             <p className="card-kicker mb-0">Conditions</p>
             <ConditionsRow character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
           </Card>
+
+          {isDm && <DmSecretCard character={character} onChange={load} onError={setActionError} />}
         </div>
 
         <div className="space-y-4 min-w-0">
@@ -1236,6 +1238,92 @@ function StoryBody({
         >
           ✎ Edit
         </Btn>
+      )}
+    </div>
+  );
+}
+
+/**
+ * DM-only secret notes (a secret curse, a hidden true identity…) — mirrors the
+ * QuestPage DM panel. Server strips `dmSecret` for non-DM reads and ignores
+ * non-DM writes, so this card renders for the DM only; the owning player never
+ * sees it even though they can edit the rest of the sheet.
+ */
+function DmSecretCard({
+  character,
+  onChange,
+  onError,
+}: {
+  character: Character;
+  onChange: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    onError(null);
+    try {
+      await api.patch(`${API}/characters/${character.id}`, { dmSecret: draft });
+      setEditing(false);
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't save the DM notes.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!character.dmSecret && !editing) {
+    return (
+      <button
+        onClick={() => {
+          setDraft('');
+          setEditing(true);
+        }}
+        className="text-xs text-slate-500 hover:text-slate-300 text-left"
+      >
+        + DM notes
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className="card"
+      style={{
+        border: '1px solid var(--color-accent-700)',
+        background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
+      }}
+    >
+      <span className="card-kicker">DM only — hidden from players</span>
+      {editing ? (
+        <div className="space-y-2">
+          <TextArea style={{ minHeight: 100 }} value={draft} onChange={(e) => setDraft(e.target.value)} />
+          <div className="flex gap-2 justify-end">
+            <Btn ghost onClick={() => setEditing(false)} className="!min-h-0 !py-1.5 text-xs">
+              Cancel
+            </Btn>
+            <Btn onClick={save} disabled={saving} className="!min-h-0 !py-1.5 text-xs">
+              {saving ? 'Saving…' : 'Save'}
+            </Btn>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-start justify-between gap-3">
+          <p style={{ margin: 0, fontSize: 13.5, color: 'var(--color-accent-200)', whiteSpace: 'pre-wrap' }}>{character.dmSecret}</p>
+          <button
+            onClick={() => {
+              setDraft(character.dmSecret);
+              setEditing(true);
+            }}
+            className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+          >
+            ✎ edit
+          </button>
+        </div>
       )}
     </div>
   );
