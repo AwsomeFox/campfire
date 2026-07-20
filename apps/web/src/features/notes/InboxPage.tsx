@@ -15,6 +15,7 @@ import type { Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { Markdown } from '../../components/Markdown';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 type ViewValue = 'open' | 'history';
@@ -220,7 +221,7 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
           {(item.authorName || '?').slice(0, 1).toUpperCase()}
         </span>
         <div className="flex-1 min-w-0">
-          <p className="text-sm m-0">{item.body}</p>
+          <Markdown>{item.body}</Markdown>
           <p className="text-muted text-[11px] mt-0.5 mb-0">
             from {item.authorName || 'Someone'}
             {resolvedOn && <> · resolved {resolvedOn}</>}
@@ -322,7 +323,7 @@ function InboxItem({
           {(item.authorName || '?').slice(0, 1).toUpperCase()}
         </span>
         <div className="flex-1 min-w-0">
-          <p className="text-sm m-0">{item.body}</p>
+          <Markdown>{item.body}</Markdown>
           <p className="text-muted text-[11px] mt-0.5 mb-0">from {item.authorName || 'Someone'}</p>
         </div>
       </div>
