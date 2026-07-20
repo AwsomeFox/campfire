@@ -954,3 +954,48 @@ export const AuditEntry = z.object({
   createdAt: IsoDate,
 });
 export type AuditEntry = z.infer<typeof AuditEntry>;
+
+// ---------- admin observability (issue #22) ----------
+// Server-wide operational snapshot for the admin console (GET /admin/metrics,
+// @ServerRoles('admin')). Everything here is cheap to compute — COUNT(*) per
+// table plus PRAGMA page_count/page_size for on-disk DB size — so the dashboard
+// can be polled without straining the server. Nothing here is per-campaign or
+// exposes story secrets: it's counts, sizes, uptime, and version only.
+
+// COUNT(*) of each top-level entity. Kept as an explicit object (not a generic
+// map) so the shape is typed end-to-end and the web dashboard can label each row.
+export const AdminMetricsCounts = z.object({
+  users: z.number().int().nonnegative(),
+  campaigns: z.number().int().nonnegative(),
+  characters: z.number().int().nonnegative(),
+  npcs: z.number().int().nonnegative(),
+  locations: z.number().int().nonnegative(),
+  quests: z.number().int().nonnegative(),
+  sessions: z.number().int().nonnegative(),
+  notes: z.number().int().nonnegative(),
+  encounters: z.number().int().nonnegative(),
+  attachments: z.number().int().nonnegative(),
+  apiTokens: z.number().int().nonnegative(),
+  rulePacks: z.number().int().nonnegative(),
+  ruleEntries: z.number().int().nonnegative(),
+});
+export type AdminMetricsCounts = z.infer<typeof AdminMetricsCounts>;
+
+export const AdminMetricsDatabase = z.object({
+  sizeBytes: z.number().int().nonnegative(), // page_count * page_size (on-disk file size)
+  pageCount: z.number().int().nonnegative(),
+  pageSize: z.number().int().nonnegative(),
+});
+export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
+
+export const AdminMetrics = z.object({
+  version: z.string(), // server package.json version (same source as /healthz)
+  now: IsoDate, // server clock when this snapshot was taken
+  startedAt: IsoDate, // process start (now - uptime)
+  uptimeSeconds: z.number().nonnegative(),
+  activeSessions: z.number().int().nonnegative(), // non-expired rows in user_sessions
+  counts: AdminMetricsCounts,
+  database: AdminMetricsDatabase,
+  recentActivity: z.array(AuditEntry), // most-recent audit rows (read-only, newest first)
+});
+export type AdminMetrics = z.infer<typeof AdminMetrics>;
