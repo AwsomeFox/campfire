@@ -21,6 +21,7 @@ function toDomain(row: typeof users.$inferSelect): User {
     serverRole: row.serverRole as User['serverRole'],
     disabled: row.disabled,
     accentColor: row.accentColor,
+    textSize: row.textSize as User['textSize'],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -170,13 +171,14 @@ export class UsersService {
     return toDomain(row);
   }
 
-  /** Self-service preferences (display name + accent color) — PATCH /me/preferences. */
+  /** Self-service preferences (display name + accent color + text size) — PATCH /me/preferences. */
   async updatePreferences(id: number, input: PreferencesUpdateInput): Promise<User> {
     await this.getRowOrThrow(id);
 
     const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
     if (input.displayName !== undefined) update.displayName = input.displayName;
     if (input.accentColor !== undefined) update.accentColor = input.accentColor;
+    if (input.textSize !== undefined) update.textSize = input.textSize;
 
     const [row] = await this.db.update(users).set(update).where(eq(users.id, id)).returning();
     return toDomain(row);

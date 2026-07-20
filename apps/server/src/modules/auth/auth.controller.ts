@@ -156,6 +156,7 @@ export class MeController {
           serverRole: user.serverRole,
           disabled: false,
           accentColor: null,
+          textSize: 'default',
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },
@@ -188,7 +189,7 @@ export class MeController {
   }
 
   @Patch('preferences')
-  @ApiOperation({ summary: 'Update own preferences', description: 'Self-service display name / accent color update.' })
+  @ApiOperation({ summary: 'Update own preferences', description: 'Self-service display name / accent color / text size update.' })
   @ApiResponse({ status: 200, description: 'Updated user profile.' })
   async updatePreferences(@Body() body: PreferencesUpdateDto, @CurrentUser() user: RequestUser): Promise<User> {
     if (user.id.startsWith('dev:')) {

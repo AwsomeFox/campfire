@@ -151,6 +151,9 @@ export const users = sqliteTable('users', {
   // Personal accent color override (#rrggbb), or null to follow the server default.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   accentColor: text('accent_color'),
+  // Personal text-size preference: 'default' | 'large'. Added by migration on
+  // older DBs; see db/db.module.ts ALTER TABLE note.
+  textSize: text('text_size').notNull().default('default'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
