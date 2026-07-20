@@ -14,7 +14,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { users, userSessions, campaignMembers } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword, verifyPassword, generateSessionToken, hashSessionToken } from '../../common/crypto';
-import type { RequestUser } from '../../common/user.types';
+import { minRole, type RequestUser, type TokenContext } from '../../common/user.types';
 import { UsersService } from '../users/users.service';
 import { SettingsService } from '../settings/settings.service';
 import { SESSION_MAX_AGE_MS, SESSION_SLIDING_UPDATE_INTERVAL_MS } from './auth.constants';
@@ -174,16 +174,43 @@ export class AuthService implements OnApplicationBootstrap {
     };
   }
 
-  async buildMe(userId: number): Promise<Me> {
+  /**
+   * When `tokenContext` is set (PAT auth), /me must report the TOKEN's
+   * effective view, not the owner's raw memberships (issue #55): a
+   * campaign-bound token only lists its campaign, every role is capped to
+   * min(token scope, membership role) — mirroring RoleResolver.effectiveRole()
+   * exactly — and a `token` block describes the token itself, including its
+   * effective server-admin power (same rule as hasServerAdminPower()).
+   * Cookie sessions (no tokenContext) are unchanged: raw roles, no `token`.
+   */
+  async buildMe(userId: number, tokenContext?: TokenContext): Promise<Me> {
     const user = await this.usersService.getOrThrow(userId);
-    const memberships = await this.db.select().from(campaignMembers).where(eq(campaignMembers.userId, userId));
+    const rows = await this.db.select().from(campaignMembers).where(eq(campaignMembers.userId, userId));
+    let memberships = rows.map((m) => ({
+      campaignId: m.campaignId,
+      role: m.role as Me['memberships'][number]['role'],
+      characterId: m.characterId,
+    }));
+    if (!tokenContext) {
+      return { user, memberships };
+    }
+
+    if (tokenContext.campaignId !== null) {
+      memberships = memberships.filter((m) => m.campaignId === tokenContext.campaignId);
+    }
+    memberships = memberships.map((m) => ({ ...m, role: minRole(tokenContext.scope, m.role) }));
+
     return {
       user,
-      memberships: memberships.map((m) => ({
-        campaignId: m.campaignId,
-        role: m.role as Me['memberships'][number]['role'],
-        characterId: m.characterId,
-      })),
+      memberships,
+      token: {
+        tokenId: tokenContext.tokenId,
+        name: tokenContext.name,
+        scope: tokenContext.scope,
+        campaignId: tokenContext.campaignId,
+        adminEnabled: tokenContext.adminEnabled,
+        serverAdmin: user.serverRole === 'admin' && tokenContext.adminEnabled === true,
+      },
     };
   }
 
