@@ -469,6 +469,135 @@ describe('encounters (e2e)', () => {
     });
   });
 
+  describe('lowercase stat keys (issue #162)', () => {
+    // A character stored with lowercase ability keys ({ dex: 18 }) — schema-valid, and
+    // what MCP/AI or raw-API writers produce — must still yield a DEX-derived initMod on
+    // its auto-added combatant, not silently roll initiative at +0 forever. Uses its own
+    // campaign so the extra party member doesn't perturb the shared-campaign counts above.
+    it('a lowercase-dex character gets the correct DEX-derived initMod on its combatant', async () => {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Lowercase Stats' });
+      const lcCampaignId = campRes.body.id;
+
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${lcCampaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Lyra', stats: { dex: 18, wis: 15 }, hpCurrent: 24, hpMax: 24 });
+      expect(charRes.status).toBe(201);
+
+      const encRes = await request(server).post(`/api/v1/campaigns/${lcCampaignId}/encounters`).set(dm).send({ name: 'Initiative Check' });
+      expect(encRes.status).toBe(201);
+      expect(encRes.body.combatants).toHaveLength(1);
+      const lyra = encRes.body.combatants[0];
+      expect(lyra.name).toBe('Lyra');
+      expect(lyra.initMod).toBe(4); // floor((18-10)/2), NOT 0 despite the lowercase key
+    });
+  });
+
+  describe('ended encounter is immutable (issue #163)', () => {
+    // An ended encounter's combatant rows are a frozen historical snapshot. Patching a
+    // combatant on it must be rejected AND must not rewrite the linked character's live
+    // sheet HP (the pre-fix bug: a post-combat combatant patch leaked back onto current HP).
+    let endedCampaignId: number;
+    let endedEncounterId: number;
+    let heroCharacterId: number;
+    let heroCombatantId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Ended Encounter Campaign' });
+      endedCampaignId = campRes.body.id;
+
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${endedCampaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Pete', stats: { DEX: 12 }, hpCurrent: 44, hpMax: 50, ownerUserId: 'dev:p-1' });
+      expect(charRes.status).toBe(201);
+      heroCharacterId = charRes.body.id;
+
+      // Create → roll initiative → start → end, leaving one character combatant behind.
+      const encRes = await request(server).post(`/api/v1/campaigns/${endedCampaignId}/encounters`).set(dm).send({ name: 'Last Stand' });
+      endedEncounterId = encRes.body.id;
+      heroCombatantId = encRes.body.combatants[0].id;
+
+      await request(server).post(`/api/v1/encounters/${endedEncounterId}/roll-initiative`).set(dm);
+      const startRes = await request(server).post(`/api/v1/encounters/${endedEncounterId}/start`).set(dm);
+      expect(startRes.status).toBe(201);
+      const endRes = await request(server).post(`/api/v1/encounters/${endedEncounterId}/end`).set(dm);
+      expect(endRes.status).toBe(201);
+      expect(endRes.body.status).toBe('ended');
+    });
+
+    it('the ended encounter is still viewable', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${endedEncounterId}`).set(player);
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('ended');
+    });
+
+    it('patching a combatant on an ended encounter is rejected (409) and does NOT change the character sheet', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Character HP at end time was 44 (never damaged in this trivial fight).
+      const before = await request(server).get(`/api/v1/characters/${heroCharacterId}`).set(dm);
+      expect(before.status).toBe(200);
+      const hpBefore = before.body.hpCurrent;
+      expect(hpBefore).toBe(44);
+
+      // DM patch is rejected...
+      const dmPatch = await request(server)
+        .patch(`/api/v1/encounters/${endedEncounterId}/combatants/${heroCombatantId}`)
+        .set(dm)
+        .send({ hpSet: 13 });
+      expect(dmPatch.status).toBe(409);
+
+      // ...and so is an owning player's patch (the exact live-verified repro in #163).
+      const playerPatch = await request(server)
+        .patch(`/api/v1/encounters/${endedEncounterId}/combatants/${heroCombatantId}`)
+        .set(player)
+        .send({ hpSet: 13 });
+      expect(playerPatch.status).toBe(409);
+
+      // The character's live sheet HP is untouched by either rejected patch.
+      const after = await request(server).get(`/api/v1/characters/${heroCharacterId}`).set(dm);
+      expect(after.body.hpCurrent).toBe(hpBefore);
+    });
+
+    it('adding / removing a combatant and rolling initiative are also rejected (409) on an ended encounter', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const add = await request(server)
+        .post(`/api/v1/encounters/${endedEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Latecomer', hpMax: 10 });
+      expect(add.status).toBe(409);
+
+      const roll = await request(server).post(`/api/v1/encounters/${endedEncounterId}/roll-initiative`).set(dm);
+      expect(roll.status).toBe(409);
+
+      const del = await request(server).delete(`/api/v1/encounters/${endedEncounterId}/combatants/${heroCombatantId}`).set(dm);
+      expect(del.status).toBe(409);
+    });
+
+    it('after /reopen the same combatant patch succeeds and mirrors to the character sheet again', async () => {
+      const server = ctx.app.getHttpServer();
+      const reopen = await request(server).post(`/api/v1/encounters/${endedEncounterId}/reopen`).set(dm);
+      expect(reopen.status).toBe(201);
+      expect(reopen.body.status).toBe('running');
+
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${endedEncounterId}/combatants/${heroCombatantId}`)
+        .set(dm)
+        .send({ hpSet: 13 });
+      expect(patch.status).toBe(200);
+      expect(patch.body.hpCurrent).toBe(13);
+
+      // Now that the encounter is live again, the write-through is back on.
+      const after = await request(server).get(`/api/v1/characters/${heroCharacterId}`).set(dm);
+      expect(after.body.hpCurrent).toBe(13);
+    });
+  });
+
   describe('viewer access', () => {
     it('viewer can read but not create encounters', async () => {
       const server = ctx.app.getHttpServer();
