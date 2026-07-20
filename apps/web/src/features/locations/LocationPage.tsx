@@ -13,6 +13,7 @@ import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { attachmentFileUrl } from '../../components/ImageUpload';
@@ -51,6 +52,7 @@ export default function LocationPage() {
   const [quests, setQuests] = useState<Quest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: '', kind: '', body: '', dmSecret: '' });
@@ -70,6 +72,7 @@ export default function LocationPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setNotFound(false);
     try {
       const [locData, npcsData, questsData, campaignData] = await Promise.all([
         api.get<Location>(`${API}/locations/${id}`),
@@ -82,7 +85,11 @@ export default function LocationPage() {
       setQuests(questsData);
       setCampaign(campaignData);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load this location.");
+      if (err instanceof ApiError && err.status === 404) {
+        setNotFound(true);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Couldn't load this location.");
+      }
     } finally {
       setLoading(false);
     }
@@ -187,6 +194,14 @@ export default function LocationPage() {
         <Card>
           <Skeleton lines={6} />
         </Card>
+      </div>
+    );
+  }
+
+  if (notFound && !location) {
+    return (
+      <div className="max-w-5xl mx-auto px-4 mt-5">
+        <NotFoundState title="Location not found" backTo={`/c/${cid}/locations`} backLabel="← Back to locations" />
       </div>
     );
   }

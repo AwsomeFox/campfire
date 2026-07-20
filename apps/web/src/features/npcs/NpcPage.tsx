@@ -11,6 +11,7 @@ import type { Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -44,6 +45,7 @@ export default function NpcPage() {
   const [quests, setQuests] = useState<Quest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: '', role: '', disposition: '', locationId: '' as string, body: '', dmSecret: '', hidden: false });
@@ -56,6 +58,7 @@ export default function NpcPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setNotFound(false);
     try {
       const [npcData, locationsData, questsData] = await Promise.all([
         api.get<Npc>(`${API}/npcs/${id}`),
@@ -66,7 +69,11 @@ export default function NpcPage() {
       setLocations(locationsData);
       setQuests(questsData);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load this NPC.");
+      if (err instanceof ApiError && err.status === 404) {
+        setNotFound(true);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Couldn't load this NPC.");
+      }
     } finally {
       setLoading(false);
     }
@@ -160,6 +167,14 @@ export default function NpcPage() {
         <Card>
           <Skeleton lines={6} />
         </Card>
+      </div>
+    );
+  }
+
+  if (notFound && !npc) {
+    return (
+      <div className="max-w-5xl mx-auto px-4 mt-5">
+        <NotFoundState title="NPC not found" backTo={`/c/${cid}/npcs`} backLabel="← Back to NPCs" />
       </div>
     );
   }

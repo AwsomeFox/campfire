@@ -26,6 +26,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -92,6 +93,7 @@ export default function RunSessionPage() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Mirrors `busy` but updates synchronously (state updates are batched/async in React,
@@ -106,11 +108,16 @@ export default function RunSessionPage() {
 
   const load = useCallback(async () => {
     setError(null);
+    setNotFound(false);
     try {
       const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
       setEncounter(data);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load this encounter.");
+      if (err instanceof ApiError && err.status === 404) {
+        setNotFound(true);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Couldn't load this encounter.");
+      }
     } finally {
       setLoading(false);
     }
@@ -252,6 +259,14 @@ export default function RunSessionPage() {
         <Card>
           <Skeleton lines={5} />
         </Card>
+      </div>
+    );
+  }
+
+  if (notFound && !encounter) {
+    return (
+      <div className="max-w-4xl mx-auto px-4 mt-5">
+        <NotFoundState title="Encounter not found" backTo={`/c/${cid}/encounters`} backLabel="← Back to encounters" />
       </div>
     );
   }
