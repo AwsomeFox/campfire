@@ -60,8 +60,20 @@ function profBonus(level: number): number {
   return 2 + Math.floor((Math.max(1, level) - 1) / 4);
 }
 
+/**
+ * Read an ability score tolerantly. `stats` is a free-keyed record, so a character
+ * saved with lowercase keys (`{ str: 16 }` — schema-valid, and what some API/MCP
+ * writers produce) would miss a canonical-uppercase lookup and read 10 (issue #48).
+ * The server now folds keys to uppercase, but this guards data that reaches the
+ * client by any other path. Defaults to 10 when the ability is absent.
+ */
+function abilityScore(character: Character, ability: Ability): number {
+  const stats = character.stats;
+  return stats[ability] ?? stats[ability.toLowerCase()] ?? 10;
+}
+
 function modOf(character: Character, ability: Ability): number {
-  return Math.floor(((character.stats[ability] ?? 10) - 10) / 2);
+  return Math.floor((abilityScore(character, ability) - 10) / 2);
 }
 
 function signed(n: number): string {
@@ -216,7 +228,7 @@ export default function CharacterPage() {
             <p className="card-kicker">Ability scores</p>
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
               {ABILITY_KEYS.map((k) => {
-                const score = character.stats[k] ?? 10;
+                const score = abilityScore(character, k);
                 return (
                   <div key={k} className="cf-inset text-center py-2.5 px-1.5">
                     <p className="text-[10px] tracking-wide text-slate-500">{k}</p>
@@ -354,7 +366,7 @@ function SheetEditForm({
   const [hpMax, setHpMax] = useState(String(character.hpMax));
   const [stats, setStats] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
-    for (const k of ABILITY_KEYS) init[k] = String(character.stats[k] ?? 10);
+    for (const k of ABILITY_KEYS) init[k] = String(abilityScore(character, k));
     return init;
   });
   const [saving, setSaving] = useState(false);

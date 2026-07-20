@@ -64,6 +64,28 @@ export const UserIdRef = z.union([z.string().max(120), Id.transform((n) => Strin
 export const AbilityKey = z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']);
 export type AbilityKey = z.infer<typeof AbilityKey>;
 
+/** Canonical ability keys in sheet order. */
+export const ABILITY_KEYS = AbilityKey.options;
+
+/**
+ * Fold an ability-score record to canonical uppercase keys (STR/DEX/…). The stats
+ * record is typed `z.record(z.string(), …)`, so any key case is schema-valid, and an
+ * API/MCP writer may store lowercase keys (`{ str: 16 }`). Callers that look scores up
+ * by canonical key — the character sheet, and the initiative engine's `stats.DEX` —
+ * would otherwise miss every lowercase entry and read a default of 10 (issue #48).
+ * An exact-uppercase key is authoritative, so a lowercase duplicate never clobbers it.
+ */
+export function normalizeStats(stats: Record<string, number> | null | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!stats) return out;
+  for (const [key, value] of Object.entries(stats)) {
+    const upper = key.toUpperCase();
+    if (upper in out && key !== upper) continue;
+    out[upper] = value;
+  }
+  return out;
+}
+
 /** Skill proficiency rank; a skill absent from the record is unproficient. */
 export const SkillRank = z.enum(['proficient', 'expertise']);
 export type SkillRank = z.infer<typeof SkillRank>;
