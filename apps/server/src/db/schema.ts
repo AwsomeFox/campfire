@@ -42,6 +42,8 @@ export const characters = sqliteTable('characters', {
   portraitUrl: text('portrait_url'),
   ddbId: text('ddb_id'),
   notes: text('notes').notNull().default(''),
+  // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  dmSecret: text('dm_secret').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -103,6 +105,8 @@ export const sessions = sqliteTable('sessions', {
   title: text('title').notNull().default(''),
   playedAt: text('played_at'),
   recap: text('recap').notNull().default(''),
+  // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  dmSecret: text('dm_secret').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

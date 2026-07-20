@@ -103,3 +103,91 @@ describe('sessions (e2e) — sessionCount + duplicate number', () => {
     expect(res.status).toBe(201);
   });
 });
+
+/**
+ * Issue #59: sessions carry a DM-only dmSecret (prep notes on a session record)
+ * with the same strip-for-non-DM redaction as quests/NPCs/locations. The recap
+ * itself stays fully player-visible.
+ */
+describe('sessions (e2e) — dmSecret redaction', () => {
+  const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
+  const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
+
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let sessionId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Secret Session Campaign' });
+    campaignId = res.body.id;
+
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 1, title: 'The Setup', recap: 'The party met at the tavern.', dmSecret: 'next session: the barkeep betrays them' });
+    expect(createRes.status).toBe(201);
+    sessionId = createRes.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('dmSecret visible to dm on create, get, and list', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const dmGet = await request(server).get(`/api/v1/sessions/${sessionId}`).set(dm);
+    expect(dmGet.status).toBe(200);
+    expect(dmGet.body.dmSecret).toBe('next session: the barkeep betrays them');
+
+    const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(dm);
+    expect(dmList.status).toBe(200);
+    expect(dmList.body[0].dmSecret).toBe('next session: the barkeep betrays them');
+  });
+
+  it('dmSecret absent for player and viewer; recap stays visible', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const playerGet = await request(server).get(`/api/v1/sessions/${sessionId}`).set(player);
+    expect(playerGet.status).toBe(200);
+    expect(playerGet.body.recap).toBe('The party met at the tavern.');
+    expect(playerGet.body.dmSecret).toBeFalsy();
+
+    const viewerGet = await request(server).get(`/api/v1/sessions/${sessionId}`).set(viewer);
+    expect(viewerGet.status).toBe(200);
+    expect(viewerGet.body.dmSecret).toBeFalsy();
+
+    // list endpoint too
+    const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(player);
+    expect(playerList.status).toBe(200);
+    for (const s of playerList.body) {
+      expect(s.dmSecret).toBeFalsy();
+    }
+
+    // campaign summary embeds sessions (and characters) — redacted there too
+    const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+    expect(summary.status).toBe(200);
+    for (const s of summary.body.sessions) {
+      expect(s.dmSecret).toBeFalsy();
+    }
+  });
+
+  it('dm can PATCH dmSecret; player cannot PATCH a session at all (403)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const dmPatch = await request(server)
+      .patch(`/api/v1/sessions/${sessionId}`)
+      .set(dm)
+      .send({ dmSecret: 'betrayal postponed to session 3' });
+    expect(dmPatch.status).toBe(200);
+    expect(dmPatch.body.dmSecret).toBe('betrayal postponed to session 3');
+
+    const playerPatch = await request(server)
+      .patch(`/api/v1/sessions/${sessionId}`)
+      .set(player)
+      .send({ dmSecret: 'players write secrets?' });
+    expect(playerPatch.status).toBe(403);
+  });
+});
