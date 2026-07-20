@@ -49,15 +49,33 @@ export class MembersController {
 
   @Delete(':memberId')
   @HttpCode(204)
-  @ApiOperation({ summary: 'Remove a member from a campaign', description: 'dm role required. Refuses to remove the last dm.' })
-  @ApiResponse({ status: 204, description: 'Removed.' })
-  @ApiResponse({ status: 409, description: 'Would remove the last dm of the campaign.' })
+  @ApiOperation({
+    summary: 'Remove a member from a campaign (or leave it yourself)',
+    description:
+      'A dm may remove any member. A member may ALSO remove their OWN seat — self-leave (issue #128 player data rights) — ' +
+      'which needs only membership, not the dm role, and works even on an archived (read-only) campaign so leaving is never blocked. ' +
+      'Either way the last dm cannot be removed/leave without first handing dm off (409). ' +
+      'The departing member keeps no edit rights: their owned character sheets stay in the campaign but are un-owned; their notes/proposals are preserved and attributed.',
+  })
+  @ApiResponse({ status: 204, description: 'Removed / left.' })
+  @ApiResponse({ status: 403, description: 'Not the dm and not removing your own membership.' })
+  @ApiResponse({ status: 409, description: 'Would remove/leave as the last dm of the campaign.' })
   async remove(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Param('memberId', ParseIntPipe) memberId: number,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireRole(user, campaignId, 'dm');
-    await this.members.remove(campaignId, memberId, user);
+    // Resolve the target seat first so we can tell self-leave from a dm removing
+    // someone else. A member leaving needs only membership (and may leave an
+    // archived campaign — requireMember doesn't assert writability); a dm
+    // removing ANOTHER member keeps the dm gate exactly as before.
+    const target = await this.members.getRowOrThrow(campaignId, memberId);
+    const selfLeave = String(target.userId) === user.id;
+    if (selfLeave) {
+      await this.access.requireMember(user, campaignId);
+    } else {
+      await this.access.requireRole(user, campaignId, 'dm');
+    }
+    await this.members.remove(campaignId, memberId, user, { selfLeave });
   }
 }
