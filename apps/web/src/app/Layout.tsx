@@ -340,6 +340,7 @@ export function Layout() {
 
   const dmNav: NavItem[] = campaignId !== undefined && isDm
     ? [
+        { key: 'storylines', label: 'Storylines', to: `/c/${campaignId}/storylines` },
         { key: 'settings', label: 'Settings', to: `/c/${campaignId}/settings` },
         { key: 'inbox', label: 'Scribe inbox', to: `/c/${campaignId}/inbox`, badge: inboxCount },
         { key: 'proposals', label: 'Proposals', to: `/c/${campaignId}/proposals` },
@@ -377,7 +378,7 @@ export function Layout() {
       {/* Desktop sidebar */}
       {campaignId !== undefined && (
         <aside
-          className="hidden md:flex w-[230px] shrink-0 sticky top-0 flex-col gap-1.5 h-screen p-3.5 border-r"
+          className="hidden md:flex w-[230px] shrink-0 sticky top-0 flex-col gap-1.5 h-screen overflow-y-auto overflow-x-hidden p-3.5 border-r"
           style={{ borderColor: 'var(--color-divider)' }}
         >
           <div className="flex items-center gap-1 mb-2">
