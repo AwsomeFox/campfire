@@ -1,6 +1,9 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { users } from '../src/db/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 describe('auth setup/login/logout (e2e, real cookie sessions, DEV_AUTH unset)', () => {
@@ -108,6 +111,92 @@ describe('login/logout + wrong password (e2e)', () => {
 
     const meAfterLogout = await agent.get('/api/v1/me');
     expect(meAfterLogout.status).toBe(401);
+  });
+});
+
+/**
+ * Issue #89: account existence / type enumeration hardening. Every credential
+ * failure that must NOT reveal whether a username exists — unknown user, wrong
+ * password, and SSO-only account (no local password) — has to return the exact
+ * same status AND the exact same response body, and must cost the same scrypt
+ * work so timing can't be used as an existence/type oracle either.
+ */
+describe('login enumeration hardening (e2e) — uniform failure for unknown/wrong/SSO', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    adminAgent = request.agent(ctx.app.getHttpServer());
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'realuser', password: 'real-password-1' });
+
+    // Create an account and null out its local hash to simulate an SSO-provisioned
+    // (OIDC) user — the state that previously returned a distinctive 403 "This
+    // account uses SSO" before any password check even ran.
+    const created = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'ssouser', password: 'placeholder-password-1', serverRole: 'user' });
+    expect(created.status).toBe(201);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(users).set({ passwordHash: null }).where(eq(users.username, 'ssouser'));
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('unknown user, wrong password, and SSO-only account return an IDENTICAL status + body', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const unknown = await request(server).post('/api/v1/auth/login').send({ username: 'no-such-user', password: 'whatever-12' });
+    const wrong = await request(server).post('/api/v1/auth/login').send({ username: 'realuser', password: 'wrong-password-1' });
+    const sso = await request(server).post('/api/v1/auth/login').send({ username: 'ssouser', password: 'placeholder-password-1' });
+
+    // Same status...
+    expect(unknown.status).toBe(401);
+    expect(wrong.status).toBe(401);
+    expect(sso.status).toBe(401);
+
+    // ...and byte-for-byte the same body (no message/error that distinguishes the case).
+    expect(wrong.body).toEqual(unknown.body);
+    expect(sso.body).toEqual(unknown.body);
+    expect(unknown.body.message).toBe('Invalid username or password');
+    // The old SSO-specific signal must be gone.
+    expect(JSON.stringify(sso.body)).not.toMatch(/SSO/i);
+  });
+
+  it('same uniform 401 on the headless PAT bootstrap path (POST /auth/token) for unknown vs SSO-only', async () => {
+    const server = ctx.app.getHttpServer();
+    const unknown = await request(server).post('/api/v1/auth/token').send({ username: 'no-such-user', password: 'whatever-12', tokenName: 'x' });
+    const sso = await request(server).post('/api/v1/auth/token').send({ username: 'ssouser', password: 'placeholder-password-1', tokenName: 'x' });
+    expect(unknown.status).toBe(401);
+    expect(sso.status).toBe(401);
+    expect(sso.body).toEqual(unknown.body);
+  });
+
+  it('timing: the unknown-user path still spends scrypt work (not skipped), so it is not an obvious timing oracle', async () => {
+    const server = ctx.app.getHttpServer();
+    const SAMPLES = 6;
+
+    async function bestOf(username: string, password: string): Promise<number> {
+      let best = Infinity;
+      for (let i = 0; i < SAMPLES; i++) {
+        const start = process.hrtime.bigint();
+        await request(server).post('/api/v1/auth/login').send({ username, password });
+        const ms = Number(process.hrtime.bigint() - start) / 1e6;
+        if (ms < best) best = ms;
+      }
+      return best;
+    }
+
+    // Best-case (minimum) times are the most stable and the ones that matter for a
+    // timing attack. A real wrong-password attempt runs one scrypt (~30ms); if the
+    // unknown-user path skipped scrypt it would return an order of magnitude faster.
+    // We only require it to stay within a generous factor — enough to prove scrypt
+    // runs for absent users without being flaky under CI load.
+    const wrongBest = await bestOf('realuser', 'wrong-password-1');
+    const unknownBest = await bestOf('no-such-user', 'whatever-12');
+    expect(unknownBest).toBeGreaterThan(wrongBest * 0.4);
   });
 });
 
