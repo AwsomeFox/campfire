@@ -60,6 +60,7 @@ documented in [Authentication](../administration/authentication.md).
 | `DATA_DIR` | `/data` | SQLite db + uploads (the one volume to back up) |
 | `TZ` | `UTC` | Timezone for timestamps |
 | `ORIGIN` | *(unset)* | Only needed if you split the SPA onto a different origin; leave unset for the single-image deployment |
+| `API_DOCS` | *(unset)* | API docs (`/api/docs`, `/api/openapi.json`) are off in production by default; set `1` to enable them (or `0` to force them off) |
 | `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | *(unset)* | Enable SSO — see [Authentication](../administration/authentication.md) |
 | `OIDC_ADMIN_GROUP` | *(unset)* | Members of this IdP group become server admins on login |
 | `OIDC_ALLOWED_GROUP` | *(unset)* | Restrict sign-in to members of this IdP group — see [Authentication](../administration/authentication.md) |
