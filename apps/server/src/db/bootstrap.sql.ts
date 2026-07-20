@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS characters (
   level INTEGER NOT NULL DEFAULT 1,
   xp INTEGER NOT NULL DEFAULT 0,
   background TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
   stats TEXT NOT NULL DEFAULT '{}',
   ac INTEGER,
   hp_current INTEGER NOT NULL DEFAULT 10,
@@ -228,9 +229,24 @@ CREATE TABLE IF NOT EXISTS notes (
   visibility TEXT NOT NULL DEFAULT 'private',
   entity_type TEXT,
   entity_id INTEGER,
+  recipient_user_id TEXT,
   body TEXT NOT NULL,
   resolved INTEGER NOT NULL DEFAULT 0,
   resolved_note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  parent_id INTEGER,
+  author_user_id TEXT NOT NULL,
+  author_name TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL,
+  in_character INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -542,6 +558,9 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign ON scheduled_sessions
 CREATE INDEX IF NOT EXISTS idx_session_rsvps_schedule ON session_rsvps(scheduled_session_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_ics_token ON campaigns(ics_token);
 CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
+-- #123: comment threads are always read for one entity (campaign + type + id),
+-- newest-thread-context ordering handled in SQL; this composite covers the lookup.
+CREATE INDEX IF NOT EXISTS idx_comments_entity ON comments(campaign_id, entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_campaign ON audit_log(campaign_id);
 -- #74: most-recent-first reads are always scoped by campaign (or by the null-campaign
 -- server-admin bucket) and ordered by id DESC. The plain campaign_id index above can't

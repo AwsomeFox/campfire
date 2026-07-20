@@ -131,6 +131,17 @@ export function normalizeStats(stats: Record<string, number> | null | undefined)
 export const SkillRank = z.enum(['proficient', 'expertise']);
 export type SkillRank = z.infer<typeof SkillRank>;
 
+/**
+ * Character lifecycle (issue #115). Only `active` PCs are auto-conscripted into a
+ * new encounter's combatant list; dead/retired/inactive characters stay on the
+ * roster (viewable, full sheet + history intact) but are skipped by the auto-add
+ * so a long campaign's graveyard of fallen and replaced PCs stops being force-added
+ * to every fight. Deleting a character remains the destructive alternative — this
+ * is the non-destructive shelf.
+ */
+export const CharacterStatus = z.enum(['active', 'dead', 'retired', 'inactive']);
+export type CharacterStatus = z.infer<typeof CharacterStatus>;
+
 /** One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5", "1d8+3 slashing") so non-attack actions stay valid. */
 export const CharacterAction = z.object({
   name: z.string().min(1).max(120),
@@ -161,6 +172,12 @@ export const Character = z.object({
   level: z.number().int().min(1).max(20).default(1),
   xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
+  // Lifecycle state (issue #115). `active` is the only status auto-added as a combatant
+  // on encounter create; dead/retired/inactive PCs are kept but skipped. Editable by the
+  // owning player or DM through the normal update path (and upsert_character over MCP).
+  status: CharacterStatus.default('active').describe(
+    "Lifecycle status: 'active' (default; auto-added to new encounters), 'dead', 'retired', or 'inactive'. Non-active PCs stay on the roster but are skipped by encounter auto-add.",
+  ),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),
@@ -179,6 +196,28 @@ export const Character = z.object({
 export type Character = z.infer<typeof Character>;
 export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
 export const CharacterUpdate = CharacterCreate.partial();
+
+/**
+ * Request body for importing a character from a PUBLIC D&D Beyond sheet (issue #18).
+ * The importer is unofficial and read-only — it reads the public character-service
+ * JSON that D&D Beyond exposes for characters whose privacy is set to Public. Callers
+ * pass either the raw numeric character id (`ddbId`) or a share/character URL (`url`,
+ * e.g. https://www.dndbeyond.com/characters/12345678); at least one is required. `url`
+ * (base-URL override, mainly for tests pointing at a fake server) is separate from the
+ * `url` that carries a character link — the server derives the id from whichever of
+ * ddbId/url is present.
+ */
+export const DdbCharacterImport = z
+  .object({
+    ddbId: z.string().max(200).optional(),
+    url: z.string().max(500).optional(),
+  })
+  .strict()
+  .refine((v) => Boolean(v.ddbId?.trim() || v.url?.trim()), {
+    message: 'Provide a D&D Beyond character id (ddbId) or a character URL (url)',
+  });
+export type DdbCharacterImport = z.infer<typeof DdbCharacterImport>;
+
 export const HpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
@@ -663,7 +702,11 @@ export const SessionZeroUpdate = z.object({
 export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 
 // ---------- notes ----------
-export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
+// `whisper` is a per-player secret channel (issue #127): the note is visible ONLY to
+// its author, the single targeted recipient (recipientUserId), and any DM. This is the
+// player-vs-player asymmetry the other visibilities can't express — private is
+// author-only, dm_shared flows up to the DM, party_shared broadcasts to everyone.
+export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared', 'whisper']);
 export const NoteKind = z.enum(['note', 'inbox']);
 export const EntityType = z.enum(['quest', 'npc', 'location', 'session', 'character', 'campaign']);
 
@@ -680,18 +723,27 @@ export const Note = z.object({
   // name, session title), resolved server-side at read time — not stored. Null when
   // the note is unanchored or the entity no longer exists.
   entityName: z.string().max(300).nullable().default(null),
+  // The single member a `whisper` note is targeted at — same identity space as
+  // authorUserId (String(users.id), or dev:<name> under DEV_AUTH). Null for every
+  // other visibility. Set only when visibility === 'whisper'.
+  recipientUserId: z.string().max(120).nullable().default(null),
+  // Display name of the whisper recipient, resolved server-side at read time (like
+  // entityName) — not stored. Null when the note isn't a whisper or the recipient is
+  // no longer a member.
+  recipientName: z.string().max(120).nullable().default(null),
   body: z.string().min(1).max(20_000),
   resolved: z.boolean().default(false), // inbox items only
   resolvedNote: z.string().max(1000).default(''),
   ...timestamps,
 });
 export type Note = z.infer<typeof Note>;
-export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, entityName: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
+export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, entityName: true, recipientName: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
 export const NoteUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
   visibility: NoteVisibility.optional(),
   entityType: EntityType.nullable().optional(),
   entityId: Id.nullable().optional(),
+  recipientUserId: z.string().max(120).nullable().optional(),
 });
 export const InboxCreate = z.object({
   authorName: z.string().max(120).default('someone'),
@@ -714,15 +766,57 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
+// ---------- comments (threaded discussion / play-by-post — issue #123) ----------
+// A first-class DISCUSSION layer, distinct from private-or-shared `notes`: every
+// comment is anchored to a campaign entity (session/recap, quest, npc, location,
+// character, campaign — the same entityType/entityId convention notes use) and is
+// visible to ALL campaign members. Unlike notes there is no per-comment visibility;
+// discussion is inherently shared. `parentId` gives one level of threading (a reply
+// to a comment). `inCharacter` flags an in-character post (a play-by-post scene) vs
+// out-of-character table chatter. Author-or-DM may edit/delete.
+export const Comment = z.object({
+  id: Id,
+  campaignId: Id,
+  // A comment ALWAYS anchors to an entity (no unanchored discussion) — required,
+  // unlike Note.entityType which is nullable.
+  entityType: EntityType,
+  entityId: Id,
+  // One level of threading: null = a top-level comment; set = a reply to that
+  // comment. Replies to replies still hang off the same top-level ancestor (the
+  // web thread renders two visual levels), so this is a soft parent pointer.
+  parentId: Id.nullable().default(null),
+  authorUserId: z.string().max(120), // String(users.id) or dev:<name>
+  authorName: z.string().max(120).default(''),
+  body: z.string().min(1).max(20_000), // markdown
+  inCharacter: z.boolean().default(false),
+  ...timestamps,
+});
+export type Comment = z.infer<typeof Comment>;
+export const CommentCreate = Comment.omit({
+  id: true,
+  campaignId: true,
+  authorUserId: true,
+  authorName: true,
+  createdAt: true,
+  updatedAt: true,
+})
+  .partial()
+  .required({ entityType: true, entityId: true, body: true });
+export const CommentUpdate = z.object({
+  body: z.string().min(1).max(20_000).optional(),
+  inCharacter: z.boolean().optional(),
+});
+
 // ---------- notifications (in-app) ----------
 // Per-user notification rows written by the server when something a member cares
 // about happens while they're not looking: a session recap is posted, someone
 // replies on a shared note thread (or the DM answers an inbox item), a player
-// shares a note up to the DM (note_shared), they're added to a campaign, or the
+// shares a note up to the DM (note_shared), someone posts on a discussion thread
+// they're part of (comment_reply), they're added to a campaign, or the
 // next session gets scheduled. Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
-export const NotificationType = z.enum(['recap_posted', 'note_reply', 'note_shared', 'added_to_campaign', 'session_scheduled']);
+export const NotificationType = z.enum(['recap_posted', 'note_reply', 'note_shared', 'comment_reply', 'added_to_campaign', 'session_scheduled']);
 export type NotificationType = z.infer<typeof NotificationType>;
 
 export const Notification = z.object({

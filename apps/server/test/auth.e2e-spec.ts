@@ -601,3 +601,90 @@ describe('POST /auth/token — headless PAT bootstrap (e2e)', () => {
     expect(res.status).toBe(400);
   });
 });
+
+/**
+ * Issue #128 (player data rights): an authenticated user may delete THEIR OWN
+ * account via DELETE /me. It reuses UsersService.remove(), so the same cleanup +
+ * guards apply: sessions/tokens/memberships cascade, owned characters are
+ * de-linked (kept, ownerUserId cleared), last-admin/sole-dm deletions are refused.
+ */
+describe('self-delete account (e2e, issue #128)', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'sd-admin', password: 'admin-password-1' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a player deletes their own account (204); owned character is de-linked but kept; account gone', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // A DM with a campaign, and a player who owns a linked character.
+    const createDm = await adminAgent.post('/api/v1/users').send({ username: 'sd-dm', password: 'dm-password-1', serverRole: 'user' });
+    const dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/login').send({ username: 'sd-dm', password: 'dm-password-1' });
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Self Delete Campaign' });
+    const campaignId = campRes.body.id;
+
+    const createPlayer = await adminAgent.post('/api/v1/users').send({ username: 'sd-player', password: 'player-password-1', serverRole: 'user' });
+    const playerId = createPlayer.body.id;
+    const playerAgent = request.agent(server);
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'sd-player', password: 'player-password-1' });
+
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Owned By Player' });
+    const charId = charRes.body.id;
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player', characterId: charId });
+
+    // Player self-deletes.
+    const delRes = await playerAgent.delete('/api/v1/me');
+    expect(delRes.status).toBe(204);
+
+    // Account is gone (login fails, and the admin roster no longer lists them).
+    const relogin = await request(server).post('/api/v1/auth/login').send({ username: 'sd-player', password: 'player-password-1' });
+    expect(relogin.status).toBe(401);
+    const roster = await adminAgent.get('/api/v1/users');
+    expect(roster.body.some((u: { id: number }) => u.id === playerId)).toBe(false);
+
+    // Character SHEET survives, de-linked (ownerUserId cleared).
+    const charAfter = await dmAgent.get(`/api/v1/characters/${charId}`);
+    expect(charAfter.status).toBe(200);
+    expect(charAfter.body.ownerUserId).toBeNull();
+
+    // The now-stale session cookie no longer authenticates.
+    expect((await playerAgent.get('/api/v1/me')).status).toBe(401);
+  });
+
+  it('the last enabled admin cannot self-delete (409)', async () => {
+    const res = await adminAgent.delete('/api/v1/me');
+    expect(res.status).toBe(409);
+    // Still there and usable.
+    expect((await adminAgent.get('/api/v1/me')).status).toBe(200);
+  });
+
+  it('the sole dm of a campaign cannot self-delete until dm is handed off (409 -> 204)', async () => {
+    const server = ctx.app.getHttpServer();
+    const createSoleDm = await adminAgent.post('/api/v1/users').send({ username: 'sd-soledm', password: 'soledm-password-1', serverRole: 'user' });
+    const soleDmId = createSoleDm.body.id;
+    const soleDm = request.agent(server);
+    await soleDm.post('/api/v1/auth/login').send({ username: 'sd-soledm', password: 'soledm-password-1' });
+    const campRes = await soleDm.post('/api/v1/campaigns').send({ name: 'Sole DM Self Delete' });
+    const campaignId = campRes.body.id;
+
+    // Blocked while sole dm.
+    expect((await soleDm.delete('/api/v1/me')).status).toBe(409);
+
+    // Promote a co-dm, then self-delete succeeds.
+    const createCoDm = await adminAgent.post('/api/v1/users').send({ username: 'sd-codm', password: 'codm-password-1', serverRole: 'user' });
+    await soleDm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: createCoDm.body.id, role: 'dm' });
+    expect((await soleDm.delete('/api/v1/me')).status).toBe(204);
+    const roster = await adminAgent.get('/api/v1/users');
+    expect(roster.body.some((u: { id: number }) => u.id === soleDmId)).toBe(false);
+  });
+});

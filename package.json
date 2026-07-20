@@ -11,6 +11,7 @@
     "build": "npm run build -w packages/schema && npm run build -w apps/server && npm run build -w apps/web",
     "test": "npm run test -w apps/server",
     "test:cov": "npm run test:cov -w apps/server",
+    "test:e2e": "npm run build && npm run test:e2e -w apps/web",
     "lint": "npm run lint --workspaces --if-present"
   },
   "devDependencies": {

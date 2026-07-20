@@ -145,6 +145,43 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(403);
   });
 
+  // Issue #128 (player data rights): a player may export THEIR OWN data (their
+  // characters, notes, proposals) — even though the campaign-wide export above is
+  // dm-only. The member export must never leak dmSecret or other members' data.
+  it('member export: a player exports their own data (200); campaign-wide export stays 403', async () => {
+    // Player owns a character (create-path grants ownership to a non-dm) and writes a private note.
+    const myChar = await playerAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'My Own Hero' });
+    expect(myChar.status).toBe(201);
+    await playerAgent.post(`/api/v1/campaigns/${campaignId}/notes`).send({ body: 'my secret plan', visibility: 'private' });
+
+    const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-member-.*\.json"/);
+
+    // Their own character + note are present.
+    expect(res.body.characters.some((c: { name: string }) => c.name === 'My Own Hero')).toBe(true);
+    expect(res.body.notes.some((n: { body: string }) => n.body === 'my secret plan')).toBe(true);
+
+    // The DM's dmSecret-bearing character ("Cursed Paladin") is NOT in the player's export.
+    expect(res.body.characters.some((c: { name: string }) => c.name === 'Cursed Paladin')).toBe(false);
+    // No campaign-wide fields leaked.
+    expect(res.body.audit).toBeUndefined();
+    expect(res.body.members).toBeUndefined();
+
+    // The player still cannot pull the campaign-wide export.
+    expect((await playerAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`)).status).toBe(403);
+  });
+
+  it('member export: 403 for a non-member', async () => {
+    // A fresh user with no membership in this campaign.
+    await dmAgent.post('/api/v1/users').send({ username: 'export-outsider', password: 'outsider-password-1', serverRole: 'user' });
+    const outsider = request.agent(ctx.app.getHttpServer());
+    await outsider.post('/api/v1/auth/login').send({ username: 'export-outsider', password: 'outsider-password-1' });
+    const res = await outsider.get(`/api/v1/campaigns/${campaignId}/export/me`);
+    expect(res.status).toBe(403);
+  });
+
   it('mdzip returns a zip content-type', async () => {
     const res = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=mdzip`).buffer(true).parse((response, callback) => {
       const chunks: Buffer[] = [];

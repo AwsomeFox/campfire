@@ -312,6 +312,27 @@ function migrateCharactersTableForXp(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before character lifecycle status (issue #115):
+ * `characters.status` didn't exist, so a dead/retired PC couldn't be marked and
+ * was force-added to every new encounter. Plain NOT NULL DEFAULT 'active' ADD
+ * COLUMN — every existing character becomes 'active' (preserving today's auto-add
+ * behavior), no table rebuild needed, same as migrateCharactersTableForXp above.
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCharactersTableForStatus(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  const hasStatus = columns.some((c) => c.name === 'status');
+  if (hasStatus) return;
+
+  sqlite.exec("ALTER TABLE characters ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+}
+
+/**
  * Migration for DBs created before characters/sessions gained DM-only secrets
  * (issue #59): `characters.dm_secret` and `sessions.dm_secret` didn't exist —
  * quests/NPCs/locations had dmSecret from day one, but a DM couldn't attach a
@@ -331,6 +352,27 @@ function migrateCharactersTableForDmSecret(sqlite: Database.Database): void {
   if (hasDmSecret) return;
 
   sqlite.exec("ALTER TABLE characters ADD COLUMN dm_secret TEXT NOT NULL DEFAULT ''");
+}
+
+/**
+ * Migration for DBs created before per-player whisper notes (issue #127):
+ * `notes.recipient_user_id` didn't exist. Plain nullable ADD COLUMN — no table
+ * rebuild needed, same shape as migrateCampaignsTableForMapAttachment above.
+ * Existing notes get NULL (no whisper target), which is correct for every
+ * pre-migration visibility (private/dm_shared/party_shared never carried a
+ * recipient). New DBs never hit this path — BOOTSTRAP_SQL already declares the
+ * column.
+ */
+function migrateNotesTableForRecipient(sqlite: Database.Database): void {
+  const hasNotesTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'")
+    .get();
+  if (!hasNotesTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(notes)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'recipient_user_id')) return;
+
+  sqlite.exec('ALTER TABLE notes ADD COLUMN recipient_user_id TEXT');
 }
 
 /** See migrateCharactersTableForDmSecret above — same migration for the sessions table. */
@@ -559,7 +601,9 @@ export function openDatabase(dataDir: string): {
   migrateCampaignsTableForIcsToken(sqlite);
   migrateCampaignsTableForStorageQuota(sqlite);
   migrateCharactersTableForXp(sqlite);
+  migrateCharactersTableForStatus(sqlite);
   migrateCharactersTableForDmSecret(sqlite);
+  migrateNotesTableForRecipient(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
   migrateCombatantsTableForHpModel(sqlite);

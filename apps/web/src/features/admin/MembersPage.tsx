@@ -11,10 +11,11 @@
  * Audit log kept (existing functionality, not in this design block).
  */
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
@@ -28,8 +29,9 @@ const ROLE_LABEL: Record<Role, string> = { dm: 'DM', player: 'Player', viewer: '
 export default function MembersPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const { roleIn } = useAuth();
+  const { roleIn, me } = useAuth();
   const role = roleIn(id);
+  const myUserId = me?.user?.id ?? null;
 
   const [members, setMembers] = useState<CampaignMember[] | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -113,6 +115,7 @@ export default function MembersPage() {
           <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Members</h2>
           <ReadOnlyMemberTable members={members ?? []} />
         </Card>
+        <YourMembershipCard campaignId={id} members={members ?? []} myUserId={myUserId} />
       </div>
     );
   }
@@ -278,6 +281,88 @@ function ReadOnlyMemberTable({ members }: { members: CampaignMember[] }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+/**
+ * Player data rights (issue #128): a member's own controls on the campaign they
+ * can see but not administer — export THEIR OWN data (characters/notes/proposals),
+ * and leave the campaign themselves. Distinct from the DM's campaign-wide export
+ * (settings page, dm-only) and the DM's remove-member control above.
+ */
+function YourMembershipCard({
+  campaignId,
+  members,
+  myUserId,
+}: {
+  campaignId: number;
+  members: CampaignMember[];
+  myUserId: number | null;
+}) {
+  const navigate = useNavigate();
+  const { refresh: refreshCampaigns } = useCampaigns();
+  const [confirming, setConfirming] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const myMember = myUserId != null ? members.find((m) => m.userId === myUserId) : undefined;
+  if (!myMember) return null;
+
+  async function leave() {
+    if (!myMember) return;
+    setLeaving(true);
+    setError(null);
+    try {
+      await api.delete(`${API}/campaigns/${campaignId}/members/${myMember.id}`);
+      await refreshCampaigns();
+      navigate('/');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't leave the campaign.");
+      setLeaving(false);
+      setConfirming(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-2.5">
+      <p className="card-kicker mb-0">Your data</p>
+      <p className="text-muted text-[11.5px] m-0">
+        Take a copy of what's yours, or leave the table. Your export includes only the characters you own, the
+        notes you wrote and the proposals you submitted — not the DM's secrets or anyone else's private data.
+      </p>
+      {error && <p className="text-xs text-rose-400 m-0">{error}</p>}
+      <div className="flex gap-2 flex-wrap items-center">
+        <a
+          className="btn btn-secondary"
+          style={{ fontSize: 12.5 }}
+          href={`${API}/campaigns/${campaignId}/export/me`}
+        >
+          ⬇ Export my data
+        </a>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          style={{ fontSize: 12.5, color: '#f87171' }}
+          onClick={() => setConfirming(true)}
+        >
+          Leave campaign…
+        </button>
+      </div>
+      <p className="text-muted text-[11px] m-0">
+        Leaving closes your seat. Character sheets you own stay with the campaign (they're just un-owned); your
+        notes stay too. A sole DM must hand off DM before leaving.
+      </p>
+      {confirming && (
+        <ConfirmDialog
+          title="Leave this campaign?"
+          body="You'll lose access to it. Export your data first if you want a copy."
+          confirmLabel={leaving ? 'Leaving…' : 'Leave'}
+          busy={leaving}
+          onConfirm={leave}
+          onCancel={() => setConfirming(false)}
+        />
+      )}
+    </Card>
   );
 }
 
