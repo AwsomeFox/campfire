@@ -26,6 +26,7 @@ import {
   RollRequest,
   RulePackInstall,
   RuleEntryType,
+  RECAP_TEMPLATE,
   SessionCreate,
   SessionUpdate,
   XpAward,
@@ -36,7 +37,7 @@ import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
 import { LocationsService } from '../locations/locations.service';
-import { SessionsService } from '../sessions/sessions.service';
+import { SessionsService, buildRecapDraft } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
 import { NotesService } from '../notes/notes.service';
 import { MembersService } from '../membership/members.service';
@@ -403,6 +404,37 @@ export class McpToolsService {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
         const role = await this.access.requireMember(user, row.campaignId);
         return this.sessions.getOrThrow(sessionId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'draft_session_recap',
+      'DM only: assemble the source material for a session recap — the shared recap template scaffold, a draft ' +
+        'seeded with the campaign\'s encounters and resolved inbox threads, and the raw structured material. This ' +
+        'does NO LLM work: it hands you the scaffold + the facts so you can write the recap, then call ' +
+        'add_session_recap (new session) or update_session (existing). Refine `draft`, delete the "Source notes" ' +
+        'appendix, and publish.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        const resolvedInbox = await this.notes.listInbox(campaignId as number, true);
+        const encounterList = await this.encounters.listForCampaign(campaignId as number);
+        const encounters = await Promise.all(
+          encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
+        );
+        const source = {
+          resolvedInbox: resolvedInbox.map((n) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
+          encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants })),
+        };
+        return {
+          template: RECAP_TEMPLATE,
+          draft: buildRecapDraft(source),
+          sourceMaterial: source,
+          guidance:
+            'Rewrite `draft` into a finished recap in the DM\'s voice, then call add_session_recap (or update_session ' +
+            'for an existing session). Delete the "Threads resolved this session" source-notes appendix before publishing.',
+        };
       },
     );
 

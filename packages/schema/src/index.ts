@@ -275,6 +275,14 @@ export type Session = z.infer<typeof Session>;
 export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
 export const SessionUpdate = SessionCreate.partial();
 
+// The canonical recap scaffold — the structured headings a DM fills instead of
+// staring at a blank box. Shared by the web "Insert template" affordance and the
+// MCP `draft_session_recap` tool so a hand-written recap and an AI-drafted one
+// use the same shape. Headings are `##` so they render under the recap's own
+// `#`/title in the Markdown viewer.
+export const RECAP_HEADINGS = ['Recap', 'Loot', 'NPCs met', 'Cliffhanger'] as const;
+export const RECAP_TEMPLATE = RECAP_HEADINGS.map((h) => `## ${h}\n\n`).join('').trimEnd() + '\n';
+
 // ---------- session share links (public read-only recap access) ----------
 // A DM-minted, unguessable capability URL for one session recap — viewable
 // without an account (absent players). The raw token is returned ONCE at
