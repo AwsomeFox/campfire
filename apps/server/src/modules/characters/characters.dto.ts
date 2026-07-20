@@ -24,7 +24,7 @@ class HpPatchDtoClass {
 export type HpPatchDto = z.infer<typeof HpPatch>;
 export const HpPatchDto = HpPatchDtoClass;
 
-export class ConditionsPatchDto extends createZodDto(ConditionsPatch) {}
+export class ConditionsPatchDto extends createZodDto(ConditionsPatch.strict()) {}
 
 export class SpellSlotPatchDto extends createZodDto(SpellSlotPatch.strict()) {}
 // XpPatch is a z.union(...) like HpPatch — same no-extends DTO construction as
