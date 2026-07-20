@@ -376,7 +376,7 @@ export function Layout() {
           <nav className="flex flex-col gap-0.5 mt-1">
             {isAdmin && (
               <SidebarNavButton
-                item={{ key: 'admin', label: 'Admin', to: '/admin' }}
+                item={{ key: 'admin', label: 'Server admin', to: '/admin' }}
                 active={location.pathname === '/admin'}
               />
             )}
@@ -473,7 +473,7 @@ export function Layout() {
             <NotificationsBell />
             {isAdmin && (
               <Link to="/admin" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
-                Admin
+                Server admin
               </Link>
             )}
             <Link to="/tokens" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
@@ -573,7 +573,7 @@ export function Layout() {
               <MoreSheetItem key={item.key} item={item} onNavigate={() => setMoreOpen(false)} />
             ))}
             {isAdmin && (
-              <MoreSheetItem item={{ key: 'admin', label: 'Admin', to: '/admin' }} onNavigate={() => setMoreOpen(false)} />
+              <MoreSheetItem item={{ key: 'admin', label: 'Server admin', to: '/admin' }} onNavigate={() => setMoreOpen(false)} />
             )}
             <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={() => setMoreOpen(false)} />
             <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={() => setMoreOpen(false)} />
@@ -655,7 +655,7 @@ function UserMenu({
       <p className="px-2 py-1 text-xs text-muted truncate">{displayName}</p>
       {isAdmin && (
         <Link to="/admin" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
-          Admin
+          Server admin
         </Link>
       )}
       <Link to="/tokens" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
