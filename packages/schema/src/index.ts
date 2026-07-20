@@ -70,6 +70,31 @@ export const CampaignClone = z.object({
   mode: CampaignCloneMode.default('full'),
 });
 
+// Import input — POST /campaigns/import (issue #120). The body is a Campfire JSON
+// export (the shape ExportService.buildExport produces): make the one-way export
+// round-trippable by re-creating the campaign from it. Validated permissively —
+// only `campaign.name` is truly required, and unknown/extra keys (attachmentsNote,
+// members, audit, proposals, …) are tolerated via .passthrough() so a real export
+// document is accepted verbatim. All entity ids in the document are treated as
+// source ids and remapped to fresh ids on import; the entities themselves are read
+// defensively field-by-field in the service, so a loose object[] is enough here.
+const ImportedEntity = z.object({}).passthrough();
+export const CampaignImport = z
+  .object({
+    // Optional override for the imported campaign's name (defaults to the export's own).
+    name: z.string().min(1).max(120).optional(),
+    campaign: z.object({ name: z.string().min(1).max(120) }).passthrough(),
+    locations: z.array(ImportedEntity).optional(),
+    npcs: z.array(ImportedEntity).optional(),
+    quests: z.array(ImportedEntity).optional(),
+    characters: z.array(ImportedEntity).optional(),
+    sessions: z.array(ImportedEntity).optional(),
+    notes: z.array(ImportedEntity).optional(),
+    encounters: z.array(ImportedEntity).optional(),
+  })
+  .passthrough();
+export type CampaignImport = z.infer<typeof CampaignImport>;
+
 // ---------- character ----------
 // characters.ownerUserId is stored as TEXT (it must also hold 'dev:<name>' dev-auth ids)
 // while users.id / CampaignMember.userId are integers — the historical type mismatch of

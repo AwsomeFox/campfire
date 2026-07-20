@@ -5,10 +5,11 @@
  * that launches the full NewCampaignWizard overlay (details -> rule system
  * -> POST + PATCH ruleSystem). Any user may create a campaign.
  */
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
+import { api, ApiError, API } from '../../lib/api';
 import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { NewCampaignWizard } from './NewCampaignWizard';
 import type { Campaign } from '@campfire/schema';
@@ -48,6 +49,73 @@ function NewCampaignTile({ onClick }: { onClick: () => void }) {
       </span>
       New campaign
     </button>
+  );
+}
+
+/**
+ * Import-campaign tile (issue #120) — the round-trip companion to export. Reads a
+ * Campfire JSON export from the user's disk and POSTs it to /campaigns/import,
+ * which recreates the campaign fresh (new ids, references remapped). On success we
+ * reuse the same post-create flow (refresh + navigate) as the wizard.
+ */
+function ImportCampaignTile({
+  onImported,
+  onError,
+}: {
+  onImported: (c: Campaign) => void | Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Reset the input so re-picking the same file fires change again.
+    e.target.value = '';
+    if (!file) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      let doc: unknown;
+      try {
+        doc = JSON.parse(text);
+      } catch {
+        throw new Error('That file is not valid JSON — pick a Campfire JSON export.');
+      }
+      const created = await api.post<Campaign>(`${API}/campaigns/import`, doc);
+      await onImported(created);
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Import failed.');
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  return (
+    <>
+      <input ref={inputRef} type="file" accept="application/json,.json" onChange={onFile} style={{ display: 'none' }} />
+      <button
+        onClick={() => inputRef.current?.click()}
+        disabled={importing}
+        className="flex flex-col items-center justify-center gap-2 text-center"
+        style={{
+          border: '1px dashed var(--color-neutral-700)',
+          borderRadius: 'var(--radius-lg)',
+          background: 'transparent',
+          color: 'var(--color-neutral-400)',
+          minHeight: 220,
+          fontSize: 13,
+        }}
+      >
+        <span
+          className="grid place-items-center rounded-full text-lg"
+          style={{ width: 34, height: 34, border: '1px dashed var(--color-neutral-700)' }}
+        >
+          ⬆
+        </span>
+        {importing ? 'Importing…' : 'Import from export'}
+      </button>
+    </>
   );
 }
 
@@ -108,6 +176,7 @@ export function HomePage() {
   const navigate = useNavigate();
   const [justCreated, setJustCreated] = useState<Campaign[]>([]);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   const allCampaigns = [...campaigns, ...justCreated.filter((c) => !campaigns.some((x) => x.id === c.id))];
   // Archived (paused/completed) campaigns are read-only server-side — keep them
@@ -156,6 +225,11 @@ export function HomePage() {
             create one.
           </p>
           <NewCampaignTile onClick={() => setWizardOpen(true)} />
+          <ImportCampaignTile
+            onImported={onCampaignCreated}
+            onError={(m) => setImportError(m)}
+          />
+          {importError && <ErrorNote message={importError} />}
         </div>
       ) : (
         <>
@@ -172,7 +246,12 @@ export function HomePage() {
               />
             ))}
             <NewCampaignTile onClick={() => setWizardOpen(true)} />
+            <ImportCampaignTile
+              onImported={onCampaignCreated}
+              onError={(m) => setImportError(m)}
+            />
           </div>
+          {importError && <ErrorNote message={importError} />}
 
           {archivedCampaigns.length > 0 && (
             <>
