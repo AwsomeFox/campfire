@@ -146,6 +146,27 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(tools).toHaveLength(64);
   });
 
+  it('tools/list input schemas inline every property — no sibling $refs (issue #31: add_combatant.ruleEntryId)', async () => {
+    const client = await mcpClient(dmToken);
+    const { tools } = await client.listTools();
+
+    // Shared zod singletons (e.g. `Id` reused by several fields of one tool) used to be
+    // deduped by identity into sibling-property refs like {"$ref":"#/properties/characterId"},
+    // which some MCP clients don't resolve. No tool schema may contain a $ref at all.
+    const offenders = tools.filter((t) => JSON.stringify(t.inputSchema).includes('"$ref"')).map((t) => t.name);
+    expect(offenders).toEqual([]);
+
+    const addCombatant = tools.find((t) => t.name === 'add_combatant');
+    expect(addCombatant).toBeDefined();
+    const props = addCombatant!.inputSchema.properties as Record<string, { type?: string; description?: string; $ref?: string }>;
+    expect(props.ruleEntryId.$ref).toBeUndefined();
+    expect(props.ruleEntryId.type).toBe('integer');
+    expect(props.ruleEntryId.description).toContain('lookup_rule');
+    expect(props.characterId.type).toBe('integer');
+    // .strict() must still carry through to the serialized schema
+    expect(addCombatant!.inputSchema.additionalProperties).toBe(false);
+  });
+
   it('get_campaign_summary works with a dm-scoped PAT', async () => {
     const client = await mcpClient(dmToken);
     const result = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
