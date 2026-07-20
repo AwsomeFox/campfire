@@ -560,6 +560,57 @@ export const ServerSettings = z.object({
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();
 
+// ── OIDC / SSO in-app configuration (server-admin only) ──────────────────────
+// Persisted alongside server settings so OIDC can be configured from the admin
+// UI, not only via env vars. Precedence: an OIDC_* env var, when set, OVERRIDES
+// the stored value for that field (see server oidc.config.ts). The client
+// secret is WRITE-ONLY — it is accepted on update but never returned.
+const OidcField = z.string().trim().max(2048);
+
+/** OIDC settings as returned to admins (GET). Never includes the client secret. */
+export const OidcSettings = z.object({
+  issuer: z.string(),
+  clientId: z.string(),
+  redirectUri: z.string(),
+  adminGroup: z.string(),
+  allowedGroup: z.string(),
+  groupsClaim: z.string(),
+  scope: z.string(),
+  // Server-computed, read-only:
+  clientSecretSet: z.boolean(), // a secret is stored or set via env (value never returned)
+  enabled: z.boolean(), // effective config is complete (issuer + clientId + clientSecret all resolve)
+  envKeys: z.array(z.string()), // OIDC_* env vars currently set — these override the stored values
+  effectiveRedirectUri: z.string(), // the callback URL the flow will actually use
+});
+export type OidcSettings = z.infer<typeof OidcSettings>;
+
+/** Admin update payload. All fields optional. clientSecret is write-only: omit to keep the current secret, pass '' to clear it. */
+export const OidcSettingsUpdate = z.object({
+  issuer: OidcField.optional(),
+  clientId: OidcField.optional(),
+  clientSecret: z.string().max(2048).optional(),
+  redirectUri: OidcField.optional(),
+  adminGroup: OidcField.optional(),
+  allowedGroup: OidcField.optional(),
+  groupsClaim: OidcField.optional(),
+  scope: OidcField.optional(),
+});
+export type OidcSettingsUpdate = z.infer<typeof OidcSettingsUpdate>;
+
+/** Test-connection request. Optional issuer lets an admin validate before saving; omitted = test the effective issuer. */
+export const OidcTestRequest = z.object({ issuer: OidcField.optional() });
+export type OidcTestRequest = z.infer<typeof OidcTestRequest>;
+
+/** Result of fetching + validating the issuer's OIDC discovery document. */
+export const OidcTestResult = z.object({
+  ok: z.boolean(),
+  issuer: z.string(),
+  message: z.string(),
+  authorizationEndpoint: z.string().nullable().default(null),
+  tokenEndpoint: z.string().nullable().default(null),
+});
+export type OidcTestResult = z.infer<typeof OidcTestResult>;
+
 export const CampaignMember = z.object({
   id: Id,
   campaignId: Id,
