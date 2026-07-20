@@ -137,6 +137,7 @@ export default function StorylinesPage() {
             className="input"
             placeholder="New arc title…"
             value={newArcTitle}
+            maxLength={200}
             onChange={(e) => setNewArcTitle(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') void createArc();

@@ -155,7 +155,7 @@ export default function LocationListPage() {
         {isDm && creating && (
           <div className="cf-inset p-3.5 space-y-2">
             {createError && <ErrorNote message={createError} />}
-            <TextInput aria-label="Location name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} autoFocus />
+            <TextInput aria-label="Location name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
             <TextInput aria-label="Location kind" placeholder="Kind (e.g. town, dungeon, region)" value={newKind} onChange={(e) => setNewKind(e.target.value)} />
             <select
               aria-label="Parent location"
