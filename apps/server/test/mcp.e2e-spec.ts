@@ -144,6 +144,15 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
     expect(tools).toHaveLength(64);
+
+    // Strict schemas must still be ADVERTISED even though per-call validation happens
+    // in our handler (so failures return the documented {"error"} JSON): every tool
+    // with args advertises additionalProperties:false in tools/list.
+    const updateCombatant = tools.find((t) => t.name === 'update_combatant');
+    expect(updateCombatant?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
+    const summary = tools.find((t) => t.name === 'get_campaign_summary');
+    expect(summary?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
+    expect((summary?.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty('campaignId');
   });
 
   it('get_campaign_summary works with a dm-scoped PAT', async () => {
@@ -337,17 +346,34 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(okResult.isError).toBeFalsy();
   });
 
-  it('strict arg schemas reject unknown keys with a structured validation error (not a silent no-op)', async () => {
+  it('strict arg schemas reject unknown keys with the documented {"error"} JSON (not SDK -32602 prose)', async () => {
     const client = await mcpClient(dmToken);
     // {hpCurrent} is not a real update_combatant arg (the real keys are hpDelta/hpSet) —
-    // this must be a machine-actionable error, not a 200 that silently dropped the key.
+    // this must be a machine-actionable error, not a 200 that silently dropped the key,
+    // and its text must be the documented {"error":{status,code,message}} JSON rather
+    // than the MCP SDK's own "-32602 Input validation error" prose.
     const result = await client.callTool({
       name: 'update_combatant',
       arguments: { encounterId: 1, combatantId: 1, hpCurrent: 5 },
     });
     expect(result.isError).toBe(true);
-    const text = (result.content as TextContent[])[0].text;
-    expect(text).toContain('hpCurrent');
+    const parsed = parseResult(result) as { error: { status: number; code: string; message: string } };
+    expect(parsed.error.status).toBe(400);
+    expect(parsed.error.code).toBe('validation_failed');
+    expect(parsed.error.message).toContain('hpCurrent');
+  });
+
+  it('strict arg schemas reject wrong-typed values with the documented {"error"} JSON naming the key', async () => {
+    const client = await mcpClient(dmToken);
+    const result = await client.callTool({
+      name: 'get_campaign_summary',
+      arguments: { campaignId: 'not-a-number' },
+    });
+    expect(result.isError).toBe(true);
+    const parsed = parseResult(result) as { error: { status: number; code: string; message: string } };
+    expect(parsed.error.status).toBe(400);
+    expect(parsed.error.code).toBe('validation_failed');
+    expect(parsed.error.message).toContain('campaignId');
   });
 
   it('structured errors: isError content is JSON {"error":{status,code,message}}', async () => {
