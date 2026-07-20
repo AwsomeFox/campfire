@@ -36,9 +36,9 @@ always makes you its DM — no admin powers required.
 
 Players need an account, then a seat at your campaign.
 
-- **Accounts** — a server admin creates them under **Admin → Users** (username + a
-  starting password to share). _(A DM-driven invite flow is on the
-  [roadmap](../reference/roadmap.md).)_
+- **Accounts** — either a server admin creates them under **Admin → Users**
+  (username + a starting password to share), or the DM sends an **invite link**
+  from **Members → Invite** and players create their own account when they open it.
 - **Seats** — on the campaign open **Members → Add member**, search a username, pick
   a role (**player** / **viewer**), and optionally link them to a character.
 

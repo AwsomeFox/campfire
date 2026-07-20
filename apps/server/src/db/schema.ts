@@ -179,6 +179,25 @@ export const campaignMembers = sqliteTable('campaign_members', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// DM invite links / join codes — see modules/membership/invites.service.ts.
+// `code` is stored PLAINTEXT, unlike session/PAT tokens (which store sha256):
+// an invite code is a shareable capability the DM re-displays and re-copies from
+// the UI, and it can only create a NEW membership at a capped role (never dm) —
+// it cannot impersonate an existing user. It is 128-bit random, always expiring,
+// optionally use-capped, and revocable (row delete).
+export const campaignInvites = sqliteTable('campaign_invites', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  code: text('code').notNull().unique(),
+  role: text('role').notNull(), // 'player' | 'viewer' — never 'dm'
+  createdByUserId: integer('created_by_user_id'), // null when created by a dev:* header user (DEV_AUTH)
+  expiresAt: text('expires_at').notNull(),
+  maxUses: integer('max_uses'), // null = unlimited (until expiry/revocation)
+  useCount: integer('use_count').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const apiTokens = sqliteTable('api_tokens', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   userId: integer('user_id').notNull(),
