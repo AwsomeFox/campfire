@@ -47,6 +47,47 @@ describe('npcs (e2e)', () => {
     }
   });
 
+  // Strict request DTOs (issue #131): NpcCreate/NpcUpdate are .strict() at the DTO
+  // layer, so a plausible-but-wrong field name (`description` — the real column is
+  // `body`) 400s with a message naming the offending key instead of the global pipe
+  // silently stripping it and 201/202-ing as an emptier-than-intended write.
+  it('unknown field in npc create/update body -> 400 naming the field, not silently stripped', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Direct create with a misnamed field -> 400 (was: 201 with `description` dropped).
+    const badCreate = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'Barkeep', description: 'a plausible-but-wrong field', role: 'Tavern owner' });
+    expect(badCreate.status).toBe(400);
+    expect(JSON.stringify(badCreate.body)).toMatch(/description|[Uu]nrecognized/);
+
+    // The exact scenario from the issue: the proposal path (?proposed=true) is where
+    // the silent drop was worst — it now 400s before a lossy proposal is ever stored.
+    const badProposed = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs?proposed=true`)
+      .set(player)
+      .send({ name: 'Barkeep', description: 'a plausible-but-wrong field', role: 'Tavern owner' });
+    expect(badProposed.status).toBe(400);
+    expect(JSON.stringify(badProposed.body)).toMatch(/description|[Uu]nrecognized/);
+
+    // A valid payload (correct `body` field) still succeeds and persists in full.
+    const okCreate = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'Barkeep', body: 'The friendly owner of the Prancing Pony', role: 'Tavern owner' });
+    expect(okCreate.status).toBe(201);
+    expect(okCreate.body.body).toBe('The friendly owner of the Prancing Pony');
+    expect(okCreate.body.role).toBe('Tavern owner');
+
+    // A misnamed field on update (PATCH) is likewise rejected.
+    const badUpdate = await request(server)
+      .patch(`/api/v1/npcs/${okCreate.body.id}`)
+      .set(dm)
+      .send({ discription: 'still a typo' });
+    expect(badUpdate.status).toBe(400);
+  });
+
   // Entity-level secrecy (issue #42): a hidden NPC is excluded WHOLESALE from
   // non-DM reads, and the DM reveals it by patching hidden=false.
   it('hidden npc is absent for player/viewer, visible to dm, and reveal makes it appear', async () => {

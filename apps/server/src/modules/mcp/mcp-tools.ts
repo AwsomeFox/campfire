@@ -1506,12 +1506,24 @@ export class McpToolsService {
     this.tool(
       server,
       'roll_dice',
-      'Roll a dice expression, e.g. "1d20+3" or "2d6", in the context of a campaign. Any campaign member may use ' +
-        'this; the roll is audited (action "dice.roll") and appears in the campaign-shared dice log.',
-      { campaignId: CampaignIdArg, expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3"') },
-      async ({ campaignId, expr }) => {
+      'Roll a dice expression in the context of a campaign, e.g. "1d20+3", "2d6", or with keep/drop for ' +
+        'advantage/disadvantage/stat-gen: "2d20kh1" (advantage), "2d20kl1" (disadvantage), "4d6dl1" (drop lowest). ' +
+        'Optionally pass a label and dc to record a check (success = total >= dc). Any campaign member may use this; ' +
+        'the roll is audited (action "dice.roll") and appears in the campaign-shared dice log.',
+      {
+        campaignId: CampaignIdArg,
+        expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3" or "2d20kh1"'),
+        label: RollRequest.shape.label.describe('Optional check label, e.g. "DEX save"'),
+        dc: RollRequest.shape.dc.describe('Optional difficulty class; success is computed as total >= dc'),
+      },
+      async ({ campaignId, expr, label, dc }) => {
         const role = await this.access.requireMember(user, campaignId as number, { write: true });
-        return this.encounters.rollDiceForCampaign(campaignId as number, { expr: expr as string }, user, role);
+        return this.encounters.rollDiceForCampaign(
+          campaignId as number,
+          { expr: expr as string, label: label as string | undefined, dc: dc as number | undefined },
+          user,
+          role,
+        );
       },
     );
 
