@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CampaignCreate, CampaignUpdate } from '@campfire/schema';
+import { CampaignClone, CampaignCreate, CampaignUpdate } from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -43,6 +43,7 @@ function uploadsRoot(): string {
 
 type CampaignCreateInput = z.infer<typeof CampaignCreate>;
 type CampaignUpdateInput = z.infer<typeof CampaignUpdate>;
+type CampaignCloneInput = z.infer<typeof CampaignClone>;
 
 function toDomain(row: typeof campaigns.$inferSelect): Campaign {
   return {
@@ -198,6 +199,306 @@ export class CampaignsService {
       campaignId: id,
     });
     return toDomain(row);
+  }
+
+  /**
+   * Clone a campaign into a brand-new one owned by the caller (issue #17 —
+   * campaign templates / cloning). Two modes:
+   *
+   *  - 'full' (default): faithful duplicate — quests (+objectives), npcs,
+   *    locations, characters, sessions, notes and encounters (+combatants),
+   *    with every intra-campaign reference (quest parent/giver, npc location,
+   *    combatant character, note entity link, campaign currentLocationId)
+   *    remapped to the cloned rows' new ids.
+   *  - 'template': prep only — quests/npcs/locations copied but play state
+   *    stripped: quest statuses reset to 'available', objectives unchecked,
+   *    locations back to 'unexplored', and sessions/notes/characters/
+   *    encounters/session-count/current-location not copied at all.
+   *
+   * Never copied in either mode: members (only the caller becomes dm — cloning
+   * must not silently grant other users access to the new campaign), api
+   * tokens, audit history, proposals, and attachments (their bytes live on
+   * disk keyed by campaign id; mapAttachmentId is therefore reset to null).
+   * Other members' private notes are also excluded — same visibility rule as
+   * GET /notes and the export module: the cloning dm cannot read them, so the
+   * clone must not carry them either.
+   *
+   * All inserts run in one synchronous db.transaction() (better-sqlite3 —
+   * same pattern as remove()/RulesService.installOpen5eSrd), so a mid-clone
+   * failure never leaves a half-copied campaign behind.
+   */
+  async clone(id: number, input: CampaignCloneInput, user: RequestUser): Promise<Campaign> {
+    const source = await this.getOrThrow(id);
+    const template = input.mode === 'template';
+    const name = (input.name ?? `${source.name} (copy)`).slice(0, 120);
+
+    // Read everything up front — only the writes need the transaction.
+    const [locationRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows] = await Promise.all([
+      this.db.select().from(locations).where(eq(locations.campaignId, id)),
+      this.db.select().from(npcs).where(eq(npcs.campaignId, id)),
+      this.db.select().from(quests).where(eq(quests.campaignId, id)),
+      this.db.select().from(characters).where(eq(characters.campaignId, id)),
+      this.db.select().from(sessions).where(eq(sessions.campaignId, id)),
+      this.db.select().from(notes).where(eq(notes.campaignId, id)),
+      this.db.select().from(encounters).where(eq(encounters.campaignId, id)),
+    ]);
+    const questIds = questRows.map((r) => r.id);
+    const objectiveRows = questIds.length
+      ? await this.db.select().from(questObjectives).where(inArray(questObjectives.questId, questIds))
+      : [];
+    const encounterIds = encounterRows.map((r) => r.id);
+    const combatantRows = encounterIds.length
+      ? await this.db.select().from(combatants).where(inArray(combatants.encounterId, encounterIds))
+      : [];
+
+    const ts = nowIso();
+    const newId = this.db.transaction((tx) => {
+      const [campaignRow] = tx
+        .insert(campaigns)
+        .values({
+          name,
+          description: source.description,
+          status: 'active',
+          currentLocationId: null, // remapped below (full mode only)
+          dangerLevel: source.dangerLevel,
+          sessionCount: template ? 0 : source.sessionCount,
+          ruleSystem: source.ruleSystem,
+          mapAttachmentId: null, // attachments (on-disk files) are not cloned
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const cloneId = campaignRow.id;
+
+      // Locations first — npcs, quests-via-npcs and currentLocationId all point at them.
+      const locMap = new Map<number, number>();
+      for (const l of locationRows) {
+        const [row] = tx
+          .insert(locations)
+          .values({
+            campaignId: cloneId,
+            name: l.name,
+            kind: l.kind,
+            status: template ? 'unexplored' : l.status,
+            mapX: l.mapX,
+            mapY: l.mapY,
+            body: l.body,
+            dmSecret: l.dmSecret,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        locMap.set(l.id, row.id);
+      }
+
+      const npcMap = new Map<number, number>();
+      for (const n of npcRows) {
+        const [row] = tx
+          .insert(npcs)
+          .values({
+            campaignId: cloneId,
+            name: n.name,
+            role: n.role,
+            disposition: n.disposition,
+            locationId: n.locationId != null ? (locMap.get(n.locationId) ?? null) : null,
+            body: n.body,
+            dmSecret: n.dmSecret,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        npcMap.set(n.id, row.id);
+      }
+
+      // Quests in two passes: insert all (parentId deferred), then remap
+      // parentId — a subquest's parent may appear after it in insert order.
+      const questMap = new Map<number, number>();
+      for (const q of questRows) {
+        const [row] = tx
+          .insert(quests)
+          .values({
+            campaignId: cloneId,
+            parentId: null,
+            title: q.title,
+            body: q.body,
+            status: template ? 'available' : q.status,
+            giverNpcId: q.giverNpcId != null ? (npcMap.get(q.giverNpcId) ?? null) : null,
+            reward: q.reward,
+            dmSecret: q.dmSecret,
+            sortOrder: q.sortOrder,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        questMap.set(q.id, row.id);
+      }
+      for (const q of questRows) {
+        if (q.parentId == null) continue;
+        const parentId = questMap.get(q.parentId);
+        if (parentId != null) {
+          tx.update(quests).set({ parentId }).where(eq(quests.id, questMap.get(q.id)!)).run();
+        }
+      }
+      for (const o of objectiveRows) {
+        const questId = questMap.get(o.questId);
+        if (questId == null) continue;
+        tx.insert(questObjectives)
+          .values({ questId, text: o.text, done: template ? false : o.done, sortOrder: o.sortOrder })
+          .run();
+      }
+
+      if (!template) {
+        const charMap = new Map<number, number>();
+        for (const c of characterRows) {
+          const [row] = tx
+            .insert(characters)
+            .values({
+              campaignId: cloneId,
+              ownerUserId: c.ownerUserId,
+              name: c.name,
+              species: c.species,
+              className: c.className,
+              level: c.level,
+              background: c.background,
+              stats: c.stats,
+              ac: c.ac,
+              hpCurrent: c.hpCurrent,
+              hpMax: c.hpMax,
+              conditions: c.conditions,
+              portraitUrl: c.portraitUrl,
+              ddbId: c.ddbId,
+              notes: c.notes,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .returning()
+            .all();
+          charMap.set(c.id, row.id);
+        }
+
+        const sessionMap = new Map<number, number>();
+        for (const s of sessionRows) {
+          const [row] = tx
+            .insert(sessions)
+            .values({
+              campaignId: cloneId,
+              number: s.number,
+              title: s.title,
+              playedAt: s.playedAt,
+              recap: s.recap,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .returning()
+            .all();
+          sessionMap.set(s.id, row.id);
+        }
+
+        const entityMaps: Record<string, Map<number, number>> = {
+          quest: questMap,
+          npc: npcMap,
+          location: locMap,
+          character: charMap,
+          session: sessionMap,
+        };
+        for (const n of noteRows) {
+          // Other members' private notes are invisible to the cloning dm — exclude
+          // them (same rule as NotesService.listForCampaign / the export module).
+          if (n.visibility === 'private' && n.authorUserId !== user.id) continue;
+          let entityType = n.entityType;
+          let entityId: number | null = null;
+          if (n.entityType === 'campaign') {
+            entityId = cloneId;
+          } else if (n.entityType != null && n.entityId != null) {
+            entityId = entityMaps[n.entityType]?.get(n.entityId) ?? null;
+            if (entityId == null) entityType = null; // dangling link in the source — drop it, don't point at a stale id
+          }
+          tx.insert(notes)
+            .values({
+              campaignId: cloneId,
+              authorUserId: n.authorUserId,
+              authorName: n.authorName,
+              kind: n.kind,
+              visibility: n.visibility,
+              entityType,
+              entityId,
+              body: n.body,
+              resolved: n.resolved,
+              resolvedNote: n.resolvedNote,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run();
+        }
+
+        for (const e of encounterRows) {
+          const [row] = tx
+            .insert(encounters)
+            .values({
+              campaignId: cloneId,
+              name: e.name,
+              status: e.status,
+              round: e.round,
+              turnIndex: e.turnIndex,
+              endedAt: e.endedAt,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .returning()
+            .all();
+          for (const c of combatantRows) {
+            if (c.encounterId !== e.id) continue;
+            tx.insert(combatants)
+              .values({
+                encounterId: row.id,
+                kind: c.kind,
+                characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                name: c.name,
+                initiative: c.initiative,
+                initMod: c.initMod,
+                hpCurrent: c.hpCurrent,
+                hpMax: c.hpMax,
+                conditions: c.conditions,
+                ruleEntryId: c.ruleEntryId, // compendium entries are server-global — no remap needed
+                sortOrder: c.sortOrder,
+              })
+              .run();
+          }
+        }
+
+        if (source.currentLocationId != null) {
+          const currentLocationId = locMap.get(source.currentLocationId);
+          if (currentLocationId != null) {
+            tx.update(campaigns).set({ currentLocationId }).where(eq(campaigns.id, cloneId)).run();
+          }
+        }
+      }
+
+      return cloneId;
+    });
+
+    // Same membership rule as create(): the caller becomes the clone's dm.
+    if (!user.devRole) {
+      const numericId = Number(user.id);
+      if (Number.isInteger(numericId)) {
+        await this.members.addCreatorAsDm(newId, numericId);
+      }
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'campaign.clone',
+      entityType: 'campaign',
+      entityId: newId,
+      campaignId: newId,
+      detail: `cloned from campaign ${id} (${template ? 'template' : 'full'})`,
+    });
+    return this.getOrThrow(newId);
   }
 
   /**
