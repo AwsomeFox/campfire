@@ -123,12 +123,6 @@ const LimitArg = (max: number, fallback: number) =>
   z.number().int().positive().max(max).optional().describe(`Max rows to return (default ${fallback}, max ${max})`);
 const OffsetArg = z.number().int().nonnegative().optional().describe('Rows to skip, for paging (default 0)');
 
-function paginate<T>(rows: T[], limit: number | undefined, offset: number | undefined): T[] {
-  const start = offset ?? 0;
-  const sliced = rows.slice(start);
-  return limit !== undefined ? sliced.slice(0, limit) : sliced;
-}
-
 /**
  * Deep-clone a zod schema so every node gets a fresh `_def` object.
  *
@@ -404,8 +398,11 @@ export class McpToolsService {
       { campaignId: CampaignIdArg, limit: LimitArg(100, 100), offset: OffsetArg },
       async ({ campaignId, limit, offset }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        const list = await this.sessions.listForCampaign(campaignId as number, role);
-        return paginate(list, limit as number | undefined, offset as number | undefined);
+        // issue #71: limit/offset pushed into SQL (was rows.slice() after a full read).
+        return this.sessions.listRecapsForCampaign(campaignId as number, role, {
+          limit: limit as number | undefined,
+          offset: offset as number | undefined,
+        });
       },
     );
 
@@ -458,10 +455,19 @@ export class McpToolsService {
       'DM only: list player inbox items for a campaign — messages players sent up via submit_inbox_item. ' +
         'Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest first), ' +
         'including any entity link each item was resolved into.',
-      { campaignId: CampaignIdArg, resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones') },
-      async ({ campaignId, resolved }) => {
+      {
+        campaignId: CampaignIdArg,
+        resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones'),
+        limit: LimitArg(200, 200),
+        offset: OffsetArg,
+      },
+      async ({ campaignId, resolved, limit, offset }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        return this.notes.listInbox(campaignId as number, (resolved as boolean | undefined) ?? false);
+        // issue #71: limit/offset pushed into SQL.
+        return this.notes.listInbox(campaignId as number, (resolved as boolean | undefined) ?? false, {
+          limit: limit as number | undefined,
+          offset: offset as number | undefined,
+        });
       },
     );
 
@@ -558,12 +564,14 @@ export class McpToolsService {
       },
       async ({ campaignId, entityType, entityId, mine, limit, offset }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        const list = await this.notes.listForCampaign(campaignId as number, user, role, {
+        // issue #71: limit/offset pushed into SQL (was rows.slice() after a full read).
+        return this.notes.listForCampaign(campaignId as number, user, role, {
           entityType: entityType as string | undefined,
           entityId: entityId as number | undefined,
           mine: mine as boolean | undefined,
+          limit: limit as number | undefined,
+          offset: offset as number | undefined,
         });
-        return paginate(list, limit as number | undefined, offset as number | undefined);
       },
     );
 
@@ -571,10 +579,15 @@ export class McpToolsService {
       server,
       'read_audit_log',
       'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven actions.',
-      { campaignId: CampaignIdArg, limit: LimitArg(500, 100) },
-      async ({ campaignId, limit }) => {
+      { campaignId: CampaignIdArg, limit: LimitArg(500, 100), offset: OffsetArg },
+      async ({ campaignId, limit, offset }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        return this.audit.listForCampaign(campaignId as number, (limit as number | undefined) ?? 100);
+        // issue #71: offset pages back through history the cap-100 previously hid.
+        return this.audit.listForCampaign(
+          campaignId as number,
+          (limit as number | undefined) ?? 100,
+          (offset as number | undefined) ?? 0,
+        );
       },
     );
 

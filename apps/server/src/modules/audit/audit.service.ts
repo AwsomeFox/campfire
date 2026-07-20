@@ -62,13 +62,14 @@ export class AuditService implements OnApplicationBootstrap {
     });
   }
 
-  async listForCampaign(campaignId: number, limit = 100) {
+  async listForCampaign(campaignId: number, limit = 100, offset = 0) {
     return this.db
       .select()
       .from(auditLog)
       .where(eq(auditLog.campaignId, campaignId))
       .orderBy(desc(auditLog.id))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
   }
 
   /**
@@ -76,13 +77,14 @@ export class AuditService implements OnApplicationBootstrap {
    * (campaign_id IS NULL): user create/disable/delete, settings changes,
    * rule-pack installs, admin token mints. Server-admin only (see controller).
    */
-  async listServerAdmin(limit = 100) {
+  async listServerAdmin(limit = 100, offset = 0) {
     return this.db
       .select()
       .from(auditLog)
       .where(isNull(auditLog.campaignId))
       .orderBy(desc(auditLog.id))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
   }
 
   /**
