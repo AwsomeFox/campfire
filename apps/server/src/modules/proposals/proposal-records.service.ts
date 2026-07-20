@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { proposals, quests, npcs, locations, sessions, characters } from '../../db/schema';
@@ -161,17 +161,46 @@ export class ProposalRecordsService {
     return row;
   }
 
+  /**
+   * Atomically transition a proposal from `pending` to `approved`/`rejected`.
+   * This is a compare-and-set: the `AND status='pending'` guard means SQLite
+   * only touches the row if it is still pending, and `.returning()` reports
+   * whether that row actually changed. Two concurrent approve/reject calls (DM
+   * double-click, or web + MCP agent) therefore can't both win — exactly one
+   * gets the row back; the other gets `null` and the caller raises 409. This
+   * is the linchpin of the fix for issue #85: the status flip is the single
+   * point of serialization, so the entity write downstream applies at most once.
+   *
+   * Returns the resolved domain row, or `null` if the proposal was not pending
+   * (already resolved, or lost the race to a concurrent resolver).
+   */
   async markResolved(
     id: number,
     status: 'approved' | 'rejected',
     note: string,
     user: RequestUser,
-  ): Promise<Proposal> {
+  ): Promise<Proposal | null> {
     const [row] = await this.db
       .update(proposals)
       .set({ status, resolvedBy: auditActor(user), note, updatedAt: nowIso() })
-      .where(eq(proposals.id, id))
+      .where(and(eq(proposals.id, id), eq(proposals.status, 'pending')))
       .returning();
-    return toDomain(row);
+    return row ? toDomain(row) : null;
+  }
+
+  /**
+   * Roll a claimed proposal back to `pending` (see ProposalsService.approve):
+   * approve claims the row first, then applies the entity write. If that write
+   * throws, this undoes the claim so the proposal is re-approvable rather than
+   * stranded as `approved` with no write applied. Guarded on `status='approved'`
+   * so it only ever reverts a claim this request made, never someone else's
+   * resolution.
+   */
+  async revertToPending(id: number): Promise<void> {
+    await this.db
+      .update(proposals)
+      .set({ status: 'pending', resolvedBy: '', note: '', updatedAt: nowIso() })
+      .where(and(eq(proposals.id, id), eq(proposals.status, 'approved')))
+      .returning();
   }
 }
