@@ -10,6 +10,7 @@ export interface OidcEnvConfig {
   clientSecret: string;
   redirectUri: string;
   adminGroup: string | null;
+  allowedGroup: string | null;
   groupsClaim: string;
   scope: string;
 }
@@ -26,10 +27,11 @@ export function readOidcEnvConfig(): OidcEnvConfig | null {
 
   const redirectUri = process.env.OIDC_REDIRECT_URI?.trim() || `${appUrl()}/api/v1/auth/oidc/callback`;
   const adminGroup = process.env.OIDC_ADMIN_GROUP?.trim() || null;
+  const allowedGroup = process.env.OIDC_ALLOWED_GROUP?.trim() || null;
   const groupsClaim = process.env.OIDC_GROUPS_CLAIM?.trim() || 'groups';
   const scope = process.env.OIDC_SCOPE?.trim() || 'openid profile email';
 
-  return { issuer, clientId, clientSecret, redirectUri, adminGroup, groupsClaim, scope };
+  return { issuer, clientId, clientSecret, redirectUri, adminGroup, allowedGroup, groupsClaim, scope };
 }
 
 export function oidcEnabled(): boolean {
