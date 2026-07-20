@@ -30,6 +30,7 @@ import {
   SessionCreate,
   SessionUpdate,
   XpAward,
+  AiDmTurnKind,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -47,6 +48,7 @@ import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
+import { AiDmService } from '../ai-dm/ai-dm.service';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -123,12 +125,6 @@ const LimitArg = (max: number, fallback: number) =>
   z.number().int().positive().max(max).optional().describe(`Max rows to return (default ${fallback}, max ${max})`);
 const OffsetArg = z.number().int().nonnegative().optional().describe('Rows to skip, for paging (default 0)');
 
-function paginate<T>(rows: T[], limit: number | undefined, offset: number | undefined): T[] {
-  const start = offset ?? 0;
-  const sliced = rows.slice(start);
-  return limit !== undefined ? sliced.slice(0, limit) : sliced;
-}
-
 /**
  * Deep-clone a zod schema so every node gets a fresh `_def` object.
  *
@@ -195,6 +191,7 @@ export class McpToolsService {
     private readonly encounters: EncountersService,
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
+    private readonly aiDm: AiDmService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
@@ -404,8 +401,11 @@ export class McpToolsService {
       { campaignId: CampaignIdArg, limit: LimitArg(100, 100), offset: OffsetArg },
       async ({ campaignId, limit, offset }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        const list = await this.sessions.listForCampaign(campaignId as number, role);
-        return paginate(list, limit as number | undefined, offset as number | undefined);
+        // issue #71: limit/offset pushed into SQL (was rows.slice() after a full read).
+        return this.sessions.listRecapsForCampaign(campaignId as number, role, {
+          limit: limit as number | undefined,
+          offset: offset as number | undefined,
+        });
       },
     );
 
@@ -458,10 +458,19 @@ export class McpToolsService {
       'DM only: list player inbox items for a campaign — messages players sent up via submit_inbox_item. ' +
         'Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest first), ' +
         'including any entity link each item was resolved into.',
-      { campaignId: CampaignIdArg, resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones') },
-      async ({ campaignId, resolved }) => {
+      {
+        campaignId: CampaignIdArg,
+        resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones'),
+        limit: LimitArg(200, 200),
+        offset: OffsetArg,
+      },
+      async ({ campaignId, resolved, limit, offset }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        return this.notes.listInbox(campaignId as number, (resolved as boolean | undefined) ?? false);
+        // issue #71: limit/offset pushed into SQL.
+        return this.notes.listInbox(campaignId as number, (resolved as boolean | undefined) ?? false, {
+          limit: limit as number | undefined,
+          offset: offset as number | undefined,
+        });
       },
     );
 
@@ -558,12 +567,14 @@ export class McpToolsService {
       },
       async ({ campaignId, entityType, entityId, mine, limit, offset }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        const list = await this.notes.listForCampaign(campaignId as number, user, role, {
+        // issue #71: limit/offset pushed into SQL (was rows.slice() after a full read).
+        return this.notes.listForCampaign(campaignId as number, user, role, {
           entityType: entityType as string | undefined,
           entityId: entityId as number | undefined,
           mine: mine as boolean | undefined,
+          limit: limit as number | undefined,
+          offset: offset as number | undefined,
         });
-        return paginate(list, limit as number | undefined, offset as number | undefined);
       },
     );
 
@@ -571,10 +582,15 @@ export class McpToolsService {
       server,
       'read_audit_log',
       'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven actions.',
-      { campaignId: CampaignIdArg, limit: LimitArg(500, 100) },
-      async ({ campaignId, limit }) => {
+      { campaignId: CampaignIdArg, limit: LimitArg(500, 100), offset: OffsetArg },
+      async ({ campaignId, limit, offset }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        return this.audit.listForCampaign(campaignId as number, (limit as number | undefined) ?? 100);
+        // issue #71: offset pages back through history the cap-100 previously hid.
+        return this.audit.listForCampaign(
+          campaignId as number,
+          (limit as number | undefined) ?? 100,
+          (offset as number | undefined) ?? 0,
+        );
       },
     );
 
@@ -588,6 +604,19 @@ export class McpToolsService {
       async ({ campaignId }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.exportService.buildExport(campaignId as number, user);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_ai_dm_seat',
+      'EXPERIMENTAL (issue #28): read the AI Dungeon Master seat for a campaign — whether an AI holds the DM seat, its ' +
+        'persona/instructions, and the per-campaign token budget/usage. Requires membership. A connected agent that is ' +
+        'meant to run the game reads this first to learn its instructions and remaining budget before ai_dm_narrate.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.aiDm.getSeat(campaignId as number);
       },
     );
   }
@@ -1402,6 +1431,35 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.encounters.end(encounterId as number, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'ai_dm_narrate',
+      'EXPERIMENTAL (issue #28): the AI Dungeon Master takes a turn. DM role required (the AI holds the DM seat), the ' +
+        'server-wide experimental flag must be on, the seat must be enabled, and the per-campaign token budget must not ' +
+        'be exhausted (otherwise a forbidden error). Narration is produced by the server\'s injected AI_DM_PROVIDER — the ' +
+        'shipped default is a no-op scaffold that makes NO vendor call, so in a stock install this returns a placeholder ' +
+        'and it is the connected agent (you) that authors the real narration and drives the other write tools. Metered ' +
+        'against the budget and audited as ai-dm.',
+      {
+        campaignId: CampaignIdArg,
+        prompt: z.string().min(1).max(20_000).describe('The situation / what the players just did, for the DM to respond to'),
+        kind: AiDmTurnKind.optional().describe("Turn kind: 'narrate' (default), 'combat', or 'recap'"),
+        maxTokens: z.number().int().min(1).max(4096).optional().describe('Optional cap on this turn\'s output tokens (clamped to remaining budget)'),
+      },
+      async ({ campaignId, prompt, kind, maxTokens }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.aiDm.takeTurn(
+          campaignId as number,
+          {
+            prompt: prompt as string,
+            kind: (kind as AiDmTurnKind | undefined) ?? 'narrate',
+            ...(maxTokens !== undefined ? { maxTokens: maxTokens as number } : {}),
+          },
+          user,
+        );
       },
     );
   }
