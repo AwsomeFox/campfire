@@ -139,6 +139,52 @@ export class ExportService {
     };
   }
 
+  /**
+   * Member-scoped export (issue #128 player data rights): the data a SINGLE
+   * member authored / owns in a campaign, so a player can take THEIR OWN copy
+   * without the DM's campaign-wide export (which is dm-only and exposes every
+   * member's private notes + dmSecret fields). Deliberately narrow:
+   *
+   *  - characters they own (characters.ownerUserId === their id),
+   *  - notes they can see that are THEIRS (authorUserId === their id — reuses
+   *    NotesService's own `mine` filter, so visibility rules still apply),
+   *  - proposals they submitted (proposer === their id).
+   *
+   * No dmSecret, no other members' data, no audit/members roster. `role` is the
+   * caller's effective role, threaded through to the character/notes services so
+   * a dm calling their own member export sees the same owner-scoped slice.
+   */
+  async buildMemberExport(campaignId: number, user: RequestUser, role: 'dm' | 'player' | 'viewer') {
+    const [campaign, characterList, noteList, proposalList] = await Promise.all([
+      this.campaigns.getOrThrow(campaignId),
+      this.characters.listForCampaign(campaignId, role),
+      this.notes.listForCampaign(campaignId, user, role, { mine: true }),
+      this.proposals.listForCampaign(campaignId, undefined),
+    ]);
+
+    const ownCharacters = characterList.filter((c) => c.ownerUserId === user.id);
+    const ownProposals = proposalList.filter((p) => p.proposer === user.id);
+
+    return {
+      campaign: { id: campaign.id, name: campaign.name, description: campaign.description, status: campaign.status },
+      exportedFor: { userId: user.id, name: user.name, role },
+      characters: ownCharacters,
+      notes: noteList,
+      proposals: ownProposals,
+      note:
+        'This is a MEMBER-scoped export — only the characters you own, the notes you authored, and the ' +
+        'proposals you submitted in this campaign. It intentionally excludes DM secrets, other members’ ' +
+        'private data, and the campaign-wide bundle (that export is DM-only).',
+    };
+  }
+
+  /** Filename for a member's own-data export — includes the member id so multiple members' files don't collide. */
+  memberExportFilename(campaignName: string, userId: string): string {
+    const slug = slugify(campaignName);
+    const date = new Date().toISOString().slice(0, 10);
+    return `campfire-${slug}-member-${slugify(userId)}-${date}.json`;
+  }
+
   exportFilename(campaignName: string, extension: 'json' | 'zip'): string {
     const slug = slugify(campaignName);
     const date = new Date().toISOString().slice(0, 10);
