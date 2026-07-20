@@ -10,6 +10,7 @@
     "dev": "concurrently -n server,web -c yellow,cyan \"npm run dev -w apps/server\" \"npm run dev -w apps/web\"",
     "build": "npm run build -w packages/schema && npm run build -w apps/server && npm run build -w apps/web",
     "test": "npm run test -w apps/server",
+    "test:cov": "npm run test:cov -w apps/server",
     "lint": "npm run lint --workspaces --if-present"
   },
   "devDependencies": {
