@@ -552,13 +552,17 @@ export class CampaignsService {
     const encounterIds = encounterRows.map((r) => r.id);
 
     this.db.transaction((tx) => {
-      for (const questId of questIds) {
-        tx.delete(questObjectives).where(eq(questObjectives.questId, questId)).run();
+      // Delete all objectives / combatants for this campaign's quests / encounters in
+      // one statement each (#72) via `WHERE quest_id IN (...)` / `encounter_id IN (...)`,
+      // rather than a DELETE per parent row. Guard the empty case: `inArray(col, [])`
+      // would be a degenerate/invalid IN clause, and there's nothing to delete anyway.
+      if (questIds.length > 0) {
+        tx.delete(questObjectives).where(inArray(questObjectives.questId, questIds)).run();
       }
       tx.delete(quests).where(eq(quests.campaignId, id)).run();
 
-      for (const encounterId of encounterIds) {
-        tx.delete(combatants).where(eq(combatants.encounterId, encounterId)).run();
+      if (encounterIds.length > 0) {
+        tx.delete(combatants).where(inArray(combatants.encounterId, encounterIds)).run();
       }
       tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
 
