@@ -372,3 +372,14 @@ h1, h2, h3, h4, h5, h6 {
     display: none;
   }
 }
+
+/* Auto-linked @-mentions inside rendered markdown (issue #64). */
+.cf-mention {
+  color: var(--color-accent);
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in srgb, var(--color-accent) 55%, transparent);
+  cursor: pointer;
+}
+.cf-mention:hover {
+  border-bottom-style: solid;
+}
