@@ -43,6 +43,17 @@ export type Campaign = z.infer<typeof Campaign>;
 export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
+// Clone/template input — POST /campaigns/:id/clone.
+//  - 'full': faithful duplicate (everything except members, attachments and audit/proposals/tokens)
+//  - 'template': prep only (quests reset to available, objectives unchecked, npcs, locations
+//    reset to unexplored) — play state (sessions, notes, encounters, characters, session count,
+//    current party location) is stripped so the copy starts fresh.
+export const CampaignCloneMode = z.enum(['full', 'template']);
+export const CampaignClone = z.object({
+  name: z.string().min(1).max(120).optional(), // defaults server-side to "<source name> (copy)"
+  mode: CampaignCloneMode.default('full'),
+});
+
 // ---------- character ----------
 export const Character = z.object({
   id: Id,
@@ -480,6 +491,7 @@ export type RollResult = z.infer<typeof RollResult>;
 // ---------- audit ----------
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
 export type DangerLevel = z.infer<typeof DangerLevel>;
+export type CampaignCloneMode = z.infer<typeof CampaignCloneMode>;
 export type QuestStatus = z.infer<typeof QuestStatus>;
 export type LocationStatus = z.infer<typeof LocationStatus>;
 export type NoteVisibility = z.infer<typeof NoteVisibility>;
