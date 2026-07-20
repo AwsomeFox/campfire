@@ -12,6 +12,7 @@ export function Toggle({
   onChange,
   disabled = false,
   label,
+  title,
   size = 17,
   className,
   style,
@@ -20,6 +21,8 @@ export function Toggle({
   onChange: () => void;
   disabled?: boolean;
   label?: string;
+  /** Native tooltip — handy for explaining why the control is disabled. */
+  title?: string;
   size?: number;
   className?: string;
   style?: CSSProperties;
@@ -38,6 +41,7 @@ export function Toggle({
       role="checkbox"
       aria-checked={checked}
       aria-label={label}
+      title={title}
       tabIndex={disabled ? -1 : 0}
       disabled={disabled}
       onClick={() => !disabled && onChange()}

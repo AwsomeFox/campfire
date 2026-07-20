@@ -85,6 +85,31 @@ export const questObjectives = sqliteTable('quest_objectives', {
   sortOrder: integer('sort_order').notNull().default(0),
 });
 
+// Timeline (in-world calendar / campaign timeline) — issue #63. Standalone module.
+export const timelineEvents = sqliteTable('timeline_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  title: text('title').notNull(),
+  inWorldDate: text('in_world_date').notNull().default(''),
+  body: text('body').notNull().default(''),
+  era: text('era').notNull().default(''),
+  sortIndex: integer('sort_index').notNull().default(0),
+  dmSecret: text('dm_secret').notNull().default(''),
+  hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// One "current in-world date" row per campaign (the issue's honest v0). campaignId
+// is UNIQUE so the module upserts rather than accumulating rows.
+export const timelineCalendars = sqliteTable('timeline_calendars', {
+  campaignId: integer('campaign_id').primaryKey(),
+  currentDate: text('current_date').notNull().default(''),
+  note: text('note').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const npcs = sqliteTable('npcs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
