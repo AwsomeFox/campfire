@@ -162,4 +162,85 @@ describe('api tokens (e2e, real cookie sessions)', () => {
       expect(createRes.body.apiToken.campaignId).toBe(campaignId);
     });
   });
+
+  // Issue #55 pinning tests — see AuthService.buildMe(). /me under a PAT must
+  // report the TOKEN's effective (capped) view, not the owner's raw memberships:
+  // roles capped to min(scope, membership role), campaign-bound tokens listing
+  // only their campaign, plus a `token` block with the effective server-admin bit.
+  describe('Issue #55: /me reflects the token\'s effective (capped) scope', () => {
+    it('viewer-scoped token owned by a dm: memberships show viewer (capped), token block present', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const createRes = await dmAgent.post('/api/v1/tokens').send({ name: 'me-viewer-scoped', scope: 'viewer' });
+      expect(createRes.status).toBe(201);
+
+      const meRes = await request(server).get('/api/v1/me').set('Authorization', `Bearer ${createRes.body.token}`);
+      expect(meRes.status).toBe(200);
+      expect(meRes.body.memberships.length).toBeGreaterThan(0);
+      for (const m of meRes.body.memberships) {
+        expect(m.role).toBe('viewer'); // raw role is 'dm' — the cap must show through
+      }
+      expect(meRes.body.token).toEqual({
+        tokenId: createRes.body.apiToken.id,
+        name: 'me-viewer-scoped',
+        scope: 'viewer',
+        campaignId: null,
+        adminEnabled: false,
+        serverAdmin: false, // owner IS a server admin, but the token was not minted adminEnabled
+      });
+    });
+
+    it('campaign-bound token: /me lists ONLY the bound campaign, role capped to the token scope', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const createRes = await dmAgent.post('/api/v1/tokens').send({ name: 'me-bound-player', scope: 'player', campaignId });
+      expect(createRes.status).toBe(201);
+
+      const meRes = await request(server).get('/api/v1/me').set('Authorization', `Bearer ${createRes.body.token}`);
+      expect(meRes.status).toBe(200);
+      // dmAgent is a dm member of several campaigns, but a bound token only sees its own.
+      expect(meRes.body.memberships).toEqual([
+        expect.objectContaining({ campaignId, role: 'player' }),
+      ]);
+      expect(meRes.body.token).toMatchObject({ scope: 'player', campaignId, serverAdmin: false });
+    });
+
+    it('token scope above the membership role does not inflate it: dm-scoped token of a player still shows player', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // token-other becomes a player in campaignId, then mints a dm-scoped token.
+      const otherMe = await otherAgent.get('/api/v1/me');
+      const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: otherMe.body.user.id, role: 'player' });
+      expect(addRes.status).toBe(201);
+
+      const createRes = await otherAgent.post('/api/v1/tokens').send({ name: 'me-player-dm-scoped', scope: 'dm' });
+      expect(createRes.status).toBe(201);
+
+      const meRes = await request(server).get('/api/v1/me').set('Authorization', `Bearer ${createRes.body.token}`);
+      expect(meRes.status).toBe(200);
+      const membership = meRes.body.memberships.find((m: { campaignId: number }) => m.campaignId === campaignId);
+      expect(membership.role).toBe('player'); // min(dm scope, player membership) = player
+      expect(meRes.body.token).toMatchObject({ scope: 'dm', campaignId: null, adminEnabled: false, serverAdmin: false });
+    });
+
+    it('adminEnabled token minted by a real admin reports serverAdmin: true', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const createRes = await dmAgent.post('/api/v1/tokens').send({ name: 'me-admin-enabled', scope: 'dm', adminEnabled: true });
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.apiToken.adminEnabled).toBe(true);
+
+      const meRes = await request(server).get('/api/v1/me').set('Authorization', `Bearer ${createRes.body.token}`);
+      expect(meRes.status).toBe(200);
+      expect(meRes.body.token).toMatchObject({ adminEnabled: true, serverAdmin: true });
+    });
+
+    it('cookie session /me is unchanged: raw membership roles, no token block', async () => {
+      const meRes = await dmAgent.get('/api/v1/me');
+      expect(meRes.status).toBe(200);
+      expect(meRes.body.token).toBeUndefined();
+      const membership = meRes.body.memberships.find((m: { campaignId: number }) => m.campaignId === campaignId);
+      expect(membership.role).toBe('dm');
+    });
+  });
 });

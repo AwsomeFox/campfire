@@ -623,9 +623,31 @@ export const InviteAccept = z.object({
 });
 export type InviteAccept = z.infer<typeof InviteAccept>;
 
+// Present on Me only when the request authenticated via a PAT (Authorization:
+// Bearer cf_pat_...). Describes what THAT token can actually do, so /me is
+// truthful for debugging scoped AI access (issue #55): `scope` caps every
+// per-campaign role, `campaignId` (when set) restricts the token to one
+// campaign, and `serverAdmin` is the token's EFFECTIVE server-admin power
+// (owner is a server admin AND the token was minted adminEnabled) — see
+// hasServerAdminPower() on the server.
+export const MeToken = z.object({
+  tokenId: Id,
+  name: z.string(),
+  scope: Role,
+  campaignId: Id.nullable(),
+  adminEnabled: z.boolean(),
+  serverAdmin: z.boolean(),
+});
+export type MeToken = z.infer<typeof MeToken>;
+
 export const Me = z.object({
   user: User,
+  // When `token` is present (PAT auth), memberships reflect the token's
+  // EFFECTIVE view: role is capped to min(token scope, membership role) and a
+  // campaign-bound token only lists that campaign. Cookie sessions see raw
+  // membership roles and no `token` field.
   memberships: z.array(z.object({ campaignId: Id, role: Role, characterId: Id.nullable() })),
+  token: MeToken.optional(),
 });
 export type Me = z.infer<typeof Me>;
 
