@@ -421,6 +421,59 @@ export const CalendarFeed = z.object({
 });
 export type CalendarFeed = z.infer<typeof CalendarFeed>;
 
+// ---------- timeline (in-world calendar / campaign timeline) — issue #63 ----------
+// The real-world Session.playedAt tells you WHEN a table met; it says nothing about
+// the in-fiction date ("the 3rd of Flamerule, 1492 DR"). This is a standalone module:
+// a DM sequences in-world events on a campaign timeline, each carrying a free-text
+// in-world date (fantasy calendars aren't ISO-parseable) plus a DM-controlled
+// `sortIndex` so the timeline orders by narrative sequence, not by that unsortable
+// string. Canon-entity secrecy conventions apply: `dmSecret` is stripped for non-DM,
+// and a `hidden` event is dropped WHOLESALE from every non-DM read (prep for a reveal).
+export const TimelineEvent = z.object({
+  id: Id,
+  campaignId: Id,
+  title: z.string().min(1).max(200),
+  // Free-text in-fiction date, e.g. "3rd of Flamerule, 1492 DR". Empty = undated
+  // (a floating "sometime around here" beat the DM can still sequence via sortIndex).
+  inWorldDate: z.string().max(200).default(''),
+  body: z.string().max(50_000).default(''), // markdown
+  // Optional era/age grouping ("Age of Chains", "Second Era") — a light bucket the
+  // timeline view can header on; free text, no enum (every world names its ages).
+  era: z.string().max(120).default(''),
+  // DM-controlled ordering along the timeline. Free-text dates can't be sorted, so
+  // the timeline reads by this (ascending), id as a stable tiebreaker.
+  sortIndex: z.number().int().default(0),
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
+  // Entity-level secrecy (issue #42 convention): a hidden event is excluded WHOLESALE
+  // from every non-DM read until the DM reveals it (hidden=false).
+  hidden: z.boolean().default(false),
+  ...timestamps,
+});
+export type TimelineEvent = z.infer<typeof TimelineEvent>;
+export const TimelineEventCreate = TimelineEvent.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ title: true });
+export type TimelineEventCreate = z.infer<typeof TimelineEventCreate>;
+export const TimelineEventUpdate = TimelineEventCreate.partial();
+export type TimelineEventUpdate = z.infer<typeof TimelineEventUpdate>;
+
+// The "honest v0" from the issue: one free-text "current in-world date" per campaign
+// ("It is presently the 3rd of Flamerule, 1492 DR"), plus an optional calendar note
+// (month names, moon phases, whatever the DM wants to remember). Stored in the
+// timeline module's own single-row-per-campaign table so it touches nothing else.
+export const TimelineCalendar = z.object({
+  campaignId: Id,
+  currentDate: z.string().max(200).default(''),
+  note: z.string().max(4000).default(''), // markdown — calendar reference / month list
+  ...timestamps,
+});
+export type TimelineCalendar = z.infer<typeof TimelineCalendar>;
+export const TimelineCalendarUpdate = z.object({
+  currentDate: z.string().max(200).optional(),
+  note: z.string().max(4000).optional(),
+});
+export type TimelineCalendarUpdate = z.infer<typeof TimelineCalendarUpdate>;
+
 // ---------- notes ----------
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
 export const NoteKind = z.enum(['note', 'inbox']);
