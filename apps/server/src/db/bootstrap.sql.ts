@@ -149,6 +149,17 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   last_seen_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS password_reset_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  code_hash TEXT UNIQUE,
+  requested_at TEXT NOT NULL,
+  approved_at TEXT,
+  approved_by TEXT NOT NULL DEFAULT '',
+  expires_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -267,6 +278,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_audit_campaign ON audit_log(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);

@@ -283,6 +283,39 @@ export const PreferencesUpdate = z.object({
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 
+// ---------- forgot-password / self-service reset ----------
+// The server may have no mail transport, so the reset path is admin-approved:
+// a user files a reset request from the login screen (POST /auth/reset-request,
+// @Public — always 202, no user-enumeration signal), a server admin approves it
+// and receives a ONE-TIME reset code (stored hashed, short expiry) to hand to
+// the user out-of-band, and the user redeems it (POST /auth/reset-confirm) to
+// set a new password without the admin ever learning it.
+export const PasswordResetRequestCreate = z.object({ username: z.string().min(1).max(60) });
+export type PasswordResetRequestCreate = z.infer<typeof PasswordResetRequestCreate>;
+
+export const PasswordResetStatus = z.enum(['pending', 'approved']);
+export type PasswordResetStatus = z.infer<typeof PasswordResetStatus>;
+
+export const PasswordResetRequest = z.object({
+  id: Id,
+  userId: Id,
+  username: z.string().default(''), // denormalized for display
+  displayName: z.string().default(''),
+  status: PasswordResetStatus,
+  requestedAt: IsoDate,
+  approvedAt: IsoDate.nullable().default(null),
+  expiresAt: IsoDate.nullable().default(null), // set when approved — code is dead past this
+}); // codeHash never leaves the server
+export type PasswordResetRequest = z.infer<typeof PasswordResetRequest>;
+
+// Admin approval response — `code` is returned ONCE, stored hashed.
+export const PasswordResetApproval = z.object({ code: z.string(), expiresAt: IsoDate, request: PasswordResetRequest });
+export type PasswordResetApproval = z.infer<typeof PasswordResetApproval>;
+
+// code capped like passwords — this is an UNauthenticated path (see LoginRequest note above).
+export const PasswordResetConfirm = z.object({ code: z.string().min(1).max(200), newPassword: Password });
+export type PasswordResetConfirm = z.infer<typeof PasswordResetConfirm>;
+
 export const AuthStatus = z.object({
   setupRequired: z.boolean(), // true until the first (admin) user exists
   localLoginEnabled: z.boolean(), // for non-admin users (admins can always log in locally)
