@@ -330,6 +330,38 @@ describe('characters (e2e)', () => {
     expect(dmGet.body.dmSecret).toBe('');
   });
 
+  // Issue #48: stats keys are normalized to canonical uppercase on write, so a writer
+  // that submits lowercase keys ({ str: 16 }) can't produce a sheet that reads all 10s.
+  it('stats keys are normalized to uppercase on create', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Lowercase Paladin', stats: { str: 16, dex: 12, con: 14 } });
+    expect(res.status).toBe(201);
+    expect(res.body.stats).toEqual({ STR: 16, DEX: 12, CON: 14 });
+  });
+
+  it('stats keys are normalized to uppercase on PATCH', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(dm)
+      .send({ stats: { str: 8, wis: 18 } });
+    expect(res.status).toBe(200);
+    expect(res.body.stats).toEqual({ STR: 8, WIS: 18 });
+  });
+
+  it('an exact-uppercase key wins over a lowercase duplicate', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(dm)
+      .send({ stats: { STR: 20, str: 3 } });
+    expect(res.status).toBe(200);
+    expect(res.body.stats.STR).toBe(20);
+  });
+
   it('conditions add/remove', async () => {
     const server = ctx.app.getHttpServer();
     const addRes = await request(server)
