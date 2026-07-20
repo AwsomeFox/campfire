@@ -189,22 +189,37 @@ export class NotesService {
     return toDomain(row);
   }
 
-  /** dm; open (unresolved) inbox items */
-  async listInbox(campaignId: number): Promise<Note[]> {
+  /**
+   * dm; inbox items. Defaults to open (unresolved) items; pass `resolved: true`
+   * for the resolved history (newest resolution first).
+   */
+  async listInbox(campaignId: number, resolved = false): Promise<Note[]> {
     const rows = await this.db
       .select()
       .from(notes)
-      .where(and(eq(notes.campaignId, campaignId), eq(notes.kind, 'inbox'), eq(notes.resolved, false)));
+      .where(and(eq(notes.campaignId, campaignId), eq(notes.kind, 'inbox'), eq(notes.resolved, resolved)));
+    if (resolved) rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return rows.map(toDomain);
   }
 
+  /**
+   * Resolving may link the entity the item became (entityType/entityId) — shown
+   * in the resolved-history view. The link is soft (not FK-validated), same as
+   * regular note entity anchors.
+   */
   async resolveInbox(id: number, input: InboxResolveInput, user: RequestUser, role: Role): Promise<Note> {
     const existing = await this.getRowOrThrow(id);
     if (existing.kind !== 'inbox') throw new NotFoundException(`Inbox item ${id} not found`);
 
     const [row] = await this.db
       .update(notes)
-      .set({ resolved: true, resolvedNote: input.resolvedNote ?? '', updatedAt: nowIso() })
+      .set({
+        resolved: true,
+        resolvedNote: input.resolvedNote ?? '',
+        entityType: input.entityType ?? null,
+        entityId: input.entityId ?? null,
+        updatedAt: nowIso(),
+      })
       .where(eq(notes.id, id))
       .returning();
 

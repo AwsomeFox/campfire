@@ -186,3 +186,133 @@ describe('inbox authorName spoofing (e2e, real cookie sessions)', () => {
     expect(res.body.authorName).not.toBe('The DM');
   });
 });
+
+/**
+ * Issue #36: resolved-item history. Resolving may link the entity the item became
+ * (entityType + entityId); GET /campaigns/:cid/inbox?resolved=true lists resolved
+ * items (newest resolution first) so the DM has a history view.
+ */
+describe('inbox resolved history (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const res = await request(ctx.app.getHttpServer())
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Inbox History Campaign' });
+    campaignId = res.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function submitInbox(body: string): Promise<number> {
+    const res = await request(ctx.app.getHttpServer())
+      .post(`/api/v1/campaigns/${campaignId}/inbox`)
+      .set(authorPlayer)
+      .send({ body });
+    expect(res.status).toBe(201);
+    return res.body.id;
+  }
+
+  it('resolve with an entity link stores it; resolved list shows it, open list does not', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const questRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Track down the smugglers' });
+    expect(questRes.status).toBe(201);
+    const questId = questRes.body.id;
+
+    const inboxId = await submitInbox('The harbormaster mentioned smugglers');
+
+    const resolveRes = await request(server)
+      .post(`/api/v1/notes/${inboxId}/resolve`)
+      .set(dm)
+      .send({ resolvedNote: 'Became a quest', entityType: 'quest', entityId: questId });
+    expect(resolveRes.status).toBe(201);
+    expect(resolveRes.body.resolved).toBe(true);
+    expect(resolveRes.body.entityType).toBe('quest');
+    expect(resolveRes.body.entityId).toBe(questId);
+
+    // gone from the open list
+    const openList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
+    expect(openList.status).toBe(200);
+    expect(openList.body.some((n: { id: number }) => n.id === inboxId)).toBe(false);
+
+    // present in the resolved history, with note + entity link intact
+    const resolvedList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
+    expect(resolvedList.status).toBe(200);
+    const item = resolvedList.body.find((n: { id: number }) => n.id === inboxId);
+    expect(item).toBeDefined();
+    expect(item.resolved).toBe(true);
+    expect(item.resolvedNote).toBe('Became a quest');
+    expect(item.entityType).toBe('quest');
+    expect(item.entityId).toBe(questId);
+  });
+
+  it('resolve without an entity link still lands in history with a null link', async () => {
+    const server = ctx.app.getHttpServer();
+    const inboxId = await submitInbox('Just a question, no entity');
+
+    const resolveRes = await request(server)
+      .post(`/api/v1/notes/${inboxId}/resolve`)
+      .set(dm)
+      .send({ resolvedNote: 'Answered at the table' });
+    expect(resolveRes.status).toBe(201);
+    expect(resolveRes.body.entityType).toBeNull();
+    expect(resolveRes.body.entityId).toBeNull();
+
+    const resolvedList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
+    const item = resolvedList.body.find((n: { id: number }) => n.id === inboxId);
+    expect(item).toBeDefined();
+    expect(item.resolvedNote).toBe('Answered at the table');
+    expect(item.entityType).toBeNull();
+  });
+
+  it('resolved history is sorted newest resolution first', async () => {
+    const server = ctx.app.getHttpServer();
+    const firstId = await submitInbox('Resolved first');
+    const secondId = await submitInbox('Resolved second');
+
+    await request(server).post(`/api/v1/notes/${firstId}/resolve`).set(dm).send({ resolvedNote: 'one' });
+    // ensure a distinct updatedAt timestamp for the second resolution
+    await new Promise((r) => setTimeout(r, 5));
+    await request(server).post(`/api/v1/notes/${secondId}/resolve`).set(dm).send({ resolvedNote: 'two' });
+
+    const resolvedList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
+    const ids: number[] = resolvedList.body.map((n: { id: number }) => n.id);
+    expect(ids.indexOf(secondId)).toBeLessThan(ids.indexOf(firstId));
+  });
+
+  it('entityType without entityId (and vice versa) is rejected', async () => {
+    const server = ctx.app.getHttpServer();
+    const inboxId = await submitInbox('Half-linked resolution attempt');
+
+    const missingId = await request(server)
+      .post(`/api/v1/notes/${inboxId}/resolve`)
+      .set(dm)
+      .send({ resolvedNote: 'oops', entityType: 'quest' });
+    expect(missingId.status).toBe(400);
+
+    const missingType = await request(server)
+      .post(`/api/v1/notes/${inboxId}/resolve`)
+      .set(dm)
+      .send({ resolvedNote: 'oops', entityId: 1 });
+    expect(missingType.status).toBe(400);
+
+    // item is still open after the failed attempts
+    const openList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
+    expect(openList.body.some((n: { id: number }) => n.id === inboxId)).toBe(true);
+  });
+
+  it('non-dm cannot list the resolved history', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(authorPlayer);
+    expect(res.status).toBe(403);
+  });
+});
