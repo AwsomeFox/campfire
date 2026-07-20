@@ -1,4 +1,4 @@
-import { Global, Module } from '@nestjs/common';
+import { Global, Injectable, Module } from '@nestjs/common';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -8,6 +8,9 @@ import * as schema from './schema';
 
 export const DB = Symbol('DB');
 export type DrizzleDb = BetterSQLite3Database<typeof schema>;
+
+/** Injection token for the DbHolder (raw better-sqlite3 handle + reopen()), used by the backup/restore module. */
+export const DB_HOLDER = Symbol('DB_HOLDER');
 
 /** Injection token for whether the FTS5 extension is available on this SQLite build (see RulesService). */
 export const RULE_ENTRIES_FTS_AVAILABLE = Symbol('RULE_ENTRIES_FTS_AVAILABLE');
@@ -323,17 +326,62 @@ function migrateEncountersTableForCurrentCombatant(sqlite: Database.Database): v
   sqlite.exec('ALTER TABLE encounters ADD COLUMN current_combatant_id INTEGER');
 }
 
-// Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
-// provider below — both providers must derive from the same sqlite.exec()
-// probe (asking twice could disagree if it were ever non-deterministic).
-let ruleEntriesFtsAvailable = false;
+/**
+ * Migration for DBs created before entity-level secrecy (issue #42):
+ * `quests.hidden` / `npcs.hidden` didn't exist. Plain NOT NULL DEFAULT 0 ADD
+ * COLUMNs — no table rebuild needed, same as migrateCharactersTableForXp above.
+ * Defaulting to 0 (false = visible) preserves the pre-migration behavior for
+ * existing rows (nothing suddenly disappears from players); the DM opts a given
+ * entity into secrecy by setting hidden=true. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateQuestsTableForHidden(sqlite: Database.Database): void {
+  const hasQuestsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='quests'")
+    .get();
+  if (!hasQuestsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
 
-export function createDb(): DrizzleDb {
-  const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', 'data');
+  const columns = sqlite.prepare('PRAGMA table_info(quests)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'hidden')) return;
+
+  sqlite.exec('ALTER TABLE quests ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+}
+
+function migrateNpcsTableForHidden(sqlite: Database.Database): void {
+  const hasNpcsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='npcs'")
+    .get();
+  if (!hasNpcsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(npcs)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'hidden')) return;
+
+  sqlite.exec('ALTER TABLE npcs ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+}
+
+/** Absolute path to the SQLite DB file for a given data dir. */
+export function dbFilePath(dataDir: string): string {
+  return path.join(dataDir, 'campfire.db');
+}
+
+/** Resolve DATA_DIR the same way the app does (env override, else repo-local data/). */
+export function resolveDataDir(): string {
+  return process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', 'data');
+}
+
+/**
+ * Open (creating + migrating if needed) the SQLite DB under `dataDir` and wrap
+ * it in a drizzle instance. Returns the raw handle too so callers that need to
+ * VACUUM INTO / close it (the backup/restore module) can reach it. Extracted
+ * from the old `createDb()` so DbHolder can call it again on a live restore.
+ */
+export function openDatabase(dataDir: string): {
+  sqlite: Database.Database;
+  orm: DrizzleDb;
+  ftsAvailable: boolean;
+} {
   fs.mkdirSync(dataDir, { recursive: true });
-  const dbPath = path.join(dataDir, 'campfire.db');
-
-  const sqlite = new Database(dbPath);
+  const sqlite = new Database(dbFilePath(dataDir));
   sqlite.pragma('journal_mode = WAL');
   migrateUsersTableForOidc(sqlite);
   migrateCampaignsTableForRuleSystem(sqlite);
@@ -348,25 +396,83 @@ export function createDb(): DrizzleDb {
   migrateCharactersTableForDmSecret(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
+  migrateQuestsTableForHidden(sqlite);
+  migrateNpcsTableForHidden(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
-  // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync. This is
   // also how index-only migrations reach existing DBs: e.g. #74's
   // idx_audit_campaign_id_desc / idx_audit_created_at are picked up on the
   // next boot with no bespoke ALTER migration needed.
-  ruleEntriesFtsAvailable = setupRuleEntriesFts(sqlite);
+  const ftsAvailable = setupRuleEntriesFts(sqlite);
+  return { sqlite, orm: drizzle(sqlite, { schema }), ftsAvailable };
+}
 
-  return drizzle(sqlite, { schema });
+/**
+ * Owns the live SQLite handle behind a single stable drizzle *proxy*. Every
+ * `@Inject(DB)` consumer receives `holder.proxy`, whose every access is
+ * forwarded to the current underlying drizzle instance — so `reopen()` can
+ * swap the file out from under a whole-server restore (BackupService) and all
+ * existing services transparently pick up the new database with no re-injection.
+ */
+@Injectable()
+export class DbHolder {
+  private sqlite: Database.Database;
+  private orm: DrizzleDb;
+  readonly ftsAvailable: boolean;
+
+  /** Stable object handed to every DB consumer; forwards to the current `orm`. */
+  readonly proxy: DrizzleDb;
+
+  constructor() {
+    const opened = openDatabase(resolveDataDir());
+    this.sqlite = opened.sqlite;
+    this.orm = opened.orm;
+    this.ftsAvailable = opened.ftsAvailable;
+
+    this.proxy = new Proxy({} as DrizzleDb, {
+      get: (_target, prop) => {
+        const current = this.orm as unknown as Record<string | symbol, unknown>;
+        const value = current[prop];
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(current) : value;
+      },
+    });
+  }
+
+  /** The raw better-sqlite3 handle (for VACUUM INTO backups). */
+  get raw(): Database.Database {
+    return this.sqlite;
+  }
+
+  /**
+   * Close the live SQLite handle, run `mutate` (which may replace the DB file
+   * on disk — used by a whole-server restore), then re-open. The re-open runs
+   * even if `mutate` throws, so the app is never left without a database. All
+   * `@Inject(DB)` consumers keep their proxy and transparently see the new one.
+   */
+  withDatabaseClosed(mutate: (dataDir: string) => void): void {
+    const dataDir = resolveDataDir();
+    try {
+      this.sqlite.close();
+    } catch {
+      // best-effort — proceed to swap the file regardless.
+    }
+    try {
+      mutate(dataDir);
+    } finally {
+      const opened = openDatabase(dataDir);
+      this.sqlite = opened.sqlite;
+      this.orm = opened.orm;
+    }
+  }
 }
 
 @Global()
 @Module({
   providers: [
-    { provide: DB, useFactory: createDb },
-    // Depends on DB purely for init ordering — createDb() must run first so
-    // ruleEntriesFtsAvailable is set before this factory reads it.
-    { provide: RULE_ENTRIES_FTS_AVAILABLE, useFactory: (_db: DrizzleDb) => ruleEntriesFtsAvailable, inject: [DB] },
+    { provide: DB_HOLDER, useClass: DbHolder },
+    { provide: DB, useFactory: (holder: DbHolder) => holder.proxy, inject: [DB_HOLDER] },
+    { provide: RULE_ENTRIES_FTS_AVAILABLE, useFactory: (holder: DbHolder) => holder.ftsAvailable, inject: [DB_HOLDER] },
   ],
-  exports: [DB, RULE_ENTRIES_FTS_AVAILABLE],
+  exports: [DB, DB_HOLDER, RULE_ENTRIES_FTS_AVAILABLE],
 })
 export class DbModule {}

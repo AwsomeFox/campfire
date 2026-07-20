@@ -266,6 +266,17 @@ export function Layout() {
     return () => document.removeEventListener('mousedown', onClick);
   }, []);
 
+  // Escape dismisses the mobile More sheet (backdrop tap + close button cover the
+  // other exits). Only bound while open so it doesn't swallow Escape elsewhere.
+  useEffect(() => {
+    if (!moreOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setMoreOpen(false);
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [moreOpen]);
+
   async function onLogout() {
     setMenuOpen(false);
     setMoreOpen(false);
@@ -574,8 +585,9 @@ function MoreSheet({
   onChangePassword: () => void;
   onLogout: () => void;
 }) {
-  // Escape-to-close, focus trap, and focus restore to the trigger (issue #92).
-  // Positioning/scroll/backdrop-close remain as-is (owned by issue #104).
+  // Escape-to-close, focus trap, and focus restore to the trigger (issue #92),
+  // combined with #104's positioning: capped height + internal scroll so a tall
+  // list never clips above the viewport, plus a visible close button.
   const sheetRef = useDialog<HTMLDivElement>({ onClose });
   return (
     <div
@@ -588,9 +600,10 @@ function MoreSheet({
         role="dialog"
         aria-modal="true"
         aria-label="More navigation"
-        className="card elev-lg w-full"
+        className="card elev-lg w-full flex flex-col"
         style={{
           maxWidth: 440,
+          maxHeight: 'calc(100dvh - 16px)',
           borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
           padding: '18px 18px calc(18px + env(safe-area-inset-bottom))',
           gap: 4,
@@ -598,39 +611,52 @@ function MoreSheet({
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className="mx-auto mb-2.5"
+          className="mx-auto mb-2.5 shrink-0"
           style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--color-neutral-700)' }}
         />
-        <div className="text-muted" style={{ fontSize: 11, padding: '0 6px 6px' }}>
-          Signed in as {displayName}
-          {roleLabel ? ` · viewing as ${roleLabel}` : ''}
+        <div className="flex items-start gap-2 shrink-0" style={{ padding: '0 6px 6px' }}>
+          <div className="text-muted flex-1 min-w-0" style={{ fontSize: 11 }}>
+            Signed in as {displayName}
+            {roleLabel ? ` · viewing as ${roleLabel}` : ''}
+          </div>
+          <button
+            type="button"
+            aria-label="Close menu"
+            onClick={onClose}
+            className="shrink-0 -mt-1 -mr-1 flex items-center justify-center rounded-md"
+            style={{ width: 32, height: 32, color: 'var(--color-text)', fontSize: 18, lineHeight: 1 }}
+          >
+            ✕
+          </button>
         </div>
-        {mainNav.map((item) => (
-          <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
-        ))}
-        {dmNav.map((item) => (
-          <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
-        ))}
-        {isAdmin && (
-          <MoreSheetItem item={{ key: 'admin', label: 'Admin', to: '/admin' }} onNavigate={onClose} />
-        )}
-        <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={onClose} />
-        <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={onClose} />
-        <MoreSheetItem item={{ key: 'preferences', label: 'Preferences', to: '/preferences' }} onNavigate={onClose} />
-        <button
-          className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
-          style={{ fontSize: 14.5, color: 'var(--color-text)' }}
-          onClick={onChangePassword}
-        >
-          Change password
-        </button>
-        <button
-          className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full text-rose-400"
-          style={{ fontSize: 14.5 }}
-          onClick={onLogout}
-        >
-          Sign out
-        </button>
+        <div className="flex flex-col overflow-y-auto" style={{ gap: 4, margin: '0 -4px', padding: '0 4px' }}>
+          {mainNav.map((item) => (
+            <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
+          ))}
+          {dmNav.map((item) => (
+            <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
+          ))}
+          {isAdmin && (
+            <MoreSheetItem item={{ key: 'admin', label: 'Admin', to: '/admin' }} onNavigate={onClose} />
+          )}
+          <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={onClose} />
+          <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={onClose} />
+          <MoreSheetItem item={{ key: 'preferences', label: 'Preferences', to: '/preferences' }} onNavigate={onClose} />
+          <button
+            className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
+            style={{ fontSize: 14.5, color: 'var(--color-text)' }}
+            onClick={onChangePassword}
+          >
+            Change password
+          </button>
+          <button
+            className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full text-rose-400"
+            style={{ fontSize: 14.5 }}
+            onClick={onLogout}
+          >
+            Sign out
+          </button>
+        </div>
       </div>
     </div>
   );

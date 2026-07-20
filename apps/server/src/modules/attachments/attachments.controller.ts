@@ -4,6 +4,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpException,
+  NotFoundException,
   Param,
   ParseIntPipe,
   Post,
@@ -132,6 +134,14 @@ export class AttachmentsController {
     const row = await this.attachmentsService.getRowOrThrow(id);
     await this.access.requireMember(user, row.campaignId);
 
+    // Issue #84: the DB row can outlive its bytes on disk — an orphaned row from a
+    // failed write, a restore that didn't carry the uploads/ dir, or a lossy import.
+    // Verify the original file is present *before* resolveFile() (which reads it to
+    // hash the ETag, and — for ?size=thumb — to generate the thumbnail), so a missing
+    // file becomes a clean catchable 404 instead of a 500, and the stream below can
+    // never hit a listener-less ENOENT that crashes the process.
+    await this.assertFileReadable(this.attachmentsService.filePath(row), id);
+
     const variant = size === 'thumb' ? 'thumb' : 'original';
     const file = this.attachmentsService.resolveFile(row, variant);
 
@@ -150,7 +160,35 @@ export class AttachmentsController {
       'Content-Length': String(file.size),
       'Content-Disposition': `inline; filename="${encodeURIComponent(row.filename)}"`,
     });
-    fs.createReadStream(file.path).pipe(res);
+
+    const stream = fs.createReadStream(file.path);
+    // Backstop for the TOCTOU window (file deleted between the stat check and the read)
+    // and any mid-stream read error. Without an 'error' listener the error is rethrown
+    // as an uncaught exception; with one, we answer 404 if headers aren't sent yet,
+    // else tear down the socket.
+    stream.on('error', () => {
+      if (res.headersSent) {
+        res.destroy();
+      } else {
+        res.status(404).end();
+      }
+    });
+    stream.pipe(res);
+  }
+
+  /**
+   * Throw 404 unless `filePath` names an existing regular file. Runs before any
+   * response bytes are sent so a missing file is a catchable Nest exception rather
+   * than a fatal stream error (issue #84).
+   */
+  private async assertFileReadable(filePath: string, id: number): Promise<void> {
+    try {
+      const stat = await fs.promises.stat(filePath);
+      if (!stat.isFile()) throw new NotFoundException(`Attachment ${id} file is missing`);
+    } catch (err) {
+      if (err instanceof HttpException) throw err;
+      throw new NotFoundException(`Attachment ${id} file is missing`);
+    }
   }
 
   @Delete(':id')

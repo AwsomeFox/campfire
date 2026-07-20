@@ -108,9 +108,10 @@ describe('proposals (e2e, real cookie sessions)', () => {
     const auditRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/audit`);
     expect(auditRes.body.some((a: { action: string }) => a.action === 'proposal.approve')).toBe(true);
 
-    // re-approving is refused
+    // re-approving is refused — the proposal is already resolved (409 conflict),
+    // and re-approving must NOT re-apply the write.
     const reapproveRes = await dmAgent.post(`/api/v1/proposals/${updateProposal.id}/approve`).send({});
-    expect(reapproveRes.status).toBe(403);
+    expect(reapproveRes.status).toBe(409);
   });
 
   it('dm rejects the create proposal -> leaves entity unchanged, marks rejected', async () => {
@@ -160,5 +161,119 @@ describe('proposals (e2e, real cookie sessions)', () => {
     expect(proposal.snapshot.reward).toBe('5gp');
     expect(proposal.payload.title).toBe('Snapshot Quest (proposed)');
     expect(proposal.payload.reward).toBe('50gp');
+  });
+
+  // --- issue #85: atomic approve/reject ---
+
+  it('concurrent double-approve of a CREATE proposal applies the write exactly once', async () => {
+    // Baseline count of quests with this unique title (should be 0).
+    const uniqueTitle = `Atomic Create ${Date.now()}`;
+    const proposeRes = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: uniqueTitle, reward: '1gp' });
+    expect(proposeRes.status).toBe(202);
+    const proposalId = proposeRes.body.proposal.id;
+
+    // Fire two approvals concurrently (DM double-click / web + MCP agent race).
+    const [a, b] = await Promise.all([
+      dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({}),
+      dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({}),
+    ]);
+
+    // Exactly one wins (201), the other loses the CAS (409). Never two 201s.
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([201, 409]);
+
+    // The create applied exactly once — no duplicate quest.
+    const questsRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
+    const matches = questsRes.body.filter((q: { title: string }) => q.title === uniqueTitle);
+    expect(matches.length).toBe(1);
+
+    // Proposal is settled as approved.
+    const settled = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+    const row = settled.body.find((p: { id: number }) => p.id === proposalId);
+    expect(row.status).toBe('approved');
+  });
+
+  it('concurrent double-approve of an UPDATE proposal applies the write once (no double-apply)', async () => {
+    const questRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Update Race Quest', reward: '0gp' });
+    const raceQuestId = questRes.body.id;
+
+    const proposeRes = await playerAgent
+      .patch(`/api/v1/quests/${raceQuestId}?proposed=true`)
+      .send({ title: 'Update Race Quest (approved)' });
+    const proposalId = proposeRes.body.proposal.id;
+
+    const [a, b] = await Promise.all([
+      dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({}),
+      dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({}),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([201, 409]);
+
+    const after = await dmAgent.get(`/api/v1/quests/${raceQuestId}`);
+    expect(after.body.title).toBe('Update Race Quest (approved)');
+  });
+
+  it('concurrent approve vs reject resolves to a single outcome consistently', async () => {
+    const questRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Approve-Reject Race', reward: '0gp' });
+    const raceQuestId = questRes.body.id;
+
+    const proposeRes = await playerAgent
+      .patch(`/api/v1/quests/${raceQuestId}?proposed=true`)
+      .send({ title: 'Approve-Reject Race (applied)' });
+    const proposalId = proposeRes.body.proposal.id;
+
+    const [approveRes, rejectRes] = await Promise.all([
+      dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({}),
+      dmAgent.post(`/api/v1/proposals/${proposalId}/reject`).send({}),
+    ]);
+
+    // Exactly one of the two wins the CAS (201); the other sees the resolved
+    // state and gets 409. They must not both succeed.
+    const statuses = [approveRes.status, rejectRes.status].sort();
+    expect(statuses).toEqual([201, 409]);
+
+    // The proposal ends in a single terminal state, and the entity reflects it:
+    // approved -> the update landed; rejected -> the quest is unchanged. No
+    // "rejected in the DB but the write landed anyway" split-brain.
+    const settled = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+    const row = settled.body.find((p: { id: number }) => p.id === proposalId);
+    const quest = await dmAgent.get(`/api/v1/quests/${raceQuestId}`);
+    if (row.status === 'approved') {
+      expect(quest.body.title).toBe('Approve-Reject Race (applied)');
+    } else {
+      expect(row.status).toBe('rejected');
+      expect(quest.body.title).toBe('Approve-Reject Race');
+    }
+  });
+
+  it('approve then reject (sequential): reject of an already-approved proposal is a 409 no-op', async () => {
+    const questRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Seq Approve Then Reject', reward: '0gp' });
+    const seqQuestId = questRes.body.id;
+
+    const proposeRes = await playerAgent
+      .patch(`/api/v1/quests/${seqQuestId}?proposed=true`)
+      .send({ title: 'Seq Approve Then Reject (applied)' });
+    const proposalId = proposeRes.body.proposal.id;
+
+    const approveRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect(approveRes.status).toBe(201);
+
+    const rejectRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/reject`).send({});
+    expect(rejectRes.status).toBe(409);
+
+    // Still approved, write still applied — reject did not overwrite the status.
+    const settled = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+    const row = settled.body.find((p: { id: number }) => p.id === proposalId);
+    expect(row.status).toBe('approved');
+    const quest = await dmAgent.get(`/api/v1/quests/${seqQuestId}`);
+    expect(quest.body.title).toBe('Seq Approve Then Reject (applied)');
   });
 });

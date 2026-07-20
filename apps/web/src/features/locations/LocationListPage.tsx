@@ -159,6 +159,9 @@ export default function LocationListPage() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
                     <Chip variant={statusVariant(loc.status)}>{statusLabel[loc.status]}</Chip>
+                    {isDm && loc.status === 'unexplored' && (
+                      <Chip variant="failed">🙈 Hidden from players</Chip>
+                    )}
                     {isDm && loc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   </div>
                   <p className="text-xs text-slate-400 truncate mt-0.5">{loc.kind || firstLine(loc.body) || ' '}</p>
