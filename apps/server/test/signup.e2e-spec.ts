@@ -113,11 +113,22 @@ describe('self-service signup toggle (e2e)', () => {
 
   it('a serverRole field smuggled into the signup body cannot mint an admin', async () => {
     const server = ctx.app.getHttpServer();
+    // SignupRequestDto is now .strict() (issue #131): an unsupported field like
+    // `serverRole` is rejected outright (400, naming the key) rather than being
+    // silently stripped and the account created as a plain 'user'. Either way no
+    // admin is minted — strict just fails loud instead of quiet.
     const res = await request(server)
       .post('/api/v1/auth/signup')
       .send({ username: 'wannabe', password: 'wannabe-password-1', serverRole: 'admin' });
-    expect(res.status).toBe(201);
-    expect(res.body.user.serverRole).toBe('user');
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body)).toMatch(/serverRole|[Uu]nrecognized/);
+
+    // And no account was created for that username — a follow-up clean signup succeeds.
+    const clean = await request(server)
+      .post('/api/v1/auth/signup')
+      .send({ username: 'wannabe', password: 'wannabe-password-1' });
+    expect(clean.status).toBe(201);
+    expect(clean.body.user.serverRole).toBe('user');
   });
 
   it('duplicate username -> 409', async () => {
