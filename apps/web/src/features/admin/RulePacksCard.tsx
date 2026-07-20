@@ -15,19 +15,27 @@
  * locks for the duration and the copy sets that expectation.
  */
 import { useCallback, useEffect, useState } from 'react';
-import type { RulePack, RulePackInstall } from '@campfire/schema';
+import type { RulePack, RulePackInstall, RulePackInstallJob } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Btn, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 type Section = NonNullable<RulePackInstall['sections']>[number];
 
-// Response shape from POST /rules/packs/install. `added`/`skippedExisting` are only
-// meaningful when installing into an already-installed pack (incremental add); on a
-// fresh install they'll typically just list every requested section under `added`.
-interface RulePackInstallResult extends RulePack {
-  added?: Section[];
-  skippedExisting?: Section[];
+/**
+ * Install is a non-blocking background job (issue #20): POST /rules/packs/install returns
+ * 202 with a job, and we poll GET /rules/packs/install-jobs/:id for per-section progress
+ * and the final result instead of blocking on a single long request.
+ */
+async function pollInstallJob(jobId: string, onProgress: (job: RulePackInstallJob) => void): Promise<RulePackInstallJob> {
+  const started = Date.now();
+  for (;;) {
+    const job = await api.get<RulePackInstallJob>(`${API}/rules/packs/install-jobs/${jobId}`);
+    onProgress(job);
+    if (job.status === 'completed' || job.status === 'failed') return job;
+    if (Date.now() - started > 5 * 60_000) throw new ApiError(0, 'Install timed out — check the server logs.');
+    await new Promise((r) => setTimeout(r, 750));
+  }
 }
 
 const SECTION_OPTIONS: { value: Section; label: string }[] = [
@@ -192,6 +200,7 @@ function InstallPanel({
   const hasExistingPack = packs.length > 0;
   const [sections, setSections] = useState<Set<Section>>(new Set(SECTION_OPTIONS.map((s) => s.value)));
   const [done, setDone] = useState<string | null>(null);
+  const [progress, setProgress] = useState<RulePackInstallJob['progress']>([]);
 
   function toggleSection(value: Section) {
     if (installing) return;
@@ -204,33 +213,33 @@ function InstallPanel({
   }
 
   async function install() {
-    // Guard against double-fire: installs can take 30s+ for large sections
-    // (Open5e import is a slow paginated fetch with retries), so the button must
-    // not be clickable again until the request settles.
+    // Guard against double-fire: installs can take a couple of minutes for large
+    // sections, so the button must not be clickable again until the job settles.
     if (installing || sections.size === 0) return;
     onInstallingChange(true);
     setDone(null);
+    setProgress([]);
     onError(null);
     try {
       const body: RulePackInstall = { source: 'open5e', sections: Array.from(sections) };
-      const result = await api.post<RulePackInstallResult>(`${API}/rules/packs/install`, body);
-      const added = result.added ?? [];
-      const skipped = result.skippedExisting ?? [];
-      if (added.length || skipped.length) {
-        const parts: string[] = [];
-        if (added.length) parts.push(`added ${added.map((s) => SECTION_LABEL[s]).join(', ')}`);
-        if (skipped.length) parts.push(`already had ${skipped.map((s) => SECTION_LABEL[s]).join(', ')}`);
-        setDone(`Done — ${parts.join('; ')}.`);
+      // POST returns 202 with a background job (issue #20) — poll it for per-section progress.
+      const enqueued = await api.post<RulePackInstallJob>(`${API}/rules/packs/install`, body);
+      const job = await pollInstallJob(enqueued.id, (j) => setProgress(j.progress));
+      if (job.status === 'failed') {
+        onError(job.error ?? "Couldn't install the rule pack.");
+        return;
+      }
+      if (job.outcome === 'updated') {
+        setDone(`Done — added ${job.added ?? 0}, already had ${job.skippedExisting ?? 0}.`);
       } else {
-        setDone('Installed.');
+        setDone(`Installed ${job.pack?.entryCount ?? 0} entries.`);
       }
       onInstalled();
     } catch (err) {
-      // Surface the server's own message on 409 (e.g. a concurrent install racing
-      // on the same section) instead of a generic string — it's the actionable one.
       onError(err instanceof ApiError ? err.message : "Couldn't install the rule pack.");
     } finally {
       onInstallingChange(false);
+      setProgress([]);
     }
   }
 
@@ -260,7 +269,28 @@ function InstallPanel({
         import runs, so it&apos;s safe to wait rather than re-click.
       </p>
       {installing && (
-        <p className="text-[11px] text-amber-300">Installing… large sections can take a couple of minutes.</p>
+        <div className="text-[11px] text-amber-300 space-y-1">
+          <p>Installing… large sections can take a couple of minutes.</p>
+          {progress.length > 0 && (
+            <div className="flex gap-2 flex-wrap">
+              {progress.map((p) => (
+                <span
+                  key={p.section}
+                  className={
+                    p.status === 'done'
+                      ? 'text-emerald-400'
+                      : p.status === 'failed'
+                        ? 'text-rose-400'
+                        : 'text-slate-400'
+                  }
+                >
+                  {SECTION_LABEL[p.section as Section] ?? p.section}
+                  {p.status === 'done' ? ` ✓ (${p.imported})` : p.status === 'running' ? ' …' : ''}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       )}
       {done && !installing && <p className="text-[11px] text-emerald-400">{done}</p>}
       <div className="flex justify-end">

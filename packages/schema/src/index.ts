@@ -510,6 +510,99 @@ export const RulePackInstall = z.object({
 });
 export type RulePackInstall = z.infer<typeof RulePackInstall>;
 
+// ---------- generic uploaded rule packs (issue #19) ----------
+// Any open-licensed rules dataset (Pathfinder 2e ORC, other OGL/CC systems, homebrew
+// under an open license) can be uploaded as JSON without needing a per-system API
+// importer. The uploaded pack MUST carry an open license (validated server-side via
+// isOpenLicense) — copyrighted/purchased content is out of scope and rejected.
+const OPEN_LICENSE_KEYWORDS = [
+  'ogl',
+  'open game license',
+  'open gaming license',
+  'orc', // ORC / Open RPG Creative license
+  'open rpg creative',
+  'cc0',
+  'cc-by',
+  'cc by',
+  'creative commons',
+  'public domain',
+  'unlicense',
+  'wtfpl',
+  'gfdl',
+  'gnu free documentation',
+];
+
+/**
+ * Whether a license string names a recognized open/free-culture license. Used to
+ * gate uploaded rule packs (issue #19) so only open-licensed content can be added —
+ * proprietary strings ("All Rights Reserved", a publisher name, "Proprietary") are
+ * rejected. Substring match, case-insensitive, intentionally permissive about
+ * formatting ("OGL 1.0a", "CC-BY-4.0", "Creative Commons Attribution 4.0" all pass).
+ */
+export function isOpenLicense(license: string): boolean {
+  const l = (license ?? '').trim().toLowerCase();
+  if (!l) return false;
+  return OPEN_LICENSE_KEYWORDS.some((k) => l.includes(k));
+}
+
+export const RulePackUploadEntry = z.object({
+  slug: z.string().min(1).max(160),
+  name: z.string().min(1).max(200),
+  type: RuleEntryType,
+  summary: z.string().max(1000).optional(),
+  body: z.string().max(50_000).optional(), // markdown
+  dataJson: z.string().max(100_000).nullable().optional(), // raw structured fields, JSON-encoded
+  license: z.string().max(120).optional(), // per-entry license; falls back to the pack license
+});
+export type RulePackUploadEntry = z.infer<typeof RulePackUploadEntry>;
+
+export const RulePackUpload = z.object({
+  source: z.literal('upload'),
+  pack: z.object({
+    slug: z.string().min(1).max(80), // unique across installed packs, e.g. "pf2e-srd"
+    name: z.string().min(1).max(120),
+    version: z.string().max(40).optional(),
+    license: z.string().min(1).max(120), // required — must be an open license (see isOpenLicense)
+    sourceUrl: z.string().max(500).optional(),
+  }),
+  entries: z.array(RulePackUploadEntry).min(1).max(20_000),
+});
+export type RulePackUpload = z.infer<typeof RulePackUpload>;
+
+// ---------- non-blocking install jobs (issue #20) ----------
+export const RulePackInstallJobStatus = z.enum(['pending', 'running', 'completed', 'failed']);
+export type RulePackInstallJobStatus = z.infer<typeof RulePackInstallJobStatus>;
+
+export const RulePackSectionProgress = z.object({
+  section: z.string(), // Open5e section name, or a rule-entry type for uploads
+  status: z.enum(['pending', 'running', 'done', 'failed']),
+  imported: z.number().int().nonnegative().default(0),
+});
+export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
+
+/**
+ * Status of a background rule-pack install (issue #20). Install is no longer a
+ * blocking request: POST /rules/packs/install (or /upload) returns 202 with one of
+ * these immediately, and the UI polls GET /rules/packs/install-jobs/:id for progress.
+ * `outcome` distinguishes a fresh install ('created') from an incremental add to an
+ * existing pack ('updated', which also sets `added`/`skippedExisting`).
+ */
+export const RulePackInstallJob = z.object({
+  id: z.string(), // opaque job id (uuid)
+  source: z.enum(['open5e', 'upload']),
+  status: RulePackInstallJobStatus,
+  progress: z.array(RulePackSectionProgress).default([]),
+  totalSections: z.number().int().nonnegative().default(0),
+  completedSections: z.number().int().nonnegative().default(0),
+  outcome: z.enum(['created', 'updated']).nullable().default(null),
+  pack: RulePack.nullable().default(null), // populated on success
+  added: z.number().int().nonnegative().nullable().default(null), // incremental installs only
+  skippedExisting: z.number().int().nonnegative().nullable().default(null), // incremental installs only
+  error: z.string().nullable().default(null), // populated on failure
+  ...timestamps,
+});
+export type RulePackInstallJob = z.infer<typeof RulePackInstallJob>;
+
 export const RuleSearchQuery = z.object({
   q: z.string().max(200).default(''),
   type: RuleEntryType.optional(),
