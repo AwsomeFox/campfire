@@ -85,6 +85,7 @@ export const Character = z.object({
   species: z.string().max(80).default(''),
   className: z.string().max(80).default(''),
   level: z.number().int().min(1).max(20).default(1),
+  xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
@@ -116,6 +117,47 @@ export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
   delta: z.number().int(),
 });
+export const XpPatch = z.union([
+  z.object({ delta: z.number().int() }),
+  z.object({ set: z.number().int().nonnegative() }),
+]);
+/** DM party-wide XP award: amount to every character in the campaign, or just `characterIds`. */
+export const XpAward = z.object({
+  amount: z.number().int().min(1).max(1_000_000),
+  characterIds: z.array(Id).min(1).optional(),
+});
+/**
+ * Guided level-up: +1 level, optionally raising hpMax (hpCurrent grows by the
+ * same amount — you gain the new hit points, existing damage stays).
+ * Intentionally NOT gated on xp thresholds — milestone-levelling tables level
+ * without XP, so the threshold check is advisory (see xpForLevel/levelForXp).
+ */
+export const LevelUp = z.object({
+  hpMax: z.number().int().min(1).optional(),
+});
+
+/**
+ * D&D 5e cumulative XP thresholds; XP_THRESHOLDS[n] = total XP required to be
+ * level n+1 (so index 0 = level 1 at 0 XP, index 19 = level 20 at 355,000 XP).
+ */
+export const XP_THRESHOLDS = [
+  0, 300, 900, 2_700, 6_500, 14_000, 23_000, 34_000, 48_000, 64_000, 85_000, 100_000, 120_000, 140_000, 165_000,
+  195_000, 225_000, 265_000, 305_000, 355_000,
+] as const;
+
+/** Total XP required to reach `level` (clamped to [1, 20]). */
+export function xpForLevel(level: number): number {
+  return XP_THRESHOLDS[Math.max(1, Math.min(20, Math.floor(level))) - 1];
+}
+
+/** Highest level the given total XP qualifies for (1–20). */
+export function levelForXp(xp: number): number {
+  let level = 1;
+  for (let i = 0; i < XP_THRESHOLDS.length; i++) {
+    if (xp >= XP_THRESHOLDS[i]) level = i + 1;
+  }
+  return level;
+}
 
 // ---------- quest ----------
 export const QuestStatus = z.enum(['available', 'active', 'completed', 'failed']);

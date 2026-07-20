@@ -4,7 +4,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -32,6 +32,19 @@ export class CampaignCharactersController {
   ) {
     const role = await this.access.requireRole(user, campaignId, 'player');
     return this.characters.create(campaignId, body, user, role);
+  }
+
+  @Post('xp')
+  @ApiOperation({ summary: 'Award XP to the party', description: 'dm role required. Adds `amount` XP to every character in the campaign, or only to `characterIds` when given.' })
+  @ApiResponse({ status: 201, description: 'Updated characters.' })
+  @ApiResponse({ status: 400, description: 'A characterId does not belong to this campaign, or the campaign has no characters.' })
+  async awardXp(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: XpAwardDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.characters.awardXp(campaignId, body, user, role);
   }
 }
 
@@ -78,6 +91,29 @@ export class CharactersController {
     const row = await this.characters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.patchHp(id, body, user, role);
+  }
+
+  @Post(':id/xp')
+  @ApiOperation({ summary: 'Adjust character XP', description: 'dm or the owning player. Body is a union: { delta } (relative) or { set } (absolute); XP never goes below 0.' })
+  @ApiResponse({ status: 201, description: 'Updated character.' })
+  async patchXp(@Param('id', ParseIntPipe) id: number, @Body() body: XpPatchDto, @CurrentUser() user: RequestUser) {
+    const row = await this.characters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.characters.patchXp(id, body, user, role);
+  }
+
+  @Post(':id/level-up')
+  @ApiOperation({
+    summary: 'Level a character up',
+    description:
+      'dm or the owning player. Raises level by 1 (400 at level 20). Optionally pass the new hpMax — the hit points gained are added to hpCurrent too (damage taken is kept). Not gated on XP thresholds, so milestone campaigns work.',
+  })
+  @ApiResponse({ status: 201, description: 'Updated character.' })
+  @ApiResponse({ status: 400, description: 'Already at level 20.' })
+  async levelUp(@Param('id', ParseIntPipe) id: number, @Body() body: LevelUpDto, @CurrentUser() user: RequestUser) {
+    const row = await this.characters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.characters.levelUp(id, body, user, role);
   }
 
   @Post(':id/conditions')

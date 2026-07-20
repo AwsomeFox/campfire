@@ -38,6 +38,7 @@ export const characters = sqliteTable('characters', {
   species: text('species').notNull().default(''),
   className: text('class_name').notNull().default(''),
   level: integer('level').notNull().default(1),
+  xp: integer('xp').notNull().default(0),
   background: text('background').notNull().default(''),
   stats: text('stats').notNull().default('{}'),
   ac: integer('ac'),
