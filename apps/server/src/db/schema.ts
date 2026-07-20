@@ -296,6 +296,75 @@ export const apiTokens = sqliteTable('api_tokens', {
   updatedAt: text('updated_at').notNull(),
 });
 
+/**
+ * MCP OAuth (issue #37) — Campfire as a minimal OAuth 2.1 authorization server.
+ *
+ * oauth_clients: RFC 7591 Dynamic Client Registration records. `clientId` is the
+ * public identifier (`cf_client_...`), stored plaintext (an OAuth client_id is
+ * not a secret). `secretHash` is sha256 of the client secret for confidential
+ * clients (token_endpoint_auth_method != "none"); NULL for public/PKCE clients
+ * like Claude. `redirectUris` / `grantTypes` / `responseTypes` are JSON arrays.
+ */
+export const oauthClients = sqliteTable('oauth_clients', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  clientId: text('client_id').notNull().unique(),
+  secretHash: text('secret_hash'), // null for public (PKCE) clients
+  clientName: text('client_name').notNull().default(''),
+  redirectUris: text('redirect_uris').notNull(), // JSON string[]
+  grantTypes: text('grant_types').notNull(), // JSON string[]
+  responseTypes: text('response_types').notNull(), // JSON string[]
+  tokenEndpointAuthMethod: text('token_endpoint_auth_method').notNull().default('none'),
+  scope: text('scope'), // requested scope string, or null
+  createdAt: text('created_at').notNull(),
+});
+
+/**
+ * oauth_auth_codes: one-time authorization codes issued by GET/POST /oauth/authorize
+ * and redeemed once at the token endpoint. `codeHash` is sha256(`cf_oac_...`).
+ * Captures the PKCE `codeChallenge` (validated against the presented verifier at
+ * exchange), the bound `redirectUri`/`resource`, and the Campfire authorization
+ * decision: `userId` (who consented), `roleScope` (dm|player|viewer cap) and
+ * optional `campaignId` binding — mirroring a PAT's scope caps.
+ */
+export const oauthAuthCodes = sqliteTable('oauth_auth_codes', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  codeHash: text('code_hash').notNull().unique(),
+  clientId: text('client_id').notNull(),
+  userId: integer('user_id').notNull(),
+  redirectUri: text('redirect_uri').notNull(),
+  codeChallenge: text('code_challenge').notNull(),
+  codeChallengeMethod: text('code_challenge_method').notNull().default('S256'),
+  scope: text('scope'), // granted OAuth scope string
+  resource: text('resource'), // RFC 8707 resource indicator, or null
+  roleScope: text('role_scope').notNull().default('dm'), // Campfire role cap
+  campaignId: integer('campaign_id'), // optional single-campaign binding
+  expiresAt: text('expires_at').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+/**
+ * oauth_access_tokens: issued bearer tokens presented on /mcp. `tokenHash` is
+ * sha256(`cf_mcp_...`); `refreshHash` is sha256(`cf_ref_...`) for the paired
+ * refresh token (rotated on every refresh). Resolves to the same RequestUser +
+ * TokenContext as a PAT via `userId` + `roleScope`/`campaignId`, so all
+ * effective-role caps apply unchanged. OAuth tokens NEVER carry server-admin
+ * power (no adminEnabled column — hardcoded false at resolve time).
+ */
+export const oauthAccessTokens = sqliteTable('oauth_access_tokens', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  tokenHash: text('token_hash').notNull().unique(),
+  refreshHash: text('refresh_hash').unique(),
+  clientId: text('client_id').notNull(),
+  userId: integer('user_id').notNull(),
+  scope: text('scope'), // granted OAuth scope string
+  resource: text('resource'),
+  roleScope: text('role_scope').notNull().default('dm'),
+  campaignId: integer('campaign_id'),
+  expiresAt: text('expires_at').notNull(), // access-token expiry
+  refreshExpiresAt: text('refresh_expires_at'), // refresh-token expiry, or null
+  createdAt: text('created_at').notNull(),
+});
+
 export const rulePacks = sqliteTable('rule_packs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   slug: text('slug').notNull().unique(),

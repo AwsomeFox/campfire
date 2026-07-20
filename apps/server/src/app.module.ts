@@ -36,6 +36,7 @@ import { ProposalsModule } from './modules/proposals/proposals.module';
 import { ExportModule } from './modules/export/export.module';
 import { RulesModule } from './modules/rules/rules.module';
 import { McpModule } from './modules/mcp/mcp.module';
+import { OAuthModule } from './modules/oauth/oauth.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
 import { EventsModule } from './modules/events/events.module';
@@ -79,6 +80,11 @@ function serveStaticImports(): DynamicModule[] {
         '/healthz',
         '/readyz',
         '/mcp',
+        '/.well-known/oauth-protected-resource',
+        '/.well-known/oauth-protected-resource/mcp',
+        '/.well-known/oauth-authorization-server',
+        '/.well-known/oauth-authorization-server/mcp',
+        '/oauth/(.*)',
         '/api/docs/(.*)',
         '/api/docs',
         '/api/docs-json',
@@ -133,6 +139,7 @@ function serveStaticImports(): DynamicModule[] {
     ExportModule,
     RulesModule,
     McpModule,
+    OAuthModule,
     AttachmentsModule,
     EncountersModule,
     EventsModule,

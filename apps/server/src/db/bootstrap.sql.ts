@@ -249,6 +249,52 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   updated_at TEXT NOT NULL
 );
 
+-- MCP OAuth (issue #37): Campfire as a minimal OAuth 2.1 authorization server so
+-- /mcp can be added as a Claude connector. See db/schema.ts for column docs.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL UNIQUE,
+  secret_hash TEXT,
+  client_name TEXT NOT NULL DEFAULT '',
+  redirect_uris TEXT NOT NULL,
+  grant_types TEXT NOT NULL,
+  response_types TEXT NOT NULL,
+  token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
+  scope TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_hash TEXT NOT NULL UNIQUE,
+  client_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  redirect_uri TEXT NOT NULL,
+  code_challenge TEXT NOT NULL,
+  code_challenge_method TEXT NOT NULL DEFAULT 'S256',
+  scope TEXT,
+  resource TEXT,
+  role_scope TEXT NOT NULL DEFAULT 'dm',
+  campaign_id INTEGER,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,
+  refresh_hash TEXT UNIQUE,
+  client_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  scope TEXT,
+  resource TEXT,
+  role_scope TEXT NOT NULL DEFAULT 'dm',
+  campaign_id INTEGER,
+  expires_at TEXT NOT NULL,
+  refresh_expires_at TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS rule_packs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   slug TEXT NOT NULL UNIQUE,
@@ -404,6 +450,8 @@ CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(cam
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_invites_campaign ON campaign_invites(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_user ON oauth_access_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_client ON oauth_auth_codes(client_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_campaign ON proposals(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_pack ON rule_entries(pack_id);

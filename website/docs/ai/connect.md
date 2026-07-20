@@ -30,6 +30,41 @@ claude mcp add --transport http campfire \
 
 That's it — your client will list Campfire's tools and can start helping.
 
+## Add Campfire as a Claude connector (OAuth — no token to copy)
+
+Claude's **connectors** UI (and any MCP client that speaks remote-server OAuth)
+can connect without a hand-copied token. Campfire acts as its own OAuth 2.1
+authorization server, so you click **Connect**, log in to Campfire, approve, and
+you're linked.
+
+1. In Claude, choose **Add custom connector** and paste your Campfire MCP URL:
+
+    ```
+    https://your-campfire-host/mcp
+    ```
+
+2. Claude discovers the authorization server automatically (via
+   `/.well-known/oauth-protected-resource`), registers itself, and opens a
+   **Campfire login + consent** page.
+3. Sign in — with your Campfire username/password, or, if you're already logged
+   into Campfire in that browser, just approve. If your server uses SSO (OIDC),
+   log into Campfire the usual way first, then approve.
+4. On the consent screen you can optionally lower the **role cap** (DM → Player →
+   Viewer) or **restrict the connection to a single campaign** — the same safety
+   controls as an API token. The default grant can never exceed your own role in
+   each campaign.
+
+The connection uses short-lived access tokens that refresh transparently, so it
+keeps working without re-copying anything. Revoke it any time from your OAuth
+client, or an admin can revoke server-side.
+
+!!! note "What this needs"
+    Nothing to configure — the OAuth endpoints are always available. The flow
+    works on local-auth servers and OIDC/SSO servers alike (the login step reuses
+    whichever login your Campfire already uses). Connector tokens are always
+    scoped to a normal user and **never carry server-admin power**, even for an
+    admin account — mint a PAT if you need that.
+
 !!! tip "Headless / unattended agents"
     An agent can also bootstrap without a browser: exchange credentials for a
     token in one call (`POST /api/v1/auth/token`), then use it as the bearer for
