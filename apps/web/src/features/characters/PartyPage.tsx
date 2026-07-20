@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import type { Character, CampaignMember } from '@campfire/schema';
+import { levelForXp } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -23,6 +24,7 @@ export default function PartyPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [awarding, setAwarding] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -69,6 +71,11 @@ export default function PartyPage() {
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-extrabold text-white">Party</h1>
         <div className="flex-1" />
+        {isDm && !awarding && characters.length > 0 && (
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setAwarding(true)}>
+            ✦ Award XP
+          </Btn>
+        )}
         {canCreate && !creating && characters.length > 0 && (
           <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
             + New character
@@ -77,6 +84,8 @@ export default function PartyPage() {
       </div>
 
       {error && <ErrorNote message={error} onRetry={load} />}
+
+      {isDm && awarding && <AwardXpForm campaignId={id} onCancel={() => setAwarding(false)} onAwarded={() => { setAwarding(false); void load(); }} />}
 
       {loading ? (
         <Card>
@@ -130,6 +139,11 @@ function CharacterCard({
             {ownerLabel && ` · ${ownerLabel}`}
           </p>
         </div>
+        {levelForXp(character.xp) > character.level && (
+          <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${levelForXp(character.xp)}`}>
+            ⬆ Level up
+          </span>
+        )}
       </div>
       <div className="flex justify-between text-[11.5px] text-slate-500">
         <span>HP</span>
@@ -148,6 +162,64 @@ function CharacterCard({
         </div>
       )}
     </Link>
+  );
+}
+
+/** DM-only party XP award (issue #14) — one amount, everyone gets it. Per-character awards live on the sheet. */
+function AwardXpForm({
+  campaignId,
+  onCancel,
+  onAwarded,
+}: {
+  campaignId: number;
+  onCancel: () => void;
+  onAwarded: () => void;
+}) {
+  const [amount, setAmount] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const amountNum = Number(amount);
+    if (!Number.isInteger(amountNum) || amountNum < 1) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/characters/xp`, { amount: amountNum });
+      onAwarded();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't award XP.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-3">
+      <h2 className="font-bold text-white text-sm">Award XP to the whole party</h2>
+      {error && <p className="text-sm text-rose-400">{error}</p>}
+      <form onSubmit={submit} className="flex gap-2 items-center flex-wrap">
+        <div className="w-32">
+          <TextInput
+            type="number"
+            min={1}
+            placeholder="XP each"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            autoFocus
+          />
+        </div>
+        <span className="text-xs text-slate-500">Every character gets this amount. Award individuals from their sheet.</span>
+        <div className="flex-1" />
+        <Btn ghost type="button" onClick={onCancel} disabled={saving}>
+          Cancel
+        </Btn>
+        <Btn type="submit" disabled={saving || !Number.isInteger(Number(amount)) || Number(amount) < 1}>
+          {saving ? 'Awarding…' : 'Award'}
+        </Btn>
+      </form>
+    </Card>
   );
 }
 

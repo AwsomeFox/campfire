@@ -59,6 +59,8 @@ const ALL_TOOLS = [
   'update_session',
   'upsert_character',
   'update_character_hp',
+  'award_xp',
+  'level_up_character',
   'set_character_conditions',
   'add_note',
   'update_note',
@@ -143,7 +145,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(64);
+    expect(tools).toHaveLength(66);
   });
 
   it('get_campaign_summary works with a dm-scoped PAT', async () => {
