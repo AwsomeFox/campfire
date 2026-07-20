@@ -69,6 +69,7 @@ function serveStaticImports(): DynamicModule[] {
         '/api/v1/(.*)',
         '/api/v1',
         '/healthz',
+        '/readyz',
         '/mcp',
         '/api/docs/(.*)',
         '/api/docs',

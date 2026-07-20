@@ -31,5 +31,11 @@ across untouched. There's no separate migration step to run.
 
 ## Health
 
-Campfire exposes `GET /healthz` for your orchestrator's health checks (the provided
-Docker/compose setup already wires it). It reports `{ ok: true, version }`.
+Campfire exposes two unauthenticated health endpoints:
+
+- `GET /healthz` — **liveness**: always 200 while the process is up; never touches
+  the database. It reports `{ ok: true, version }`.
+- `GET /readyz` — **readiness**: runs a real `SELECT 1` against SQLite and answers
+  503 (`{ ok: false, version, error }`) when the database is locked, corrupted, or
+  its volume is unavailable. The provided Docker `HEALTHCHECK` and compose setup
+  target this endpoint, so a broken DB marks the container unhealthy.

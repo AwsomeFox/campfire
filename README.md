@@ -57,7 +57,7 @@ just dev       # backend :8080 + frontend :5173, hot reload
 - Web: http://localhost:5173
 - API: http://localhost:8080/api/v1
 - Swagger UI: http://localhost:8080/api/docs · spec: http://localhost:8080/api/openapi.json
-- Health: http://localhost:8080/healthz
+- Health: http://localhost:8080/healthz (liveness) · http://localhost:8080/readyz (readiness, checks the DB)
 
 ### Dev auth
 
