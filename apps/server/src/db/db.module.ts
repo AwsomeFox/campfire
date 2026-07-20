@@ -359,6 +359,31 @@ function migrateNpcsTableForHidden(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE npcs ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * Migration for DBs created before per-attachment visibility (issue #97):
+ * `attachments.hidden` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no
+ * table rebuild needed, same shape as migrateQuestsTableForHidden above.
+ *
+ * Defaulting existing rows to 0 (visible) deliberately PRESERVES pre-migration
+ * behavior — nothing a party could already fetch suddenly 404s on upgrade, and
+ * campaign-map backgrounds already assigned to players keep rendering. The
+ * secure default (hidden=1 for map/image) applies only to NEW uploads via
+ * AttachmentsService.create; a DM can retroactively hide existing prep material
+ * with POST /attachments/:id/hide. New DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the column.
+ */
+function migrateAttachmentsTableForHidden(sqlite: Database.Database): void {
+  const hasAttachmentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='attachments'")
+    .get();
+  if (!hasAttachmentsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(attachments)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'hidden')) return;
+
+  sqlite.exec('ALTER TABLE attachments ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+}
+
 /** Absolute path to the SQLite DB file for a given data dir. */
 export function dbFilePath(dataDir: string): string {
   return path.join(dataDir, 'campfire.db');
@@ -398,6 +423,7 @@ export function openDatabase(dataDir: string): {
   migrateEncountersTableForCurrentCombatant(sqlite);
   migrateQuestsTableForHidden(sqlite);
   migrateNpcsTableForHidden(sqlite);
+  migrateAttachmentsTableForHidden(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync. This is
   // also how index-only migrations reach existing DBs: e.g. #74's

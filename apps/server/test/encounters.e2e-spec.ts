@@ -422,6 +422,43 @@ describe('encounters (e2e)', () => {
       expect(res.status).toBe(400);
     });
 
+    it('/reopen on a non-ended (preparing) encounter is rejected 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Still Preparing' });
+      const freshId = freshRes.body.id;
+
+      const res = await request(server).post(`/api/v1/encounters/${freshId}/reopen`).set(dm);
+      expect(res.status).toBe(400);
+    });
+
+    it('a non-dm cannot reopen an ended encounter (403)', async () => {
+      // `encounterId` is still 'ended' from the earlier end test.
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).post(`/api/v1/encounters/${encounterId}/reopen`).set(player);
+      expect(res.status).toBe(403);
+    });
+
+    it('dm reopens an ended encounter back to running, preserving round and clearing endedAt', async () => {
+      const server = ctx.app.getHttpServer();
+      const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      expect(before.body.status).toBe('ended');
+      const priorRound = before.body.round;
+      const priorCurrent = before.body.currentCombatantId;
+
+      const res = await request(server).post(`/api/v1/encounters/${encounterId}/reopen`).set(dm);
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('running');
+      expect(res.body.endedAt).toBeNull();
+      // Combat resumes exactly where it stopped — round/turn pointer are preserved.
+      expect(res.body.round).toBe(priorRound);
+      expect(res.body.currentCombatantId).toBe(priorCurrent);
+
+      // A reopened (running) encounter can be ended again (no lingering guard).
+      const endAgain = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
+      expect(endAgain.status).toBe(201);
+      expect(endAgain.body.status).toBe('ended');
+    });
+
     it('dm deletes the encounter', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).delete(`/api/v1/encounters/${encounterId}`).set(dm);

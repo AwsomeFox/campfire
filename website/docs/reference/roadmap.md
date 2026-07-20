@@ -88,11 +88,11 @@ who hits them. Grouped by theme:
 
 **Operator confidence**
 
-- ⬜ **Backup & restore** — in-app backup, scheduling, and a whole-server restore/import _(today: manual `/data` copy + per-campaign export only)_
+- ✅ **Backup & restore** — WAL-safe whole-server backup (`VACUUM INTO` + uploads) and restore over the API, plus opt-in scheduled on-disk backups (`BACKUP_SCHEDULE_ENABLED`) — see [Backups & upgrades](../administration/operations.md)
+- ✅ **In-app OIDC config & test** — configure OIDC from **Admin → OIDC single sign-on** with a **Test connection** check, alongside (and overridable by) env vars
 - ⬜ **Admin observability** — user/campaign counts, storage usage, version, update-available
 - ⬜ **Server-wide audit** — a log of admin actions (account creation, settings, pack installs); today audit is per-campaign only
 - ⬜ **Storage management** — upload size visibility, quotas, orphan cleanup
-- ⬜ **In-app OIDC config & test** — instead of env-only with no "connection OK" feedback
 
 _(Several of these operator items are in active development for the next release.)_
 

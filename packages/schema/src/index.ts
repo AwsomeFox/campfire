@@ -887,6 +887,14 @@ export const Attachment = z.object({
   filename: z.string().max(255), // original client filename, display only
   mime: z.string().max(80),
   size: z.number().int().nonnegative(), // bytes
+  // Per-attachment visibility / staged reveal (issue #97). `hidden` gates the file
+  // bytes AND the row itself: a hidden attachment is DM-only — non-DM members get a
+  // 404 on GET /attachments/:id/file and never see it in the campaign list, so an
+  // uploaded-but-unrevealed handout (next-arc dungeon map, reveal art) can't be
+  // fetched by id enumeration. New 'map'/'image' uploads default hidden=true (DM
+  // prep material); 'portrait' uploads default hidden=false (player-visible). The
+  // DM stages the reveal moment via POST /attachments/:id/reveal (hidden=false).
+  hidden: z.boolean().default(false),
   ...timestamps,
 });
 export type Attachment = z.infer<typeof Attachment>;
@@ -1127,3 +1135,48 @@ export const AdminMetrics = z.object({
   recentActivity: z.array(AuditEntry), // most-recent audit rows (read-only, newest first)
 });
 export type AdminMetrics = z.infer<typeof AdminMetrics>;
+
+// ---------- campaign-wide search + @-mention cross-linking (issue #64) ----------
+// The kinds of things a campaign-wide search can turn up. `campaign` from
+// EntityType is deliberately excluded — a campaign never searches its own row,
+// only the entities inside it — and `note` is added (notes are searchable but
+// aren't a mention/link target).
+export const SearchResultType = z.enum(['quest', 'npc', 'location', 'character', 'session', 'note']);
+export type SearchResultType = z.infer<typeof SearchResultType>;
+
+// A single hit. The service ONLY ever builds these from role-filtered lists
+// (listForCampaign(role)), so a hidden quest/npc/unexplored location, a
+// non-visible note, and every dmSecret are already stripped before a result
+// object is ever constructed — hits never leak an entity the caller can't see.
+export const SearchResult = z.object({
+  type: SearchResultType,
+  id: Id,
+  campaignId: Id,
+  title: z.string().default(''), // display name/title (session -> title || "Session N")
+  snippet: z.string().default(''), // short excerpt around the first match
+  matchedField: z.string().default(''), // which field matched (name/title/body/recap/notes…)
+  // For a note anchored to another entity — lets the UI deep-link to the anchor
+  // rather than the (page-less) note itself. Null for the entity types themselves.
+  entityType: EntityType.nullable().default(null),
+  entityId: Id.nullable().default(null),
+});
+export type SearchResult = z.infer<typeof SearchResult>;
+
+export const SearchResponse = z.object({
+  query: z.string(),
+  results: z.array(SearchResult),
+});
+export type SearchResponse = z.infer<typeof SearchResponse>;
+
+// @-mention cross-linking: the set of named, page-backed entities a member may
+// link to (and that the Markdown renderer may auto-link by name). Notes are
+// excluded — they have no standalone page — so this is SearchResultType minus 'note'.
+export const MentionTargetType = z.enum(['quest', 'npc', 'location', 'character', 'session']);
+export type MentionTargetType = z.infer<typeof MentionTargetType>;
+
+export const MentionTarget = z.object({
+  type: MentionTargetType,
+  id: Id,
+  name: z.string(), // quest/session title, or entity name — what to match & display
+});
+export type MentionTarget = z.infer<typeof MentionTarget>;

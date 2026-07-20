@@ -801,6 +801,92 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(auditPage.map((r) => r.id)).toEqual(auditAll.slice(1, 3).map((r) => r.id));
   });
 
+  it('resources/list exposes the static index + a summary/party/recaps URI per accessible campaign (issue #26)', async () => {
+    const client = await mcpClient(dmToken);
+
+    const { resources } = await client.listResources();
+    const uris = resources.map((r) => r.uri);
+    // Static index resource is always present.
+    expect(uris).toContain('campfire://campaigns');
+    // Templated resources are enumerated one concrete URI per accessible campaign.
+    expect(uris).toContain(`campfire://campaign/${campaignId}/summary`);
+    expect(uris).toContain(`campfire://campaign/${campaignId}/party`);
+    expect(uris).toContain(`campfire://campaign/${campaignId}/recaps`);
+
+    // The URI templates themselves are advertised via resources/templates/list.
+    const { resourceTemplates } = await client.listResourceTemplates();
+    const templates = resourceTemplates.map((t) => t.uriTemplate);
+    expect(templates).toContain('campfire://campaign/{campaignId}/summary');
+    expect(templates).toContain('campfire://campaign/{campaignId}/party');
+    expect(templates).toContain('campfire://campaign/{campaignId}/recaps');
+  });
+
+  it('reading campfire://campaigns and campfire://campaign/{id}/summary returns the same JSON as the read tools (issue #26)', async () => {
+    const client = await mcpClient(dmToken);
+
+    const indexRead = await client.readResource({ uri: 'campfire://campaigns' });
+    expect(indexRead.contents).toHaveLength(1);
+    expect(indexRead.contents[0].mimeType).toBe('application/json');
+    const campaigns = JSON.parse((indexRead.contents[0] as { text: string }).text) as Array<{ id: number; name: string }>;
+    expect(campaigns.some((c) => c.id === campaignId && c.name === 'MCP Campaign')).toBe(true);
+
+    const summaryRead = await client.readResource({ uri: `campfire://campaign/${campaignId}/summary` });
+    expect(summaryRead.contents).toHaveLength(1);
+    const summary = JSON.parse((summaryRead.contents[0] as { text: string }).text) as { campaign: { id: number; name: string } };
+    expect(summary.campaign.id).toBe(campaignId);
+    expect(summary.campaign.name).toBe('MCP Campaign');
+  });
+
+  it('reading a campaign resource enforces the same membership gate as the tools (403 for a campaign-scoped PAT on another campaign)', async () => {
+    // A campaign-bound PAT is a non-member outside its campaign — reading another
+    // campaign's resource must fail exactly like get_campaign_summary does.
+    const otherCampRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Resource Other' });
+    expect(otherCampRes.status).toBe(201);
+    const otherCampaignId = otherCampRes.body.id;
+
+    const scopedTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-res-scoped', scope: 'dm', campaignId });
+    expect(scopedTokenRes.status).toBe(201);
+    const client = await mcpClient(scopedTokenRes.body.token);
+
+    await expect(client.readResource({ uri: `campfire://campaign/${otherCampaignId}/summary` })).rejects.toThrow();
+    // sanity: its own campaign still reads
+    const ownRead = await client.readResource({ uri: `campfire://campaign/${campaignId}/summary` });
+    expect(ownRead.contents).toHaveLength(1);
+  });
+
+  it('prompts/list exposes recap-writer and session-prep, each taking a campaignId argument (issue #26)', async () => {
+    const client = await mcpClient(dmToken);
+    const { prompts } = await client.listPrompts();
+    const byName = new Map(prompts.map((p) => [p.name, p]));
+    expect([...byName.keys()].sort()).toEqual(['recap-writer', 'session-prep']);
+    for (const name of ['recap-writer', 'session-prep']) {
+      const args = byName.get(name)!.arguments ?? [];
+      expect(args.some((a) => a.name === 'campaignId')).toBe(true);
+    }
+  });
+
+  it('getting the recap-writer prompt returns a message seeded with the campaign id and recap template (issue #26)', async () => {
+    const client = await mcpClient(dmToken);
+    const result = await client.getPrompt({ name: 'recap-writer', arguments: { campaignId: String(campaignId) } });
+    expect(result.messages).toHaveLength(1);
+    const message = result.messages[0];
+    expect(message.role).toBe('user');
+    const text = (message.content as { type: string; text: string }).text;
+    expect(text).toContain(`campaign ${campaignId}`);
+    expect(text).toContain('draft_session_recap');
+    // the shared recap template headings are embedded
+    expect(text).toContain('## Recap');
+    expect(text).toContain('## Cliffhanger');
+  });
+
+  it('getting the session-prep prompt references the summary resource and prep tools', async () => {
+    const client = await mcpClient(dmToken);
+    const result = await client.getPrompt({ name: 'session-prep', arguments: { campaignId: String(campaignId) } });
+    const text = (result.messages[0].content as { type: string; text: string }).text;
+    expect(text).toContain(`campfire://campaign/${campaignId}/summary`);
+    expect(text).toContain('read_inbox');
+  });
+
   it('request without Authorization gets 401; GET gets 405', async () => {
     const noAuth = await request(ctx.app.getHttpServer())
       .post('/mcp')

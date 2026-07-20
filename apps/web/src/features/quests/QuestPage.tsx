@@ -20,6 +20,7 @@ import {
   statusVariant,
 } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Toggle } from '../../components/Toggle';
@@ -56,6 +57,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  const [notFound, setNotFound] = useState(false);
 
   const [editingBody, setEditingBody] = useState(false);
   const [bodyDraft, setBodyDraft] = useState('');
@@ -85,6 +87,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const load = useCallback(async () => {
     setError(null);
     setForbidden(false);
+    setNotFound(false);
     setLoading(true);
     try {
       const q = await api.get<QuestWithObjectives>(`${API}/quests/${questId}`);
@@ -108,6 +111,8 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
+      } else if (e instanceof ApiError && e.status === 404) {
+        setNotFound(true);
       } else {
         setError("Couldn't load this quest.");
       }
@@ -292,6 +297,18 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         <Card>
           <EmptyState icon="🔒" title="You don't have access to this campaign" />
         </Card>
+      </PageShell>
+    );
+  }
+
+  if (notFound) {
+    return (
+      <PageShell campaignId={campaignId}>
+        <NotFoundState
+          title="Quest not found"
+          backTo={`/c/${campaignId}/quests`}
+          backLabel="← Back to quests"
+        />
       </PageShell>
     );
   }

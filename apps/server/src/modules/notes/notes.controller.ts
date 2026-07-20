@@ -23,6 +23,7 @@ export class CampaignNotesController {
   @ApiQuery({ name: 'entityType', required: false, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign'], description: 'Filter to notes attached to this entity type.' })
   @ApiQuery({ name: 'entityId', required: false, type: Number, description: 'Filter to notes attached to this specific entity id (used together with entityType).' })
   @ApiQuery({ name: 'mine', required: false, type: Boolean, description: 'If true, only notes authored by the caller.' })
+  @ApiQuery({ name: 'q', required: false, type: String, description: 'Free-text search: only notes whose body contains this string (case-insensitive).' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max notes to return (default: all, capped at 200).' })
   @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Notes to skip, for paging (default 0).' })
   @ApiResponse({ status: 200, description: 'Notes visible to the caller, per the visibility rules above.' })
@@ -32,6 +33,7 @@ export class CampaignNotesController {
     @Query('entityType') entityType?: string,
     @Query('entityId') entityId?: string,
     @Query('mine') mine?: string,
+    @Query('q') q?: string,
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
   ) {
@@ -41,6 +43,7 @@ export class CampaignNotesController {
       entityType,
       entityId: entityId !== undefined ? Number(entityId) : undefined,
       mine: mine === 'true',
+      q,
       limit: page.limit,
       offset: page.offset,
     });

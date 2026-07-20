@@ -1,5 +1,5 @@
 import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, or, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
 import type { Note, Role, PageParams } from '@campfire/schema';
@@ -134,7 +134,7 @@ export class NotesService {
     campaignId: number,
     user: RequestUser,
     role: Role,
-    filters: { entityType?: string; entityId?: number; mine?: boolean; limit?: number; offset?: number },
+    filters: { entityType?: string; entityId?: number; mine?: boolean; q?: string; limit?: number; offset?: number },
   ): Promise<Note[]> {
     // Visibility is pushed into SQL (was a JS post-filter, issue #71) so limit/offset
     // page over the ACTUALLY-visible rows: party_shared to everyone, own notes always,
@@ -146,16 +146,21 @@ export class NotesService {
     if (filters.entityType) conds.push(eq(notes.entityType, filters.entityType));
     if (filters.entityId !== undefined) conds.push(eq(notes.entityId, filters.entityId));
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
+    // Free-text search over note bodies (issue #65) — case-insensitive substring match,
+    // pushed into SQL so it composes correctly with limit/offset paging (#71) rather than
+    // filtering only the current page. Scoped to NOTES only (campaign-wide search is #64).
+    const search = filters.q?.trim().toLowerCase();
+    if (search) conds.push(sql`lower(${notes.body}) like ${'%' + search + '%'}`);
 
     const page: PageParams = { limit: filters.limit, offset: filters.offset };
-    let q = this.db
+    let query = this.db
       .select()
       .from(notes)
       .where(and(...conds))
       .orderBy(asc(notes.id)) // deterministic order for stable paging (insertion order)
       .$dynamic();
-    q = applyPage(q, page);
-    const visible = await q;
+    query = applyPage(query, page);
+    const visible = await query;
 
     const names = await this.resolveEntityNames(campaignId, visible);
     return visible.map((r) => toDomain(r, entityNameFor(r, names)));
