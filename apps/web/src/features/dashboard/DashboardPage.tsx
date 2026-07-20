@@ -20,6 +20,7 @@ import { PartyCard } from './PartyCard';
 import { SessionLog } from './SessionLog';
 import { NotesQuickRail } from './NotesQuickRail';
 import { DiceWidget } from './DiceWidget';
+import { HandoutsCard } from './HandoutsCard';
 
 export default function DashboardPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -156,6 +157,7 @@ export default function DashboardPage() {
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <PartyCard campaignId={id} characters={summary.characters} />
           <NpcGrid campaignId={id} npcs={summary.npcs} />
+          <HandoutsCard campaignId={id} role={role} />
           <DiceWidget campaignId={id} />
           <NotesQuickRail campaignId={id} openInboxCount={summary.openInboxCount} role={role} />
         </div>
