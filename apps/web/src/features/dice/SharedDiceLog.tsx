@@ -18,6 +18,16 @@ import { useAnnounce } from '../../components/Announcer';
 
 const POLL_MS = 5000;
 
+// Flavor a d20 roll for the crit flourish (issue #67): a natural 20 gets a gold
+// total + sparkle, a natural 1 a muted-rose shudder. Only meaningful for a single
+// d20 (the classic to-hit / save die); everything else is a plain roll.
+function rollFlavor(r: DiceRoll): 'crit' | 'fumble' | null {
+  if (!/\bd20\b/i.test(r.expr)) return null;
+  if (r.rolls.includes(20)) return 'crit';
+  if (r.rolls.includes(1)) return 'fumble';
+  return null;
+}
+
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(ms / 60000);
@@ -34,6 +44,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const [rolling, setRolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rolls, setRolls] = useState<DiceRoll[]>([]);
+  // Id of the roll the local user just made — only that total tumbles in, so
+  // polled-in rolls from other players don't animate on every 5s refresh.
+  const [justRolledId, setJustRolledId] = useState<number | null>(null);
   const announce = useAnnounce();
   const exprId = useId();
 
@@ -67,8 +80,11 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: expr.trim() });
       // Prepend own roll immediately (dedupe by id — the next poll returns it too).
       setRolls((prev) => [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit));
+      setJustRolledId(result.id);
       // Announce the result — the roll feed is otherwise visual-only (issue #93).
-      announce(`Rolled ${result.expr}: ${result.total} (${result.rolls.join(', ')})`);
+      const flavor = rollFlavor(result);
+      const flourish = flavor === 'crit' ? ' — critical!' : flavor === 'fumble' ? ' — fumble!' : '';
+      announce(`Rolled ${result.expr}: ${result.total} (${result.rolls.join(', ')})${flourish}`);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "Couldn't roll.";
       setError(message);
@@ -105,7 +121,16 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         </p>
       ) : (
         <div className="flex flex-col gap-1">
-          {rolls.map((r) => (
+          {rolls.map((r) => {
+            const flavor = rollFlavor(r);
+            const fresh = r.id === justRolledId;
+            const totalClass = [
+              flavor === 'crit' ? 'cf-roll-crit' : flavor === 'fumble' ? 'cf-roll-fumble' : '',
+              fresh ? 'cf-anim-roll' : '',
+              fresh && flavor === 'crit' ? 'cf-anim-crit' : '',
+              fresh && flavor === 'fumble' ? 'cf-anim-fumble' : '',
+            ].filter(Boolean).join(' ');
+            return (
             <div
               key={r.id}
               title={new Date(r.createdAt).toLocaleString()}
@@ -120,7 +145,13 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
               <span className="text-muted" style={{ fontSize: 11 }}>
                 [{r.rolls.join(', ')}]
               </span>
+              {fresh && flavor === 'crit' && (
+                <span className="cf-crit-spark" aria-hidden="true" style={{ fontSize: compact ? 12 : 14, color: 'var(--cf-crit)', flex: 'none' }}>
+                  ✦
+                </span>
+              )}
               <span
+                className={totalClass || undefined}
                 style={{
                   fontFamily: 'var(--font-heading)',
                   fontSize: compact ? 16 : 18,
@@ -134,7 +165,8 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                 {timeAgo(r.createdAt)}
               </span>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Card>
