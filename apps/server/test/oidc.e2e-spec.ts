@@ -527,6 +527,115 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
     });
   });
 
+  // Issue #45 fix pinning tests — with OIDC_ALLOWED_GROUP set, authenticating at the
+  // IdP is no longer sufficient to get a Campfire account: the groups claim must
+  // contain the allowed group (or the admin group — admins always retain access).
+  // Before this fix, provisionOrUpdateUser created an account for ANY valid `sub`,
+  // so on a shared corporate/family IdP everyone got a Campfire account on first login.
+  describe('OIDC_ALLOWED_GROUP sign-in allowlist (dedicated app instance)', () => {
+    let app: AppProcess;
+
+    beforeAll(async () => {
+      app = await spawnApp(oidcEnvFor(idp, { OIDC_ALLOWED_GROUP: 'campfire-users', OIDC_ADMIN_GROUP: 'campfire-admins' }));
+    });
+
+    afterAll(async () => {
+      await app.kill();
+    });
+
+    it('denies a user without the allowed group: 403, no session cookie, no account provisioned', async () => {
+      idp.setNextUser({ sub: 'sub-outsider', preferred_username: 'outsider', email: 'outsider@example.com', name: 'Out Sider', groups: ['some-other-app'] });
+
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent);
+      expect(callbackRes.status).toBe(403);
+      const callbackBody = await callbackRes.json();
+      expect(callbackBody.message).toMatch(/not allowed to sign in/i);
+
+      // No session cookie was minted — only the OIDC flow cookie gets cleared.
+      const headers = callbackRes.headers as Headers & { getSetCookie?: () => string[] };
+      const setCookies = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : [];
+      expect(setCookies.some((c) => c.startsWith('campfire_session='))).toBe(false);
+
+      const meRes = await agent.get('/api/v1/me');
+      expect(meRes.status).toBe(401);
+    });
+
+    it('no account row exists for the denied user (visible to an admin in the users list)', async () => {
+      // Sign in as an admin (allowed via the admin group) and confirm the denied
+      // sub was never provisioned — the allowlist gates provisioning itself, not
+      // just the session.
+      idp.setNextUser({ sub: 'sub-allow-admin', preferred_username: 'allowadmin', email: 'allowadmin@example.com', name: 'Allow Admin', groups: ['campfire-admins'] });
+      const adminAgent = new CookieAgent(app.baseUrl);
+      await performOidcLogin(adminAgent);
+      const adminMe = await adminAgent.get('/api/v1/me');
+      const adminMeBody = await adminMe.json();
+      expect(adminMe.status).toBe(200);
+      expect(adminMeBody.user.serverRole).toBe('admin');
+
+      const usersRes = await adminAgent.get('/api/v1/users');
+      expect(usersRes.status).toBe(200);
+      const users = await usersRes.json();
+      const usernames = (users as Array<{ username: string }>).map((u) => u.username);
+      expect(usernames).not.toContain('outsider');
+    });
+
+    it('allows a user in the allowed group: provisions and signs in normally', async () => {
+      idp.setNextUser({ sub: 'sub-member', preferred_username: 'member', email: 'member@example.com', name: 'Mem Ber', groups: ['campfire-users'] });
+
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent);
+      expect(callbackRes.status).toBe(302);
+      expect(callbackRes.headers.get('location')).toBe('/');
+
+      const meRes = await agent.get('/api/v1/me');
+      const meBody = await meRes.json();
+      expect(meRes.status).toBe(200);
+      expect(meBody.user.username).toBe('member');
+      expect(meBody.user.serverRole).toBe('user');
+    });
+
+    it('allows an admin-group member who is NOT in the allowed group (admin implies access)', async () => {
+      idp.setNextUser({ sub: 'sub-admin-only', preferred_username: 'adminonly', email: 'adminonly@example.com', name: 'Admin Only', groups: ['campfire-admins'] });
+
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent);
+      expect(callbackRes.status).toBe(302);
+
+      const meRes = await agent.get('/api/v1/me');
+      const meBody = await meRes.json();
+      expect(meRes.status).toBe(200);
+      expect(meBody.user.serverRole).toBe('admin');
+    });
+
+    it('locks out an EXISTING user who is removed from the allowed group at the IdP', async () => {
+      // member was provisioned above while in campfire-users; drop the group and retry.
+      idp.setNextUser({ sub: 'sub-member', preferred_username: 'member', email: 'member@example.com', name: 'Mem Ber', groups: [] });
+
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent);
+      expect(callbackRes.status).toBe(403);
+      const callbackBody = await callbackRes.json();
+      expect(callbackBody.message).toMatch(/not allowed to sign in/i);
+
+      const meRes = await agent.get('/api/v1/me');
+      expect(meRes.status).toBe(401);
+    });
+
+    it('re-admits that user once the group is restored (same account, no duplicate)', async () => {
+      idp.setNextUser({ sub: 'sub-member', preferred_username: 'member', email: 'member@example.com', name: 'Mem Ber', groups: ['campfire-users'] });
+
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent);
+      expect(callbackRes.status).toBe(302);
+
+      const meRes = await agent.get('/api/v1/me');
+      const meBody = await meRes.json();
+      expect(meRes.status).toBe(200);
+      expect(meBody.user.username).toBe('member'); // sub-based reuse — no `member-2`
+    });
+  });
+
   describe('last-admin protection is isolated (dedicated app instance)', () => {
     let app: AppProcess;
 

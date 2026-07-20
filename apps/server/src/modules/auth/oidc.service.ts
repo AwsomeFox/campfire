@@ -1,4 +1,4 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { ForbiddenException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import type * as client from 'openid-client';
 import { readOidcEnvConfig, type OidcEnvConfig } from './oidc.config';
 import { UsersService } from '../users/users.service';
@@ -182,6 +182,12 @@ export class OidcService {
    * existing user. Syncs serverRole from the admin-group claim on EVERY
    * login (up and down — but UsersService.syncOidcServerRole refuses to
    * demote the last enabled admin, logging a warn instead).
+   *
+   * When OIDC_ALLOWED_GROUP is set, membership in that group (or in
+   * OIDC_ADMIN_GROUP — admins always retain access) is required to sign in
+   * at all: without it, no account is provisioned and existing accounts are
+   * denied a session with a 403. Checked on EVERY login, so removing a user
+   * from the allowed group at the IdP locks them out on their next login.
    */
   async provisionOrUpdateUser(claims: OidcClaims): Promise<User> {
     const env = this.getEnvConfig();
@@ -190,6 +196,10 @@ export class OidcService {
     const groups = extractGroups(claims, env.groupsClaim);
     const isAdminByGroup = env.adminGroup !== null && groups.includes(env.adminGroup);
     const desiredRole: 'admin' | 'user' = isAdminByGroup ? 'admin' : 'user';
+
+    if (env.allowedGroup !== null && !groups.includes(env.allowedGroup) && !isAdminByGroup) {
+      throw new ForbiddenException('Your account is not allowed to sign in to Campfire');
+    }
 
     const existingRow = await this.usersService.getRowByOidcSub(claims.sub);
     if (existingRow) {
