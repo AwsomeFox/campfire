@@ -106,7 +106,7 @@ export class AttachmentsController {
   @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.attachmentsService.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
     await this.attachmentsService.remove(id, user, role);
   }
 }

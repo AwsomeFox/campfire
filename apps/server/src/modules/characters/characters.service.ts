@@ -1,8 +1,8 @@
-import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch } from '@campfire/schema';
-import type { Character, Role } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp } from '@campfire/schema';
+import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -15,8 +15,12 @@ type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type CharacterUpdateInput = z.infer<typeof CharacterUpdate>;
 type HpPatchInput = z.infer<typeof HpPatch>;
 type ConditionsPatchInput = z.infer<typeof ConditionsPatch>;
+type SpellSlotPatchInput = z.infer<typeof SpellSlotPatch>;
+type XpPatchInput = z.infer<typeof XpPatch>;
+type XpAwardInput = z.infer<typeof XpAward>;
+type LevelUpInput = z.infer<typeof LevelUp>;
 
-function toDomain(row: typeof characters.$inferSelect): Character {
+export function toDomain(row: typeof characters.$inferSelect): Character {
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -25,12 +29,17 @@ function toDomain(row: typeof characters.$inferSelect): Character {
     species: row.species,
     className: row.className,
     level: row.level,
+    xp: row.xp,
     background: row.background,
     stats: fromJsonText<Record<string, number>>(row.stats, {}),
     ac: row.ac,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
     conditions: fromJsonText<string[]>(row.conditions, []),
+    saveProficiencies: fromJsonText<Character['saveProficiencies']>(row.saveProficiencies, []),
+    skills: fromJsonText<Record<string, SkillRank>>(row.skills, {}),
+    actions: fromJsonText<CharacterAction[]>(row.actions, []),
+    spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
     portraitUrl: row.portraitUrl,
     ddbId: row.ddbId,
     notes: row.notes,
@@ -83,12 +92,17 @@ export class CharactersService {
         species: input.species ?? '',
         className: input.className ?? '',
         level: input.level ?? 1,
+        xp: input.xp ?? 0,
         background: input.background ?? '',
         stats: toJsonText(input.stats ?? {}),
         ac: input.ac ?? null,
         hpCurrent: input.hpCurrent ?? 10,
         hpMax: input.hpMax ?? 10,
         conditions: toJsonText(input.conditions ?? []),
+        saveProficiencies: toJsonText(input.saveProficiencies ?? []),
+        skills: toJsonText(input.skills ?? {}),
+        actions: toJsonText(input.actions ?? []),
+        spellSlots: toJsonText(input.spellSlots ?? {}),
         portraitUrl: input.portraitUrl ?? null,
         ddbId: input.ddbId ?? null,
         notes: input.notes ?? '',
@@ -117,6 +131,7 @@ export class CharactersService {
     if (input.species !== undefined) update.species = input.species;
     if (input.className !== undefined) update.className = input.className;
     if (input.level !== undefined) update.level = input.level;
+    if (input.xp !== undefined) update.xp = input.xp;
     if (input.background !== undefined) update.background = input.background;
     if (input.stats !== undefined) update.stats = toJsonText(input.stats);
     if (input.ac !== undefined) update.ac = input.ac;
@@ -131,6 +146,19 @@ export class CharactersService {
       update.hpCurrent = Math.max(0, Math.min(finalHpMax, rawHpCurrent));
     }
     if (input.conditions !== undefined) update.conditions = toJsonText(input.conditions);
+    if (input.saveProficiencies !== undefined) update.saveProficiencies = toJsonText(input.saveProficiencies);
+    if (input.skills !== undefined) update.skills = toJsonText(input.skills);
+    if (input.actions !== undefined) update.actions = toJsonText(input.actions);
+    // Clamp each level's `used` to [0, max] whenever slot maxima are rewritten —
+    // mirrors the hpCurrent/hpMax clamp above and patchSpellSlots' clamp, so a
+    // PATCH can never leave more slots spent than exist.
+    if (input.spellSlots !== undefined) {
+      const clamped: Record<string, SpellSlotLevel> = {};
+      for (const [level, slot] of Object.entries(input.spellSlots)) {
+        clamped[level] = { max: slot.max, used: Math.max(0, Math.min(slot.max, slot.used)) };
+      }
+      update.spellSlots = toJsonText(clamped);
+    }
     if (input.portraitUrl !== undefined) update.portraitUrl = input.portraitUrl;
     if (input.ddbId !== undefined) update.ddbId = input.ddbId;
     if (input.notes !== undefined) update.notes = input.notes;
@@ -195,6 +223,108 @@ export class CharactersService {
     return toDomain(row);
   }
 
+  async patchXp(id: number, patch: XpPatchInput, user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+
+    // Mirrors patchHp: { delta } is relative, { set } absolute; XP never goes negative.
+    let xp: number;
+    if ('delta' in patch) {
+      xp = existing.xp + patch.delta;
+    } else {
+      xp = patch.set;
+    }
+    xp = Math.max(0, xp);
+
+    const [row] = await this.db
+      .update(characters)
+      .set({ xp, updatedAt: nowIso() })
+      .where(eq(characters.id, id))
+      .returning();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.xp',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify(patch),
+    });
+    return toDomain(row);
+  }
+
+  /** DM party award: add `amount` XP to every campaign character (or just `characterIds`). Role gate (dm) enforced at controller. */
+  async awardXp(campaignId: number, award: XpAwardInput, user: RequestUser, role: Role): Promise<Character[]> {
+    const rows = await this.db.select().from(characters).where(eq(characters.campaignId, campaignId));
+    let targets = rows;
+    if (award.characterIds) {
+      const wanted = new Set(award.characterIds);
+      targets = rows.filter((r) => wanted.has(r.id));
+      const foundIds = new Set(targets.map((r) => r.id));
+      const missing = award.characterIds.filter((cid) => !foundIds.has(cid));
+      if (missing.length > 0) {
+        throw new BadRequestException(`Characters not in campaign ${campaignId}: ${missing.join(', ')}`);
+      }
+    }
+    if (targets.length === 0) throw new BadRequestException('No characters to award XP to');
+
+    const ts = nowIso();
+    const updated: Character[] = [];
+    for (const target of targets) {
+      const [row] = await this.db
+        .update(characters)
+        .set({ xp: Math.max(0, target.xp + award.amount), updatedAt: ts })
+        .where(eq(characters.id, target.id))
+        .returning();
+      updated.push(toDomain(row));
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.xp_award',
+      entityType: 'character',
+      entityId: targets[0].id,
+      campaignId,
+      detail: JSON.stringify({ amount: award.amount, characterIds: targets.map((t) => t.id) }),
+    });
+    return updated;
+  }
+
+  /**
+   * Guided level-up: +1 level (never past 20), optionally raising hpMax; the
+   * hit points gained are added to hpCurrent too (existing damage is kept),
+   * then clamped to [0, newHpMax] like every other HP-writing path.
+   * Deliberately not gated on XP thresholds — milestone campaigns level
+   * without XP; the web UI surfaces the threshold advisory instead.
+   */
+  async levelUp(id: number, input: LevelUpInput, user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+    if (existing.level >= 20) throw new BadRequestException('Already at level 20 — there is no level 21');
+
+    const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nowIso() };
+    if (input.hpMax !== undefined) {
+      const gained = input.hpMax - existing.hpMax;
+      update.hpMax = input.hpMax;
+      update.hpCurrent = Math.max(0, Math.min(input.hpMax, existing.hpCurrent + Math.max(0, gained)));
+    }
+
+    const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.levelup',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify({ level: row.level, ...(input.hpMax !== undefined ? { hpMax: input.hpMax } : {}) }),
+    });
+    return toDomain(row);
+  }
+
   async patchConditions(id: number, patch: ConditionsPatchInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
@@ -213,6 +343,37 @@ export class CharactersService {
       actor: auditActor(user),
       actorRole: role,
       action: 'character.conditions',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify(patch),
+    });
+    return toDomain(row);
+  }
+
+  /** Spend (+delta) or restore (-delta) slots at one spell level; `used` is clamped to [0, max]. */
+  async patchSpellSlots(id: number, patch: SpellSlotPatchInput, user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+
+    const slots = fromJsonText<Record<string, SpellSlotLevel>>(existing.spellSlots, {});
+    const key = String(patch.level);
+    const slot = slots[key];
+    if (!slot || slot.max <= 0) {
+      throw new BadRequestException(`No spell slots at level ${patch.level} — set the level's max via PATCH spellSlots first`);
+    }
+    slots[key] = { max: slot.max, used: Math.max(0, Math.min(slot.max, slot.used + patch.delta)) };
+
+    const [row] = await this.db
+      .update(characters)
+      .set({ spellSlots: toJsonText(slots), updatedAt: nowIso() })
+      .where(eq(characters.id, id))
+      .returning();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.spellSlots',
       entityType: 'character',
       entityId: id,
       campaignId: existing.campaignId,

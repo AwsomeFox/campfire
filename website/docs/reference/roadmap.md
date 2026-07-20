@@ -19,7 +19,7 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **Notes** — private / share-with-DM / share-with-party, anchored to any entity
 - ✅ **Scribe inbox** — zero-friction quick capture → DM resolves into canon
 - ✅ **Encounters / run-session** — initiative (auto-rolled d20+DEX), turn order, next-turn, at-table HP & conditions, add monsters from the compendium, HP writes back to sheets on end
-- ✅ **Dice roller** — server-side, audited, on the dashboard and in combat
+- ✅ **Dice roller** — server-side, audited, on the dashboard and in combat, with a campaign-shared roll log every member sees
 - ✅ **Compendium** — Open5e SRD import, full-text search, reader
 - ✅ **Proposals** — AI/collab writes queue for DM approval
 - ✅ **Export** — whole campaign to JSON or Markdown zip
@@ -31,7 +31,7 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **Per-campaign roles** — dm / player / viewer, with last-DM & last-admin protection
 - ✅ **MCP server** — AI-operable over streamable HTTP, PAT-authenticated, scope-capped
 - ✅ **Single-image deploy** — multi-arch Docker image, one data volume, same-origin SPA serving, Traefik/Authentik ready
-- ✅ **Preferences** — per-user accent colour
+- ✅ **Preferences** — per-user accent colour and text size
 
 ## AI operability ✅
 
@@ -47,9 +47,9 @@ An AI agent can run an entire campaign over MCP alone — verified end-to-end:
 Requested and being built so the operator and the storyteller stay distinct
 (see [Admin vs DM](../administration/access-model.md)):
 
-- ⬜ **DM invite links / join codes** — let a DM bring players in without the server admin creating each account _(today: the "Invite" card is a disabled placeholder)_
+- ✅ **DM invite links / join codes** — a DM generates a `/join/<code>` link from **Members → Invite** (player/viewer, expiring, revocable); whoever opens it creates their own account and lands in the campaign
 - ⬜ **Optional self-service signup** — a server setting for open registration
-- ⬜ **Admin ≠ auto-DM** — a server admin no longer implicitly sees every campaign's DM secrets; server power ≠ story access
+- ✅ **Admin ≠ auto-DM** — a server admin no longer implicitly sees every campaign's DM secrets; server power ≠ story access
 
 ## Half-built & stale 🟡
 
@@ -60,7 +60,6 @@ Honest rough edges that exist but aren't finished:
 - 🟡 **Proposal diffs** — show the proposed new values only; there's no before/after snapshot to compare against current state
 - 🟡 **Real-time updates** — the run-session and dashboard use polling; live push (SSE) is planned for smoother at-the-table multi-device play
 - 🟡 **Notes anchor labels** — entity-linked notes show `Quest #12`-style references rather than the entity's name in some list views
-- 🟡 **Preferences extras** — "text size" and "notifications" cards are placeholders with no backing yet
 - 🟡 **AI scribe automation** — the proposal queue is real, but there's no built-in scheduled/automatic scribe; today it's client-driven (connect an MCP client and ask it to act)
 
 ## Planned ⬜
@@ -70,7 +69,7 @@ who hits them. Grouped by theme:
 
 **Account lifecycle & self-service**
 
-- ⬜ **DM invites / join codes** and ⬜ **optional self-service signup** (see [Admin vs DM](../administration/access-model.md))
+- ✅ **DM invites / join codes** and ⬜ **optional self-service signup** (see [Admin vs DM](../administration/access-model.md))
 - ⬜ **Forgot-password / self-service reset** — today only an admin can reset a local user's password
 
 **Between-session engagement**
@@ -81,7 +80,7 @@ who hits them. Grouped by theme:
 
 **Table depth**
 
-- ⬜ **XP & levelling** — _(today `level` is a plain editable number)_
+- ✅ **XP & levelling** — XP tracking with 5e thresholds, party-wide DM awards, and a guided level-up (level +1, new max HP, damage carried over)
 - ⬜ **Inventory & loot** — party treasury and per-character items _(today loot lives in prose)_
 - ⬜ **Campaign archive** — a real read-only "completed" state _(today `status` is stored but cosmetic; completed campaigns stay fully editable in the hub)_
 - ⬜ **Campaign templates / cloning** — reuse prep instead of rebuilding from scratch

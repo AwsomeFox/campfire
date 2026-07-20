@@ -41,6 +41,22 @@ export function hashSessionToken(token: string): string {
 }
 
 /**
+ * Password-reset code: `cf_reset_<32 hex chars>` (16 random bytes). Handed to
+ * an admin ONCE on approval (see PasswordResetService.approve); DB stores
+ * sha256(code), never the raw code. Single-use + short expiry, so 128 bits of
+ * entropy is ample for a code relayed out-of-band.
+ */
+const RESET_CODE_PREFIX = 'cf_reset_';
+
+export function generateResetCode(): string {
+  return `${RESET_CODE_PREFIX}${randomBytes(16).toString('hex')}`;
+}
+
+export function hashResetCode(code: string): string {
+  return createHash('sha256').update(code).digest('hex');
+}
+
+/**
  * API (PAT) token: `cf_pat_<48 hex chars>` (24 random bytes). DB stores
  * sha256(token); `tokenPrefix` (first 11 chars, e.g. `cf_pat_9f2a`) is kept
  * alongside for display purposes only — never enough to guess the token.
@@ -62,4 +78,60 @@ export function apiTokenPrefix(token: string): string {
 
 export function looksLikeApiToken(token: string): boolean {
   return /^cf_pat_[0-9a-f]{48}$/.test(token);
+}
+
+/**
+ * Campaign invite join code: 16 random bytes base64url (~22 chars, 128 bits —
+ * unguessable). Stored PLAINTEXT in campaign_invites (unlike sessions/PATs,
+ * which store sha256): the code is a shareable capability the DM re-displays
+ * and re-copies from the UI, and it can only create a NEW membership at a
+ * capped role (never dm) — it cannot impersonate an existing user. Codes are
+ * always expiring, optionally use-capped, and revocable. See
+ * modules/membership/invites.service.ts.
+ */
+export function generateInviteCode(): string {
+  return randomBytes(16).toString('base64url');
+}
+
+/**
+ * Recap share-link token: `cf_share_<48 hex chars>` (24 random bytes — 192 bits,
+ * unguessable). DB stores sha256(token); `tokenPrefix` (first 13 chars, e.g.
+ * `cf_share_9f2a`) is kept alongside for display purposes only — never enough
+ * to reconstruct the link. Same storage policy as PATs above.
+ */
+const SHARE_TOKEN_PREFIX = 'cf_share_';
+const SHARE_TOKEN_DISPLAY_PREFIX_LEN = 13;
+
+export function generateShareToken(): string {
+  return `${SHARE_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
+}
+
+export function hashShareToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export function shareTokenPrefix(token: string): string {
+  return token.slice(0, SHARE_TOKEN_DISPLAY_PREFIX_LEN);
+}
+
+export function looksLikeShareToken(token: string): boolean {
+  return /^cf_share_[0-9a-f]{48}$/.test(token);
+}
+
+/**
+ * Campaign ICS feed token: `cf_ics_<48 hex chars>` (24 random bytes) — the
+ * capability secret in a campaign's public calendar-feed URL. Unlike session
+ * tokens and PATs it is stored PLAINTEXT (campaigns.ics_token): the feed URL
+ * must be re-displayable to members (calendar apps need it copy-pasted, and
+ * "shown once" would be hostile UX for a read-only schedule feed). Same
+ * entropy as a PAT, so it is equally unguessable.
+ */
+const ICS_TOKEN_PREFIX = 'cf_ics_';
+
+export function generateIcsFeedToken(): string {
+  return `${ICS_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
+}
+
+export function looksLikeIcsFeedToken(token: string): boolean {
+  return /^cf_ics_[0-9a-f]{48}$/.test(token);
 }

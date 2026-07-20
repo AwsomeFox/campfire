@@ -14,16 +14,21 @@ function minRole(a: Role, b: Role): Role {
  *
  * Order (before the token cap below is applied):
  *  1. user.devRole (DEV_AUTH header path) — short-circuits everything else.
- *  2. serverRole === 'admin' -> always 'dm' (admins have full DM rights everywhere).
- *  3. campaign_members lookup (userId must be numeric — dev:* users never reach here).
- *  4. null — not a member of this campaign.
+ *  2. campaign_members lookup (userId must be numeric — dev:* users never reach here).
+ *  3. null — not a member of this campaign.
+ *
+ * serverRole is deliberately NOT consulted (issue #9, admin ≠ auto-DM): a
+ * server admin manages users/settings/packs but holds NO implicit role in any
+ * campaign — they see campaign content (including DM secrets) only through a
+ * real campaign_members row, exactly like everyone else. Server power must not
+ * equal story access.
  *
  * PAT token cap (applied last, whenever user.tokenContext is set): if the
  * token is bound to a specific campaignId and this isn't it, the caller is
- * treated as a non-member (null) regardless of their real role — including
- * admins acting through a scoped token. Otherwise the effective role is
- * capped to `min(tokenContext.scope, real effective role)` — admin serverRole
- * does NOT bypass this cap when acting via token.
+ * treated as a non-member (null) regardless of their real role. Otherwise the
+ * effective role is capped to `min(tokenContext.scope, real effective role)`.
+ * A token's adminEnabled flag only unlocks SERVER-admin gates (see
+ * hasServerAdminPower()) — it never grants campaign access here.
  */
 @Injectable()
 export class RoleResolver {
@@ -42,15 +47,14 @@ export class RoleResolver {
 
   /**
    * The user's real (untapped-by-token) effective role on a campaign —
-   * membership row, devRole, or admin server-role. Used anywhere a token's
-   * own campaignId/scope must never be trusted on its own, e.g. minting a
-   * new token (TokensService.create) or scoping GET /campaigns
-   * (accessibleCampaignIds below): both must fall back to what the CALLER
-   * actually has, never the token's self-reported campaignId.
+   * membership row or devRole (never serverRole — see the class doc above).
+   * Used anywhere a token's own campaignId/scope must never be trusted on
+   * its own, e.g. minting a new token (TokensService.create) or scoping
+   * GET /campaigns (accessibleCampaignIds below): both must fall back to
+   * what the CALLER actually has, never the token's self-reported campaignId.
    */
   async baseEffectiveRole(user: RequestUser, campaignId: number): Promise<Role | null> {
     if (user.devRole) return user.devRole;
-    if (user.serverRole === 'admin') return 'dm';
 
     const numericId = Number(user.id);
     if (!Number.isInteger(numericId)) return null;
@@ -66,6 +70,10 @@ export class RoleResolver {
 
   /**
    * Campaign ids this user may access at all (for GET /campaigns scoping).
+   *
+   * Server admins get no special treatment here either (issue #9): the
+   * campaign list itself is campaign data (names/descriptions can spoil the
+   * story), so an admin sees only campaigns they are actually a member of.
    *
    * A campaign-scoped token's campaignId is NEVER trusted on its own — it
    * must be intersected with the caller's real base accessible set
@@ -84,7 +92,6 @@ export class RoleResolver {
     }
 
     if (user.devRole) return 'all';
-    if (user.serverRole === 'admin') return 'all';
 
     const numericId = Number(user.id);
     if (!Number.isInteger(numericId)) return [];

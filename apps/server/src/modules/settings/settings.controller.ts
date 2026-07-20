@@ -18,7 +18,7 @@ export class SettingsController {
   }
 
   @Patch()
-  @ApiOperation({ summary: 'Update server settings', description: 'Server-admin only. e.g. allowLocalLogin gates non-admin local (password) login.' })
+  @ApiOperation({ summary: 'Update server settings', description: 'Server-admin only. e.g. allowLocalLogin gates non-admin local (password) login; allowSignup gates self-service signup (POST /auth/signup).' })
   @ApiResponse({ status: 200, description: 'Updated server settings.' })
   update(@Body() body: SettingsUpdateDto) {
     return this.settings.update(body);

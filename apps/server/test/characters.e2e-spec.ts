@@ -115,6 +115,143 @@ describe('characters (e2e)', () => {
     expect(res.body.hpCurrent).toBe(0);
   });
 
+  // Sheet depth (issue #1): saving throws, skills, actions, spell slots.
+  it('new characters default to empty sheet-depth fields', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(res.status).toBe(200);
+    expect(res.body.saveProficiencies).toEqual([]);
+    expect(res.body.skills).toEqual({});
+    expect(res.body.actions).toEqual([]);
+    expect(res.body.spellSlots).toEqual({});
+  });
+
+  it('PATCH saveProficiencies round-trips', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ saveProficiencies: ['STR', 'CON'] });
+    expect(res.status).toBe(200);
+    expect(res.body.saveProficiencies).toEqual(['STR', 'CON']);
+  });
+
+  it('PATCH saveProficiencies rejects a non-ability key', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ saveProficiencies: ['LUCK'] });
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH skills round-trips proficient/expertise ranks', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ skills: { Stealth: 'expertise', Perception: 'proficient' } });
+    expect(res.status).toBe(200);
+    expect(res.body.skills).toEqual({ Stealth: 'expertise', Perception: 'proficient' });
+  });
+
+  it('PATCH skills rejects an unknown rank', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ skills: { Stealth: 'legendary' } });
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH actions round-trips and fills field defaults', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({
+        actions: [
+          { name: 'Longsword', kind: 'melee', toHit: '+5', damage: '1d8+3 slashing', notes: 'versatile 1d10' },
+          { name: 'Second Wind' }, // defaults: kind/toHit/damage/notes -> ''
+        ],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.actions).toHaveLength(2);
+    expect(res.body.actions[0]).toEqual({ name: 'Longsword', kind: 'melee', toHit: '+5', damage: '1d8+3 slashing', notes: 'versatile 1d10' });
+    expect(res.body.actions[1]).toEqual({ name: 'Second Wind', kind: '', toHit: '', damage: '', notes: '' });
+  });
+
+  it('PATCH actions rejects a nameless action', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ actions: [{ name: '' }] });
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH spellSlots sets maxima and clamps used to max', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ spellSlots: { '1': { max: 4, used: 0 }, '2': { max: 2, used: 5 } } });
+    expect(res.status).toBe(200);
+    // used=5 > max=2 is clamped down, mirroring the hpCurrent/hpMax clamp.
+    expect(res.body.spellSlots).toEqual({ '1': { max: 4, used: 0 }, '2': { max: 2, used: 2 } });
+  });
+
+  it('PATCH spellSlots rejects a non 1-9 level key', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ spellSlots: { '10': { max: 1, used: 0 } } });
+    expect(res.status).toBe(400);
+  });
+
+  it('spell-slots spend/restore adjusts used and clamps to [0, max]', async () => {
+    const server = ctx.app.getHttpServer();
+    const spend = await request(server)
+      .post(`/api/v1/characters/${characterId}/spell-slots`)
+      .set(owner)
+      .send({ level: 1, delta: 1 });
+    expect(spend.status).toBe(201);
+    expect(spend.body.spellSlots['1']).toEqual({ max: 4, used: 1 });
+
+    const overRestore = await request(server)
+      .post(`/api/v1/characters/${characterId}/spell-slots`)
+      .set(owner)
+      .send({ level: 1, delta: -100 });
+    expect(overRestore.status).toBe(201);
+    expect(overRestore.body.spellSlots['1']).toEqual({ max: 4, used: 0 });
+
+    const overSpend = await request(server)
+      .post(`/api/v1/characters/${characterId}/spell-slots`)
+      .set(owner)
+      .send({ level: 1, delta: 100 });
+    expect(overSpend.status).toBe(201);
+    expect(overSpend.body.spellSlots['1']).toEqual({ max: 4, used: 4 });
+  });
+
+  it('spell-slots at an unconfigured level -> 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${characterId}/spell-slots`)
+      .set(owner)
+      .send({ level: 9, delta: 1 });
+    expect(res.status).toBe(400);
+  });
+
+  it('non-owner, non-dm player gets 403 on spell-slots', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/characters/${characterId}/spell-slots`)
+      .set(nonOwner)
+      .send({ level: 1, delta: 1 });
+    expect(res.status).toBe(403);
+  });
+
   it('conditions add/remove', async () => {
     const server = ctx.app.getHttpServer();
     const addRes = await request(server)

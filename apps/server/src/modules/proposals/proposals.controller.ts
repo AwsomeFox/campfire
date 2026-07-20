@@ -23,7 +23,9 @@ export class CampaignProposalsController {
     @Query('status') status: string | undefined,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireRole(user, campaignId, 'dm');
+    // allowArchived: listing proposals is a read — fine on an archived campaign
+    // (approve/reject below stay blocked while archived).
+    await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
     return this.proposals.listForCampaign(campaignId, status);
   }
 }

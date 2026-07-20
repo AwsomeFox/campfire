@@ -26,7 +26,8 @@ export class ExportController {
     @CurrentUser() user: RequestUser,
     @Res() res: Response,
   ): Promise<void> {
-    await this.access.requireRole(user, campaignId, 'dm');
+    // allowArchived: exporting an archived (read-only) campaign is a primary archive use case.
+    await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
     const campaign = await this.campaigns.getOrThrow(campaignId);
 
     if (format === 'mdzip') {

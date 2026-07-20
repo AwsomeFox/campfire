@@ -11,6 +11,9 @@ import { RouteErrorBoundary } from './RouteErrorBoundary';
 import { Skeleton } from '../components/ui';
 import { SetupPage } from '../features/auth/SetupPage';
 import { LoginPage } from '../features/auth/LoginPage';
+import { SignupPage } from '../features/auth/SignupPage';
+import { ResetPasswordPage } from '../features/auth/ResetPasswordPage';
+import { JoinPage } from '../features/auth/JoinPage';
 import { HomePage } from '../features/home/HomePage';
 import { NotFoundPage } from '../features/home/NotFoundPage';
 
@@ -43,6 +46,24 @@ export const router = createBrowserRouter([
   {
     path: '/login',
     element: page(<LoginPage />),
+  },
+  {
+    path: '/signup',
+    element: page(<SignupPage />),
+  },
+  {
+    path: '/reset-password',
+    element: page(<ResetPasswordPage />),
+  },
+  {
+    // Invite landing page — public on purpose: the invited person has no account yet.
+    path: '/join/:code',
+    element: page(<JoinPage />),
+  },
+  {
+    // Public read-only recap share link — no auth, outside AuthedLayout on purpose.
+    path: '/share/:token',
+    element: lazyPage(() => import('../features/sessions/SharedRecapPage')),
   },
   {
     element: <AuthedLayout />,
@@ -86,6 +107,10 @@ export const router = createBrowserRouter([
           {
             path: '/c/:campaignId/characters/:characterId',
             element: lazyPage(() => import('../features/characters/CharacterPage')),
+          },
+          {
+            path: '/c/:campaignId/inventory',
+            element: lazyPage(() => import('../features/inventory/InventoryPage')),
           },
           {
             path: '/c/:campaignId/sessions',

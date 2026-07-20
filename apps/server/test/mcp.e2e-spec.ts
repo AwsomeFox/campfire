@@ -59,6 +59,8 @@ const ALL_TOOLS = [
   'update_session',
   'upsert_character',
   'update_character_hp',
+  'award_xp',
+  'level_up_character',
   'set_character_conditions',
   'add_note',
   'update_note',
@@ -143,7 +145,37 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(64);
+    expect(tools).toHaveLength(66);
+
+    // Strict schemas must still be ADVERTISED even though per-call validation happens
+    // in our handler (so failures return the documented {"error"} JSON): every tool
+    // with args advertises additionalProperties:false in tools/list.
+    const updateCombatant = tools.find((t) => t.name === 'update_combatant');
+    expect(updateCombatant?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
+    const summary = tools.find((t) => t.name === 'get_campaign_summary');
+    expect(summary?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
+    expect((summary?.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty('campaignId');
+  });
+
+  it('tools/list input schemas inline every property — no sibling $refs (issue #31: add_combatant.ruleEntryId)', async () => {
+    const client = await mcpClient(dmToken);
+    const { tools } = await client.listTools();
+
+    // Shared zod singletons (e.g. `Id` reused by several fields of one tool) used to be
+    // deduped by identity into sibling-property refs like {"$ref":"#/properties/characterId"},
+    // which some MCP clients don't resolve. No tool schema may contain a $ref at all.
+    const offenders = tools.filter((t) => JSON.stringify(t.inputSchema).includes('"$ref"')).map((t) => t.name);
+    expect(offenders).toEqual([]);
+
+    const addCombatant = tools.find((t) => t.name === 'add_combatant');
+    expect(addCombatant).toBeDefined();
+    const props = addCombatant!.inputSchema.properties as Record<string, { type?: string; description?: string; $ref?: string }>;
+    expect(props.ruleEntryId.$ref).toBeUndefined();
+    expect(props.ruleEntryId.type).toBe('integer');
+    expect(props.ruleEntryId.description).toContain('lookup_rule');
+    expect(props.characterId.type).toBe('integer');
+    // .strict() must still carry through to the serialized schema
+    expect(addCombatant!.inputSchema.additionalProperties).toBe(false);
   });
 
   it('get_campaign_summary works with a dm-scoped PAT', async () => {
@@ -208,6 +240,20 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(matches[0].name).toBe('Fireball');
     expect(matches[0].type).toBe('spell');
     expect(matches[0].body).toContain('bright streak');
+  });
+
+  it('lookup_rule ranks the exact-name match first (issue #33)', async () => {
+    const client = await mcpClient(viewerToken);
+    // "poisoned" matches both the Poisoned condition (by name) and Petrified (whose
+    // body mentions the Poisoned condition and which was imported first) — the
+    // exact-name match must be the top result, with its body included.
+    const result = await client.callTool({ name: 'lookup_rule', arguments: { query: 'poisoned' } });
+    expect(result.isError).toBeFalsy();
+    const matches = parseResult(result) as Array<{ name: string; body?: string }>;
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(matches[0].name).toBe('Poisoned');
+    expect(matches[0].body).toContain('disadvantage');
+    expect(matches.some((m) => m.name === 'Petrified')).toBe(true);
   });
 
   it('lookup_rule respects the type filter', async () => {
@@ -337,17 +383,34 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(okResult.isError).toBeFalsy();
   });
 
-  it('strict arg schemas reject unknown keys with a structured validation error (not a silent no-op)', async () => {
+  it('strict arg schemas reject unknown keys with the documented {"error"} JSON (not SDK -32602 prose)', async () => {
     const client = await mcpClient(dmToken);
     // {hpCurrent} is not a real update_combatant arg (the real keys are hpDelta/hpSet) —
-    // this must be a machine-actionable error, not a 200 that silently dropped the key.
+    // this must be a machine-actionable error, not a 200 that silently dropped the key,
+    // and its text must be the documented {"error":{status,code,message}} JSON rather
+    // than the MCP SDK's own "-32602 Input validation error" prose.
     const result = await client.callTool({
       name: 'update_combatant',
       arguments: { encounterId: 1, combatantId: 1, hpCurrent: 5 },
     });
     expect(result.isError).toBe(true);
-    const text = (result.content as TextContent[])[0].text;
-    expect(text).toContain('hpCurrent');
+    const parsed = parseResult(result) as { error: { status: number; code: string; message: string } };
+    expect(parsed.error.status).toBe(400);
+    expect(parsed.error.code).toBe('validation_failed');
+    expect(parsed.error.message).toContain('hpCurrent');
+  });
+
+  it('strict arg schemas reject wrong-typed values with the documented {"error"} JSON naming the key', async () => {
+    const client = await mcpClient(dmToken);
+    const result = await client.callTool({
+      name: 'get_campaign_summary',
+      arguments: { campaignId: 'not-a-number' },
+    });
+    expect(result.isError).toBe(true);
+    const parsed = parseResult(result) as { error: { status: number; code: string; message: string } };
+    expect(parsed.error.status).toBe(400);
+    expect(parsed.error.code).toBe('validation_failed');
+    expect(parsed.error.message).toContain('campaignId');
   });
 
   it('structured errors: isError content is JSON {"error":{status,code,message}}', async () => {
@@ -515,8 +578,32 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(inboxList.isError).toBeFalsy();
     expect((parseResult(inboxList) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(true);
 
-    const resolveResult = await dmClient.callTool({ name: 'resolve_inbox_item', arguments: { noteId: item.id, resolvedNote: 'handled' } });
+    const resolveResult = await dmClient.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: item.id, resolvedNote: 'handled', entityType: 'campaign', entityId: campaignId },
+    });
     expect(resolveResult.isError).toBeFalsy();
+    const resolved = parseResult(resolveResult) as { resolved: boolean; entityType: string | null; entityId: number | null };
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.entityType).toBe('campaign');
+    expect(resolved.entityId).toBe(campaignId);
+
+    // resolved history via read_inbox { resolved: true }; open list no longer has it
+    const openAfter = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId } });
+    expect((parseResult(openAfter) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(false);
+    const historyList = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId, resolved: true } });
+    expect(historyList.isError).toBeFalsy();
+    expect((parseResult(historyList) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(true);
+
+    // half-provided entity link is rejected
+    const secondItem = parseResult(
+      await dmClient.callTool({ name: 'submit_inbox_item', arguments: { campaignId, body: 'Another question' } }),
+    ) as { id: number };
+    const badResolve = await dmClient.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: secondItem.id, entityType: 'quest' },
+    });
+    expect(badResolve.isError).toBe(true);
   });
 
   it('add_member -> update_member -> remove_member round-trip (dm only)', async () => {

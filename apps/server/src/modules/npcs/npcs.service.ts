@@ -14,7 +14,7 @@ import type { RequestUser } from '../../common/user.types';
 type NpcCreateInput = z.infer<typeof NpcCreate>;
 type NpcUpdateInput = z.infer<typeof NpcUpdate>;
 
-function toDomain(row: typeof npcs.$inferSelect): Npc {
+export function toDomain(row: typeof npcs.$inferSelect): Npc {
   return {
     id: row.id,
     campaignId: row.campaignId,

@@ -9,6 +9,7 @@ type SettingsUpdateInput = z.infer<typeof SettingsUpdate>;
 
 const DEFAULTS: z.infer<typeof ServerSettings> = {
   allowLocalLogin: true,
+  allowSignup: false,
 };
 
 @Injectable()
@@ -35,6 +36,11 @@ export class SettingsService {
   async getAllowLocalLogin(): Promise<boolean> {
     const all = await this.getAll();
     return all.allowLocalLogin;
+  }
+
+  async getAllowSignup(): Promise<boolean> {
+    const all = await this.getAll();
+    return all.allowSignup;
   }
 
   async update(input: SettingsUpdateInput): Promise<z.infer<typeof ServerSettings>> {

@@ -10,6 +10,7 @@ import { ServerRolesGuard } from './common/guards/server-roles.guard';
 import {
   THROTTLE_DEFAULT,
   THROTTLE_AUTH,
+  THROTTLE_SHARE,
   DEFAULT_THROTTLE_LIMIT,
   DEFAULT_THROTTLE_TTL_MS,
   AUTH_THROTTLE_LIMIT,
@@ -36,6 +37,10 @@ import { RulesModule } from './modules/rules/rules.module';
 import { McpModule } from './modules/mcp/mcp.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
+import { EventsModule } from './modules/events/events.module';
+import { RollsModule } from './modules/rolls/rolls.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -97,6 +102,10 @@ function serveStaticImports(): DynamicModule[] {
         // (see auth.controller.ts), which overrides these module-level defaults for THOSE
         // routes specifically. Every other route effectively never hits this bucket.
         { name: THROTTLE_AUTH, limit: DEFAULT_THROTTLE_LIMIT, ttl: DEFAULT_THROTTLE_TTL_MS },
+        // Same pattern for the public recap share-link endpoint: loose module-level
+        // ceiling here, strict per-route override via @Throttle({share: {...}}) on
+        // GET /shared/recaps/:token only (see session-shares.controller.ts).
+        { name: THROTTLE_SHARE, limit: DEFAULT_THROTTLE_LIMIT, ttl: DEFAULT_THROTTLE_TTL_MS },
       ],
       skipIf: () => isThrottleDisabled(),
     }),
@@ -121,6 +130,10 @@ function serveStaticImports(): DynamicModule[] {
     McpModule,
     AttachmentsModule,
     EncountersModule,
+    EventsModule,
+    RollsModule,
+    NotificationsModule,
+    InventoryModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },

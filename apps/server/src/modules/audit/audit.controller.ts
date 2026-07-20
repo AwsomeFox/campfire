@@ -17,7 +17,8 @@ export class AuditController {
   @ApiOperation({ summary: 'List recent audit entries for a campaign', description: 'dm role required. Most-recent-first, capped at 100 entries.' })
   @ApiResponse({ status: 200, description: 'Up to 100 most recent audit entries.' })
   async list(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'dm');
+    // allowArchived: reading the audit log of an archived (read-only) campaign is fine.
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
     return this.audit.listForCampaign(id, 100);
   }
 }

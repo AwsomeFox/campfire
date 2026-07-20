@@ -10,6 +10,16 @@ import type { RuleEntryType } from '@campfire/schema';
  *   - There is no `/v2/monsters/` route — the monster/statblock list lives at
  *     `/v2/creatures/`. We still expose it to Campfire as ruleEntry.type
  *     'monster' (our vocabulary), just fetched from the creatures path.
+ *   - Likewise there is no `/v2/races/` route — that list lives at
+ *     `/v2/species/` (verified live 2026-07-19; `/v2/races/` returns the
+ *     Open5e SPA's HTML, not JSON). Exposed as ruleEntry.type 'race'.
+ *   - Classes (`/v2/classes/`) usually have an EMPTY `desc`; the real prose
+ *     lives in `features[]` ({name, desc, gained_at}), which we render into
+ *     the markdown body. Subclasses appear in the same list with a non-null
+ *     `subclass_of` sub-object. Species text similarly lives in `traits[]`
+ *     ({name, desc}) alongside a short top-level `desc`. Feats carry `desc`
+ *     plus a `benefits[]` array of {desc} bullets and a flat `prerequisite`
+ *     string.
  *   - Every list is paginated: {count, next, previous, results: [...]}. `next`
  *     is a full URL, so pagination just follows it rather than re-deriving
  *     page numbers.
@@ -40,13 +50,16 @@ const FETCH_TIMEOUT_MS = 30_000;
 // response is a real problem with the request/upstream shape and retrying won't help.
 const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 
-export type Open5eSection = 'spells' | 'monsters' | 'items' | 'conditions';
+export type Open5eSection = 'spells' | 'monsters' | 'items' | 'conditions' | 'classes' | 'races' | 'feats';
 
 const SECTION_TO_PATH: Record<Open5eSection, string> = {
   spells: 'spells',
   monsters: 'creatures', // v2 has no /monsters/ route — see file header note.
   items: 'magicitems',
   conditions: 'conditions',
+  classes: 'classes',
+  races: 'species', // v2 has no /races/ route either — see file header note.
+  feats: 'feats',
 };
 
 const SECTION_TO_ENTRY_TYPE: Record<Open5eSection, RuleEntryType> = {
@@ -54,6 +67,9 @@ const SECTION_TO_ENTRY_TYPE: Record<Open5eSection, RuleEntryType> = {
   monsters: 'monster',
   items: 'item',
   conditions: 'condition',
+  classes: 'class',
+  races: 'race',
+  feats: 'feat',
 };
 
 export interface ImportedEntry {
@@ -182,11 +198,90 @@ function mapCondition(row: Record<string, unknown>): ImportedEntry {
   };
 }
 
+/** Renders an array of {name, desc} sub-sections (class features, species traits) as markdown headings. */
+function namedSectionsToMarkdown(v: unknown): string {
+  if (!Array.isArray(v)) return '';
+  return (v as Array<Record<string, unknown>>)
+    .map((s) => {
+      const name = asString(s?.name);
+      const desc = asString(s?.desc);
+      if (!name && !desc) return '';
+      return name ? `### ${name}\n\n${desc}` : desc;
+    })
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function mapClass(row: Record<string, unknown>): ImportedEntry {
+  const hitDice = asString(row.hit_dice);
+  const casterType = asString(row.caster_type);
+  const subclassOf = nestedName(row.subclass_of);
+  const savingThrows = Array.isArray(row.saving_throws)
+    ? (row.saving_throws as Array<Record<string, unknown>>).map((s) => nestedName(s)).filter(Boolean)
+    : [];
+  const desc = asString(row.desc);
+  // v2 classes usually have an empty `desc` — the real prose is the features list.
+  const body = [desc, namedSectionsToMarkdown(row.features)].filter(Boolean).join('\n\n');
+  return {
+    slug: asString(row.key) || asString(row.name),
+    name: asString(row.name),
+    type: 'class',
+    summary: truncate(
+      [subclassOf ? `${subclassOf} subclass` : null, hitDice ? `hit dice ${hitDice}` : null, savingThrows.length ? `saves ${savingThrows.join('/')}` : null]
+        .filter(Boolean)
+        .join(' · ') || desc,
+      300,
+    ),
+    body,
+    dataJson: JSON.stringify({ hitDice: hitDice || null, casterType: casterType || null, subclassOf: subclassOf || null, savingThrows }),
+    license: licenseOf(row),
+  };
+}
+
+function mapSpecies(row: Record<string, unknown>): ImportedEntry {
+  const desc = asString(row.desc);
+  const traits = Array.isArray(row.traits) ? (row.traits as Array<Record<string, unknown>>) : [];
+  const traitNames = traits.map((t) => asString(t?.name)).filter(Boolean);
+  const isSubspecies = row.is_subspecies === true;
+  // `subspecies_of` is a flat key string (e.g. "srd_halfling"), not a nested object.
+  const subspeciesOf = asString(row.subspecies_of);
+  return {
+    slug: asString(row.key) || asString(row.name),
+    name: asString(row.name),
+    type: 'race',
+    summary: truncate(desc || traitNames.join(' · '), 300),
+    body: [desc, namedSectionsToMarkdown(row.traits)].filter(Boolean).join('\n\n'),
+    dataJson: JSON.stringify({ isSubspecies, subspeciesOf: subspeciesOf || null, traits: traitNames }),
+    license: licenseOf(row),
+  };
+}
+
+function mapFeat(row: Record<string, unknown>): ImportedEntry {
+  const desc = asString(row.desc);
+  const prerequisite = asString(row.prerequisite);
+  const benefits = Array.isArray(row.benefits)
+    ? (row.benefits as Array<Record<string, unknown>>).map((b) => asString(b?.desc)).filter(Boolean)
+    : [];
+  const body = [desc, benefits.map((b) => `- ${b}`).join('\n')].filter(Boolean).join('\n\n');
+  return {
+    slug: asString(row.key) || asString(row.name),
+    name: asString(row.name),
+    type: 'feat',
+    summary: truncate(prerequisite ? `Prerequisite: ${prerequisite}` : desc, 300),
+    body,
+    dataJson: JSON.stringify({ prerequisite: prerequisite || null, hasPrerequisite: row.has_prerequisite ?? null }),
+    license: licenseOf(row),
+  };
+}
+
 const SECTION_MAPPER: Record<Open5eSection, (row: Record<string, unknown>) => ImportedEntry> = {
   spells: mapSpell,
   monsters: mapCreature,
   items: mapMagicItem,
   conditions: mapCondition,
+  classes: mapClass,
+  races: mapSpecies,
+  feats: mapFeat,
 };
 
 async function fetchWithTimeout(url: string): Promise<Response> {
@@ -335,4 +430,4 @@ export function entryTypeForSection(section: Open5eSection): RuleEntryType {
   return SECTION_TO_ENTRY_TYPE[section];
 }
 
-export const ALL_OPEN5E_SECTIONS: Open5eSection[] = ['spells', 'monsters', 'items', 'conditions'];
+export const ALL_OPEN5E_SECTIONS: Open5eSection[] = ['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'];

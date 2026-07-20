@@ -121,6 +121,25 @@ function migrateUsersTableForAccentColor(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-user text size: `users.text_size`
+ * didn't exist. Plain NOT NULL DEFAULT 'default' ADD COLUMN — no table
+ * rebuild needed, same as migrateUsersTableForAccentColor above. New DBs
+ * never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateUsersTableForTextSize(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasTextSize = columns.some((c) => c.name === 'text_size');
+  if (hasTextSize) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN text_size TEXT NOT NULL DEFAULT 'default'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -165,6 +184,88 @@ function migrateApiTokensTableForAdminEnabled(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE api_tokens ADD COLUMN admin_enabled INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * Migration for DBs created before proposal before/after diffs:
+ * `proposals.snapshot` didn't exist. Plain nullable ADD COLUMN — no table
+ * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
+ * Pre-existing proposals keep a NULL snapshot (there is no way to reconstruct
+ * the entity's state at their propose time); the review UI falls back to
+ * showing proposed values only for those rows. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateProposalsTableForSnapshot(sqlite: Database.Database): void {
+  const hasProposalsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'")
+    .get();
+  if (!hasProposalsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(proposals)').all() as Array<{ name: string }>;
+  const hasSnapshot = columns.some((c) => c.name === 'snapshot');
+  if (hasSnapshot) return;
+
+  sqlite.exec('ALTER TABLE proposals ADD COLUMN snapshot TEXT');
+}
+
+/**
+ * Migration for DBs created before character-sheet depth (issue #1):
+ * `characters.save_proficiencies` / `skills` / `actions` / `spell_slots`
+ * didn't exist. Plain defaulted ADD COLUMNs — no table rebuild needed, same
+ * as migrateCampaignsTableForRuleSystem above. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateCharactersTableForSheetDepth(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+
+  if (!has('save_proficiencies')) sqlite.exec("ALTER TABLE characters ADD COLUMN save_proficiencies TEXT NOT NULL DEFAULT '[]'");
+  if (!has('skills')) sqlite.exec("ALTER TABLE characters ADD COLUMN skills TEXT NOT NULL DEFAULT '{}'");
+  if (!has('actions')) sqlite.exec("ALTER TABLE characters ADD COLUMN actions TEXT NOT NULL DEFAULT '[]'");
+  if (!has('spell_slots')) sqlite.exec("ALTER TABLE characters ADD COLUMN spell_slots TEXT NOT NULL DEFAULT '{}'");
+}
+
+/**
+ * Migration for DBs created before session scheduling (issue #13):
+ * `campaigns.ics_token` didn't exist. Plain nullable ADD COLUMN — no table
+ * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForIcsToken(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  const hasIcsToken = columns.some((c) => c.name === 'ics_token');
+  if (hasIcsToken) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN ics_token TEXT');
+}
+
+/**
+ * Migration for DBs created before XP tracking (issue #14): `characters.xp`
+ * didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no table rebuild needed,
+ * same as migrateApiTokensTableForAdminEnabled above. New DBs never hit this
+ * path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCharactersTableForXp(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  const hasXp = columns.some((c) => c.name === 'xp');
+  if (hasXp) return;
+
+  sqlite.exec('ALTER TABLE characters ADD COLUMN xp INTEGER NOT NULL DEFAULT 0');
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -180,8 +281,13 @@ export function createDb(): DrizzleDb {
   migrateUsersTableForOidc(sqlite);
   migrateCampaignsTableForRuleSystem(sqlite);
   migrateUsersTableForAccentColor(sqlite);
+  migrateUsersTableForTextSize(sqlite);
   migrateCampaignsTableForMapAttachment(sqlite);
   migrateApiTokensTableForAdminEnabled(sqlite);
+  migrateProposalsTableForSnapshot(sqlite);
+  migrateCharactersTableForSheetDepth(sqlite);
+  migrateCampaignsTableForIcsToken(sqlite);
+  migrateCharactersTableForXp(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.

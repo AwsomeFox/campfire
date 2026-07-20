@@ -51,15 +51,20 @@ export class CampaignRollController {
 
   /** Any campaign member may roll dice — not gated by dm role. */
   @Post()
-  @ApiOperation({ summary: 'Roll dice', description: "Any campaign member. `expr` is a restricted NdM(+/-K) expression, e.g. \"1d20+3\"." })
-  @ApiResponse({ status: 201, description: 'Roll result (individual dice + total).' })
+  @ApiOperation({
+    summary: 'Roll dice',
+    description:
+      'Any campaign member. `expr` is a restricted NdM(+/-K) expression, e.g. "1d20+3". The roll is persisted to the campaign-shared dice log (see GET /campaigns/:id/rolls).',
+  })
+  @ApiResponse({ status: 201, description: 'Persisted roll (individual dice + total + roller identity).' })
   @ApiResponse({ status: 400, description: 'Malformed dice expression.' })
   async roll(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: RollRequestDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId);
+    // write: rolls are audited activity — an archived (read-only) campaign takes no new rolls.
+    const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.encounters.rollDiceForCampaign(campaignId, body, user, role);
   }
 }

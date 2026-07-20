@@ -13,8 +13,9 @@ top bar and is visible only to server admins.
   can't demote, disable, or delete your way into a locked-out server, and you can't
   delete a user who is the **sole DM** of a campaign without reassigning first.
 
-_(A DM-driven invite flow and optional self-service signup are on the
-[roadmap](../reference/roadmap.md); today accounts are admin-created.)_
+_(Accounts also get created when someone accepts a DM **invite link** — see
+[Admin vs DM](access-model.md). Optional open self-service signup is still on the
+[roadmap](../reference/roadmap.md).)_
 
 ## Server settings (Admin → Settings)
 

@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { UserCreate, UserUpdate, PasswordChange, PreferencesUpdate } from '@campfire/schema';
 import type { User } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { users, userSessions, campaignMembers, campaigns } from '../../db/schema';
+import { users, userSessions, campaignMembers, campaigns, passwordResetRequests } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
 
@@ -21,6 +21,7 @@ function toDomain(row: typeof users.$inferSelect): User {
     serverRole: row.serverRole as User['serverRole'],
     disabled: row.disabled,
     accentColor: row.accentColor,
+    textSize: row.textSize as User['textSize'],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -170,13 +171,14 @@ export class UsersService {
     return toDomain(row);
   }
 
-  /** Self-service preferences (display name + accent color) — PATCH /me/preferences. */
+  /** Self-service preferences (display name + accent color + text size) — PATCH /me/preferences. */
   async updatePreferences(id: number, input: PreferencesUpdateInput): Promise<User> {
     await this.getRowOrThrow(id);
 
     const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
     if (input.displayName !== undefined) update.displayName = input.displayName;
     if (input.accentColor !== undefined) update.accentColor = input.accentColor;
+    if (input.textSize !== undefined) update.textSize = input.textSize;
 
     const [row] = await this.db.update(users).set(update).where(eq(users.id, id)).returning();
     return toDomain(row);
@@ -223,8 +225,10 @@ export class UsersService {
       }
     }
 
-    // Cascade: sessions + campaign_members. Leave notes/characters — characters keep ownerUserId string.
+    // Cascade: sessions + campaign_members + open password-reset requests.
+    // Leave notes/characters — characters keep ownerUserId string.
     await this.db.delete(userSessions).where(eq(userSessions.userId, id));
+    await this.db.delete(passwordResetRequests).where(eq(passwordResetRequests.userId, id));
     await this.db.delete(campaignMembers).where(eq(campaignMembers.userId, id));
     await this.db.delete(users).where(eq(users.id, id));
   }

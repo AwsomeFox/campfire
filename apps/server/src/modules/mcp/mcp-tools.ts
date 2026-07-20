@@ -28,6 +28,7 @@ import {
   RuleEntryType,
   SessionCreate,
   SessionUpdate,
+  XpAward,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -127,6 +128,45 @@ function paginate<T>(rows: T[], limit: number | undefined, offset: number | unde
 }
 
 /**
+ * Deep-clone a zod schema so every node gets a fresh `_def` object.
+ *
+ * Why: the MCP SDK serializes each tool's inputSchema for `tools/list` with
+ * zod-to-json-schema, which tracks visited `_def`s by object identity and emits
+ * any SECOND occurrence as a local `$ref` instead of inlining it. Shared
+ * singletons in @campfire/schema (e.g. `Id`, reused by CombatantCreate's
+ * `characterId` AND `ruleEntryId`) therefore surfaced as sibling-property refs
+ * like `{"$ref":"#/properties/characterId"}` — valid JSON Schema, but many MCP
+ * clients don't resolve refs between sibling properties, and the field's own
+ * type/description metadata was dropped (issue #31; also hit create_quest/
+ * update_quest `giverNpcId`, upsert_npc `locationId`, add_member `characterId`).
+ * Cloning (zod's own `.describe()` clone pattern, applied recursively) keeps
+ * validation behavior identical while guaranteeing every property serializes
+ * inline.
+ */
+function inlineClone<T extends z.ZodTypeAny>(schema: T): T {
+  const def = schema._def as Record<string, unknown>;
+  const next: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(def)) {
+    if (value instanceof z.ZodType) {
+      // wrapper/composite nodes: optional/nullable/default `innerType`, array element `type`, effects `schema`, object `catchall`, …
+      next[key] = inlineClone(value);
+    } else if (Array.isArray(value) && value.length > 0 && value.every((v) => v instanceof z.ZodType)) {
+      next[key] = value.map((v) => inlineClone(v as z.ZodTypeAny)); // union options / tuple items
+    } else {
+      next[key] = value; // plain metadata (typeName, checks, description, defaultValue, enum values, …)
+    }
+  }
+  if (typeof def.shape === 'function') {
+    // ZodObject exposes its shape lazily through a function — rebuild it over cloned properties.
+    const shape = (def.shape as () => z.ZodRawShape)();
+    const clonedShape: z.ZodRawShape = {};
+    for (const [key, value] of Object.entries(shape)) clonedShape[key] = inlineClone(value);
+    next.shape = () => clonedShape;
+  }
+  return new (schema.constructor as new (d: Record<string, unknown>) => T)(next);
+}
+
+/**
  * Builds a per-request McpServer whose tools are bound to the authenticated
  * RequestUser. Stateless: one server + transport per POST /mcp.
  *
@@ -172,9 +212,11 @@ export class McpToolsService {
         'NPC/quest/location DM-only text), approve/reject proposals, install rule packs (server admin only), manage ' +
         'members. player: create/update their own character, roll dice, check objectives, post notes/inbox items, ' +
         'act on combatants linked to characters they own. viewer: read-only, plus dice rolls and notes/inbox (any ' +
-        'member may post). A PAT (personal access token) additionally CAPS the effective role to min(token scope, ' +
-        'real membership role) and, if the token is bound to one campaignId, 403s on every other campaign — this ' +
-        'applies even to server admins acting through a scoped token. SERVER-admin power (install_rule_pack, and ' +
+        'member may post). Server admins hold NO implicit campaign role (admin != auto-DM): campaign access, ' +
+        'including DM secrets, comes only from an actual membership row, exactly like any other user. A PAT ' +
+        '(personal access token) additionally CAPS the effective role to min(token scope, ' +
+        'real membership role) and, if the token is bound to one campaignId, 403s on every other campaign. ' +
+        'SERVER-admin power (install_rule_pack, and ' +
         'REST-only routes like POST /users and /settings) is capped separately and more strictly: a PAT never ' +
         'carries server-admin power unless it was explicitly minted with adminEnabled:true by a caller who ' +
         'currently held real server-admin power themselves — an admin\'s ordinary/viewer-scoped token is NOT an ' +
@@ -185,6 +227,10 @@ export class McpToolsService {
         'Use this when acting as a player-role agent proposing world changes for a human DM to review. propose is ' +
         'not available on objectives, characters, notes, campaign status, members, or combat tools — those write ' +
         'directly and are already gated by role.\n\n' +
+        'ARCHIVED CAMPAIGNS — a campaign whose status is paused or completed is READ-ONLY: every write tool ' +
+        '(quests, npcs, locations, sessions, characters, notes, inbox, members, encounters, dice rolls, proposal ' +
+        'submission/approval) fails with 403 until a dm sets status back to "active" via update_campaign_status. ' +
+        'Reads, export_campaign, read_audit_log, delete_campaign, and the status flip itself still work.\n\n' +
         'ERRORS — a failed call returns isError:true with JSON text {"error":{"status","code","message"}} (e.g. ' +
         'status 404/code "not_found", status 403/code "forbidden", status 400/code "validation_failed"). Every ' +
         'tool\'s argument object is strict — an unknown/misspelled key is a validation_failed error, not a silent ' +
@@ -204,13 +250,24 @@ export class McpToolsService {
   ): void {
     // Every tool's args are validated against z.object(shape).strict() — an unknown/
     // misnamed key (e.g. {hpCurrent} instead of {hpSet}) is a validation_failed error
-    // instead of being silently dropped by the SDK's default (non-strict) object parse.
+    // instead of being silently dropped by a non-strict object parse.
     // Cast away the SDK's deep conditional generics (TS2589 with a non-literal
     // ZodRawShape); passing a prebuilt ZodObject instance (rather than the raw shape) is
     // an officially supported `inputSchema` form and is what carries `.strict()` through
-    // to both `tools/list`'s JSON schema (additionalProperties:false) and the per-call
-    // validation the SDK runs before invoking our handler.
-    const strictShape = z.object(shape).strict();
+    // to `tools/list`'s JSON schema (additionalProperties:false). inlineClone() breaks
+    // shared zod-instance identity so no property serializes as a sibling $ref (see above).
+    const strictShape = inlineClone(z.object(shape).strict());
+    // The SDK runs its own validation against inputSchema BEFORE invoking our callback
+    // and, on failure, returns its "-32602 Input validation error ..." prose as the
+    // isError text — NOT the documented {"error":{status,code,message}} JSON (our
+    // try/catch below never runs). Shadow safeParseAsync — the only parse entry point
+    // the SDK's per-call validation uses for a zod-v3 object schema — so the SDK's
+    // pre-parse always passes, and run the real strict parse inside the callback where
+    // fail() renders a ZodError as {"error":{status:400,code:"validation_failed",...}}.
+    // tools/list is unaffected: JSON-schema generation reads the object shape (not the
+    // parse method), so additionalProperties:false is still advertised.
+    (strictShape as { safeParseAsync: unknown }).safeParseAsync = (data: unknown) =>
+      Promise.resolve({ success: true as const, data });
     const register = server.registerTool.bind(server) as (
       name: string,
       config: { description: string; inputSchema: z.ZodTypeAny },
@@ -218,7 +275,8 @@ export class McpToolsService {
     ) => void;
     register(name, { description, inputSchema: strictShape }, async (args) => {
       try {
-        return ok(await handler(args ?? {}));
+        const validated = strictShape.parse(args ?? {}) as Record<string, unknown>;
+        return ok(await handler(validated));
       } catch (err) {
         return fail(err);
       }
@@ -351,11 +409,13 @@ export class McpToolsService {
     this.tool(
       server,
       'read_inbox',
-      'DM only: list open (unresolved) player inbox items for a campaign — messages players sent up via submit_inbox_item.',
-      { campaignId: CampaignIdArg },
-      async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
-        return this.notes.listInbox(campaignId as number);
+      'DM only: list player inbox items for a campaign — messages players sent up via submit_inbox_item. ' +
+        'Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest first), ' +
+        'including any entity link each item was resolved into.',
+      { campaignId: CampaignIdArg, resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones') },
+      async ({ campaignId, resolved }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        return this.notes.listInbox(campaignId as number, (resolved as boolean | undefined) ?? false);
       },
     );
 
@@ -365,7 +425,7 @@ export class McpToolsService {
       'DM only: list proposals for a campaign, optionally filtered by status (pending|approved|rejected).',
       { campaignId: CampaignIdArg, status: z.enum(['pending', 'approved', 'rejected']).optional().describe('Filter by status') },
       async ({ campaignId, status }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.proposals.listForCampaign(campaignId as number, status as string | undefined);
       },
     );
@@ -467,7 +527,7 @@ export class McpToolsService {
       'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven actions.',
       { campaignId: CampaignIdArg, limit: LimitArg(500, 100) },
       async ({ campaignId, limit }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.audit.listForCampaign(campaignId as number, (limit as number | undefined) ?? 100);
       },
     );
@@ -480,7 +540,7 @@ export class McpToolsService {
         '— the caller may treat it as a JSON string to parse or archive.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.exportService.buildExport(campaignId as number, user);
       },
     );
@@ -507,7 +567,7 @@ export class McpToolsService {
         'notes, sessions, proposals, members, tokens, attachments). Irreversible.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         await this.campaigns.remove(campaignId as number, user);
         return { ok: true, campaignId };
       },
@@ -523,7 +583,7 @@ export class McpToolsService {
       async ({ campaignId, propose, ...fields }) => {
         const validated = QuestCreate.parse(fields);
         if (propose) {
-          const role = await this.access.requireMember(user, campaignId as number);
+          const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'quest', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -542,7 +602,7 @@ export class McpToolsService {
         const row = await this.quests.getRowOrThrow(questId as number);
         const validated = QuestUpdate.parse(fields);
         if (propose) {
-          const role = await this.access.requireMember(user, row.campaignId);
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'update', validated, user, role);
           return { proposal };
         }
@@ -572,7 +632,7 @@ export class McpToolsService {
       async ({ questId, status, propose }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
         if (propose) {
-          const role = await this.access.requireMember(user, row.campaignId);
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const validated = QuestUpdate.parse({ status });
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'update', validated, user, role);
           return { proposal };
@@ -662,7 +722,7 @@ export class McpToolsService {
           }
           const validated = NpcUpdate.parse(fields);
           if (propose) {
-            const role = await this.access.requireMember(user, row.campaignId);
+            const role = await this.access.requireMember(user, row.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(row.campaignId, 'npc', npcId as number, 'update', validated, user, role);
             return { proposal };
           }
@@ -671,7 +731,7 @@ export class McpToolsService {
         }
         const validated = NpcCreate.parse(fields); // name required on create
         if (propose) {
-          const role = await this.access.requireMember(user, campaignId as number);
+          const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'npc', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -713,7 +773,7 @@ export class McpToolsService {
           }
           const validated = LocationUpdate.parse(fields);
           if (propose) {
-            const role = await this.access.requireMember(user, row.campaignId);
+            const role = await this.access.requireMember(user, row.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(row.campaignId, 'location', locationId as number, 'update', validated, user, role);
             return { proposal };
           }
@@ -722,7 +782,7 @@ export class McpToolsService {
         }
         const validated = LocationCreate.parse(fields); // name required on create
         if (propose) {
-          const role = await this.access.requireMember(user, campaignId as number);
+          const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'location', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -771,7 +831,7 @@ export class McpToolsService {
       },
       async ({ campaignId, number, title, recap, playedAt, propose }) => {
         // Membership is required even to compute the default number.
-        const memberRole = await this.access.requireMember(user, campaignId as number);
+        const memberRole = await this.access.requireMember(user, campaignId as number, { write: true });
         let sessionNumber = number as number | undefined;
         if (sessionNumber === undefined) {
           const existing = await this.sessions.listForCampaign(campaignId as number);
@@ -811,7 +871,7 @@ export class McpToolsService {
           ...(playedAt !== undefined ? { playedAt } : {}),
         });
         if (propose) {
-          const role = await this.access.requireMember(user, row.campaignId);
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'session', sessionId as number, 'update', validated, user, role);
           return { proposal };
         }
@@ -868,6 +928,46 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'award_xp',
+      "Award XP. Either to one character by characterId (player owner or DM; delta may be negative to correct a mistake, XP never drops below 0), or DM-only to the whole party / a characterIds subset via amount.",
+      {
+        campaignId: CampaignIdArg,
+        characterId: Id.optional().describe('Single character to adjust (owner or DM); omit for a DM party-wide award'),
+        amount: z.number().int().describe('XP to add. Party-wide awards require a positive amount'),
+        characterIds: z.array(Id).optional().describe('Party-award only: limit the award to these characters'),
+      },
+      async ({ campaignId, characterId, amount, characterIds }) => {
+        if (characterId !== undefined) {
+          const row = await this.characters.getRowOrThrow(characterId as number);
+          if (row.campaignId !== (campaignId as number)) {
+            throw new BadRequestException(`Character ${characterId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
+          }
+          const role = await this.access.requireRole(user, row.campaignId, 'player');
+          return this.characters.patchXp(characterId as number, { delta: amount as number }, user, role);
+        }
+        const validated = XpAward.parse({ amount, ...(characterIds !== undefined ? { characterIds } : {}) });
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.characters.awardXp(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'level_up_character',
+      'Level a character up by 1 (player owner or DM; 400 at level 20). Optionally pass the new hpMax — hit points gained are added to current HP too. Not gated on XP thresholds (milestone campaigns level without XP).',
+      {
+        characterId: Id.describe('Character id'),
+        hpMax: z.number().int().min(1).optional().describe('New maximum HP after the level-up'),
+      },
+      async ({ characterId, hpMax }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.characters.levelUp(characterId as number, { ...(hpMax !== undefined ? { hpMax: hpMax as number } : {}) }, user, role);
+      },
+    );
+
+    this.tool(
+      server,
       'set_character_conditions',
       'Add and/or remove status conditions (e.g. "poisoned", "prone") on a character (player owner or DM).',
       {
@@ -899,7 +999,7 @@ export class McpToolsService {
         entityId: Id.optional().describe('Optionally link to an entity id'),
       },
       async ({ campaignId, body, visibility, entityType, entityId }) => {
-        const role = await this.access.requireMember(user, campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
         return this.notes.create(
           campaignId as number,
           {
@@ -925,7 +1025,7 @@ export class McpToolsService {
       },
       async ({ noteId, body, visibility }) => {
         const row = await this.notes.getRowOrThrow(noteId as number);
-        const role = await this.access.requireMember(user, row.campaignId);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
         return this.notes.update(
           noteId as number,
           { ...(body !== undefined ? { body: body as string } : {}), ...(visibility !== undefined ? { visibility: visibility as z.infer<typeof NoteVisibility> } : {}) },
@@ -942,7 +1042,7 @@ export class McpToolsService {
       { noteId: Id.describe('Note id') },
       async ({ noteId }) => {
         const row = await this.notes.getRowOrThrow(noteId as number);
-        const role = await this.access.requireMember(user, row.campaignId);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
         await this.notes.remove(noteId as number, user, role);
         return { ok: true, noteId };
       },
@@ -955,7 +1055,7 @@ export class McpToolsService {
         'of character). Appears in read_inbox until a dm calls resolve_inbox_item.',
       { campaignId: CampaignIdArg, body: z.string().min(1).max(20_000).describe('Message body') },
       async ({ campaignId, body }) => {
-        const role = await this.access.requireMember(user, campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
         return this.notes.createInbox(campaignId as number, { authorName: user.name, body: body as string }, user, role);
       },
     );
@@ -963,12 +1063,30 @@ export class McpToolsService {
     this.tool(
       server,
       'resolve_inbox_item',
-      'DM only: resolve a player inbox item, optionally with a resolution note.',
-      { noteId: Id.describe('Inbox note id'), resolvedNote: z.string().max(1000).optional().describe('Resolution note') },
-      async ({ noteId, resolvedNote }) => {
+      'DM only: resolve a player inbox item, optionally with a resolution note and/or a link to the entity it ' +
+        'became (entityType + entityId together) — shown in the resolved history (read_inbox with resolved=true).',
+      {
+        noteId: Id.describe('Inbox note id'),
+        resolvedNote: z.string().max(1000).optional().describe('Resolution note'),
+        entityType: EntityType.optional().describe('Entity type this item was resolved into (requires entityId)'),
+        entityId: Id.optional().describe('Entity id this item was resolved into (requires entityType)'),
+      },
+      async ({ noteId, resolvedNote, entityType, entityId }) => {
+        if ((entityType == null) !== (entityId == null)) {
+          throw new BadRequestException('entityType and entityId must be provided together');
+        }
         const row = await this.notes.getRowOrThrow(noteId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.notes.resolveInbox(noteId as number, { resolvedNote: (resolvedNote as string | undefined) ?? '' }, user, role);
+        return this.notes.resolveInbox(
+          noteId as number,
+          {
+            resolvedNote: (resolvedNote as string | undefined) ?? '',
+            entityType: (entityType as z.infer<typeof EntityType> | undefined) ?? null,
+            entityId: (entityId as number | undefined) ?? null,
+          },
+          user,
+          role,
+        );
       },
     );
 
@@ -985,7 +1103,9 @@ export class McpToolsService {
         dangerLevel: DangerLevel.optional().describe('low | moderate | high | deadly'),
       },
       async ({ campaignId, status, currentLocationId, dangerLevel }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        // allowArchived: this is the un-archive path (status back to 'active') —
+        // CampaignsService.update() restricts archived campaigns to status-only patches.
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         const patch: z.infer<typeof CampaignUpdate> = {};
         if (status !== undefined) patch.status = status as z.infer<typeof CampaignUpdate>['status'];
         if (currentLocationId !== undefined) patch.currentLocationId = currentLocationId as number | null;
@@ -1061,7 +1181,7 @@ export class McpToolsService {
       server,
       'install_rule_pack',
       'Server admin only: install (or incrementally update) the Open5e SRD rule pack — spells, monsters, items, ' +
-        'conditions — so lookup_rule/get_rule_entry and add_combatant\'s ruleEntryId can find them.',
+        'conditions, classes, races, feats — so lookup_rule/get_rule_entry and add_combatant\'s ruleEntryId can find them.',
       { ...RulePackInstall.shape },
       async ({ source, url, sections }) => {
         // hasServerAdminPower(), not a raw serverRole check — a token minted for a server
@@ -1083,10 +1203,10 @@ export class McpToolsService {
       server,
       'roll_dice',
       'Roll a dice expression, e.g. "1d20+3" or "2d6", in the context of a campaign. Any campaign member may use ' +
-        'this; the roll is audited (action "dice.roll").',
+        'this; the roll is audited (action "dice.roll") and appears in the campaign-shared dice log.',
       { campaignId: CampaignIdArg, expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3"') },
       async ({ campaignId, expr }) => {
-        const role = await this.access.requireMember(user, campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
         return this.encounters.rollDiceForCampaign(campaignId as number, { expr: expr as string }, user, role);
       },
     );
@@ -1109,7 +1229,13 @@ export class McpToolsService {
       '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
         'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted.',
-      { encounterId: Id.describe('Encounter id — from list_encounters'), ...CombatantCreate.shape },
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        ...CombatantCreate.shape,
+        // Same constraints as CombatantCreate (Id, optional) but described for tools/list.
+        characterId: Id.optional().describe('Character id — links a party member and pulls name/hp/initMod from their sheet when omitted'),
+        ruleEntryId: Id.optional().describe('Monster statblock rule entry id — from lookup_rule/get_rule_entry'),
+      },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');

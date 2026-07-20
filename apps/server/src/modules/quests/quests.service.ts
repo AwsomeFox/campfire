@@ -17,7 +17,7 @@ type QuestStatusPatchInput = z.infer<typeof QuestStatusPatch>;
 type ObjectiveCreateInput = z.infer<typeof ObjectiveCreate>;
 type ObjectivePatchInput = z.infer<typeof ObjectivePatch>;
 
-function toDomain(row: typeof quests.$inferSelect): Quest {
+export function toDomain(row: typeof quests.$inferSelect): Quest {
   return {
     id: row.id,
     campaignId: row.campaignId,

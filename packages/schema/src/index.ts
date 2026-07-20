@@ -43,21 +43,70 @@ export type Campaign = z.infer<typeof Campaign>;
 export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
+// Clone/template input — POST /campaigns/:id/clone.
+//  - 'full': faithful duplicate (everything except members, attachments and audit/proposals/tokens)
+//  - 'template': prep only (quests reset to available, objectives unchecked, npcs, locations
+//    reset to unexplored) — play state (sessions, notes, encounters, characters, session count,
+//    current party location) is stripped so the copy starts fresh.
+export const CampaignCloneMode = z.enum(['full', 'template']);
+export const CampaignClone = z.object({
+  name: z.string().min(1).max(120).optional(), // defaults server-side to "<source name> (copy)"
+  mode: CampaignCloneMode.default('full'),
+});
+
 // ---------- character ----------
+// characters.ownerUserId is stored as TEXT (it must also hold 'dev:<name>' dev-auth ids)
+// while users.id / CampaignMember.userId are integers — the historical type mismatch of
+// issue #32. Inputs accept either shape and normalize to the canonical string form
+// (String(users.id)), so a DM can pass a member's numeric userId straight through.
+export const UserIdRef = z.union([z.string().max(120), Id.transform((n) => String(n))]);
+
+export const AbilityKey = z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']);
+export type AbilityKey = z.infer<typeof AbilityKey>;
+
+/** Skill proficiency rank; a skill absent from the record is unproficient. */
+export const SkillRank = z.enum(['proficient', 'expertise']);
+export type SkillRank = z.infer<typeof SkillRank>;
+
+/** One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5", "1d8+3 slashing") so non-attack actions stay valid. */
+export const CharacterAction = z.object({
+  name: z.string().min(1).max(120),
+  kind: z.string().max(40).default(''), // "melee", "ranged", "spell", "feature"…
+  toHit: z.string().max(20).default(''),
+  damage: z.string().max(80).default(''),
+  notes: z.string().max(500).default(''),
+});
+export type CharacterAction = z.infer<typeof CharacterAction>;
+
+/** Slots at one spell level. `used` is clamped server-side to [0, max]. */
+export const SpellSlotLevel = z.object({
+  max: z.number().int().min(0).max(20),
+  used: z.number().int().min(0).max(20).default(0),
+});
+export type SpellSlotLevel = z.infer<typeof SpellSlotLevel>;
+
 export const Character = z.object({
   id: Id,
   campaignId: Id,
-  ownerUserId: z.string().max(120).nullable().default(null), // OIDC sub; null = DM-managed
+  // Owning player's user id as a string — String(users.id) for real accounts, 'dev:<name>'
+  // under DEV_AUTH; null = DM-managed. Kept in sync with CampaignMember.characterId links
+  // (linking a member to a character grants them ownership — see MembersService).
+  ownerUserId: UserIdRef.nullable().default(null),
   name: z.string().min(1).max(120),
   species: z.string().max(80).default(''),
   className: z.string().max(80).default(''),
   level: z.number().int().min(1).max(20).default(1),
+  xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(1).default(10),
   conditions: z.array(z.string().max(40)).default([]),
+  saveProficiencies: z.array(AbilityKey).default([]), // abilities with saving-throw proficiency
+  skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
+  actions: z.array(CharacterAction).max(100).default([]),
+  spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
@@ -74,6 +123,52 @@ export const ConditionsPatch = z.object({
   add: z.array(z.string().max(40)).optional(),
   remove: z.array(z.string().max(40)).optional(),
 });
+/** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
+export const SpellSlotPatch = z.object({
+  level: z.number().int().min(1).max(9),
+  delta: z.number().int(),
+});
+export const XpPatch = z.union([
+  z.object({ delta: z.number().int() }),
+  z.object({ set: z.number().int().nonnegative() }),
+]);
+/** DM party-wide XP award: amount to every character in the campaign, or just `characterIds`. */
+export const XpAward = z.object({
+  amount: z.number().int().min(1).max(1_000_000),
+  characterIds: z.array(Id).min(1).optional(),
+});
+/**
+ * Guided level-up: +1 level, optionally raising hpMax (hpCurrent grows by the
+ * same amount — you gain the new hit points, existing damage stays).
+ * Intentionally NOT gated on xp thresholds — milestone-levelling tables level
+ * without XP, so the threshold check is advisory (see xpForLevel/levelForXp).
+ */
+export const LevelUp = z.object({
+  hpMax: z.number().int().min(1).optional(),
+});
+
+/**
+ * D&D 5e cumulative XP thresholds; XP_THRESHOLDS[n] = total XP required to be
+ * level n+1 (so index 0 = level 1 at 0 XP, index 19 = level 20 at 355,000 XP).
+ */
+export const XP_THRESHOLDS = [
+  0, 300, 900, 2_700, 6_500, 14_000, 23_000, 34_000, 48_000, 64_000, 85_000, 100_000, 120_000, 140_000, 165_000,
+  195_000, 225_000, 265_000, 305_000, 355_000,
+] as const;
+
+/** Total XP required to reach `level` (clamped to [1, 20]). */
+export function xpForLevel(level: number): number {
+  return XP_THRESHOLDS[Math.max(1, Math.min(20, Math.floor(level))) - 1];
+}
+
+/** Highest level the given total XP qualifies for (1–20). */
+export function levelForXp(xp: number): number {
+  let level = 1;
+  for (let i = 0; i < XP_THRESHOLDS.length; i++) {
+    if (xp >= XP_THRESHOLDS[i]) level = i + 1;
+  }
+  return level;
+}
 
 // ---------- quest ----------
 export const QuestStatus = z.enum(['available', 'active', 'completed', 'failed']);
@@ -156,6 +251,86 @@ export type Session = z.infer<typeof Session>;
 export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
 export const SessionUpdate = SessionCreate.partial();
 
+// ---------- session share links (public read-only recap access) ----------
+// A DM-minted, unguessable capability URL for one session recap — viewable
+// without an account (absent players). The raw token is returned ONCE at
+// creation and stored hashed (sha256), same policy as PATs; deleting the row
+// revokes the link.
+export const SessionShare = z.object({
+  id: Id,
+  sessionId: Id,
+  campaignId: Id,
+  createdBy: z.string().max(200).default(''), // user id or token name, display/audit only
+  tokenPrefix: z.string().max(16), // display only, e.g. cf_share_9f2a
+  ...timestamps,
+});
+export type SessionShare = z.infer<typeof SessionShare>;
+export const SessionShareCreated = z.object({ token: z.string(), share: SessionShare });
+export type SessionShareCreated = z.infer<typeof SessionShareCreated>;
+
+// Payload served by the UNauthenticated GET /shared/recaps/:token endpoint.
+// Deliberately minimal — no internal ids, no dmSecret-bearing entities, just
+// what an absent player needs to catch up on the session.
+export const SharedRecap = z.object({
+  campaignName: z.string(),
+  sessionNumber: z.number().int().positive(),
+  title: z.string().default(''),
+  playedAt: IsoDate.nullable().default(null),
+  recap: z.string().default(''),
+});
+export type SharedRecap = z.infer<typeof SharedRecap>;
+
+// ---------- session scheduling (next session + availability + ICS feed) ----------
+// A ScheduledSession is a *future* (planned) game night — distinct from Session
+// above, which is the play log/recap of a session that already happened.
+const IsoDateTime = z
+  .string()
+  .max(40)
+  .refine((v) => !Number.isNaN(Date.parse(v)), 'expected an ISO-8601 date-time'); // normalized to UTC server-side
+
+export const ScheduledSession = z.object({
+  id: Id,
+  campaignId: Id,
+  scheduledAt: IsoDateTime, // when the session starts (stored as ISO UTC)
+  durationMinutes: z.number().int().min(15).max(24 * 60).default(240), // drives DTEND in the ICS feed
+  title: z.string().max(200).default(''),
+  location: z.string().max(200).default(''), // "Sam's place", a VTT link…
+  notes: z.string().max(5000).default(''),
+  ...timestamps,
+});
+export type ScheduledSession = z.infer<typeof ScheduledSession>;
+export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ scheduledAt: true });
+export const ScheduledSessionUpdate = ScheduledSessionCreate.partial();
+
+export const RsvpStatus = z.enum(['yes', 'no', 'maybe']);
+export type RsvpStatus = z.infer<typeof RsvpStatus>;
+
+export const SessionRsvp = z.object({
+  id: Id,
+  scheduledSessionId: Id,
+  userId: z.string().max(120), // same shape as Note.authorUserId (String(users.id) or dev user)
+  userName: z.string().max(120).default(''), // denormalized for display
+  status: RsvpStatus,
+  note: z.string().max(500).default(''), // "might be 30min late"
+  ...timestamps,
+});
+export type SessionRsvp = z.infer<typeof SessionRsvp>;
+export const RsvpSet = z.object({ status: RsvpStatus, note: z.string().max(500).optional() });
+export type RsvpSet = z.infer<typeof RsvpSet>;
+
+export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
+export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+// Per-campaign ICS calendar feed. `token` is an unguessable capability secret
+// (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
+// may read it (the feed only exposes schedule data members already see);
+// enable/rotate/disable is DM-only.
+export const CalendarFeed = z.object({
+  token: z.string().nullable(),
+  url: z.string().nullable(), // relative feed path, e.g. /api/v1/calendar/<token>.ics
+});
+export type CalendarFeed = z.infer<typeof CalendarFeed>;
+
 // ---------- notes ----------
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
 export const NoteKind = z.enum(['note', 'inbox']);
@@ -170,13 +345,17 @@ export const Note = z.object({
   visibility: NoteVisibility.default('private'),
   entityType: EntityType.nullable().default(null),
   entityId: Id.nullable().default(null),
+  // Display name of the anchored entity (quest title, npc/location/character/campaign
+  // name, session title), resolved server-side at read time — not stored. Null when
+  // the note is unanchored or the entity no longer exists.
+  entityName: z.string().max(300).nullable().default(null),
   body: z.string().min(1).max(20_000),
   resolved: z.boolean().default(false), // inbox items only
   resolvedNote: z.string().max(1000).default(''),
   ...timestamps,
 });
 export type Note = z.infer<typeof Note>;
-export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
+export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, entityName: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
 export const NoteUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
   visibility: NoteVisibility.optional(),
@@ -187,7 +366,44 @@ export const InboxCreate = z.object({
   authorName: z.string().max(120).default('someone'),
   body: z.string().min(1).max(20_000),
 });
-export const InboxResolve = z.object({ resolvedNote: z.string().max(1000).default('') });
+export const InboxResolve = z
+  .object({
+    resolvedNote: z.string().max(1000).default(''),
+    // Optional link to the entity this item was resolved into (drives the history view).
+    entityType: EntityType.nullable().optional(),
+    entityId: Id.nullable().optional(),
+  })
+  .refine((v) => (v.entityType == null) === (v.entityId == null), {
+    message: 'entityType and entityId must be provided together',
+  });
+
+// ---------- notifications (in-app) ----------
+// Per-user notification rows written by the server when something a member cares
+// about happens while they're not looking: a session recap is posted, someone
+// replies on a shared note thread (or the DM answers an inbox item), they're
+// added to a campaign, or the next session gets scheduled. Read via
+// GET /notifications (own rows only); real-time push can layer on later — the
+// store is plain rows, transport-agnostic.
+export const NotificationType = z.enum(['recap_posted', 'note_reply', 'added_to_campaign', 'session_scheduled']);
+export type NotificationType = z.infer<typeof NotificationType>;
+
+export const Notification = z.object({
+  id: Id,
+  userId: Id, // recipient (users.id) — never exposed to anyone but the recipient
+  campaignId: Id,
+  type: NotificationType,
+  title: z.string().min(1).max(200),
+  body: z.string().max(1000).default(''), // short excerpt/context, plain text
+  entityType: EntityType.nullable().default(null), // deep-link target (e.g. session), if any
+  entityId: Id.nullable().default(null),
+  actorName: z.string().max(120).default(''), // display name of who triggered it
+  readAt: IsoDate.nullable().default(null), // null = unread
+  createdAt: IsoDate,
+});
+export type Notification = z.infer<typeof Notification>;
+
+export const NotificationUnreadCount = z.object({ count: z.number().int().nonnegative() });
+export type NotificationUnreadCount = z.infer<typeof NotificationUnreadCount>;
 
 // ---------- rule packs (Compendium backend) ----------
 // Installed, server-wide rules content (spells/monsters/items/…) imported from
@@ -205,7 +421,7 @@ export const RulePack = z.object({
 });
 export type RulePack = z.infer<typeof RulePack>;
 
-export const RuleEntryType = z.enum(['spell', 'monster', 'item', 'class', 'race', 'condition', 'section', 'other']);
+export const RuleEntryType = z.enum(['spell', 'monster', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other']);
 export type RuleEntryType = z.infer<typeof RuleEntryType>;
 
 export const RuleEntry = z.object({
@@ -224,7 +440,7 @@ export type RuleEntry = z.infer<typeof RuleEntry>;
 export const RulePackInstall = z.object({
   source: z.literal('open5e'),
   url: z.string().max(500).optional(), // override API base, mainly for tests (fake server)
-  sections: z.array(z.enum(['spells', 'monsters', 'items', 'conditions'])).optional(), // default: all
+  sections: z.array(z.enum(['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'])).optional(), // default: all
 });
 export type RulePackInstall = z.infer<typeof RulePackInstall>;
 
@@ -254,6 +470,12 @@ export type ServerRole = z.infer<typeof ServerRole>;
 // Hex color, e.g. #9184d9. Shared by User.accentColor and PreferencesUpdate below.
 const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 
+// UI text-size preference. 'default' follows the design's base scale; 'large'
+// scales the whole UI up for readability. Shared by User.textSize and
+// PreferencesUpdate below.
+export const TextSize = z.enum(['default', 'large']);
+export type TextSize = z.infer<typeof TextSize>;
+
 export const User = z.object({
   id: Id,
   username: z.string().min(2).max(60).regex(/^[a-z0-9_.-]+$/i, 'letters, numbers, _ . - only'),
@@ -262,6 +484,8 @@ export const User = z.object({
   disabled: z.boolean().default(false),
   // Personal accent color override (per-user UI theming). null = follow the server default (Nocturne blurple).
   accentColor: HexColor.nullable().default(null),
+  // Personal text-size preference (per-user UI scaling).
+  textSize: TextSize.default('default'),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -273,6 +497,9 @@ export const SetupRequest = z.object({ username: User.shape.username, password: 
 // against an arbitrarily large input before verifyPassword() even gets to reject it.
 export const LoginRequest = z.object({ username: z.string().min(1), password: z.string().min(1).max(200) });
 export const UserCreate = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional(), serverRole: ServerRole.optional() });
+// Self-service signup (POST /auth/signup) — same shape as SetupRequest, but the created
+// account is always serverRole 'user' (never admin) and the route is gated on allowSignup.
+export const SignupRequest = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional() });
 export const UserUpdate = z.object({ displayName: z.string().max(120).optional(), serverRole: ServerRole.optional(), disabled: z.boolean().optional() });
 export const PasswordChange = z.object({ currentPassword: z.string().optional(), newPassword: Password }); // current required for self-change; admin reset omits
 
@@ -280,12 +507,47 @@ export const PasswordChange = z.object({ currentPassword: z.string().optional(),
 export const PreferencesUpdate = z.object({
   displayName: z.string().max(120).optional(),
   accentColor: HexColor.nullable().optional(),
+  textSize: TextSize.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
+
+// ---------- forgot-password / self-service reset ----------
+// The server may have no mail transport, so the reset path is admin-approved:
+// a user files a reset request from the login screen (POST /auth/reset-request,
+// @Public — always 202, no user-enumeration signal), a server admin approves it
+// and receives a ONE-TIME reset code (stored hashed, short expiry) to hand to
+// the user out-of-band, and the user redeems it (POST /auth/reset-confirm) to
+// set a new password without the admin ever learning it.
+export const PasswordResetRequestCreate = z.object({ username: z.string().min(1).max(60) });
+export type PasswordResetRequestCreate = z.infer<typeof PasswordResetRequestCreate>;
+
+export const PasswordResetStatus = z.enum(['pending', 'approved']);
+export type PasswordResetStatus = z.infer<typeof PasswordResetStatus>;
+
+export const PasswordResetRequest = z.object({
+  id: Id,
+  userId: Id,
+  username: z.string().default(''), // denormalized for display
+  displayName: z.string().default(''),
+  status: PasswordResetStatus,
+  requestedAt: IsoDate,
+  approvedAt: IsoDate.nullable().default(null),
+  expiresAt: IsoDate.nullable().default(null), // set when approved — code is dead past this
+}); // codeHash never leaves the server
+export type PasswordResetRequest = z.infer<typeof PasswordResetRequest>;
+
+// Admin approval response — `code` is returned ONCE, stored hashed.
+export const PasswordResetApproval = z.object({ code: z.string(), expiresAt: IsoDate, request: PasswordResetRequest });
+export type PasswordResetApproval = z.infer<typeof PasswordResetApproval>;
+
+// code capped like passwords — this is an UNauthenticated path (see LoginRequest note above).
+export const PasswordResetConfirm = z.object({ code: z.string().min(1).max(200), newPassword: Password });
+export type PasswordResetConfirm = z.infer<typeof PasswordResetConfirm>;
 
 export const AuthStatus = z.object({
   setupRequired: z.boolean(), // true until the first (admin) user exists
   localLoginEnabled: z.boolean(), // for non-admin users (admins can always log in locally)
+  signupEnabled: z.boolean(), // effective: allowSignup && allowLocalLogin && !setupRequired
   oidcEnabled: z.boolean(), // future
   version: z.string(),
 });
@@ -293,6 +555,7 @@ export type AuthStatus = z.infer<typeof AuthStatus>;
 
 export const ServerSettings = z.object({
   allowLocalLogin: z.boolean().default(true), // gate for non-admin local login
+  allowSignup: z.boolean().default(false), // gate for self-service signup (POST /auth/signup) — off by default
 });
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();
@@ -310,6 +573,55 @@ export const CampaignMember = z.object({
 export type CampaignMember = z.infer<typeof CampaignMember>;
 export const MemberCreate = z.object({ userId: Id, role: Role, characterId: Id.nullable().optional() });
 export const MemberUpdate = z.object({ role: Role.optional(), characterId: Id.nullable().optional() });
+
+// ---------- campaign invites (DM invite links / join codes) ----------
+// A DM-generated, shareable link that onboards a player without a server admin:
+// whoever opens /join/<code> creates their own account (or joins with an existing
+// one) and lands in the campaign at the role the DM chose. Never grants 'dm' —
+// a leaked link must not hand out DM power. Codes are unguessable (128-bit
+// random), expiring, optionally use-capped, and revocable by the DM.
+export const InviteRole = z.enum(['player', 'viewer']);
+export type InviteRole = z.infer<typeof InviteRole>;
+
+export const CampaignInvite = z.object({
+  id: Id,
+  campaignId: Id,
+  code: z.string(), // join code — the shareable link is <origin>/join/<code>
+  role: InviteRole,
+  createdByUserId: Id.nullable().default(null),
+  expiresAt: IsoDate,
+  maxUses: z.number().int().positive().nullable().default(null), // null = unlimited (until expiry/revocation)
+  useCount: z.number().int().nonnegative().default(0),
+  ...timestamps,
+});
+export type CampaignInvite = z.infer<typeof CampaignInvite>;
+
+export const InviteCreate = z.object({
+  role: InviteRole.default('player'),
+  expiresInDays: z.number().int().min(1).max(365).default(7), // invites always expire — default one week
+  maxUses: z.number().int().min(1).max(1000).nullable().optional(),
+});
+export type InviteCreate = z.infer<typeof InviteCreate>;
+
+// Public preview of a valid invite (GET /invites/:code) — just enough for the
+// join page to say what you're joining and as what. campaignId is included so
+// the web app can navigate to /c/:id after joining.
+export const InvitePreview = z.object({
+  campaignId: Id,
+  campaignName: z.string(),
+  role: InviteRole,
+  expiresAt: IsoDate,
+});
+export type InvitePreview = z.infer<typeof InvitePreview>;
+
+// Accept an invite as a brand-new user (POST /invites/:code/accept, @Public):
+// creates the account AND the membership in one call, then starts a session.
+export const InviteAccept = z.object({
+  username: User.shape.username,
+  password: Password,
+  displayName: z.string().max(120).optional(),
+});
+export type InviteAccept = z.infer<typeof InviteAccept>;
 
 export const Me = z.object({
   user: User,
@@ -384,6 +696,10 @@ export const Proposal = z.object({
   entityId: Id.nullable().default(null), // null for creates
   action: ProposalAction,
   payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
+  // The target entity's state captured at propose time (update proposals only; null for
+  // creates) — lets the DM review UI render a real before/after diff even if the entity
+  // changes between propose and review.
+  snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
   proposer: z.string().max(200), // user id or token name
   status: ProposalStatus.default('pending'),
   resolvedBy: z.string().max(200).default(''),
@@ -463,6 +779,54 @@ export const CombatantUpdate = z.object({
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
+// ---------- inventory & loot (party treasury + per-character items) ----------
+export const ItemOwnerType = z.enum(['party', 'character']);
+export type ItemOwnerType = z.infer<typeof ItemOwnerType>;
+
+export const InventoryItem = z.object({
+  id: Id,
+  campaignId: Id,
+  ownerType: ItemOwnerType.default('party'),
+  characterId: Id.nullable().default(null), // set iff ownerType='character'
+  name: z.string().min(1).max(200),
+  qty: z.number().int().min(0).default(1),
+  notes: z.string().max(5_000).default(''),
+  ...timestamps,
+});
+export type InventoryItem = z.infer<typeof InventoryItem>;
+export const InventoryItemCreate = InventoryItem.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+export const InventoryItemUpdate = InventoryItemCreate.partial();
+
+// Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).
+const Coin = z.number().int().nonnegative();
+export const Treasury = z.object({
+  campaignId: Id,
+  cp: Coin.default(0),
+  sp: Coin.default(0),
+  ep: Coin.default(0),
+  gp: Coin.default(0),
+  pp: Coin.default(0),
+  updatedAt: IsoDate,
+});
+export type Treasury = z.infer<typeof Treasury>;
+// Union like HpPatch: { delta } (relative, may be negative but result must stay >= 0)
+// or { set } (absolute). Omitted denominations are left untouched.
+export const TreasuryPatch = z.union([
+  z.object({
+    delta: z.object({
+      cp: z.number().int().optional(),
+      sp: z.number().int().optional(),
+      ep: z.number().int().optional(),
+      gp: z.number().int().optional(),
+      pp: z.number().int().optional(),
+    }),
+  }),
+  z.object({
+    set: z.object({ cp: Coin.optional(), sp: Coin.optional(), ep: Coin.optional(), gp: Coin.optional(), pp: Coin.optional() }),
+  }),
+]);
+export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
+
 // ---------- dice rolling ----------
 // Safe, restricted dice expression: NdM optionally followed by +K or -K, e.g. "1d20+3", "2d6-1", "d20".
 export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*([+-]\s*\d{1,3})?\s*$/i;
@@ -477,9 +841,37 @@ export const RollResult = z.object({
 });
 export type RollResult = z.infer<typeof RollResult>;
 
+// ---------- real-time campaign events (SSE) ----------
+// Thin invalidation signals pushed over GET /campaigns/:id/events — they carry ids, not
+// entity payloads, so clients refetch through the normal (permission-checked) REST reads.
+export const CampaignEventType = z.enum(['encounter.updated', 'encounter.deleted']);
+export type CampaignEventType = z.infer<typeof CampaignEventType>;
+export const CampaignEvent = z.object({
+  type: CampaignEventType,
+  campaignId: Id,
+  encounterId: Id,
+  at: IsoDate,
+});
+export type CampaignEvent = z.infer<typeof CampaignEvent>;
+
+// A persisted, campaign-shared dice roll (issue #35): RollResult plus authorship +
+// timestamp. Rolls are stored server-side so every campaign member sees the same
+// feed — POST /campaigns/:id/roll returns one of these, and GET /campaigns/:id/rolls
+// lists the recent history (polled by the web today; the same payload is what an
+// SSE stream would push later).
+export const DiceRoll = RollResult.extend({
+  id: Id,
+  campaignId: Id,
+  rollerUserId: z.string().max(200), // RequestUser.id — String(users.id) or 'dev:<name>' / 'token:<name>' actors
+  rollerName: z.string().max(200).default(''),
+  createdAt: IsoDate,
+});
+export type DiceRoll = z.infer<typeof DiceRoll>;
+
 // ---------- audit ----------
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
 export type DangerLevel = z.infer<typeof DangerLevel>;
+export type CampaignCloneMode = z.infer<typeof CampaignCloneMode>;
 export type QuestStatus = z.infer<typeof QuestStatus>;
 export type LocationStatus = z.infer<typeof LocationStatus>;
 export type NoteVisibility = z.infer<typeof NoteVisibility>;

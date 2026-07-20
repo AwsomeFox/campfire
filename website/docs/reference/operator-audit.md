@@ -73,7 +73,7 @@ depth, XP visibility, and self-service account recovery.
 | Manage storage | ❌ | Uploads accumulate with no size visibility, quota, or orphan cleanup |
 | Review who has API/AI tokens | 🟡 | Users manage their own tokens; an admin can't see or revoke everyone's from one place |
 | Upgrade | ✅ | Bump the image tag; migrations auto-run and are idempotent; `/data` carries across |
-| Keep admin power separate from campaign secrets | 🟡→🔨 | Today a server admin is implicitly DM of every campaign (sees all secrets); privilege separation is being added |
+| Keep admin power separate from campaign secrets | ✅ | A server admin holds no implicit campaign role — DM secrets (and the campaign list itself) require an actual membership; server power ≠ story access |
 
 **Biggest admin gaps:** a real backup/restore story, server observability, a
 server-wide audit trail, and self-service account flows (invites/signup/reset).

@@ -58,6 +58,30 @@ function entryToDomain(row: typeof ruleEntries.$inferSelect): RuleEntry {
   };
 }
 
+/**
+ * ORDER BY expression that ranks name matches ahead of summary/body matches
+ * (issue #33: searching "poisoned" must return "Poisoned" before "Petrified",
+ * whose body merely mentions the Poisoned condition). Buckets, best first:
+ *   0 — exact name match (case-insensitive)
+ *   1 — name starts with the query
+ *   2 — name contains the query
+ *   3 — everything else (summary/body-only matches)
+ * Ties within a bucket are broken by the caller's secondary ORDER BY
+ * (FTS bm25 rank, or name in the LIKE fallback).
+ */
+function nameMatchRank(q: string) {
+  // Strip LIKE wildcards so user input can't skew the bucketing (mirrors the
+  // sanitisation in the LIKE fallback below); lower() both sides for
+  // case-insensitive comparison independent of the column's collation.
+  const needle = q.trim().replace(/[%_]/g, '').toLowerCase();
+  return sql`CASE
+    WHEN lower(${ruleEntries.name}) = ${needle} THEN 0
+    WHEN lower(${ruleEntries.name}) LIKE ${`${needle}%`} THEN 1
+    WHEN lower(${ruleEntries.name}) LIKE ${`%${needle}%`} THEN 2
+    ELSE 3
+  END`;
+}
+
 /** Escapes an FTS5 MATCH query string by quoting it as a single phrase, then appending a prefix wildcard per token. */
 function toFtsQuery(q: string): string {
   const tokens = q
@@ -310,6 +334,10 @@ export class RulesService {
    * pack slug. Uses SQLite fts5 MATCH when available (see db.module.ts probe);
    * otherwise falls back to a LIKE scan across name/summary/body — slower but
    * correct on SQLite builds without the fts5 extension compiled in.
+   *
+   * Both paths order results by nameMatchRank() so exact/prefix name matches
+   * rank ahead of body-only matches (issue #33), with FTS bm25 rank (or name,
+   * in the LIKE fallback) breaking ties within a bucket.
    */
   async search(params: { q: string; type?: RuleEntryType; pack?: string }, limit = 50): Promise<RuleEntry[]> {
     const packFilter = params.pack ? await this.db.select().from(rulePacks).where(eq(rulePacks.slug, params.pack)).limit(1) : undefined;
@@ -341,6 +369,7 @@ export class RulesService {
         .from(ruleEntries)
         .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
         .where(and(sql`rule_entries_fts MATCH ${ftsQuery}`, ...conditions))
+        .orderBy(nameMatchRank(params.q), sql`rule_entries_fts.rank`)
         .limit(limit);
       return rows.map((r) => entryToDomain(r.entry));
     }
@@ -356,6 +385,7 @@ export class RulesService {
       .select()
       .from(ruleEntries)
       .where(and(...conditions))
+      .orderBy(nameMatchRank(params.q), ruleEntries.name)
       .limit(limit);
     return rows.map(entryToDomain);
   }
