@@ -210,6 +210,29 @@ function migrateProposalsTableForSnapshot(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before proposer attribution (issue #124): the
+ * proposals table stored only a single `proposer` string (the token name or a
+ * bare user id). `proposer_user_id` powers the proposer self-view filter, and
+ * `proposer_token` keeps token provenance as secondary info. Plain defaulted /
+ * nullable ADD COLUMNs — no table rebuild. Pre-existing rows get an empty
+ * proposer_user_id (so they surface only to the DM's all-view, never a member
+ * self-view) and NULL proposer_token. New DBs never hit this path — BOOTSTRAP_SQL
+ * already declares both columns.
+ */
+function migrateProposalsTableForAttribution(sqlite: Database.Database): void {
+  const hasProposalsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'")
+    .get();
+  if (!hasProposalsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(proposals)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+
+  if (!has('proposer_user_id')) sqlite.exec("ALTER TABLE proposals ADD COLUMN proposer_user_id TEXT NOT NULL DEFAULT ''");
+  if (!has('proposer_token')) sqlite.exec('ALTER TABLE proposals ADD COLUMN proposer_token TEXT');
+}
+
+/**
  * Migration for DBs created before character-sheet depth (issue #1):
  * `characters.save_proficiencies` / `skills` / `actions` / `spell_slots`
  * didn't exist. Plain defaulted ADD COLUMNs — no table rebuild needed, same
@@ -573,6 +596,7 @@ export function openDatabase(dataDir: string): {
   migrateCampaignsTableForMapAttachment(sqlite);
   migrateApiTokensTableForAdminEnabled(sqlite);
   migrateProposalsTableForSnapshot(sqlite);
+  migrateProposalsTableForAttribution(sqlite);
   migrateCharactersTableForSheetDepth(sqlite);
   migrateCampaignsTableForIcsToken(sqlite);
   migrateCampaignsTableForStorageQuota(sqlite);
