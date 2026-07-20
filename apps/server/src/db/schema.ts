@@ -276,6 +276,10 @@ export const notes = sqliteTable('notes', {
   visibility: text('visibility').notNull().default('private'),
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
+  // Target member for a `whisper` note (issue #127) — String(users.id) or dev:<name>,
+  // same identity space as author_user_id. Null for every other visibility. Nullable/
+  // absent in older DBs pre-migration; see db/db.module.ts migrateNotesTableForRecipient().
+  recipientUserId: text('recipient_user_id'),
   body: text('body').notNull(),
   resolved: integer('resolved', { mode: 'boolean' }).notNull().default(false),
   resolvedNote: text('resolved_note').notNull().default(''),

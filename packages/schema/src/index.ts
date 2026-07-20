@@ -702,7 +702,11 @@ export const SessionZeroUpdate = z.object({
 export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 
 // ---------- notes ----------
-export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
+// `whisper` is a per-player secret channel (issue #127): the note is visible ONLY to
+// its author, the single targeted recipient (recipientUserId), and any DM. This is the
+// player-vs-player asymmetry the other visibilities can't express — private is
+// author-only, dm_shared flows up to the DM, party_shared broadcasts to everyone.
+export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared', 'whisper']);
 export const NoteKind = z.enum(['note', 'inbox']);
 export const EntityType = z.enum(['quest', 'npc', 'location', 'session', 'character', 'campaign']);
 
@@ -719,18 +723,27 @@ export const Note = z.object({
   // name, session title), resolved server-side at read time — not stored. Null when
   // the note is unanchored or the entity no longer exists.
   entityName: z.string().max(300).nullable().default(null),
+  // The single member a `whisper` note is targeted at — same identity space as
+  // authorUserId (String(users.id), or dev:<name> under DEV_AUTH). Null for every
+  // other visibility. Set only when visibility === 'whisper'.
+  recipientUserId: z.string().max(120).nullable().default(null),
+  // Display name of the whisper recipient, resolved server-side at read time (like
+  // entityName) — not stored. Null when the note isn't a whisper or the recipient is
+  // no longer a member.
+  recipientName: z.string().max(120).nullable().default(null),
   body: z.string().min(1).max(20_000),
   resolved: z.boolean().default(false), // inbox items only
   resolvedNote: z.string().max(1000).default(''),
   ...timestamps,
 });
 export type Note = z.infer<typeof Note>;
-export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, entityName: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
+export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, entityName: true, recipientName: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
 export const NoteUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
   visibility: NoteVisibility.optional(),
   entityType: EntityType.nullable().optional(),
   entityId: Id.nullable().optional(),
+  recipientUserId: z.string().max(120).nullable().optional(),
 });
 export const InboxCreate = z.object({
   authorName: z.string().max(120).default('someone'),
