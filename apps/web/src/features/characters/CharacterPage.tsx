@@ -4,21 +4,21 @@
  * two-column body — ability scores / HP / background / conditions on the left, a
  * portrait upload + player info panel on the right.
  *
- * Owner or DM can edit everything (HP, conditions, stats, story, portrait); everyone else
- * gets a read-only view.
+ * Owner or DM can edit everything (HP, conditions, stats, saves, skills, actions,
+ * spell slots, story, portrait); everyone else gets a read-only view.
+ *
+ * Sheet depth (issue #1): saving throws (toggle proficiency per ability), skills
+ * (cycle none → proficient → expertise), actions (attack/spell/feature rows), and
+ * spell slots (per-level pips; spend/restore via POST /characters/:id/spell-slots,
+ * maxima via PATCH spellSlots) are all backed by the Character schema now.
  *
  * Design affordances with no backing API (rendered disabled with a "soon" tag — see report):
- *  - Saving throws (no per-character save/proficiency data in the schema)
- *  - Skills (no skill/proficiency data in the schema)
- *  - Actions (no per-attack/action-row API; dice themselves ARE modeled —
- *    see POST /campaigns/:id/roll, used by the dashboard Dice card and
- *    encounter dice log — this card is about missing action rows, not dice)
  *  - Inventory (no inventory API — `Character` has no items field)
  *  - D&D Beyond link (schema has `ddbId` but there is no linking flow/endpoint)
  */
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { Attachment, Character, CampaignMember } from '@campfire/schema';
+import type { Attachment, Character, CharacterAction, CampaignMember, SkillRank } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
@@ -27,7 +27,45 @@ import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials, abilityMod } from './avatar';
 
-const ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'];
+const ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
+type Ability = (typeof ABILITY_KEYS)[number];
+
+/** SRD 5e skill list with governing abilities. */
+const SKILLS: ReadonlyArray<{ name: string; ability: Ability }> = [
+  { name: 'Acrobatics', ability: 'DEX' },
+  { name: 'Animal Handling', ability: 'WIS' },
+  { name: 'Arcana', ability: 'INT' },
+  { name: 'Athletics', ability: 'STR' },
+  { name: 'Deception', ability: 'CHA' },
+  { name: 'History', ability: 'INT' },
+  { name: 'Insight', ability: 'WIS' },
+  { name: 'Intimidation', ability: 'CHA' },
+  { name: 'Investigation', ability: 'INT' },
+  { name: 'Medicine', ability: 'WIS' },
+  { name: 'Nature', ability: 'INT' },
+  { name: 'Perception', ability: 'WIS' },
+  { name: 'Performance', ability: 'CHA' },
+  { name: 'Persuasion', ability: 'CHA' },
+  { name: 'Religion', ability: 'INT' },
+  { name: 'Sleight of Hand', ability: 'DEX' },
+  { name: 'Stealth', ability: 'DEX' },
+  { name: 'Survival', ability: 'WIS' },
+];
+
+const SPELL_LEVELS = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const;
+
+/** 5e proficiency bonus by level: +2 at 1-4 up to +6 at 17-20. */
+function profBonus(level: number): number {
+  return 2 + Math.floor((Math.max(1, level) - 1) / 4);
+}
+
+function modOf(character: Character, ability: Ability): number {
+  return Math.floor(((character.stats[ability] ?? 10) - 10) / 2);
+}
+
+function signed(n: number): string {
+  return n >= 0 ? `+${n}` : `${n}`;
+}
 
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
@@ -208,39 +246,13 @@ export default function CharacterPage() {
             {canEdit && <HpEditor character={character} onChange={load} onError={setActionError} />}
           </Card>
 
-          <Card className="space-y-2">
-            <div className="flex items-center gap-2">
-              <p className="card-kicker mb-0">Actions</p>
-              <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
-            </div>
-            <p className="text-xs text-slate-500">
-              Per-attack action rows aren't modeled yet — attach a weapon/spell list here. Dice already work: roll
-              from the dashboard's Dice card or an encounter's dice log.
-            </p>
-          </Card>
+          <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
 
-          <Card className="space-y-2">
-            <div className="flex items-center gap-2">
-              <p className="card-kicker mb-0">Saving throws</p>
-              <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
-            </div>
-            <div className="grid gap-2 opacity-40 pointer-events-none" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
-              {ABILITY_KEYS.map((k) => (
-                <div key={k} className="cf-inset text-center py-2 px-1.5">
-                  <p className="text-[10px] tracking-wide text-slate-500">{k}</p>
-                  <p className="text-[15px] mt-0.5">—</p>
-                </div>
-              ))}
-            </div>
-          </Card>
+          <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
 
-          <Card className="space-y-2">
-            <div className="flex items-center gap-2">
-              <p className="card-kicker mb-0">Skills</p>
-              <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
-            </div>
-            <p className="text-xs text-slate-500">Skill proficiencies aren't tracked yet — this arrives with the full sheet model.</p>
-          </Card>
+          <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+
+          <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
 
           <Card className="space-y-3">
             <div className="flex items-center justify-between">
@@ -414,6 +426,414 @@ function SheetEditForm({
         </Btn>
       </div>
     </div>
+  );
+}
+
+type SheetCardProps = {
+  character: Character;
+  canEdit: boolean;
+  onChange: () => void;
+  onError: (msg: string | null) => void;
+};
+
+function SavingThrowsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
+  const [busy, setBusy] = useState(false);
+  const pb = profBonus(character.level);
+  const profs = new Set(character.saveProficiencies);
+
+  async function toggle(k: Ability) {
+    if (!canEdit || busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      const next = profs.has(k)
+        ? character.saveProficiencies.filter((a) => a !== k)
+        : [...character.saveProficiencies, k];
+      await api.patch(`${API}/characters/${character.id}`, { saveProficiencies: next });
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't update saving throws.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-2">
+      <div className="flex items-center gap-2">
+        <p className="card-kicker mb-0">Saving throws</p>
+        <span className="text-[11px] text-slate-500">proficiency {signed(pb)}</span>
+      </div>
+      <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
+        {ABILITY_KEYS.map((k) => {
+          const proficient = profs.has(k);
+          const mod = modOf(character, k) + (proficient ? pb : 0);
+          const inner = (
+            <>
+              <p className="text-[10px] tracking-wide text-slate-500">
+                {k}
+                {proficient && (
+                  <span className="ml-1" style={{ color: 'var(--color-accent-300)' }}>
+                    ●
+                  </span>
+                )}
+              </p>
+              <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
+            </>
+          );
+          if (!canEdit) {
+            return (
+              <div key={k} className="cf-inset text-center py-2 px-1.5">
+                {inner}
+              </div>
+            );
+          }
+          return (
+            <button
+              key={k}
+              type="button"
+              onClick={() => toggle(k)}
+              disabled={busy}
+              className="cf-inset text-center py-2 px-1.5"
+              style={{ cursor: busy ? 'default' : 'pointer', font: 'inherit', color: 'inherit' }}
+              title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
+            >
+              {inner}
+            </button>
+          );
+        })}
+      </div>
+      {canEdit && <p className="text-[11px] text-slate-500">Tap an ability to toggle save proficiency.</p>}
+    </Card>
+  );
+}
+
+function SkillsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
+  const [busy, setBusy] = useState(false);
+  const pb = profBonus(character.level);
+
+  async function cycle(name: string) {
+    if (!canEdit || busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      const rank = character.skills[name];
+      const next: Record<string, SkillRank> = { ...character.skills };
+      if (rank === undefined) next[name] = 'proficient';
+      else if (rank === 'proficient') next[name] = 'expertise';
+      else delete next[name];
+      await api.patch(`${API}/characters/${character.id}`, { skills: next });
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't update skills.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-2">
+      <div className="flex items-center gap-2">
+        <p className="card-kicker mb-0">Skills</p>
+        {canEdit && <span className="text-[11px] text-slate-500">tap to cycle: none → proficient ● → expertise ★</span>}
+      </div>
+      <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+        {SKILLS.map(({ name, ability }) => {
+          const rank = character.skills[name];
+          const mod = modOf(character, ability) + (rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0);
+          const marker = rank === 'expertise' ? '★' : rank === 'proficient' ? '●' : '○';
+          const row = (
+            <>
+              <span
+                className="w-4 shrink-0 text-center"
+                style={{ color: rank ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
+                aria-hidden
+              >
+                {marker}
+              </span>
+              <span className="flex-1 text-left truncate">{name}</span>
+              <span className="text-[10px] text-slate-500">{ability}</span>
+              <span className="w-8 text-right font-semibold">{signed(mod)}</span>
+            </>
+          );
+          if (!canEdit) {
+            return (
+              <div key={name} className="flex items-center gap-1.5 text-[13px] py-0.5">
+                {row}
+              </div>
+            );
+          }
+          return (
+            <button
+              key={name}
+              type="button"
+              onClick={() => cycle(name)}
+              disabled={busy}
+              className="flex items-center gap-1.5 text-[13px] py-0.5"
+              style={{ cursor: busy ? 'default' : 'pointer', background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit' }}
+              title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
+            >
+              {row}
+            </button>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function ActionsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
+  const [adding, setAdding] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState('');
+  const [toHit, setToHit] = useState('');
+  const [damage, setDamage] = useState('');
+  const [notes, setNotes] = useState('');
+
+  async function saveActions(next: CharacterAction[], failMsg: string) {
+    if (busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.patch(`${API}/characters/${character.id}`, { actions: next });
+      onChange();
+      return true;
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : failMsg);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function add() {
+    if (!name.trim()) return;
+    const action: CharacterAction = {
+      name: name.trim(),
+      kind: kind.trim(),
+      toHit: toHit.trim(),
+      damage: damage.trim(),
+      notes: notes.trim(),
+    };
+    const ok = await saveActions([...character.actions, action], "Couldn't add the action.");
+    if (ok) {
+      setName('');
+      setKind('');
+      setToHit('');
+      setDamage('');
+      setNotes('');
+      setAdding(false);
+    }
+  }
+
+  function remove(index: number) {
+    void saveActions(
+      character.actions.filter((_, i) => i !== index),
+      "Couldn't remove the action.",
+    );
+  }
+
+  return (
+    <Card className="space-y-2.5">
+      <div className="flex items-center gap-2">
+        <p className="card-kicker mb-0">Actions</p>
+        {canEdit && !adding && (
+          <Btn ghost className="!min-h-0 !py-1 text-xs ml-auto" onClick={() => setAdding(true)}>
+            + Add
+          </Btn>
+        )}
+      </div>
+      {character.actions.length === 0 && !adding && (
+        <p className="text-xs text-slate-500">
+          No actions yet{canEdit ? ' — add attacks, spells, and features' : ''}. Dice already work: roll from the
+          dashboard's Dice card or an encounter's dice log.
+        </p>
+      )}
+      {character.actions.map((action, i) => (
+        <div key={`${action.name}-${i}`} className="cf-inset px-3 py-2 flex items-start gap-2.5">
+          <div className="flex-1 min-w-0">
+            <p className="text-[13px] font-semibold flex items-center gap-1.5 flex-wrap">
+              {action.name}
+              {action.kind && (
+                <span className="tag tag-neutral" style={{ fontSize: 9 }}>
+                  {action.kind}
+                </span>
+              )}
+            </p>
+            <p className="text-xs text-slate-400 flex gap-3 flex-wrap">
+              {action.toHit && <span>to hit {action.toHit}</span>}
+              {action.damage && <span>{action.damage}</span>}
+            </p>
+            {action.notes && <p className="text-[11px] text-slate-500 mt-0.5">{action.notes}</p>}
+          </div>
+          {canEdit && (
+            <button
+              type="button"
+              aria-label={`Remove ${action.name}`}
+              onClick={() => remove(i)}
+              disabled={busy}
+              style={{
+                cursor: busy ? 'default' : 'pointer',
+                opacity: 0.7,
+                background: 'transparent',
+                border: 0,
+                padding: 0,
+                font: 'inherit',
+                color: 'inherit',
+              }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      ))}
+      {adding && (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2.5">
+            <TextInput autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (Longsword, Fire Bolt…)" />
+            <TextInput value={kind} onChange={(e) => setKind(e.target.value)} placeholder="Kind (melee, ranged, spell…)" />
+          </div>
+          <div className="grid grid-cols-2 gap-2.5">
+            <TextInput value={toHit} onChange={(e) => setToHit(e.target.value)} placeholder="To hit (+5)" />
+            <TextInput value={damage} onChange={(e) => setDamage(e.target.value)} placeholder="Damage (1d8+3 slashing)" />
+          </div>
+          <TextInput value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (versatile, 60 ft range…)" />
+          <div className="flex gap-2 justify-end">
+            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setAdding(false)} disabled={busy}>
+              Cancel
+            </Btn>
+            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={add} disabled={busy || !name.trim()}>
+              {busy ? 'Saving…' : 'Add action'}
+            </Btn>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [maxima, setMaxima] = useState<Record<string, string>>({});
+
+  const levels = SPELL_LEVELS.filter((lvl) => (character.spellSlots[lvl]?.max ?? 0) > 0);
+
+  async function adjust(level: string, delta: number) {
+    if (busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.post(`${API}/characters/${character.id}/spell-slots`, { level: Number(level), delta });
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't update spell slots.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startEdit() {
+    const init: Record<string, string> = {};
+    for (const lvl of SPELL_LEVELS) init[lvl] = String(character.spellSlots[lvl]?.max ?? 0);
+    setMaxima(init);
+    setEditing(true);
+  }
+
+  async function saveMaxima() {
+    if (busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      const next: Record<string, { max: number; used: number }> = {};
+      for (const lvl of SPELL_LEVELS) {
+        const max = Math.max(0, Math.min(20, Number(maxima[lvl]) || 0));
+        if (max > 0) next[lvl] = { max, used: Math.min(character.spellSlots[lvl]?.used ?? 0, max) };
+      }
+      await api.patch(`${API}/characters/${character.id}`, { spellSlots: next });
+      setEditing(false);
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't save spell slots.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-2.5">
+      <div className="flex items-center gap-2">
+        <p className="card-kicker mb-0">Spell slots</p>
+        {canEdit && !editing && (
+          <Btn ghost className="!min-h-0 !py-1 text-xs ml-auto" onClick={startEdit}>
+            ✎ Edit slots
+          </Btn>
+        )}
+      </div>
+      {editing ? (
+        <div className="space-y-2">
+          <div className="grid gap-2.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(64px, 1fr))' }}>
+            {SPELL_LEVELS.map((lvl) => (
+              <div key={lvl} className="space-y-1">
+                <label className="text-[10px] text-slate-500 font-bold uppercase">Lv {lvl}</label>
+                <TextInput
+                  type="number"
+                  min={0}
+                  max={20}
+                  value={maxima[lvl] ?? '0'}
+                  onChange={(e) => setMaxima((m) => ({ ...m, [lvl]: e.target.value }))}
+                />
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2 justify-end">
+            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)} disabled={busy}>
+              Cancel
+            </Btn>
+            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={saveMaxima} disabled={busy}>
+              {busy ? 'Saving…' : 'Save'}
+            </Btn>
+          </div>
+        </div>
+      ) : levels.length === 0 ? (
+        <p className="text-xs text-slate-500">
+          No spell slots configured{canEdit ? ' — set per-level maxima with “Edit slots”' : ''}.
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {levels.map((lvl) => {
+            const slot = character.spellSlots[lvl]!;
+            const available = Math.max(0, slot.max - slot.used);
+            return (
+              <div key={lvl} className="flex items-center gap-2.5 flex-wrap">
+                <span className="text-[11px] text-slate-500 font-bold uppercase w-9">Lv {lvl}</span>
+                <span className="tracking-[3px] text-[15px] leading-none" aria-label={`${available} of ${slot.max} slots available`}>
+                  {Array.from({ length: slot.max }, (_, i) => (
+                    <span key={i} style={{ color: i < available ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}>
+                      {i < available ? '●' : '○'}
+                    </span>
+                  ))}
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  {available}/{slot.max}
+                </span>
+                {canEdit && (
+                  <span className="inline-flex gap-1 ml-auto">
+                    <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || available === 0} onClick={() => adjust(lvl, 1)}>
+                      Use
+                    </Btn>
+                    <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || slot.used === 0} onClick={() => adjust(lvl, -1)}>
+                      Restore
+                    </Btn>
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
   );
 }
 

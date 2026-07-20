@@ -4,7 +4,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -91,5 +91,19 @@ export class CharactersController {
     const row = await this.characters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.patchConditions(id, body, user, role);
+  }
+
+  @Post(':id/spell-slots')
+  @ApiOperation({ summary: 'Spend or restore spell slots', description: 'dm or the owning player. Body is { level, delta }: delta +1 spends a slot, -1 restores; `used` is clamped to [0, max]. 400 if the character has no slots at that level (set maxima via PATCH spellSlots).' })
+  @ApiResponse({ status: 201, description: 'Updated character.' })
+  @ApiResponse({ status: 400, description: 'No spell slots at that level.' })
+  async patchSpellSlots(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: SpellSlotPatchDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.characters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.characters.patchSpellSlots(id, body, user, role);
   }
 }
