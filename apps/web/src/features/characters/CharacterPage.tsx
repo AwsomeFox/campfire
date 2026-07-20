@@ -482,6 +482,15 @@ function XpCard({
   const [busy, setBusy] = useState(false);
   const [levellingUp, setLevellingUp] = useState(false);
   const [newHpMax, setNewHpMax] = useState(String(character.hpMax));
+  // Level-up celebration (issue #67): the level a confirm just reached; the
+  // banner clears itself after a beat (timeout, not animationEnd, so it also
+  // clears under prefers-reduced-motion where no animation fires).
+  const [celebratedLevel, setCelebratedLevel] = useState<number | null>(null);
+  useEffect(() => {
+    if (celebratedLevel == null) return;
+    const t = setTimeout(() => setCelebratedLevel(null), 2600);
+    return () => clearTimeout(t);
+  }, [celebratedLevel]);
 
   const atCap = character.level >= 20;
   const currentThreshold = xpForLevel(character.level);
@@ -517,6 +526,7 @@ function XpCard({
     try {
       await api.post(`${API}/characters/${character.id}/level-up`, hpMaxNum !== character.hpMax ? { hpMax: hpMaxNum } : {});
       setLevellingUp(false);
+      setCelebratedLevel(character.level + 1);
       onChange();
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't level up.");
@@ -530,11 +540,29 @@ function XpCard({
       <div className="flex items-baseline gap-2.5 flex-wrap">
         <p className="card-kicker mb-0">Experience</p>
         {ready && (
-          <span className="tag tag-accent" style={{ fontSize: 10 }}>
+          <span className="tag tag-accent cf-anim-ready" style={{ fontSize: 10 }}>
             Ready to level up
           </span>
         )}
       </div>
+      {celebratedLevel != null && (
+        <div
+          className="cf-anim-levelup cf-inset flex items-center gap-2.5 px-3.5 py-2.5"
+          role="status"
+          style={{
+            background: 'linear-gradient(90deg, color-mix(in srgb, var(--cf-crit) 20%, transparent), color-mix(in srgb, var(--color-accent) 22%, transparent))',
+            border: '1px solid color-mix(in srgb, var(--cf-crit) 45%, transparent)',
+          }}
+        >
+          <span aria-hidden="true" style={{ fontSize: 22, position: 'relative' }}>
+            🎉
+            <span className="cf-sparkle" aria-hidden="true" style={{ position: 'absolute', top: -6, right: -8, fontSize: 12 }}>✨</span>
+          </span>
+          <span className="font-heading" style={{ fontSize: 15, color: 'var(--cf-crit)' }}>
+            Level {celebratedLevel}! You grow stronger.
+          </span>
+        </div>
+      )}
       <div className="flex items-center gap-3.5 flex-wrap">
         <span className="font-heading text-[34px] leading-none">
           {character.xp.toLocaleString()}

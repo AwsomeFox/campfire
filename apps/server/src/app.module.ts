@@ -25,6 +25,7 @@ import { MembershipModule } from './modules/membership/membership.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { CharactersModule } from './modules/characters/characters.module';
 import { QuestsModule } from './modules/quests/quests.module';
+import { StorylinesModule } from './modules/storylines/storylines.module';
 import { NpcsModule } from './modules/npcs/npcs.module';
 import { LocationsModule } from './modules/locations/locations.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
@@ -36,6 +37,7 @@ import { ProposalsModule } from './modules/proposals/proposals.module';
 import { ExportModule } from './modules/export/export.module';
 import { RulesModule } from './modules/rules/rules.module';
 import { McpModule } from './modules/mcp/mcp.module';
+import { OAuthModule } from './modules/oauth/oauth.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
 import { EventsModule } from './modules/events/events.module';
@@ -81,6 +83,11 @@ function serveStaticImports(): DynamicModule[] {
         '/healthz',
         '/readyz',
         '/mcp',
+        '/.well-known/oauth-protected-resource',
+        '/.well-known/oauth-protected-resource/mcp',
+        '/.well-known/oauth-authorization-server',
+        '/.well-known/oauth-authorization-server/mcp',
+        '/oauth/(.*)',
         '/api/docs/(.*)',
         '/api/docs',
         '/api/docs-json',
@@ -126,6 +133,7 @@ function serveStaticImports(): DynamicModule[] {
     CampaignsModule,
     CharactersModule,
     QuestsModule,
+    StorylinesModule,
     NpcsModule,
     LocationsModule,
     SessionsModule,
@@ -135,6 +143,7 @@ function serveStaticImports(): DynamicModule[] {
     ExportModule,
     RulesModule,
     McpModule,
+    OAuthModule,
     AttachmentsModule,
     EncountersModule,
     EventsModule,
