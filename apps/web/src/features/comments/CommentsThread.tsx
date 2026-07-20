@@ -1,0 +1,325 @@
+/**
+ * Threaded discussion (issue #123). Renders the comment thread for any campaign
+ * entity (session/recap today; wired to reuse the entityType/entityId convention
+ * for quests/npcs/locations later) plus a compose box. Comments are visible to
+ * every campaign member; author-or-DM may edit/delete. One level of threading:
+ * top-level comments, with replies nested one deep.
+ */
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { Comment, EntityType } from '@campfire/schema';
+import { api, API } from '../../lib/api';
+import { useAuth } from '../../app/auth';
+import { Btn, TextArea, ErrorNote } from '../../components/ui';
+import { Markdown } from '../../components/Markdown';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+
+function timeAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+export function CommentsThread({
+  campaignId,
+  entityType,
+  entityId,
+}: {
+  campaignId: number;
+  entityType: EntityType;
+  entityId: number;
+}) {
+  const { me, roleIn } = useAuth();
+  const myUserId = me ? String(me.user.id) : null;
+  const isDm = roleIn(campaignId) === 'dm';
+
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<number | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const list = await api.get<Comment[]>(
+        `${API}/campaigns/${campaignId}/comments?entityType=${entityType}&entityId=${entityId}`,
+      );
+      setComments(list);
+    } catch {
+      setError("Couldn't load the discussion.");
+    } finally {
+      setLoading(false);
+    }
+  }, [campaignId, entityType, entityId]);
+
+  useEffect(() => {
+    setLoading(true);
+    void load();
+  }, [load]);
+
+  // Group into top-level comments + their direct replies (one level deep).
+  const threads = useMemo(() => {
+    const roots = comments.filter((c) => c.parentId === null);
+    const repliesByParent = new Map<number, Comment[]>();
+    for (const c of comments) {
+      if (c.parentId !== null) {
+        const arr = repliesByParent.get(c.parentId) ?? [];
+        arr.push(c);
+        repliesByParent.set(c.parentId, arr);
+      }
+    }
+    return roots.map((root) => ({ root, replies: repliesByParent.get(root.id) ?? [] }));
+  }, [comments]);
+
+  function canModerate(c: Comment): boolean {
+    return isDm || (myUserId !== null && c.authorUserId === myUserId);
+  }
+
+  async function remove(id: number) {
+    try {
+      await api.delete(`${API}/comments/${id}`);
+      setConfirmingDelete(null);
+      await load();
+    } catch {
+      setError("Couldn't delete the comment.");
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wide flex items-center gap-2">
+        Discussion
+        {comments.length > 0 && <span className="tag">{comments.length}</span>}
+      </h3>
+      {error && <ErrorNote message={error} onRetry={load} />}
+
+      {loading ? (
+        <p className="text-sm text-slate-600">Loading discussion…</p>
+      ) : threads.length === 0 ? (
+        <p className="text-sm text-slate-600">No comments yet — start the conversation.</p>
+      ) : (
+        <ul className="space-y-3 list-none p-0 m-0">
+          {threads.map(({ root, replies }) => (
+            <li key={root.id} className="space-y-2">
+              <CommentCard
+                comment={root}
+                canModerate={canModerate(root)}
+                onReply={() => setReplyTo(replyTo === root.id ? null : root.id)}
+                onDelete={() => setConfirmingDelete(root.id)}
+                onChanged={load}
+              />
+              {replies.length > 0 && (
+                <ul className="space-y-2 list-none p-0 m-0 ml-5 border-l border-slate-800 pl-4">
+                  {replies.map((reply) => (
+                    <li key={reply.id}>
+                      <CommentCard
+                        comment={reply}
+                        canModerate={canModerate(reply)}
+                        onDelete={() => setConfirmingDelete(reply.id)}
+                        onChanged={load}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {replyTo === root.id && (
+                <div className="ml-5 pl-4">
+                  <ComposeBox
+                    campaignId={campaignId}
+                    entityType={entityType}
+                    entityId={entityId}
+                    parentId={root.id}
+                    placeholder="Write a reply…"
+                    onPosted={() => {
+                      setReplyTo(null);
+                      void load();
+                    }}
+                    onCancel={() => setReplyTo(null)}
+                  />
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <ComposeBox
+        campaignId={campaignId}
+        entityType={entityType}
+        entityId={entityId}
+        parentId={null}
+        placeholder="Add to the discussion…"
+        onPosted={load}
+      />
+
+      {confirmingDelete !== null && (
+        <ConfirmDialog
+          title="Delete comment?"
+          body="This cannot be undone. Deleting a top-level comment also removes its replies."
+          confirmLabel="Delete"
+          onConfirm={() => remove(confirmingDelete)}
+          onCancel={() => setConfirmingDelete(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CommentCard({
+  comment,
+  canModerate,
+  onReply,
+  onDelete,
+  onChanged,
+}: {
+  comment: Comment;
+  canModerate: boolean;
+  onReply?: () => void;
+  onDelete: () => void;
+  onChanged: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(comment.body);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.patch(`${API}/comments/${comment.id}`, { body: draft });
+      setEditing(false);
+      onChanged();
+    } catch {
+      setError("Couldn't save the edit.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-2">
+      <div className="flex items-center gap-2 flex-wrap text-xs">
+        <span className="font-bold text-slate-300">{comment.authorName || comment.authorUserId}</span>
+        {comment.inCharacter && <span className="tag tag-accent">In character</span>}
+        <span className="text-slate-600">{timeAgo(comment.createdAt)}</span>
+        {comment.updatedAt !== comment.createdAt && <span className="text-slate-600 italic">edited</span>}
+      </div>
+      {error && <ErrorNote message={error} />}
+      {editing ? (
+        <div className="space-y-2">
+          <TextArea style={{ minHeight: 80 }} value={draft} onChange={(e) => setDraft(e.target.value)} />
+          <div className="flex gap-2 justify-end">
+            <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setEditing(false)}>
+              Cancel
+            </Btn>
+            <Btn className="!min-h-0 !py-1 text-xs" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Btn>
+          </div>
+        </div>
+      ) : (
+        <div className="text-sm">
+          <Markdown>{comment.body}</Markdown>
+        </div>
+      )}
+      {!editing && (
+        <div className="flex gap-3 text-xs">
+          {onReply && (
+            <button onClick={onReply} className="text-slate-500 hover:text-slate-300">
+              Reply
+            </button>
+          )}
+          {canModerate && (
+            <button onClick={() => setEditing(true)} className="text-slate-500 hover:text-slate-300">
+              Edit
+            </button>
+          )}
+          {canModerate && (
+            <button onClick={onDelete} className="text-rose-500/80 hover:text-rose-400">
+              Delete
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComposeBox({
+  campaignId,
+  entityType,
+  entityId,
+  parentId,
+  placeholder,
+  onPosted,
+  onCancel,
+}: {
+  campaignId: number;
+  entityType: EntityType;
+  entityId: number;
+  parentId: number | null;
+  placeholder: string;
+  onPosted: () => void;
+  onCancel?: () => void;
+}) {
+  const [body, setBody] = useState('');
+  const [inCharacter, setInCharacter] = useState(false);
+  const [posting, setPosting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function post() {
+    if (!body.trim()) return;
+    setPosting(true);
+    setError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/comments`, {
+        entityType,
+        entityId,
+        parentId: parentId ?? undefined,
+        body,
+        inCharacter,
+      });
+      setBody('');
+      setInCharacter(false);
+      onPosted();
+    } catch {
+      setError("Couldn't post the comment.");
+    } finally {
+      setPosting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      {error && <ErrorNote message={error} />}
+      <TextArea
+        style={{ minHeight: 72 }}
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder={placeholder}
+      />
+      <div className="flex items-center gap-3 justify-end">
+        <label className="flex items-center gap-1.5 text-xs text-slate-500 mr-auto cursor-pointer">
+          <input type="checkbox" checked={inCharacter} onChange={(e) => setInCharacter(e.target.checked)} />
+          In character
+        </label>
+        {onCancel && (
+          <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={onCancel}>
+            Cancel
+          </Btn>
+        )}
+        <Btn className="!min-h-0 !py-1 text-xs" onClick={post} disabled={posting || !body.trim()}>
+          {posting ? 'Posting…' : 'Post'}
+        </Btn>
+      </div>
+    </div>
+  );
+}

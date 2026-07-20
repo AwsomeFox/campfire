@@ -753,15 +753,57 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
+// ---------- comments (threaded discussion / play-by-post — issue #123) ----------
+// A first-class DISCUSSION layer, distinct from private-or-shared `notes`: every
+// comment is anchored to a campaign entity (session/recap, quest, npc, location,
+// character, campaign — the same entityType/entityId convention notes use) and is
+// visible to ALL campaign members. Unlike notes there is no per-comment visibility;
+// discussion is inherently shared. `parentId` gives one level of threading (a reply
+// to a comment). `inCharacter` flags an in-character post (a play-by-post scene) vs
+// out-of-character table chatter. Author-or-DM may edit/delete.
+export const Comment = z.object({
+  id: Id,
+  campaignId: Id,
+  // A comment ALWAYS anchors to an entity (no unanchored discussion) — required,
+  // unlike Note.entityType which is nullable.
+  entityType: EntityType,
+  entityId: Id,
+  // One level of threading: null = a top-level comment; set = a reply to that
+  // comment. Replies to replies still hang off the same top-level ancestor (the
+  // web thread renders two visual levels), so this is a soft parent pointer.
+  parentId: Id.nullable().default(null),
+  authorUserId: z.string().max(120), // String(users.id) or dev:<name>
+  authorName: z.string().max(120).default(''),
+  body: z.string().min(1).max(20_000), // markdown
+  inCharacter: z.boolean().default(false),
+  ...timestamps,
+});
+export type Comment = z.infer<typeof Comment>;
+export const CommentCreate = Comment.omit({
+  id: true,
+  campaignId: true,
+  authorUserId: true,
+  authorName: true,
+  createdAt: true,
+  updatedAt: true,
+})
+  .partial()
+  .required({ entityType: true, entityId: true, body: true });
+export const CommentUpdate = z.object({
+  body: z.string().min(1).max(20_000).optional(),
+  inCharacter: z.boolean().optional(),
+});
+
 // ---------- notifications (in-app) ----------
 // Per-user notification rows written by the server when something a member cares
 // about happens while they're not looking: a session recap is posted, someone
 // replies on a shared note thread (or the DM answers an inbox item), a player
-// shares a note up to the DM (note_shared), they're added to a campaign, or the
+// shares a note up to the DM (note_shared), someone posts on a discussion thread
+// they're part of (comment_reply), they're added to a campaign, or the
 // next session gets scheduled. Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
-export const NotificationType = z.enum(['recap_posted', 'note_reply', 'note_shared', 'added_to_campaign', 'session_scheduled']);
+export const NotificationType = z.enum(['recap_posted', 'note_reply', 'note_shared', 'comment_reply', 'added_to_campaign', 'session_scheduled']);
 export type NotificationType = z.infer<typeof NotificationType>;
 
 export const Notification = z.object({
