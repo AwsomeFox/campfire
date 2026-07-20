@@ -685,6 +685,11 @@ export const RuleEntry = z.object({
   summary: z.string().max(1000).default(''),
   body: z.string().max(50_000).default(''), // markdown
   dataJson: z.string().nullable().default(null), // raw structured fields (stats etc.), JSON-encoded
+  // Human-readable source/document label the entry came from (Open5e `document.name`,
+  // e.g. "System Reference Document 5.1"), so entries from different rulebooks are
+  // distinguishable and the reader can attribute the real source/license (issue #143).
+  // '' for older imports/uploads that predate the column — the reader falls back to the pack name.
+  source: z.string().max(200).default(''),
   ...timestamps,
 });
 export type RuleEntry = z.infer<typeof RuleEntry>;
@@ -739,6 +744,7 @@ export const RulePackUploadEntry = z.object({
   body: z.string().max(50_000).optional(), // markdown
   dataJson: z.string().max(100_000).nullable().optional(), // raw structured fields, JSON-encoded
   license: z.string().max(120).optional(), // per-entry license; falls back to the pack license
+  source: z.string().max(200).optional(), // per-entry source/document label; falls back to the pack name
 });
 export type RulePackUploadEntry = z.infer<typeof RulePackUploadEntry>;
 

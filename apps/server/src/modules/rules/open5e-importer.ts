@@ -97,6 +97,8 @@ export interface ImportedEntry {
   body: string;
   dataJson: string | null;
   license: string;
+  /** Human-readable source/document label (Open5e `document.name`), e.g. "System Reference Document 5.1". */
+  source: string;
 }
 
 /** Minimal structured logger so a summary can be asserted on in tests without console spying. */
@@ -117,6 +119,8 @@ export interface Open5eSectionResult {
   entries: ImportedEntry[];
   /** Rows present in a fetched page but skipped (malformed row, or a cross-origin `next` link refused). */
   skippedCount: number;
+  /** Same-name rows collapsed to one canonical entry per (name,type) across documents (issue #143). */
+  dedupedCount: number;
 }
 
 interface Open5ePage {
@@ -152,6 +156,57 @@ function licenseOf(row: Record<string, unknown>): string {
   return '';
 }
 
+/**
+ * The Open5e document slug an entry came from. `row.document` is usually a sub-object
+ * ({key, name, licenses}), but some rows carry `document` as a bare slug string, so we
+ * handle both. Falls back to the slug prefix before the first '_' (Open5e keys are shaped
+ * `<document-slug>_<name-slug>`, e.g. "srd_fireball" / "a5e-ag_fireball"), which is how the
+ * same-named triplicates are told apart (issue #143).
+ */
+function documentKeyOf(row: Record<string, unknown>): string {
+  const doc = row.document;
+  if (doc && typeof doc === 'object') {
+    const key = asString((doc as Record<string, unknown>).key);
+    if (key) return key.toLowerCase();
+  } else if (typeof doc === 'string' && doc) {
+    return doc.toLowerCase();
+  }
+  const key = asString(row.key);
+  const underscore = key.indexOf('_');
+  return underscore > 0 ? key.slice(0, underscore).toLowerCase() : '';
+}
+
+/** Human-readable source/document label for an entry — `document.name`, else the slug. */
+function sourceOf(row: Record<string, unknown>): string {
+  const doc = row.document;
+  if (doc && typeof doc === 'object') {
+    const name = asString((doc as Record<string, unknown>).name);
+    if (name) return name;
+    const key = asString((doc as Record<string, unknown>).key);
+    if (key) return key;
+  } else if (typeof doc === 'string' && doc) {
+    return doc;
+  }
+  return '';
+}
+
+/**
+ * Canonicality rank for de-duplicating same-name entries across Open5e documents
+ * (issue #143): a fresh install returns e.g. `srd_fireball`, `srd-2024_fireball`, and
+ * `a5e-ag_fireball` — three identical-looking "Fireball" rows. We keep exactly one,
+ * preferring the most-canonical source:
+ *   0 — SRD 5.1 (`srd`), the OGL 5e baseline everyone shares
+ *   1 — any other official SRD document (`srd-2024` = SRD 5.2 / CC-BY, etc.)
+ *   2 — everything else (Advanced 5e `a5e-*`, third-party books)
+ * Lower wins; ties keep the first-seen row (stable).
+ */
+function documentRank(row: Record<string, unknown>): number {
+  const key = documentKeyOf(row);
+  if (key === 'srd') return 0;
+  if (key.startsWith('srd')) return 1;
+  return 2;
+}
+
 function mapSpell(row: Record<string, unknown>): ImportedEntry {
   const school = nestedName(row.school);
   const level = typeof row.level === 'number' ? row.level : null;
@@ -164,6 +219,7 @@ function mapSpell(row: Record<string, unknown>): ImportedEntry {
     body: desc,
     dataJson: JSON.stringify({ school, level, castingTime: row.casting_time ?? null, range: row.range_text ?? null, duration: row.duration ?? null, concentration: row.concentration ?? null, ritual: row.ritual ?? null }),
     license: licenseOf(row),
+    source: sourceOf(row),
   };
 }
 
@@ -187,6 +243,7 @@ function mapCreature(row: Record<string, unknown>): ImportedEntry {
       abilityScores: row.ability_scores ?? null,
     }),
     license: licenseOf(row),
+    source: sourceOf(row),
   };
 }
 
@@ -202,6 +259,7 @@ function mapMagicItem(row: Record<string, unknown>): ImportedEntry {
     body: desc,
     dataJson: JSON.stringify({ category, rarity, requiresAttunement: row.requires_attunement ?? null }),
     license: licenseOf(row),
+    source: sourceOf(row),
   };
 }
 
@@ -216,6 +274,7 @@ function mapCondition(row: Record<string, unknown>): ImportedEntry {
     body: desc,
     dataJson: null,
     license: licenseOf(row),
+    source: sourceOf(row),
   };
 }
 
@@ -256,6 +315,7 @@ function mapClass(row: Record<string, unknown>): ImportedEntry {
     body,
     dataJson: JSON.stringify({ hitDice: hitDice || null, casterType: casterType || null, subclassOf: subclassOf || null, savingThrows }),
     license: licenseOf(row),
+    source: sourceOf(row),
   };
 }
 
@@ -274,6 +334,7 @@ function mapSpecies(row: Record<string, unknown>): ImportedEntry {
     body: [desc, namedSectionsToMarkdown(row.traits)].filter(Boolean).join('\n\n'),
     dataJson: JSON.stringify({ isSubspecies, subspeciesOf: subspeciesOf || null, traits: traitNames }),
     license: licenseOf(row),
+    source: sourceOf(row),
   };
 }
 
@@ -292,6 +353,7 @@ function mapFeat(row: Record<string, unknown>): ImportedEntry {
     body,
     dataJson: JSON.stringify({ prerequisite: prerequisite || null, hasPrerequisite: row.has_prerequisite ?? null }),
     license: licenseOf(row),
+    source: sourceOf(row),
   };
 }
 
@@ -401,15 +463,21 @@ export async function fetchOpen5eSection(
 ): Promise<Open5eSectionResult> {
   const path = SECTION_TO_PATH[section];
   const mapper = SECTION_MAPPER[section];
-  const entries: ImportedEntry[] = [];
+  // De-dupe same-name rows across Open5e documents (issue #143): a section is a single
+  // entry type, so keying by lowercased name is keying by (name,type). We keep the
+  // most-canonical source per name (see documentRank) — first the SRD 5.1 baseline, then
+  // other SRD documents, then third-party books — so one clean "Fireball"/"Goblin" lands
+  // instead of a triplicate. Insertion order is preserved for stable search ranking.
+  const byName = new Map<string, { entry: ImportedEntry; rank: number }>();
   let skippedCount = 0;
+  let dedupedCount = 0;
   let pagesFetched = 0;
   let url: string | null = `${baseUrl.replace(/\/$/, '')}/${path}/?limit=${PAGE_LIMIT}`;
 
-  while (url && entries.length < MAX_ENTRIES_PER_SECTION) {
+  while (url && byName.size < MAX_ENTRIES_PER_SECTION) {
     if (pagesFetched >= MAX_PAGES_PER_SECTION) {
       logger.warn(
-        `[open5e-importer] section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${entries.length} entries — stopping pagination`,
+        `[open5e-importer] section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping pagination`,
       );
       break;
     }
@@ -433,12 +501,25 @@ export async function fetchOpen5eSection(
       throw new BadRequestException(`Open5e section "${section}" response missing "results" array (unexpected shape)`);
     }
     for (const row of page.results) {
-      if (entries.length >= MAX_ENTRIES_PER_SECTION) break;
+      let entry: ImportedEntry;
+      let rank: number;
       try {
-        entries.push(mapper(row));
+        entry = mapper(row);
+        rank = documentRank(row);
       } catch {
         // Skip a single malformed row rather than failing the whole import.
         skippedCount += 1;
+        continue;
+      }
+      const key = entry.name.trim().toLowerCase();
+      const existing = byName.get(key);
+      if (existing) {
+        // A same-name row from another document — collapse it, keeping the better source.
+        dedupedCount += 1;
+        if (rank < existing.rank) byName.set(key, { entry, rank });
+      } else {
+        if (byName.size >= MAX_ENTRIES_PER_SECTION) break;
+        byName.set(key, { entry, rank });
       }
     }
 
@@ -453,14 +534,19 @@ export async function fetchOpen5eSection(
     }
   }
 
+  const entries = [...byName.values()].map((v) => v.entry);
+
   // Always report a per-section import count (issue #53: silent empty sections were the
   // symptom — an explicit count per section makes an empty/short section visible in logs).
-  logger.info(`[open5e-importer] section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)`);
+  logger.info(
+    `[open5e-importer] section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)` +
+      (dedupedCount > 0 ? ` (de-duped ${dedupedCount} same-name row(s) from other documents)` : ''),
+  );
   if (skippedCount > 0) {
     logger.warn(`[open5e-importer] section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
   }
 
-  return { entries, skippedCount };
+  return { entries, skippedCount, dedupedCount };
 }
 
 export function entryTypeForSection(section: Open5eSection): RuleEntryType {

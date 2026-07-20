@@ -370,6 +370,7 @@ CREATE TABLE IF NOT EXISTS rule_entries (
   summary TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL DEFAULT '',
   data_json TEXT,
+  source TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -534,6 +535,11 @@ CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_pack ON rule_entries(pack_id);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_type ON rule_entries(type);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_slug ON rule_entries(slug);
+-- One canonical row per (pack, type, slug): the importer/upload paths dedupe on this key,
+-- and the unique index makes an accidental exact-duplicate insert a caught constraint error
+-- rather than a silently-duplicated compendium row (issue #143). Existing DBs are de-duped
+-- by migrateRuleEntriesTableForSource (runs before this) so the index can be created cleanly.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_entries_pack_type_slug ON rule_entries(pack_id, type, slug);
 CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);

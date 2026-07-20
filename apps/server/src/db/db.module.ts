@@ -423,6 +423,40 @@ function migrateLocationsTableForParentId(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-entry source labels + the (pack,type,slug)
+ * unique index (issue #143): `rule_entries.source` didn't exist, and a fresh Open5e
+ * install could write triplicate same-name rows with no way to tell them apart. This
+ * does two things on an existing DB, both idempotent:
+ *   1. Plain NOT NULL DEFAULT '' ADD COLUMN for `source` — no table rebuild, same as
+ *      migrateCharactersTableForDmSecret above.
+ *   2. Collapse any exact-duplicate (pack_id, type, slug) rows left by pre-fix installs,
+ *      keeping the lowest id, so BOOTSTRAP_SQL's new UNIQUE index can be created cleanly
+ *      (a unique index over data with duplicates would otherwise throw and fail boot).
+ * Deleting fires the rule_entries AFTER DELETE trigger, keeping the FTS index in sync.
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column + index.
+ */
+function migrateRuleEntriesTableForSource(sqlite: Database.Database): void {
+  const hasRuleEntriesTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_entries'")
+    .get();
+  if (!hasRuleEntriesTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(rule_entries)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'source')) {
+    sqlite.exec("ALTER TABLE rule_entries ADD COLUMN source TEXT NOT NULL DEFAULT ''");
+  }
+
+  // Drop exact (pack_id, type, slug) duplicates, keeping the earliest row, so the new
+  // unique index can be built. Runs every boot but is a cheap no-op once clean.
+  sqlite.exec(`
+    DELETE FROM rule_entries
+    WHERE id NOT IN (
+      SELECT MIN(id) FROM rule_entries GROUP BY pack_id, type, slug
+    );
+  `);
+}
+
+/**
  * Migration for DBs created before dice keep/drop + check context (issue #130):
  * `dice_rolls` gained `kept` (JSON of the kept dice), `label`, and `dc`. Plain nullable
  * ADD COLUMNs — no table rebuild needed, same shape as migrateLocationsTableForParentId
@@ -484,6 +518,7 @@ export function openDatabase(dataDir: string): {
   migrateNpcsTableForHidden(sqlite);
   migrateAttachmentsTableForHidden(sqlite);
   migrateLocationsTableForParentId(sqlite);
+  migrateRuleEntriesTableForSource(sqlite);
   migrateDiceRollsTableForKeepDrop(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync. This is
