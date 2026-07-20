@@ -24,6 +24,18 @@ const timestamps = {
   updatedAt: IsoDate,
 };
 
+// ---------- pagination (issue #71) ----------
+// Shared list-pagination convention. High-volume list endpoints (sessions, notes,
+// audit) and their MCP equivalents accept optional `?limit` & `?offset` query
+// params, pushed down into SQL. When both are omitted the endpoint returns its
+// full (or historically-capped) result, so existing callers are unaffected —
+// pagination is opt-in. `limit` is clamped to a per-endpoint maximum server-side.
+export const PageParams = z.object({
+  limit: z.number().int().positive().optional(),
+  offset: z.number().int().nonnegative().optional(),
+});
+export type PageParams = z.infer<typeof PageParams>;
+
 // ---------- campaign ----------
 export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
 
@@ -333,6 +345,15 @@ export type Session = z.infer<typeof Session>;
 export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
 export const SessionUpdate = SessionCreate.partial();
 
+// The list-shape of a session (issue #71): a session's `recap` markdown can be up
+// to 100KB, so list/summary payloads deliberately DROP the full body and carry a
+// short plain-text `recapExcerpt` instead — a 150-session campaign's list stays
+// small. Fetch the full recap with GET /sessions/:id when a single session is opened.
+export const SessionListItem = Session.omit({ recap: true }).extend({
+  recapExcerpt: z.string().default(''),
+});
+export type SessionListItem = z.infer<typeof SessionListItem>;
+
 // The canonical recap scaffold — the structured headings a DM fills instead of
 // staring at a blank box. Shared by the web "Insert template" affordance and the
 // MCP `draft_session_recap` tool so a hand-written recap and an AI-drafted one
@@ -602,7 +623,7 @@ export const CampaignSummary = z.object({
   npcs: z.array(Npc),
   locations: z.array(Location),
   characters: z.array(Character),
-  sessions: z.array(Session),
+  sessions: z.array(SessionListItem), // list-shape (recapExcerpt, not full recap) — issue #71
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;
