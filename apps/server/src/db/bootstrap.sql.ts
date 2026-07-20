@@ -123,6 +123,17 @@ CREATE TABLE IF NOT EXISTS timeline_calendars (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_zero (
+  campaign_id INTEGER PRIMARY KEY,
+  lines TEXT NOT NULL DEFAULT '[]',
+  veils TEXT NOT NULL DEFAULT '[]',
+  safety_tools TEXT NOT NULL DEFAULT '[]',
+  house_rules TEXT NOT NULL DEFAULT '',
+  tone_and_expectations TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS npcs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
