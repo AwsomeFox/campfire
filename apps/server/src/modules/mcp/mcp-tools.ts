@@ -1275,7 +1275,8 @@ export class McpToolsService {
       'upsert_character',
       'Create a character (omit characterId) or update one (pass characterId). player may create/update their own ' +
         'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
-        'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise. With propose:true ' +
+        'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise. Set status to ' +
+        "active|dead|retired|inactive to mark a PC's lifecycle — only active PCs are auto-added to new encounters. With propose:true " +
         'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly.',
       {
         campaignId: CampaignIdArg,
