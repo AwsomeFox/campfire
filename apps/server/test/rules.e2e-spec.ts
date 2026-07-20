@@ -55,7 +55,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       .send({ source: 'open5e', url: fake.baseUrl });
     expect(installRes.status).toBe(201);
     expect(installRes.body.slug).toBe('open5e-srd');
-    expect(installRes.body.entryCount).toBe(2 + 2 + 1 + 2); // spells + creatures + magicitems + conditions from the fake server
+    expect(installRes.body.entryCount).toBe(2 + 2 + 1 + 2 + 2 + 2 + 1); // spells + creatures + magicitems + conditions + classes + species + feats from the fake server
     expect(installRes.body.license).toContain('Creative Commons');
     const packId = installRes.body.id;
 
@@ -72,8 +72,8 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       .send({ source: 'open5e', url: fake.baseUrl });
     expect(reinstallRes.status).toBe(200);
     expect(reinstallRes.body.added).toBe(0);
-    expect(reinstallRes.body.skippedExisting).toBe(2 + 2 + 1 + 2);
-    expect(reinstallRes.body.entryCount).toBe(2 + 2 + 1 + 2); // unchanged
+    expect(reinstallRes.body.skippedExisting).toBe(2 + 2 + 1 + 2 + 2 + 2 + 1);
+    expect(reinstallRes.body.entryCount).toBe(2 + 2 + 1 + 2 + 2 + 2 + 1); // unchanged
 
     // search: free text finds the fireball spell
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
@@ -138,6 +138,74 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
 
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin' }).set(dm);
     expect(searchRes.body).toEqual([]); // creatures weren't imported
+
+    await request(server).delete(`/api/v1/rules/packs/${installRes.body.id}`).set(dm);
+  });
+
+  it('install classes, races, and feats sections (issue #2) — mapped to class/race/feat entry types', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const installRes = await request(server)
+      .post('/api/v1/rules/packs/install')
+      .set(dm)
+      .send({ source: 'open5e', url: fake.baseUrl, sections: ['classes', 'races', 'feats'] });
+    expect(installRes.status).toBe(201);
+    expect(installRes.body.entryCount).toBe(2 + 2 + 1); // classes + species + feats from the fake server
+
+    // classes: served from /v2/classes/; empty desc means the body comes from features[].
+    const classSearch = await request(server).get('/api/v1/rules/search').query({ q: 'barbarian', type: 'class' }).set(dm);
+    expect(classSearch.status).toBe(200);
+    for (const e of classSearch.body) expect(e.type).toBe('class');
+    const barbarian = classSearch.body.find((e: { name: string }) => e.name === 'Barbarian');
+    expect(barbarian).toBeDefined();
+    expect(barbarian.body).toContain('### Rage');
+    expect(barbarian.body).toContain('primal ferocity');
+    expect(barbarian.summary).toContain('hit dice D12');
+    const barbarianData = JSON.parse(barbarian.dataJson);
+    expect(barbarianData.hitDice).toBe('D12');
+    expect(barbarianData.savingThrows).toEqual(['Strength', 'Constitution']);
+    expect(barbarianData.subclassOf).toBeNull();
+
+    // subclasses share the classes list, distinguished via subclass_of.
+    const berserker = (await request(server).get('/api/v1/rules/search').query({ q: 'berserker' }).set(dm)).body.find(
+      (e: { name: string }) => e.name === 'Path of the Berserker',
+    );
+    expect(berserker).toBeDefined();
+    expect(berserker.type).toBe('class');
+    expect(JSON.parse(berserker.dataJson).subclassOf).toBe('Barbarian');
+    expect(berserker.summary).toContain('Barbarian subclass');
+
+    // races: fetched from /v2/species/ (v2 has no /races/ route) but exposed as type 'race'.
+    const raceSearch = await request(server).get('/api/v1/rules/search').query({ q: 'dwarf', type: 'race' }).set(dm);
+    expect(raceSearch.status).toBe(200);
+    for (const e of raceSearch.body) expect(e.type).toBe('race');
+    const dwarf = raceSearch.body.find((e: { name: string }) => e.name === 'Dwarf');
+    expect(dwarf).toBeDefined();
+    expect(dwarf.body).toContain('### Darkvision');
+    expect(dwarf.summary).toContain('Bold and hardy');
+    const hillDwarf = raceSearch.body.find((e: { name: string }) => e.name === 'Hill Dwarf');
+    expect(hillDwarf).toBeDefined();
+    const hillDwarfData = JSON.parse(hillDwarf.dataJson);
+    expect(hillDwarfData.isSubspecies).toBe(true);
+    expect(hillDwarfData.subspeciesOf).toBe('srd_dwarf');
+
+    // feats: prerequisite surfaces in the summary, benefits become body bullets.
+    const featSearch = await request(server).get('/api/v1/rules/search').query({ q: 'grappler', type: 'feat' }).set(dm);
+    expect(featSearch.status).toBe(200);
+    const grappler = featSearch.body.find((e: { name: string }) => e.name === 'Grappler');
+    expect(grappler).toBeDefined();
+    expect(grappler.type).toBe('feat');
+    expect(grappler.summary).toBe('Prerequisite: Strength 13 or higher');
+    expect(grappler.body).toContain('close-quarters grappling');
+    expect(grappler.body).toContain('- You have advantage on attack rolls');
+    expect(JSON.parse(grappler.dataJson).hasPrerequisite).toBe(true);
+
+    // license still flows through from the document sub-object for the new sections.
+    expect(installRes.body.license).toContain('Creative Commons');
+
+    // sections not requested weren't imported.
+    const spellSearch = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
+    expect(spellSearch.body).toEqual([]);
 
     await request(server).delete(`/api/v1/rules/packs/${installRes.body.id}`).set(dm);
   });
@@ -444,7 +512,7 @@ describe('rules / rule packs — concurrent install race (e2e, fake Open5e serve
 
     const listRes = await request(server).get('/api/v1/rules/packs').set(dmHeaders);
     expect(listRes.body).toHaveLength(1);
-    expect(listRes.body[0].entryCount).toBe(2 + 2 + 1 + 2);
+    expect(listRes.body[0].entryCount).toBe(2 + 2 + 1 + 2 + 2 + 2 + 1);
 
     await request(server).delete(`/api/v1/rules/packs/${[...packIds][0]}`).set(dmHeaders);
   });
