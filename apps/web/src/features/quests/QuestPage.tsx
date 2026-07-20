@@ -20,6 +20,7 @@ import {
   statusVariant,
 } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Toggle } from '../../components/Toggle';
@@ -56,6 +57,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  const [notFound, setNotFound] = useState(false);
 
   const [editingBody, setEditingBody] = useState(false);
   const [bodyDraft, setBodyDraft] = useState('');
@@ -85,6 +87,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const load = useCallback(async () => {
     setError(null);
     setForbidden(false);
+    setNotFound(false);
     setLoading(true);
     try {
       const q = await api.get<QuestWithObjectives>(`${API}/quests/${questId}`);
@@ -108,6 +111,8 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
+      } else if (e instanceof ApiError && e.status === 404) {
+        setNotFound(true);
       } else {
         setError("Couldn't load this quest.");
       }
@@ -292,6 +297,18 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         <Card>
           <EmptyState icon="🔒" title="You don't have access to this campaign" />
         </Card>
+      </PageShell>
+    );
+  }
+
+  if (notFound) {
+    return (
+      <PageShell campaignId={campaignId}>
+        <NotFoundState
+          title="Quest not found"
+          backTo={`/c/${campaignId}/quests`}
+          backLabel="← Back to quests"
+        />
       </PageShell>
     );
   }
@@ -606,6 +623,10 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 <span className="text-muted">Status</span>
                 <span>{capitalize(quest.status)}</span>
               </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span className="text-muted">Updated</span>
+                <span title={quest.updatedAt}>{timeAgo(quest.updatedAt)}</span>
+              </div>
             </div>
           </div>
 
@@ -822,4 +843,17 @@ function PageShell({ campaignId, children }: { campaignId: number; children: Rea
 
 function capitalize(s: string): string {
   return s.length ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+// "Updated Xd ago", matching QuestListPage / NotesQuickRail phrasing.
+function timeAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
+  if (days <= 0) return 'today';
+  if (days === 1) return '1d ago';
+  if (days < 7) return `${days}d ago`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return `${weeks}w ago`;
+  const months = Math.floor(days / 30);
+  return `${months}mo ago`;
 }
