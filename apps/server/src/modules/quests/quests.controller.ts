@@ -14,6 +14,7 @@ import {
   QuestStatusPatchDto,
   ObjectiveCreateDto,
   ObjectivePatchDto,
+  ObjectiveReorderDto,
 } from './quests.dto';
 
 @ApiTags('quests')
@@ -138,6 +139,20 @@ export class QuestsController {
     const row = await this.quests.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.quests.addObjective(id, body, user, role);
+  }
+
+  @Post(':id/objectives/reorder')
+  @ApiOperation({ summary: 'Reorder a quest\'s objectives', description: 'dm role required. Body: { objectiveIds } — a permutation of the quest\'s objective ids; sortOrder is reassigned by position.' })
+  @ApiResponse({ status: 201, description: 'Objectives in their new order.' })
+  @ApiResponse({ status: 400, description: 'objectiveIds is not a permutation of this quest\'s objective ids.' })
+  async reorderObjectives(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ObjectiveReorderDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.quests.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.quests.reorderObjectives(id, body, user, role);
   }
 
   @Patch(':id/objectives/:oid')

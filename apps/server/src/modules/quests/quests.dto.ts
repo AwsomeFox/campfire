@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch } from '@campfire/schema';
+import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch, ObjectiveReorder } from '@campfire/schema';
 
 // .strict() at the DTO layer only — see encounters.dto.ts header comment. Note:
 // QuestCreate/QuestUpdate (the un-.strict()'d shared exports) are also used
@@ -12,3 +12,4 @@ export class QuestUpdateDto extends createZodDto(QuestUpdate.strict()) {}
 export class QuestStatusPatchDto extends createZodDto(QuestStatusPatch) {}
 export class ObjectiveCreateDto extends createZodDto(ObjectiveCreate) {}
 export class ObjectivePatchDto extends createZodDto(ObjectivePatch) {}
+export class ObjectiveReorderDto extends createZodDto(ObjectiveReorder.strict()) {}

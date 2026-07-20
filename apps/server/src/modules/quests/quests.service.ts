@@ -1,7 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq, max } from 'drizzle-orm';
 import type { z } from 'zod';
-import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch } from '@campfire/schema';
+import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch, ObjectiveReorder } from '@campfire/schema';
 import type { Quest, QuestObjective, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { quests, questObjectives, npcs } from '../../db/schema';
@@ -16,6 +16,7 @@ type QuestUpdateInput = z.infer<typeof QuestUpdate>;
 type QuestStatusPatchInput = z.infer<typeof QuestStatusPatch>;
 type ObjectiveCreateInput = z.infer<typeof ObjectiveCreate>;
 type ObjectivePatchInput = z.infer<typeof ObjectivePatch>;
+type ObjectiveReorderInput = z.infer<typeof ObjectiveReorder>;
 
 export function toDomain(row: typeof quests.$inferSelect): Quest {
   return {
@@ -53,7 +54,16 @@ export class QuestsService {
   ) {}
 
   async listForCampaign(campaignId: number, role: Role): Promise<Quest[]> {
-    const rows = await this.db.select().from(quests).where(eq(quests.campaignId, campaignId));
+    // Order by sortOrder (then id as a stable tiebreaker) so the quest board and
+    // every other reader honor the DM-controlled ordering — previously this was
+    // rowid order and quest.sortOrder was a silent no-op (#100). A flat sort is
+    // enough for the two-level board: the UI groups by parentId while preserving
+    // this array order, so siblings within each parent group stay sorted too.
+    const rows = await this.db
+      .select()
+      .from(quests)
+      .where(eq(quests.campaignId, campaignId))
+      .orderBy(asc(quests.sortOrder), asc(quests.id));
     // Drop hidden quests wholesale for non-DM BEFORE redacting dmSecret (issue #42).
     return redactSecrets(filterHidden(rows.map(toDomain), role), role);
   }
@@ -90,7 +100,7 @@ export class QuestsService {
       .select()
       .from(questObjectives)
       .where(eq(questObjectives.questId, questId))
-      .orderBy(questObjectives.sortOrder);
+      .orderBy(asc(questObjectives.sortOrder), asc(questObjectives.id));
     return rows.map(objectiveToDomain);
   }
 
@@ -132,6 +142,38 @@ export class QuestsService {
       .where(and(eq(quests.id, parentId), eq(quests.campaignId, campaignId)))
       .limit(1);
     if (!row) throw new BadRequestException(`parentId ${parentId} does not exist in this campaign`);
+    // Reject cycles: setting quest `excludeQuestId`'s parent to `parentId` must not
+    // make the quest its own ancestor (#95). Walk parentId's ancestor chain upward;
+    // if we reach the quest being updated, the edge would close a loop and both
+    // quests would fall off the board (neither is a root). Create has no id yet, so
+    // it can never form a cycle — this only runs on update (excludeQuestId set).
+    if (excludeQuestId != null) {
+      await this.assertNoAncestorCycle(parentId, excludeQuestId, campaignId);
+    }
+  }
+
+  /**
+   * Walk the parent chain starting at `startParentId`. Throws 400 if it reaches
+   * `questId` (the quest being reparented) — that would create a cycle. A local
+   * `seen` set guards against looping forever on pre-existing cyclic legacy rows
+   * that don't involve `questId`.
+   */
+  private async assertNoAncestorCycle(startParentId: number, questId: number, campaignId: number): Promise<void> {
+    let cursor: number | null = startParentId;
+    const seen = new Set<number>();
+    while (cursor != null) {
+      if (cursor === questId) {
+        throw new BadRequestException('parentId would create a cycle: a quest cannot be its own ancestor');
+      }
+      if (seen.has(cursor)) break;
+      seen.add(cursor);
+      const [row]: { parentId: number | null }[] = await this.db
+        .select({ parentId: quests.parentId })
+        .from(quests)
+        .where(and(eq(quests.id, cursor), eq(quests.campaignId, campaignId)))
+        .limit(1);
+      cursor = row?.parentId ?? null;
+    }
   }
 
   private async validateGiverNpcRef(giverNpcId: number | null | undefined, campaignId: number): Promise<void> {
@@ -238,13 +280,24 @@ export class QuestsService {
 
   async addObjective(questId: number, input: ObjectiveCreateInput, user: RequestUser, role: Role): Promise<QuestObjective> {
     const quest = await this.getRowOrThrow(questId);
+    // Append to the end by default: new objectives get max(sortOrder)+1 so they
+    // land last instead of all defaulting to 0 and colliding at the top (#100).
+    // An explicit sortOrder still wins if the caller provides one.
+    let sortOrder = input.sortOrder;
+    if (sortOrder == null) {
+      const [agg] = await this.db
+        .select({ maxSort: max(questObjectives.sortOrder) })
+        .from(questObjectives)
+        .where(eq(questObjectives.questId, questId));
+      sortOrder = agg?.maxSort == null ? 0 : agg.maxSort + 1;
+    }
     const [row] = await this.db
       .insert(questObjectives)
       .values({
         questId,
         text: input.text,
         done: false,
-        sortOrder: input.sortOrder ?? 0,
+        sortOrder,
       })
       .returning();
     await this.audit.log({
@@ -299,6 +352,54 @@ export class QuestsService {
       campaignId: quest.campaignId,
     });
     return objectiveToDomain(row);
+  }
+
+  /**
+   * Reorder a quest's objectives in one atomic call (#100). `objectiveIds` must be
+   * a permutation of exactly this quest's current objective ids — sortOrder is then
+   * reassigned by array index. Rejects (400) any id that isn't this quest's, any
+   * duplicate, or a partial list, so a stale/foreign id can't silently corrupt order.
+   */
+  async reorderObjectives(
+    questId: number,
+    input: ObjectiveReorderInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<QuestObjective[]> {
+    const quest = await this.getRowOrThrow(questId);
+    const existing = await this.db
+      .select({ id: questObjectives.id })
+      .from(questObjectives)
+      .where(eq(questObjectives.questId, questId));
+    const existingIds = new Set(existing.map((o) => o.id));
+    const provided = input.objectiveIds;
+    const uniqueProvided = new Set(provided);
+    if (
+      provided.length !== existing.length ||
+      uniqueProvided.size !== provided.length ||
+      provided.some((id) => !existingIds.has(id))
+    ) {
+      throw new BadRequestException("objectiveIds must be a permutation of this quest's objective ids");
+    }
+
+    this.db.transaction((tx) => {
+      provided.forEach((id, idx) => {
+        tx.update(questObjectives)
+          .set({ sortOrder: idx })
+          .where(and(eq(questObjectives.id, id), eq(questObjectives.questId, questId)))
+          .run();
+      });
+    });
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'quest.objective.reorder',
+      entityType: 'quest',
+      entityId: questId,
+      campaignId: quest.campaignId,
+    });
+    return this.objectivesForQuest(questId);
   }
 
   async removeObjective(questId: number, objectiveId: number, user: RequestUser, role: Role): Promise<void> {
