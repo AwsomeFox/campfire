@@ -318,6 +318,20 @@ export const encounters = sqliteTable('encounters', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Shared dice log (issue #35) — see modules/rolls. Every POST /campaigns/:id/roll
+// persists a row here so all campaign members share one roll feed. `rolls` is the
+// per-die results array stored as JSON text (same convention as characters.conditions).
+export const diceRolls = sqliteTable('dice_rolls', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  rollerUserId: text('roller_user_id').notNull(),
+  rollerName: text('roller_name').notNull().default(''),
+  expr: text('expr').notNull(),
+  rolls: text('rolls').notNull().default('[]'),
+  total: integer('total').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),

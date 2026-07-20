@@ -43,8 +43,9 @@ Ending is guarded — you can't end a fight that isn't running, or revive an end
 ## At the table on a phone
 
 Players can pull the encounter up on their own devices; it refreshes every few
-seconds (and a manual **Refresh** is there too). The dice log is currently
-per-device, so at a voice/remote table announce big rolls as you would in person.
+seconds (and a manual **Refresh** is there too). The dice log is shared by the
+whole table — every member's rolls appear in the same feed, with the roller's
+name, on every device.
 
 !!! tip "Depth"
     The tracker covers initiative, turns, HP, and condition tags. Mechanical

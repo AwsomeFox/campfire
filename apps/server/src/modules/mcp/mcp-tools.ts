@@ -1156,7 +1156,7 @@ export class McpToolsService {
       server,
       'roll_dice',
       'Roll a dice expression, e.g. "1d20+3" or "2d6", in the context of a campaign. Any campaign member may use ' +
-        'this; the roll is audited (action "dice.roll").',
+        'this; the roll is audited (action "dice.roll") and appears in the campaign-shared dice log.',
       { campaignId: CampaignIdArg, expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3"') },
       async ({ campaignId, expr }) => {
         const role = await this.access.requireMember(user, campaignId as number);

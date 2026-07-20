@@ -279,6 +279,17 @@ CREATE TABLE IF NOT EXISTS encounters (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dice_rolls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  roller_user_id TEXT NOT NULL,
+  roller_name TEXT NOT NULL DEFAULT '',
+  expr TEXT NOT NULL,
+  rolls TEXT NOT NULL DEFAULT '[]',
+  total INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL,
@@ -320,6 +331,7 @@ CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
+CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 `;
 
 /**
