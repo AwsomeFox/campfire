@@ -172,9 +172,11 @@ export class McpToolsService {
         'NPC/quest/location DM-only text), approve/reject proposals, install rule packs (server admin only), manage ' +
         'members. player: create/update their own character, roll dice, check objectives, post notes/inbox items, ' +
         'act on combatants linked to characters they own. viewer: read-only, plus dice rolls and notes/inbox (any ' +
-        'member may post). A PAT (personal access token) additionally CAPS the effective role to min(token scope, ' +
-        'real membership role) and, if the token is bound to one campaignId, 403s on every other campaign — this ' +
-        'applies even to server admins acting through a scoped token. SERVER-admin power (install_rule_pack, and ' +
+        'member may post). Server admins hold NO implicit campaign role (admin != auto-DM): campaign access, ' +
+        'including DM secrets, comes only from an actual membership row, exactly like any other user. A PAT ' +
+        '(personal access token) additionally CAPS the effective role to min(token scope, ' +
+        'real membership role) and, if the token is bound to one campaignId, 403s on every other campaign. ' +
+        'SERVER-admin power (install_rule_pack, and ' +
         'REST-only routes like POST /users and /settings) is capped separately and more strictly: a PAT never ' +
         'carries server-admin power unless it was explicitly minted with adminEnabled:true by a caller who ' +
         'currently held real server-admin power themselves — an admin\'s ordinary/viewer-scoped token is NOT an ' +

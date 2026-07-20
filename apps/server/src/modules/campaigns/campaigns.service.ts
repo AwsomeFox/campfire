@@ -74,7 +74,7 @@ export class CampaignsService {
     private readonly members: MembersService,
   ) {}
 
-  /** Admins (incl. dev:* users) see all campaigns; everyone else only campaigns they're a member of. */
+  /** Dev-auth (dev:*) users see all campaigns; everyone else — server admins included (issue #9) — only campaigns they're a member of. */
   async listForUser(user: RequestUser): Promise<Campaign[]> {
     const accessible = await this.roleResolver.accessibleCampaignIds(user);
     const rows = await this.db.select().from(campaigns);

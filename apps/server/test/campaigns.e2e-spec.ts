@@ -379,9 +379,13 @@ describe('campaign delete cascade (e2e)', () => {
     expect(res.status).toBe(200);
   });
 
-  it('campaign itself 404s', async () => {
+  it('campaign itself is gone (403 — the cascade removed the membership row, and admin ≠ auto-DM means no implicit fallback)', async () => {
+    // Pre-issue-#9 this was a 404: the deleting dm here is the setup ADMIN, whose
+    // implicit dm-everywhere role passed requireMember and hit getOrThrow's 404.
+    // Now membership is the only path in, so a deleted campaign answers exactly
+    // like any other campaign you're not a member of: 403, existence not leaked.
     const res = await dmAgent.get(`/api/v1/campaigns/${campaignId}`);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
   });
 
   it('quest and its objective 404 (objective 404s via the quest lookup, not directly listable)', async () => {
