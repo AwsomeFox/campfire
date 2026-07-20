@@ -20,7 +20,7 @@ export function NewCampaignWizard({
   onCreated,
 }: {
   onClose: () => void;
-  onCreated: (campaign: Campaign) => void;
+  onCreated: (campaign: Campaign) => void | Promise<void>;
 }) {
   const [step, setStep] = useState<Step>('details');
   const [name, setName] = useState('');
@@ -76,7 +76,10 @@ export function NewCampaignWizard({
           // wired up yet) — don't block the user from entering their new campaign.
         }
       }
-      onCreated(campaign);
+      // Awaited so the button stays in its "Creating…" state while the parent
+      // refreshes memberships/campaigns before navigating (issue #103) — no
+      // flash back to the idle label mid-transition.
+      await onCreated(campaign);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to create campaign.');
     } finally {
