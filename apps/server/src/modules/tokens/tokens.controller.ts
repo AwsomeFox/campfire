@@ -28,9 +28,9 @@ export class TokensController {
   }
 
   @Post()
-  @ApiOperation({ summary: 'Create a personal access token', description: "Self-service PAT minting. scope caps the effective role (min(scope, real membership role)); campaignId optionally binds the token to a single campaign the caller has real access to (403 otherwise)." })
-  @ApiResponse({ status: 201, description: 'PAT created. `token` is shown once — store it now.' })
-  @ApiResponse({ status: 403, description: 'No access to the requested campaignId.' })
+  @ApiOperation({ summary: 'Create a personal access token', description: "Self-service PAT minting. scope caps the effective role (min(scope, real membership role)); campaignId optionally binds the token to a single campaign the caller has real access to (403 otherwise). When the caller is itself authenticated via a PAT, the new token is additionally capped to that calling token: scope is silently downgraded to min(requested, calling token's scope), and a campaign-bound calling token can only mint tokens bound to the same campaign." })
+  @ApiResponse({ status: 201, description: 'PAT created. `token` is shown once — store it now. `apiToken.scope` reflects any silent downgrade to the calling token\'s scope.' })
+  @ApiResponse({ status: 403, description: 'No access to the requested campaignId (including a campaignId outside the calling token\'s own campaign binding).' })
   create(@Body() body: ApiTokenCreateDto, @CurrentUser() user: RequestUser) {
     return this.tokens.create(requireRealUserId(user), body, user);
   }
