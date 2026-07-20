@@ -2,12 +2,13 @@ import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundEx
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest } from '@campfire/schema';
-import type { Combatant, Encounter, EncounterStatus, EncounterWithCombatants, Role, RollResult } from '@campfire/schema';
+import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters, combatants, encounters, ruleEntries } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
+import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -72,6 +73,7 @@ export class EncountersService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly rolls: RollsService,
   ) {}
 
   async getRowOrThrow(id: number) {
@@ -500,9 +502,16 @@ export class EncountersService {
     });
   }
 
-  /** Rolls an arbitrary dice expression for a campaign — any member may roll; result is audited. */
-  async rollDiceForCampaign(campaignId: number, input: RollRequestInput, user: RequestUser, role: Role): Promise<RollResult> {
+  /**
+   * Rolls an arbitrary dice expression for a campaign — any member may roll; result is
+   * audited AND persisted to the shared per-campaign dice log (issue #35), so every
+   * member sees the same roll feed via GET /campaigns/:id/rolls. Returns the persisted
+   * DiceRoll — a superset of the old RollResult shape (expr/rolls/total), so existing
+   * clients keep working unchanged.
+   */
+  async rollDiceForCampaign(campaignId: number, input: RollRequestInput, user: RequestUser, role: Role): Promise<DiceRoll> {
     const result = rollDice(input.expr);
+    const persisted = await this.rolls.record(campaignId, result, user);
 
     await this.audit.log({
       actor: auditActor(user),
@@ -514,6 +523,6 @@ export class EncountersService {
       detail: `${result.expr} = ${result.total}`,
     });
 
-    return result;
+    return persisted;
   }
 }

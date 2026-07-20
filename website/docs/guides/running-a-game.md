@@ -30,7 +30,8 @@ Prep is just building world entities ahead of time (see
   statuses, tick objectives, edit NPC dispositions as relationships change.
 - **Run fights** on the run-session screen — initiative, turns, damage, conditions,
   with HP writing back to character sheets when the encounter ends.
-- **Roll dice** from the dashboard widget or inside combat; players roll their own.
+- **Roll dice** from the dashboard widget or inside combat; players roll their own,
+  and everyone sees the same shared roll feed.
 - **Players drive their own characters** — HP, conditions, ticking objectives — and
   keep notes. What they can't touch is DM canon or anyone else's character.
 - **Danger level** lives in the DM's status-header edit form, so it changes
