@@ -4,9 +4,10 @@ import type { z } from 'zod';
 import { MemberCreate, MemberUpdate } from '@campfire/schema';
 import type { CampaignMember } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, users, characters } from '../../db/schema';
+import { campaignMembers, campaigns, users, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -18,6 +19,7 @@ export class MembersService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async listForCampaign(campaignId: number): Promise<CampaignMember[]> {
@@ -122,6 +124,20 @@ export class MembersService {
       entityId: row.id,
       campaignId,
       detail: `user=${input.userId} role=${input.role}`,
+    });
+
+    // Notify the added user (not the acting DM). Best-effort inside NotificationsService.
+    const [campaign] = await this.db
+      .select({ name: campaigns.name })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    await this.notifications.notifyUser(input.userId, campaignId, actor, {
+      type: 'added_to_campaign',
+      title: `You were added to ${campaign?.name ?? 'a campaign'} as ${input.role}`,
+      entityType: 'campaign',
+      entityId: campaignId,
+      actorName: actor.name,
     });
 
     const [full] = await this.listForCampaign(campaignId).then((all) => all.filter((m) => m.id === row.id));

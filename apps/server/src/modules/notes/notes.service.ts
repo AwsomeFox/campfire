@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { notes } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -47,7 +48,51 @@ export class NotesService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  /**
+   * note_reply fan-out for a newly created SHARED note attached to an entity:
+   * notify the other members who already wrote a shared note on that same
+   * entity (the closest thing this data model has to a thread), but only those
+   * who can actually SEE the new note — party_shared is visible to everyone,
+   * dm_shared only to dm-role members. Private notes never notify anyone.
+   */
+  private async notifyThreadAuthors(row: typeof notes.$inferSelect, user: RequestUser): Promise<void> {
+    if (row.visibility === 'private' || !row.entityType || !row.entityId) return;
+    const siblings = await this.db
+      .select({ authorUserId: notes.authorUserId, visibility: notes.visibility })
+      .from(notes)
+      .where(
+        and(
+          eq(notes.campaignId, row.campaignId),
+          eq(notes.kind, 'note'),
+          eq(notes.entityType, row.entityType),
+          eq(notes.entityId, row.entityId),
+        ),
+      );
+    const roles = await this.notifications.memberRoles(row.campaignId);
+    const recipients = new Set<number>();
+    for (const sibling of siblings) {
+      if (sibling.visibility === 'private') continue; // they weren't part of the shared thread
+      const authorId = Number(sibling.authorUserId);
+      if (!Number.isInteger(authorId) || String(authorId) === user.id) continue;
+      const memberRole = roles.get(authorId);
+      if (!memberRole) continue; // no longer a member
+      if (row.visibility === 'dm_shared' && memberRole !== 'dm') continue; // can't see the new note
+      recipients.add(authorId);
+    }
+    for (const recipient of recipients) {
+      await this.notifications.notifyUser(recipient, row.campaignId, user, {
+        type: 'note_reply',
+        title: `${user.name || 'Someone'} added a note on a ${row.entityType} you commented on`,
+        body: excerpt(row.body),
+        entityType: row.entityType as EntityTypeValue,
+        entityId: row.entityId,
+        actorName: user.name,
+      });
+    }
+  }
 
   async listForCampaign(
     campaignId: number,
@@ -106,6 +151,7 @@ export class NotesService {
       entityId: row.id,
       campaignId,
     });
+    await this.notifyThreadAuthors(row, user);
     return toDomain(row);
   }
 
@@ -215,6 +261,14 @@ export class NotesService {
       entityType: 'note',
       entityId: id,
       campaignId: existing.campaignId,
+    });
+
+    // The DM answering an inbox item is the "reply" the submitter is waiting on.
+    await this.notifications.notifyUser(existing.authorUserId, existing.campaignId, user, {
+      type: 'note_reply',
+      title: `${user.name || 'The DM'} resolved your inbox note`,
+      body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(existing.body),
+      actorName: user.name,
     });
     return toDomain(row);
   }
