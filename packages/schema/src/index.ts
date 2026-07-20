@@ -1209,6 +1209,24 @@ export const InviteAccept = z.object({
 });
 export type InviteAccept = z.infer<typeof InviteAccept>;
 
+// Server-enforced WRITE authority, orthogonal to token `scope` (which caps
+// READ/role). A token's read role (dm/player/viewer) and its write mode are
+// independent dimensions: a dm-scoped token can READ every secret yet still be
+// forced to route every mutation through the DM's proposal queue.
+//  - 'direct'  — writes apply immediately when the caller's role allows; the
+//                per-request `?proposed=true` flag is honored as an opt-in. This
+//                is the back-compat default: every pre-existing token behaves as
+//                it always did.
+//  - 'propose' — every mutation is COERCED into a pending proposal server-side,
+//                regardless of the `?proposed=` flag; the token can never write
+//                canon directly. Intended for AI/DM agents (issue #158).
+//  - 'none'    — read-only: every write is rejected outright, no proposal path.
+// Ordering (broadest → narrowest): direct > propose > none. A token minted BY a
+// token can never be granted a broader writeScope than the calling token (see
+// TokensService.create), mirroring the scope/adminEnabled caps.
+export const WriteScope = z.enum(['direct', 'propose', 'none']);
+export type WriteScope = z.infer<typeof WriteScope>;
+
 // Present on Me only when the request authenticated via a PAT (Authorization:
 // Bearer cf_pat_...). Describes what THAT token can actually do, so /me is
 // truthful for debugging scoped AI access (issue #55): `scope` caps every
@@ -1220,6 +1238,10 @@ export const MeToken = z.object({
   tokenId: Id,
   name: z.string(),
   scope: Role,
+  // Server-enforced write authority of THIS token (see WriteScope). Surfaced on
+  // /me so an AI agent can see whether its writes are read-only ('none'), forced
+  // to the proposal queue ('propose'), or direct ('direct').
+  writeScope: WriteScope,
   campaignId: Id.nullable(),
   adminEnabled: z.boolean(),
   serverAdmin: z.boolean(),
@@ -1245,6 +1267,11 @@ export const ApiToken = z.object({
   userId: Id,
   name: z.string().min(1).max(80),
   scope: TokenScope,
+  // Server-enforced write authority, independent of `scope` — see WriteScope.
+  // Defaults 'direct' (back-compat: existing tokens write exactly as before).
+  // Existing DBs get the column added defaulting to 'direct' via
+  // migrateApiTokensTableForWriteScope() (db.module.ts).
+  writeScope: WriteScope.default('direct'),
   campaignId: Id.nullable().default(null), // null = all campaigns the owner can access
   // Whether this token may exercise SERVER-admin powers (ServerRolesGuard-gated routes,
   // install_rule_pack, etc) on behalf of an admin owner. Independent of `scope`, which
@@ -1266,6 +1293,11 @@ export const ApiTokenCreate = z.object({
   // token can only mint tokens bound to that same campaign — a scoped-down token can
   // never mint a broader sibling.
   scope: TokenScope,
+  // Server-enforced write authority (default 'direct'). When the caller is itself
+  // authenticated via a PAT, this is additionally capped to the calling token's
+  // writeScope (min in the direct>propose>none order) — a propose-only token can
+  // never mint a direct-write sibling. See WriteScope / TokensService.create.
+  writeScope: WriteScope.optional(),
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // requires the caller to currently hold real server-admin power; silently forced false otherwise
 });
@@ -1279,6 +1311,7 @@ export const AuthTokenRequest = z.object({
   password: z.string().min(1).max(200), // same cap as LoginRequest.password — scrypt DoS guard on an unauthenticated path
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer' (least privilege) — see TokensService.mintFor
+  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // caller (the just-authenticated user) must currently be a server admin — see TokensService.create
 });
@@ -1290,6 +1323,7 @@ export type AuthTokenRequest = z.infer<typeof AuthTokenRequest>;
 export const AdminTokenCreate = z.object({
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer'
+  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
   campaignId: Id.nullable().optional(),
   // May only be set true when the TARGET user (owner of the minted token) is themself
   // a server admin, AND the calling admin currently holds real (non-token-capped)
@@ -1300,20 +1334,35 @@ export type AdminTokenCreate = z.infer<typeof AdminTokenCreate>;
 
 // ---------- proposals (AI/collab writes pending DM approval) ----------
 export const ProposalAction = z.enum(['create', 'update', 'delete']);
-export const ProposalStatus = z.enum(['pending', 'approved', 'rejected']);
+// `withdrawn` is a self-service terminal state (issue #124): the proposer pulled
+// their own still-pending proposal before the DM acted. Distinct from `rejected`
+// (a DM decision) so provenance/history stays honest about who ended it.
+export const ProposalStatus = z.enum(['pending', 'approved', 'rejected', 'withdrawn']);
 
 export const Proposal = z.object({
   id: Id,
   campaignId: Id,
   entityType: EntityType,
-  entityId: Id.nullable().default(null), // null for creates
+  // For creates this is null at propose time; once an approved create-proposal has
+  // been applied it is backfilled with the created row's id, so the record's
+  // provenance points at the entity it produced (issue #124).
+  entityId: Id.nullable().default(null),
   action: ProposalAction,
   payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
   // The target entity's state captured at propose time (update proposals only; null for
   // creates) — lets the DM review UI render a real before/after diff even if the entity
   // changes between propose and review.
   snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
-  proposer: z.string().max(200), // user id or token name
+  // Human-readable attribution: the display name of the USER who submitted, even when
+  // the write came in over a PAT (resolved to the token's owning user — issue #124).
+  proposer: z.string().max(200),
+  // Stable id of the submitting user (String(users.id), or `dev:<name>` under DEV_AUTH).
+  // Powers the proposer self-view: a non-DM member lists only proposals where this
+  // matches them. Empty string on rows written before this column existed.
+  proposerUserId: z.string().max(200).default(''),
+  // Secondary provenance: the token name when submitted via a PAT, else null. Lets the
+  // DM see "acting as <user> via token <name>" without losing the human attribution.
+  proposerToken: z.string().max(200).nullable().default(null),
   status: ProposalStatus.default('pending'),
   resolvedBy: z.string().max(200).default(''),
   note: z.string().max(1000).default(''),
@@ -1321,6 +1370,11 @@ export const Proposal = z.object({
 });
 export type Proposal = z.infer<typeof Proposal>;
 export const ProposalResolve = z.object({ note: z.string().max(1000).optional() });
+// Revise a still-pending proposal (issue #124): the proposer amends their own
+// proposed create/update body before the DM acts. Validated against the target
+// entity's Create/Update schema server-side, same as an edit-before-approve.
+export const ProposalRevise = z.object({ payload: z.record(z.string(), z.unknown()) });
+export type ProposalRevise = z.infer<typeof ProposalRevise>;
 // Approve may carry an amended `payload` (edit-before-approve): the DM tweaks the
 // proposed create/update body before it's applied through the normal write path.
 // Ignored for `delete` proposals (which carry no payload). Omit `payload` to apply

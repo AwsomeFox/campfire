@@ -184,6 +184,7 @@ describe('api tokens (e2e, real cookie sessions)', () => {
         tokenId: createRes.body.apiToken.id,
         name: 'me-viewer-scoped',
         scope: 'viewer',
+        writeScope: 'direct', // default write authority (issue #158) — unaffected by read scope
         campaignId: null,
         adminEnabled: false,
         serverAdmin: false, // owner IS a server admin, but the token was not minted adminEnabled

@@ -3,6 +3,7 @@ import { ApiExcludeController } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Public } from '../../common/decorators/public.decorator';
+import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { McpToolsService } from './mcp-tools';
 
@@ -25,6 +26,12 @@ import { McpToolsService } from './mcp-tools';
  */
 @ApiExcludeController()
 @Public()
+// A single POST /mcp multiplexes every read AND write tool, so the HTTP
+// WriteModeGuard (which only sees "POST") can't enforce write-mode per tool — and
+// blocking the whole endpoint would stop a read-only token from even READING over
+// MCP. Exempt the transport here and enforce write-mode INSIDE each write tool
+// instead (requireWriteMode / assertDirectWriteAllowed in mcp-tools.ts). Issue #158.
+@WriteModeExempt()
 @Controller('mcp')
 export class McpController {
   constructor(private readonly tools: McpToolsService) {}

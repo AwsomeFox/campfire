@@ -73,17 +73,52 @@ describe('proposals (e2e, real cookie sessions)', () => {
     expect(res.body.proposal.snapshot).toBeNull();
   });
 
-  it('non-dm cannot list or approve/reject proposals', async () => {
+  it('a non-dm member CAN list their own proposals (self-view), but not approve/reject (#124)', async () => {
+    // The player filed the quest-update proposal above — they can now see it.
     const listRes = await playerAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
-    expect(listRes.status).toBe(403);
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.length).toBeGreaterThanOrEqual(1);
+    expect(listRes.body.every((p: { proposerUserId: string }) => p.proposerUserId === String(playerId))).toBe(true);
 
     const pendingRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`);
     const proposalId = pendingRes.body[0].id;
 
+    // Reviewing (approve/reject) is still DM-only.
     const approveRes = await playerAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
     expect(approveRes.status).toBe(403);
     const rejectRes = await playerAgent.post(`/api/v1/proposals/${proposalId}/reject`).send({});
     expect(rejectRes.status).toBe(403);
+  });
+
+  it('the self-view is scoped: a member sees only their OWN proposals, not another member\'s (#124)', async () => {
+    // The player has proposals; the viewer proposed a create earlier too. Each sees
+    // only their own; neither sees the other's.
+    const playerList = await playerAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+    const viewerList = await viewerAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+    expect(playerList.status).toBe(200);
+    expect(viewerList.status).toBe(200);
+    expect(playerList.body.every((p: { proposerUserId: string }) => p.proposerUserId === String(playerId))).toBe(true);
+    expect(viewerList.body.every((p: { proposerUserId: string }) => p.proposerUserId === String(viewerId))).toBe(true);
+    // No cross-contamination: none of the player's ids appear in the viewer's list.
+    const playerIds = new Set(playerList.body.map((p: { id: number }) => p.id));
+    expect(viewerList.body.some((p: { id: number }) => playerIds.has(p.id))).toBe(false);
+    // The DM sees a superset (everyone's).
+    const dmList = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+    expect(dmList.body.length).toBeGreaterThan(playerList.body.length);
+  });
+
+  it('proposer is attributed to the USER (display name + user id), not a token name (#124)', async () => {
+    const proposeRes = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: 'Attribution Quest' });
+    expect(proposeRes.status).toBe(202);
+    const p = proposeRes.body.proposal;
+    // Human-readable proposer is the user's display name — never a `token:...` string.
+    expect(p.proposer).toBe('prop-player');
+    expect(p.proposer.startsWith('token:')).toBe(false);
+    expect(p.proposerUserId).toBe(String(playerId));
+    // Submitted over a cookie session, so no token provenance.
+    expect(p.proposerToken).toBeNull();
   });
 
   it('dm lists pending proposals', async () => {
@@ -334,6 +369,119 @@ describe('proposals (e2e, real cookie sessions)', () => {
     // Untouched.
     const pendingRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`);
     expect(pendingRes.body.some((pp: { id: number }) => pp.id === proposalId)).toBe(true);
+  });
+
+  // ---------- #124: entityId backfill on create-approve ----------
+
+  it('approving a CREATE proposal backfills the created entityId onto the proposal (#124)', async () => {
+    const proposeRes = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: 'Backfill Quest', reward: '7gp' });
+    expect(proposeRes.status).toBe(202);
+    const proposalId = proposeRes.body.proposal.id;
+    // A create proposal has no target yet.
+    expect(proposeRes.body.proposal.entityId).toBeNull();
+
+    const approveRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect(approveRes.status).toBe(201);
+    // The approve response reflects the backfilled id...
+    expect(typeof approveRes.body.entityId).toBe('number');
+    const createdId = approveRes.body.entityId;
+
+    // ...and it points at the actual created quest.
+    const questRes = await dmAgent.get(`/api/v1/quests/${createdId}`);
+    expect(questRes.status).toBe(200);
+    expect(questRes.body.title).toBe('Backfill Quest');
+
+    // The persisted proposal record also carries the backfilled entityId.
+    const listRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=approved`);
+    const row = listRes.body.find((p: { id: number }) => p.id === proposalId);
+    expect(row.entityId).toBe(createdId);
+  });
+
+  // ---------- #124: proposer attribution over a PAT resolves to the owning user ----------
+
+  it('a proposal submitted over a PAT is attributed to the owning USER, with the token as secondary provenance (#124)', async () => {
+    // The player mints their own PAT and submits a proposal with it.
+    const tokenRes = await playerAgent.post(`/api/v1/tokens`).send({ name: 'r4verify', scope: 'player' });
+    expect(tokenRes.status).toBe(201);
+    const token = tokenRes.body.token;
+
+    const proposeRes = await request(ctx.app.getHttpServer())
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ title: 'Token-Submitted Quest' });
+    expect(proposeRes.status).toBe(202);
+    const p = proposeRes.body.proposal;
+    // Attributed to the human user, NOT `token:r4verify`.
+    expect(p.proposer).toBe('prop-player');
+    expect(p.proposerUserId).toBe(String(playerId));
+    // Token name kept as secondary provenance.
+    expect(p.proposerToken).toBe('r4verify');
+
+    // And it lands in the owning user's self-view (submitted via their token).
+    const selfView = await playerAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+    expect(selfView.body.some((row: { id: number }) => row.id === p.id)).toBe(true);
+  });
+
+  // ---------- #124: revise + withdraw loop ----------
+
+  it('a proposer can revise their own pending proposal; a non-proposer cannot (#124)', async () => {
+    const proposeRes = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: 'Draft Title', reward: '1gp' });
+    const proposalId = proposeRes.body.proposal.id;
+
+    // Another member (the viewer) cannot revise someone else's proposal.
+    const forbidden = await viewerAgent.patch(`/api/v1/proposals/${proposalId}`).send({ payload: { title: 'Hijacked' } });
+    expect(forbidden.status).toBe(403);
+
+    // The proposer revises the payload.
+    const reviseRes = await playerAgent.patch(`/api/v1/proposals/${proposalId}`).send({ payload: { title: 'Revised Title', reward: '2gp' } });
+    expect(reviseRes.status).toBe(200);
+    expect(reviseRes.body.payload.title).toBe('Revised Title');
+    expect(reviseRes.body.status).toBe('pending');
+
+    // An invalid revision is rejected (400) and nothing is stored.
+    const badRevise = await playerAgent.patch(`/api/v1/proposals/${proposalId}`).send({ payload: { title: '' } });
+    expect(badRevise.status).toBe(400);
+
+    // When the DM approves, the REVISED payload is what applies.
+    const approveRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect(approveRes.status).toBe(201);
+    const questsRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
+    expect(questsRes.body.some((q: { title: string }) => q.title === 'Revised Title')).toBe(true);
+    expect(questsRes.body.some((q: { title: string }) => q.title === 'Draft Title')).toBe(false);
+  });
+
+  it('a proposer can withdraw their own pending proposal; a non-proposer cannot, and it no longer applies (#124)', async () => {
+    const proposeRes = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: 'Withdraw Me' });
+    const proposalId = proposeRes.body.proposal.id;
+
+    // A non-proposer cannot withdraw it.
+    const forbidden = await viewerAgent.post(`/api/v1/proposals/${proposalId}/withdraw`).send({});
+    expect(forbidden.status).toBe(403);
+
+    // The proposer withdraws it.
+    const withdrawRes = await playerAgent.post(`/api/v1/proposals/${proposalId}/withdraw`).send({});
+    expect(withdrawRes.status).toBe(201);
+    expect(withdrawRes.body.status).toBe('withdrawn');
+
+    // It is now terminal — a DM approve is a 409 no-op and no quest is created.
+    const approveRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect(approveRes.status).toBe(409);
+    const questsRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
+    expect(questsRes.body.some((q: { title: string }) => q.title === 'Withdraw Me')).toBe(false);
+
+    // Withdrawing again (already terminal) is a 409.
+    const again = await playerAgent.post(`/api/v1/proposals/${proposalId}/withdraw`).send({});
+    expect(again.status).toBe(409);
+
+    // The withdrawn proposal shows up in the proposer's own status filter.
+    const withdrawnList = await playerAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=withdrawn`);
+    expect(withdrawnList.body.some((p: { id: number }) => p.id === proposalId)).toBe(true);
   });
 
   // ---------- #85: atomicity (preserved on merge with main) ----------
