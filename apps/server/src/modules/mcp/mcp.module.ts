@@ -14,6 +14,7 @@ import { RulesModule } from '../rules/rules.module';
 import { EncountersModule } from '../encounters/encounters.module';
 import { AuditModule } from '../audit/audit.module';
 import { ExportModule } from '../export/export.module';
+import { AiDmModule } from '../ai-dm/ai-dm.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -35,6 +36,7 @@ import { McpController } from './mcp.controller';
     EncountersModule,
     AuditModule,
     ExportModule,
+    AiDmModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],

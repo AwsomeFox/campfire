@@ -464,6 +464,22 @@ export const partyTreasury = sqliteTable('party_treasury', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Experimental server-side AI Dungeon Master (issue #28) — one seat per campaign,
+// created lazily on first configure/read. Metered against a per-campaign token
+// budget; the server never calls an LLM vendor (see modules/ai-dm).
+export const aiDmSeats = sqliteTable('ai_dm_seats', {
+  campaignId: integer('campaign_id').primaryKey(),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+  model: text('model').notNull().default(''),
+  instructions: text('instructions').notNull().default(''),
+  tokenBudget: integer('token_budget').notNull().default(0),
+  tokensUsed: integer('tokens_used').notNull().default(0),
+  turnCount: integer('turn_count').notNull().default(0),
+  lastTurnAt: text('last_turn_at'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),
