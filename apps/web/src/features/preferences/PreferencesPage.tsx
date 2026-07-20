@@ -1,17 +1,18 @@
 /**
  * Preferences — /preferences, available to every authenticated user.
  * Mirrors design/claude-design/Campfire.dc.html "Preferences" screen
- * (~L1156-1227): Theme card (accent swatches + free hex input, live preview)
- * and a display-name field. Only the fields with backing API (accentColor,
- * displayName — both on PreferencesUpdate) are wired up; the design's Text
- * size and Notifications cards have no backing data yet, so they render
- * disabled with a "soon" tag rather than being silently dropped. The AI
- * scribe card is live — MCP is a real, shipped API (see /tokens + apps/mcp) —
- * so it links to token creation instead of claiming "not available".
+ * (~L1156-1227): Theme card (accent swatches + free hex input, live preview),
+ * text size (default/large — persisted as PreferencesUpdate.textSize, applied
+ * globally by AuthProvider via data-text-size on <html>), and a display-name
+ * field. The design's Notifications card was removed rather than shipped as a
+ * dead placeholder — notifications are their own larger feature (issue #6).
+ * The AI scribe card is live — MCP is a real, shipped API (see /tokens +
+ * apps/mcp) — so it links to token creation instead of claiming "not
+ * available".
  */
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { User } from '@campfire/schema';
+import type { TextSize, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, ErrorNote } from '../../components/ui';
@@ -37,6 +38,7 @@ export default function PreferencesPage() {
 
   const [displayName, setDisplayName] = useState(user?.displayName ?? '');
   const [accentColor, setAccentColor] = useState<string | null>(user?.accentColor ?? null);
+  const [textSize, setTextSize] = useState<TextSize>(user?.textSize ?? 'default');
   const [hexInput, setHexInput] = useState(user?.accentColor ?? '');
   const [hexError, setHexError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -47,6 +49,7 @@ export default function PreferencesPage() {
     if (!user) return;
     setDisplayName(user.displayName ?? '');
     setAccentColor(user.accentColor ?? null);
+    setTextSize(user.textSize ?? 'default');
     setHexInput(user.accentColor ?? '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
@@ -61,7 +64,10 @@ export default function PreferencesPage() {
     );
   }
 
-  const dirty = displayName !== (user.displayName ?? '') || accentColor !== (user.accentColor ?? null);
+  const dirty =
+    displayName !== (user.displayName ?? '') ||
+    accentColor !== (user.accentColor ?? null) ||
+    textSize !== (user.textSize ?? 'default');
   const previewColor = accentColor ?? DEFAULT_ACCENT;
 
   function pickSwatch(hex: string) {
@@ -98,9 +104,11 @@ export default function PreferencesPage() {
       const updated = await api.patch<User>(`${API}/me/preferences`, {
         displayName: displayName.trim(),
         accentColor,
+        textSize,
       });
       setDisplayName(updated.displayName ?? '');
       setAccentColor(updated.accentColor ?? null);
+      setTextSize(updated.textSize ?? 'default');
       setHexInput(updated.accentColor ?? '');
       await refresh();
       setSaved(true);
@@ -184,20 +192,28 @@ export default function PreferencesPage() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <span style={{ flex: 1, minWidth: 120, fontSize: 13.5, color: 'var(--color-neutral-600)' }}>Text size</span>
-          <div className="seg" style={{ opacity: 0.5 }}>
-            <button type="button" disabled style={{ padding: '7px 14px', font: 'inherit', fontSize: 12.5, border: 0, background: 'transparent', minHeight: 36 }}>
-              Default
-            </button>
-            <button type="button" disabled style={{ padding: '7px 14px', font: 'inherit', fontSize: 12.5, border: 0, background: 'transparent', minHeight: 36 }}>
-              Large
-            </button>
+          <span style={{ flex: 1, minWidth: 120, fontSize: 13.5 }}>Text size</span>
+          <div className="seg">
+            {(['default', 'large'] as const).map((size) => (
+              <button
+                key={size}
+                type="button"
+                onClick={() => setTextSize(size)}
+                className="seg-opt"
+                style={
+                  textSize === size
+                    ? { color: 'var(--color-accent)', boxShadow: 'inset 0 0 0 1px var(--color-accent)' }
+                    : undefined
+                }
+              >
+                {size === 'default' ? 'Default' : 'Large'}
+              </button>
+            ))}
           </div>
-          <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
         </div>
 
         <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-          Accent recolors your view only — the table sees their own.
+          Accent and text size restyle your view only — the table sees their own.
         </p>
       </div>
 
@@ -236,16 +252,6 @@ export default function PreferencesPage() {
           </Link>
           <span className="text-muted" style={{ fontSize: 11.5 }}>then connect from the tokens page</span>
         </div>
-      </div>
-
-      <div className="card elev-sm" style={{ opacity: 0.6 }}>
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="card-kicker" style={{ margin: 0 }}>Notifications</span>
-          <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
-        </div>
-        <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-          Session reminders, inbox replies, and quest updates. Not available yet — no backing API on this server.
-        </p>
       </div>
 
       <div className="flex gap-2 items-center">

@@ -301,6 +301,35 @@ describe('me/preferences (e2e)', () => {
     expect(patchRes.body.accentColor).toBeNull();
   });
 
+  it('textSize defaults to default on /me', async () => {
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.textSize).toBe('default');
+  });
+
+  it('setting textSize large -> /me reflects it', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ textSize: 'large' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.textSize).toBe('large');
+
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.textSize).toBe('large');
+    // Previously-set displayName is untouched by an unrelated textSize-only update.
+    expect(meRes.body.user.displayName).toBe('Prefs User');
+  });
+
+  it('invalid textSize -> 400', async () => {
+    const res = await agent.patch('/api/v1/me/preferences').send({ textSize: 'enormous' });
+    expect(res.status).toBe(400);
+  });
+
+  it('setting textSize back to default clears the override', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ textSize: 'default' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.textSize).toBe('default');
+  });
+
   it('unauthenticated PATCH /me/preferences -> 401', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).patch('/api/v1/me/preferences').send({ displayName: 'Nope' });

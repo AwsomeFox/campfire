@@ -113,6 +113,15 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Personal "Text size" preference (Preferences page). The app's type scale is
+   specified in px throughout (inline styles + component CSS), so a root
+   font-size bump wouldn't reach it — `zoom` scales the rendered UI the same
+   way browser zoom does, which is what "Large" means here. AuthProvider sets
+   data-text-size on <html> from the logged-in user's preference. */
+:root[data-text-size='large'] body {
+  zoom: 1.15;
+}
+
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
