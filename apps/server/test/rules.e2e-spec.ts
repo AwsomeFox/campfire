@@ -55,7 +55,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       .send({ source: 'open5e', url: fake.baseUrl });
     expect(installRes.status).toBe(201);
     expect(installRes.body.slug).toBe('open5e-srd');
-    expect(installRes.body.entryCount).toBe(2 + 2 + 1 + 2); // spells + creatures + magicitems + conditions from the fake server
+    expect(installRes.body.entryCount).toBe(2 + 2 + 1 + 4); // spells + creatures + magicitems + conditions from the fake server
     expect(installRes.body.license).toContain('Creative Commons');
     const packId = installRes.body.id;
 
@@ -72,8 +72,8 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       .send({ source: 'open5e', url: fake.baseUrl });
     expect(reinstallRes.status).toBe(200);
     expect(reinstallRes.body.added).toBe(0);
-    expect(reinstallRes.body.skippedExisting).toBe(2 + 2 + 1 + 2);
-    expect(reinstallRes.body.entryCount).toBe(2 + 2 + 1 + 2); // unchanged
+    expect(reinstallRes.body.skippedExisting).toBe(2 + 2 + 1 + 4);
+    expect(reinstallRes.body.entryCount).toBe(2 + 2 + 1 + 4); // unchanged
 
     // search: free text finds the fireball spell
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
@@ -92,6 +92,24 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     const packSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', pack: 'open5e-srd' }).set(dm);
     expect(packSearchRes.status).toBe(200);
     expect(packSearchRes.body.some((e: { name: string }) => e.name === 'Goblin')).toBe(true);
+
+    // search ranking (issue #33): "poisoned" matches both Poisoned (by name) and
+    // Petrified (whose body mentions the Poisoned condition, and which was imported
+    // first, so it has the lower rowid) — the exact-name match must rank first.
+    const rankedRes = await request(server).get('/api/v1/rules/search').query({ q: 'poisoned' }).set(dm);
+    expect(rankedRes.status).toBe(200);
+    expect(rankedRes.body.length).toBeGreaterThanOrEqual(2); // both condition entries matched
+    expect(rankedRes.body[0].name).toBe('Poisoned');
+    expect(rankedRes.body.some((e: { name: string }) => e.name === 'Petrified')).toBe(true);
+
+    // ...and the exact-name bucket is case-insensitive.
+    const upperRes = await request(server).get('/api/v1/rules/search').query({ q: 'POISONED' }).set(dm);
+    expect(upperRes.body[0].name).toBe('Poisoned');
+
+    // Prefix name matches also outrank body-only matches: "poison" is a prefix of
+    // "Poisoned" but only appears inside Petrified's body.
+    const prefixRes = await request(server).get('/api/v1/rules/search').query({ q: 'poison' }).set(dm);
+    expect(prefixRes.body[0].name).toBe('Poisoned');
 
     // search: no query returns entries (optionally filtered), not an error
     const browseRes = await request(server).get('/api/v1/rules/search').query({ type: 'condition' }).set(dm);
@@ -366,7 +384,7 @@ describe('rules / rule packs — incremental install (e2e, fake Open5e server)',
       .set(dmHeaders)
       .send({ source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
     expect(conditionsRes.status).toBe(201);
-    expect(conditionsRes.body.entryCount).toBe(2);
+    expect(conditionsRes.body.entryCount).toBe(4);
     const packId = conditionsRes.body.id;
 
     // Installing spells on top: the pack already exists, so this is incremental — 200,
@@ -378,7 +396,7 @@ describe('rules / rule packs — incremental install (e2e, fake Open5e server)',
     expect(spellsRes.status).toBe(200);
     expect(spellsRes.body.added).toBe(2);
     expect(spellsRes.body.skippedExisting).toBe(0);
-    expect(spellsRes.body.entryCount).toBe(2 + 2); // conditions + spells
+    expect(spellsRes.body.entryCount).toBe(4 + 2); // conditions + spells
     expect(spellsRes.body.id).toBe(packId); // same pack, not a new row
 
     // Search now finds both the earlier conditions and the newly-added spells.
@@ -396,8 +414,8 @@ describe('rules / rule packs — incremental install (e2e, fake Open5e server)',
       .send({ source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
     expect(reinstallConditions.status).toBe(200);
     expect(reinstallConditions.body.added).toBe(0);
-    expect(reinstallConditions.body.skippedExisting).toBe(2);
-    expect(reinstallConditions.body.entryCount).toBe(4); // unchanged by the no-op reinstall
+    expect(reinstallConditions.body.skippedExisting).toBe(4);
+    expect(reinstallConditions.body.entryCount).toBe(6); // unchanged by the no-op reinstall
 
     await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
   });
@@ -444,7 +462,7 @@ describe('rules / rule packs — concurrent install race (e2e, fake Open5e serve
 
     const listRes = await request(server).get('/api/v1/rules/packs').set(dmHeaders);
     expect(listRes.body).toHaveLength(1);
-    expect(listRes.body[0].entryCount).toBe(2 + 2 + 1 + 2);
+    expect(listRes.body[0].entryCount).toBe(2 + 2 + 1 + 4);
 
     await request(server).delete(`/api/v1/rules/packs/${[...packIds][0]}`).set(dmHeaders);
   });

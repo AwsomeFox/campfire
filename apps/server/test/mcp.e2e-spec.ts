@@ -210,6 +210,20 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(matches[0].body).toContain('bright streak');
   });
 
+  it('lookup_rule ranks the exact-name match first (issue #33)', async () => {
+    const client = await mcpClient(viewerToken);
+    // "poisoned" matches both the Poisoned condition (by name) and Petrified (whose
+    // body mentions the Poisoned condition and which was imported first) — the
+    // exact-name match must be the top result, with its body included.
+    const result = await client.callTool({ name: 'lookup_rule', arguments: { query: 'poisoned' } });
+    expect(result.isError).toBeFalsy();
+    const matches = parseResult(result) as Array<{ name: string; body?: string }>;
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(matches[0].name).toBe('Poisoned');
+    expect(matches[0].body).toContain('disadvantage');
+    expect(matches.some((m) => m.name === 'Petrified')).toBe(true);
+  });
+
   it('lookup_rule respects the type filter', async () => {
     const client = await mcpClient(viewerToken);
     const result = await client.callTool({ name: 'lookup_rule', arguments: { query: 'goblin', type: 'monster' } });
