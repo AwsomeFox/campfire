@@ -56,6 +56,7 @@ import { EncountersService } from '../encounters/encounters.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
+import { SessionZeroService } from '../session-zero/session-zero.service';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -200,6 +201,7 @@ export class McpToolsService {
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
     private readonly aiDm: AiDmService,
+    private readonly sessionZero: SessionZeroService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
@@ -319,6 +321,20 @@ export class McpToolsService {
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
         return this.campaigns.summary(campaignId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_session_zero',
+      "The campaign's session-zero charter — lines (hard limits: content that never appears), veils (soft limits: " +
+        'kept off-screen), the safety tools the table agreed to use (X-Card, Open Door, …), house rules, and tone/' +
+        'content expectations. Any AI running or assisting at this table MUST respect these boundaries. Read-only over ' +
+        'MCP; a campaign that never ran session zero returns empty fields.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.sessionZero.get(campaignId as number);
       },
     );
 
@@ -1746,6 +1762,21 @@ export class McpToolsService {
       async (campaignId) => {
         const role = await this.access.requireMember(user, campaignId);
         return this.sessions.listForCampaign(campaignId, role);
+      },
+    );
+
+    perCampaign(
+      'campaign-session-zero',
+      'session-zero',
+      {
+        title: 'Session zero charter',
+        description:
+          "The table's safety & expectations charter — lines & veils, safety tools, house rules, tone. Any AI at " +
+          'this table is bound by it. The resource form of get_session_zero.',
+      },
+      async (campaignId) => {
+        await this.access.requireMember(user, campaignId);
+        return this.sessionZero.get(campaignId);
       },
     );
   }

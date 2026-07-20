@@ -571,6 +571,44 @@ export const TimelineCalendarUpdate = z.object({
 });
 export type TimelineCalendarUpdate = z.infer<typeof TimelineCalendarUpdate>;
 
+// ---------- session zero / table charter (safety tools & expectations) — issue #122 ----------
+// Session zero is where a table agrees on the content it will and won't play through
+// and the tools it will use to steer in the moment. Before this, none of that had a
+// home — a campaign carried only name/description/status/danger/ruleSystem, so lines &
+// veils lived (if anywhere) in a markdown blob players might never open. This is a
+// first-class, structured, per-campaign record: ONE row per campaign, DM-authored,
+// readable by the whole table (no dmSecret — a safety charter everyone must see). It's
+// also exposed read-only over MCP so a connected AI (and the roadmap's AI DM) is bound
+// by the same lines & veils the humans agreed to.
+export const SessionZero = z.object({
+  campaignId: Id,
+  // Hard limits ("lines") — content that never appears at the table, full stop.
+  lines: z.array(z.string().min(1).max(500)).max(200).default([]),
+  // Soft limits ("veils") — content that may exist in the fiction but stays off-screen
+  // (fade to black), never described in detail.
+  veils: z.array(z.string().min(1).max(500)).max(200).default([]),
+  // Safety tools this table has agreed to use — X-Card, Open Door, Script Change, etc.
+  // Free text (every table names them differently), one agreed tool per entry.
+  safetyTools: z.array(z.string().min(1).max(200)).max(50).default([]),
+  // House rules — table conventions and rules-as-written deviations (markdown).
+  houseRules: z.string().max(20_000).default(''),
+  // Tone & content expectations — the register the table is playing in: gritty vs.
+  // heroic, comedic vs. serious, expected spotlight/PvP norms, etc. (markdown).
+  toneAndExpectations: z.string().max(20_000).default(''),
+  ...timestamps,
+});
+export type SessionZero = z.infer<typeof SessionZero>;
+// Update is a partial patch: every field optional so the DM can revise one section
+// without resending the whole charter (the single-row-per-campaign upsert convention).
+export const SessionZeroUpdate = z.object({
+  lines: z.array(z.string().min(1).max(500)).max(200).optional(),
+  veils: z.array(z.string().min(1).max(500)).max(200).optional(),
+  safetyTools: z.array(z.string().min(1).max(200)).max(50).optional(),
+  houseRules: z.string().max(20_000).optional(),
+  toneAndExpectations: z.string().max(20_000).optional(),
+});
+export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
+
 // ---------- notes ----------
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
 export const NoteKind = z.enum(['note', 'inbox']);

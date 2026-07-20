@@ -147,6 +147,22 @@ export const timelineCalendars = sqliteTable('timeline_calendars', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Session zero / table charter (safety tools & expectations) — issue #122. One row
+// per campaign (campaignId PK), upserted like timeline_calendars. lines/veils/
+// safetyTools are string arrays stored as JSON text (see common/json.ts); the rest is
+// markdown. Member-readable, DM-authored — no dmSecret (a safety record the whole
+// table must see).
+export const sessionZero = sqliteTable('session_zero', {
+  campaignId: integer('campaign_id').primaryKey(),
+  lines: text('lines').notNull().default('[]'),
+  veils: text('veils').notNull().default('[]'),
+  safetyTools: text('safety_tools').notNull().default('[]'),
+  houseRules: text('house_rules').notNull().default(''),
+  toneAndExpectations: text('tone_and_expectations').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const npcs = sqliteTable('npcs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
