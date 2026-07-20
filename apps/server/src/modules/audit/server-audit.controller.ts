@@ -1,7 +1,9 @@
-import { Controller, Get } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Controller, Get, Query } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
+import { parsePageParams } from '../../common/pagination';
 import { AuditService } from './audit.service';
+import { AUDIT_DEFAULT_LIMIT, AUDIT_MAX_LIMIT } from './audit.controller';
 
 /**
  * #23: server-wide admin audit trail. Lists audit rows not tied to any campaign
@@ -18,10 +20,13 @@ export class ServerAuditController {
   @Get()
   @ApiOperation({
     summary: 'List recent server-admin audit entries',
-    description: 'Server-admin only. Server-wide actions (campaign_id null), most-recent-first, capped at 100 entries.',
+    description: 'Server-admin only. Server-wide actions (campaign_id null), most-recent-first. Defaults to 100 entries; page with `?limit` (max 500) and `?offset`.',
   })
-  @ApiResponse({ status: 200, description: 'Up to 100 most recent server-admin audit entries.' })
-  list() {
-    return this.audit.listServerAdmin(100);
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max entries to return (default 100, max 500).' })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Entries to skip, for paging older history (default 0).' })
+  @ApiResponse({ status: 200, description: 'Server-admin audit entries, most-recent-first.' })
+  list(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+    const page = parsePageParams({ limit, offset }, AUDIT_MAX_LIMIT);
+    return this.audit.listServerAdmin(page.limit ?? AUDIT_DEFAULT_LIMIT, page.offset ?? 0);
   }
 }

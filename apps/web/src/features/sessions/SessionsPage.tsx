@@ -14,7 +14,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import type { Session, SessionShare, SessionShareCreated } from '@campfire/schema';
+import type { Session, SessionListItem, SessionShare, SessionShareCreated } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -43,7 +43,9 @@ export default function SessionsPage() {
     });
   }
 
-  const [sessions, setSessions] = useState<Session[]>([]);
+  // List-shape sessions (issue #71): each carries a `recapExcerpt`, not the full
+  // recap body — SessionDetail fetches the full recap for the opened session.
+  const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
@@ -55,7 +57,7 @@ export default function SessionsPage() {
     setForbidden(false);
     setLoading(true);
     try {
-      const list = await api.get<Session[]>(`${API}/campaigns/${cid}/sessions`);
+      const list = await api.get<SessionListItem[]>(`${API}/campaigns/${cid}/sessions`);
       setSessions(list);
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
@@ -241,7 +243,7 @@ export default function SessionsPage() {
                       <span className="font-heading text-[16px]">{s.title || 'Untitled session'}</span>
                       <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
                     </span>
-                    <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recap || 'No recap written yet.'}</span>
+                    <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
                   </span>
                 </button>
               ))}
@@ -290,7 +292,7 @@ function SessionDetail({
   onBack,
   onChange,
 }: {
-  session: Session;
+  session: SessionListItem;
   isDm: boolean;
   onBack: () => void;
   onChange: () => void;
@@ -299,7 +301,10 @@ function SessionDetail({
   const [sharing, setSharing] = useState(false);
   const [titleDraft, setTitleDraft] = useState(session.title);
   const [dateDraft, setDateDraft] = useState(toDateInputValue(session.playedAt));
-  const [recapDraft, setRecapDraft] = useState(session.recap);
+  // The list omits the full recap body (issue #71) — fetch it for the opened session.
+  const [recap, setRecap] = useState('');
+  const [recapLoading, setRecapLoading] = useState(true);
+  const [recapDraft, setRecapDraft] = useState('');
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -310,18 +315,34 @@ function SessionDetail({
     setSharing(false);
     setTitleDraft(session.title);
     setDateDraft(toDateInputValue(session.playedAt));
-    setRecapDraft(session.recap);
+    setRecapLoading(true);
+    let cancelled = false;
+    api
+      .get<Session>(`${API}/sessions/${session.id}`)
+      .then((full) => {
+        if (cancelled) return;
+        setRecap(full.recap);
+        setRecapDraft(full.recap);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setRecapLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [session]);
 
   async function save() {
     setSaving(true);
     setError(null);
     try {
-      await api.patch<Session>(`${API}/sessions/${session.id}`, {
+      const updated = await api.patch<Session>(`${API}/sessions/${session.id}`, {
         title: titleDraft,
         playedAt: dateDraft ? dateDraft : null,
         recap: recapDraft,
       });
+      setRecap(updated.recap);
       setEditing(false);
       onChange();
     } catch {
@@ -392,8 +413,10 @@ function SessionDetail({
         </Card>
       ) : (
         <Card>
-          {session.recap ? (
-            <Markdown>{session.recap}</Markdown>
+          {recapLoading ? (
+            <p className="text-sm text-slate-600">Loading recap…</p>
+          ) : recap ? (
+            <Markdown>{recap}</Markdown>
           ) : (
             <p className="text-sm text-slate-600">No recap written yet.</p>
           )}

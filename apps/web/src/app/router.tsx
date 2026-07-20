@@ -69,6 +69,13 @@ export const router = createBrowserRouter([
     element: <AuthedLayout />,
     children: [
       {
+        // Cast-to-TV player display (issue #60). Authed (members only) but mounted
+        // OUTSIDE the app chrome so it fills the screen with no sidebar/tabbar.
+        // The page renders only player-safe, secret-free data (see playerSafe.ts).
+        path: '/c/:campaignId/screen',
+        element: lazyPage(() => import('../features/screen/PlayerDisplayPage')),
+      },
+      {
         element: <Layout />,
         children: [
           { path: '/', element: page(<HomePage />) },
@@ -115,6 +122,10 @@ export const router = createBrowserRouter([
           {
             path: '/c/:campaignId/sessions',
             element: lazyPage(() => import('../features/sessions/SessionsPage')),
+          },
+          {
+            path: '/c/:campaignId/timeline',
+            element: lazyPage(() => import('../features/timeline/TimelinePage')),
           },
           {
             path: '/c/:campaignId/encounters',
