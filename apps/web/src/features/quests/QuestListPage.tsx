@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { Quest, QuestChanges } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 
@@ -127,6 +128,9 @@ export default function QuestListPage() {
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
   }, [cid, load]);
+
+  // Keep the quest board live at the table (issue #113): poll ~5s while visible.
+  usePollWhileVisible(() => void load(), 5000, Number.isFinite(cid));
 
   if (!Number.isFinite(cid)) {
     return (
