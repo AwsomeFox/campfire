@@ -610,6 +610,8 @@ h1, h2, h3, h4, h5, h6 {
   .cf-sparkle {
     animation: none !important;
   }
+}
+
 /* Auto-linked @-mentions inside rendered markdown (issue #64). */
 .cf-mention {
   color: var(--color-accent);
