@@ -21,6 +21,7 @@ import type { Request, Response } from 'express';
 import fs from 'node:fs';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
+import { filterHidden } from '../../common/redact';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { AttachmentsService, ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES } from './attachments.service';
 import { AttachmentUploadDto } from './attachments.dto';
@@ -94,6 +95,25 @@ export class CampaignAttachmentsController {
 
     return this.attachmentsService.create(campaignId, body.kind, file, user, role);
   }
+
+  /**
+   * List a campaign's attachments (issue #97 — there was no listing endpoint, so
+   * the reveal/handouts flow had nothing to drive off). Any member may list, but
+   * hidden (DM-only, unrevealed) attachments are dropped for non-DM roles via
+   * filterHidden — same wholesale-secrecy treatment as hidden quests/npcs (#42),
+   * so a player's list never even hints at a staged handout's existence.
+   */
+  @Get()
+  @ApiOperation({ summary: 'List campaign attachments', description: 'Requires membership. Hidden (DM-only) attachments are omitted for non-DM roles.' })
+  @ApiResponse({ status: 200, description: 'Attachments for the campaign (hidden ones filtered out for non-DM).' })
+  async list(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    const all = await this.attachmentsService.listForCampaign(campaignId);
+    return filterHidden(all, role);
+  }
 }
 
 @ApiTags('attachments')
@@ -132,7 +152,16 @@ export class AttachmentsController {
       throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
     }
     const row = await this.attachmentsService.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId);
+
+    // Issue #97: a hidden (DM-only, unrevealed) attachment must be indistinguishable
+    // from a nonexistent one for non-DM members — otherwise sequential integer ids
+    // let a player enumerate & fetch every staged handout. 404 (not 403) so the
+    // response leaks nothing about whether the id exists, matching how hidden
+    // quests/npcs are treated (#42). The DM reveals it (POST :id/reveal) to share.
+    if (row.hidden && role !== 'dm') {
+      throw new NotFoundException(`Attachment ${id} not found`);
+    }
 
     // Issue #84: the DB row can outlive its bytes on disk — an orphaned row from a
     // failed write, a restore that didn't carry the uploads/ dir, or a lossy import.
@@ -189,6 +218,33 @@ export class AttachmentsController {
       if (err instanceof HttpException) throw err;
       throw new NotFoundException(`Attachment ${id} file is missing`);
     }
+  }
+
+  /**
+   * Reveal a staged handout to the party (issue #97): flips hidden=false so every
+   * member can now fetch the file / see it in the campaign list. dm-only — this is
+   * the DM's prep→reveal moment. Returns the updated attachment.
+   */
+  @Post(':id/reveal')
+  @ApiOperation({ summary: 'Reveal an attachment to players', description: 'dm role required. Clears the DM-only flag so all campaign members can fetch the file.' })
+  @ApiResponse({ status: 201, description: 'Updated attachment (hidden=false).' })
+  async reveal(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.attachmentsService.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.attachmentsService.setHidden(id, false, user, role);
+  }
+
+  /**
+   * Re-hide an attachment (issue #97): flips hidden=true, pulling it back to
+   * DM-only. Lets a DM stage previously-shared or legacy-visible material. dm-only.
+   */
+  @Post(':id/hide')
+  @ApiOperation({ summary: 'Hide an attachment from players', description: 'dm role required. Sets the DM-only flag so non-DM members can no longer fetch or list the file.' })
+  @ApiResponse({ status: 201, description: 'Updated attachment (hidden=true).' })
+  async hide(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.attachmentsService.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.attachmentsService.setHidden(id, true, user, role);
   }
 
   @Delete(':id')

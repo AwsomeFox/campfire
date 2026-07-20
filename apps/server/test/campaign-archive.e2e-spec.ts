@@ -60,6 +60,10 @@ describe('campaign archive read-only enforcement (e2e)', () => {
       .attach('file', TINY_PNG, { filename: 'memory.png', contentType: 'image/png' });
     expect(uploadRes.status).toBe(201);
     attachmentId = uploadRes.body.id;
+    // Images are DM-only by default (issue #97); reveal it so the player-visible
+    // "reads still work while archived" assertion below exercises a shared handout.
+    const revealRes = await request(server).post(`/api/v1/attachments/${attachmentId}/reveal`).set(dm);
+    expect(revealRes.status).toBe(201);
 
     // A pending proposal from before the archive — must NOT be approvable while archived.
     const proposalRes = await request(server)
