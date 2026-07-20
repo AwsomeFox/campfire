@@ -1612,13 +1612,15 @@ export class McpToolsService {
       'add_combatant',
       '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
-        'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted.',
+        'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted. Pass ' +
+        '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N".',
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
         ...CombatantCreate.shape,
         // Same constraints as CombatantCreate (Id, optional) but described for tools/list.
         characterId: Id.optional().describe('Character id — links a party member and pulls name/hp/initMod from their sheet when omitted'),
         ruleEntryId: Id.optional().describe('Monster statblock rule entry id — from lookup_rule/get_rule_entry'),
+        count: z.number().int().min(1).max(50).optional().describe('Add this many copies at once (monsters), names auto-suffixed 1..N so duplicates are distinguishable'),
       },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -1631,9 +1633,11 @@ export class McpToolsService {
     this.tool(
       server,
       'update_combatant',
-      'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), ' +
-        'addConditions/removeConditions, and/or initiative (dm only). DM may modify any combatant; a player may only ' +
-        'touch hp/conditions on a combatant linked to a character they own.',
+      'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
+        '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
+        'successes = stable), addConditions/removeConditions. DM-only fields: initiative, and the identity edits ' +
+        'name / hpMax / initMod (rename a duplicate, fix a mistyped stat). DM may modify any combatant; a player may ' +
+        'only touch hp/temp-hp/death-saves/conditions on a combatant linked to a character they own.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantUpdate.shape },
       async ({ encounterId, combatantId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
