@@ -403,6 +403,12 @@ export const apiTokens = sqliteTable('api_tokens', {
   userId: integer('user_id').notNull(),
   name: text('name').notNull(),
   scope: text('scope').notNull(),
+  // Server-enforced WRITE authority ('direct' | 'propose' | 'none'), orthogonal
+  // to `scope` (which caps read/role). See WriteScope in @campfire/schema. Existing
+  // DBs get this added via migrateApiTokensTableForWriteScope(), defaulting to
+  // 'direct' — the safe/back-compat value: pre-existing tokens write exactly as
+  // before, none are silently downgraded to read-only.
+  writeScope: text('write_scope').notNull().default('direct'),
   campaignId: integer('campaign_id'),
   // See db/db.module.ts ALTER TABLE note — existing DBs get this added via
   // migrateApiTokensTableForAdminEnabled(), defaulting to 0 (false), which is the

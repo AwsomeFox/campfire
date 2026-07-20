@@ -331,6 +331,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   user_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   scope TEXT NOT NULL,
+  write_scope TEXT NOT NULL DEFAULT 'direct',
   campaign_id INTEGER,
   admin_enabled INTEGER NOT NULL DEFAULT 0,
   token_hash TEXT NOT NULL UNIQUE,

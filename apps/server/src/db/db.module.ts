@@ -188,6 +188,32 @@ function migrateApiTokensTableForAdminEnabled(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #158 migration: `api_tokens.write_scope` didn't exist before a token's
+ * write authority was split from its read `scope`. Before this, a dm-scoped
+ * token wrote canon DIRECTLY and the proposal path was purely voluntary
+ * (?proposed=true) — an AI/DM token meant to only PROPOSE could just omit the
+ * flag. Plain NOT NULL DEFAULT 'direct' ADD COLUMN — no table rebuild, same
+ * shape as migrateApiTokensTableForAdminEnabled above. Defaulting to 'direct' is
+ * the safe/back-compat direction: every pre-existing token keeps writing exactly
+ * as it did (none are silently downgraded to read-only, which would break live
+ * integrations). Operators who want a propose-only or read-only token mint a new
+ * one with writeScope set. New DBs never hit this path — BOOTSTRAP_SQL already
+ * declares the column.
+ */
+function migrateApiTokensTableForWriteScope(sqlite: Database.Database): void {
+  const hasApiTokensTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='api_tokens'")
+    .get();
+  if (!hasApiTokensTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(api_tokens)').all() as Array<{ name: string }>;
+  const hasWriteScope = columns.some((c) => c.name === 'write_scope');
+  if (hasWriteScope) return;
+
+  sqlite.exec("ALTER TABLE api_tokens ADD COLUMN write_scope TEXT NOT NULL DEFAULT 'direct'");
+}
+
+/**
  * Migration for DBs created before proposal before/after diffs:
  * `proposals.snapshot` didn't exist. Plain nullable ADD COLUMN — no table
  * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
@@ -595,6 +621,7 @@ export function openDatabase(dataDir: string): {
   migrateUsersTableForTextSize(sqlite);
   migrateCampaignsTableForMapAttachment(sqlite);
   migrateApiTokensTableForAdminEnabled(sqlite);
+  migrateApiTokensTableForWriteScope(sqlite);
   migrateProposalsTableForSnapshot(sqlite);
   migrateProposalsTableForAttribution(sqlite);
   migrateCharactersTableForSheetDepth(sqlite);
