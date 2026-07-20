@@ -15,6 +15,7 @@
  *    everyone in the shared feed sees; the tray just surfaces the same kept die.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { DiceRoll } from '@campfire/schema';
 import { Btn } from '../../components/ui';
 import { RolledDice } from './RolledDice';
@@ -78,11 +79,11 @@ function previewText(pool: Pool, modifier: number, advMode: AdvMode): string {
   return entries.map(([sides, count]) => `${count}d${sides}`).join(' + ') + (formatMod(modifier) ? ` ${formatMod(modifier)}` : '');
 }
 
-const STATIC_PRESETS: { label: string; pool: Pool }[] = [
-  { label: 'Attack', pool: { 20: 1 } },
-  { label: 'Save', pool: { 20: 1 } },
-  { label: 'Ability check', pool: { 20: 1 } },
-  { label: 'Initiative', pool: { 20: 1 } },
+const STATIC_PRESETS: { labelKey: string; pool: Pool }[] = [
+  { labelKey: 'presetAttack', pool: { 20: 1 } },
+  { labelKey: 'presetSave', pool: { 20: 1 } },
+  { labelKey: 'presetAbilityCheck', pool: { 20: 1 } },
+  { labelKey: 'presetInitiative', pool: { 20: 1 } },
 ];
 
 function storageKey(campaignId: number): string {
@@ -101,6 +102,7 @@ function loadPresets(campaignId: number): SavedPreset[] {
 }
 
 export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }: DiceTrayProps) {
+  const { t } = useTranslation();
   const [pool, setPool] = useState<Pool>({});
   const [modifier, setModifier] = useState(0);
   const [advMode, setAdvMode] = useState<AdvMode>('flat');
@@ -184,7 +186,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
 
   const saveCurrentPreset = useCallback(() => {
     if (exprs.length === 0) return;
-    const label = window.prompt('Name this roll (e.g. "Longsword", "Stealth")')?.trim();
+    const label = window.prompt(t('dice.namePrompt'))?.trim();
     if (!label) return;
     const preset: SavedPreset = { label, pool: { ...pool }, modifier, advMode };
     persistPresets([...savedPresets.filter((p) => p.label !== label), preset].slice(-12));
@@ -205,7 +207,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
       if (result) {
         // Server keeps the high/low die (2d20kh1 / kl1) and returns the kept total.
         setFeedback({
-          label: advMode === 'adv' ? 'Advantage — kept high' : 'Disadvantage — kept low',
+          label: advMode === 'adv' ? t('dice.keptHigh') : t('dice.keptLow'),
           total: result.total,
           rolls: result.rolls,
           kept: result.kept,
@@ -232,7 +234,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
             key={sides}
             type="button"
             onClick={() => addDie(sides)}
-            aria-label={`Add a d${sides}`}
+            aria-label={t('dice.addDie', { sides })}
             className="cf-btn"
             style={{
               minHeight: dieBtnSize,
@@ -263,7 +265,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
               : {}),
           }}
         >
-          Advantage
+          {t('dice.advantage')}
         </button>
         <button
           type="button"
@@ -279,19 +281,19 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
               : {}),
           }}
         >
-          Disadvantage
+          {t('dice.disadvantage')}
         </button>
       </div>
 
       {/* Modifier stepper */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span className="text-muted" style={{ fontSize: 12, minWidth: 52 }}>
-          Modifier
+          {t('dice.modifier')}
         </span>
         <button
           type="button"
           onClick={() => setModifier((m) => Math.max(m - 1, -MAX_MOD))}
-          aria-label="Decrease modifier"
+          aria-label={t('dice.decreaseModifier')}
           className="cf-btn cf-btn-ghost"
           style={{ minHeight: 36, minWidth: 40, padding: 0, fontSize: 18 }}
         >
@@ -306,7 +308,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
         <button
           type="button"
           onClick={() => setModifier((m) => Math.min(m + 1, MAX_MOD))}
-          aria-label="Increase modifier"
+          aria-label={t('dice.increaseModifier')}
           className="cf-btn cf-btn-ghost"
           style={{ minHeight: 36, minWidth: 40, padding: 0, fontSize: 18 }}
         >
@@ -346,7 +348,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
               <button
                 type="button"
                 onClick={() => decGroup(sides)}
-                aria-label={`Remove one d${sides}`}
+                aria-label={t('dice.removeOne', { sides })}
                 className="text-muted"
                 style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '0 4px' }}
               >
@@ -355,7 +357,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
               <button
                 type="button"
                 onClick={() => removeGroup(sides)}
-                aria-label={`Remove all d${sides}`}
+                aria-label={t('dice.removeAll', { sides })}
                 className="text-muted"
                 style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, padding: '0 2px' }}
               >
@@ -376,7 +378,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
             className="text-muted"
             style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11.5, marginLeft: 'auto' }}
           >
-            Clear
+            {t('dice.clear')}
           </button>
         )}
       </div>
@@ -389,7 +391,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
           disabled={!canRoll}
           style={{ flex: 1, minHeight: compact ? 40 : 48, fontSize: compact ? 14 : 16 }}
         >
-          {rolling ? 'Rolling…' : exprs.length === 0 ? 'Roll' : `Roll ${previewText(pool, modifier, advMode)}`}
+          {rolling ? t('dice.rolling') : exprs.length === 0 ? t('dice.roll') : t('dice.rollExpr', { preview: previewText(pool, modifier, advMode) })}
         </Btn>
         {feedback && (
           <div style={{ textAlign: 'right', flex: 'none' }}>
@@ -415,13 +417,13 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {STATIC_PRESETS.map((p) => (
           <button
-            key={p.label}
+            key={p.labelKey}
             type="button"
             onClick={() => applyPreset(p)}
             className="cf-btn cf-btn-ghost"
             style={{ minHeight: 32, fontSize: 11.5, padding: '0 10px' }}
           >
-            {p.label}
+            {t(`dice.${p.labelKey}`)}
           </button>
         ))}
         {savedPresets.map((p) => (
@@ -445,7 +447,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
             <button
               type="button"
               onClick={() => deletePreset(p.label)}
-              aria-label={`Delete preset ${p.label}`}
+              aria-label={t('dice.deletePreset', { label: p.label })}
               className="text-muted"
               style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11, padding: '6px 8px 6px 2px' }}
             >
@@ -460,7 +462,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
             className="text-muted"
             style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11.5, padding: '0 6px', marginLeft: 'auto' }}
           >
-            + Save roll
+            {t('dice.saveRoll')}
           </button>
         )}
       </div>

@@ -10,6 +10,7 @@
  * item's resolution note and a link to the entity it was resolved into.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import type { Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -65,6 +66,7 @@ function optionLabel(type: EntityTypeValue, row: Record<string, unknown>): strin
 }
 
 export default function InboxPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { roleIn } = useAuth();
@@ -93,12 +95,12 @@ export default function InboxPage() {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
       } else {
-        setError("Couldn't load the inbox.");
+        setError(t('notes.inboxCouldntLoad'));
       }
     } finally {
       setLoading(false);
     }
-  }, [cid]);
+  }, [cid, t]);
 
   useEffect(() => {
     if (Number.isFinite(cid) && role === 'dm') void load();
@@ -113,14 +115,14 @@ export default function InboxPage() {
       setExpandedId(null);
       await load();
     } catch {
-      setError("Couldn't resolve this item.");
+      setError(t('notes.inboxCouldntResolve'));
     }
   }
 
   if (!Number.isFinite(cid)) {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('notes.noCampaign')} />
       </div>
     );
   }
@@ -129,7 +131,7 @@ export default function InboxPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🎩" title="DM only" hint="The scribe inbox is only visible to the DM." />
+          <EmptyState icon="🎩" title={t('notes.dmOnlyTitle')} hint={t('notes.dmOnlyHint')} />
         </Card>
       </div>
     );
@@ -139,7 +141,7 @@ export default function InboxPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🔒" title="You don't have access to this campaign" />
+          <EmptyState icon="🔒" title={t('notes.noAccess')} />
         </Card>
       </div>
     );
@@ -147,9 +149,9 @@ export default function InboxPage() {
 
   return (
     <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
-      <h1 className="text-xl font-extrabold text-white m-0">Scribe inbox</h1>
+      <h1 className="text-xl font-extrabold text-white m-0">{t('notes.inboxTitle')}</h1>
       <p className="text-muted text-xs m-0">
-        Raw notes from the table. Resolve each one into the entity it belongs to — or let Claude sweep them for you.
+        {t('notes.inboxIntro')}
       </p>
       <p className="text-muted text-xs m-0">
         &quot;Claude&quot; here means any MCP-capable assistant (like Claude) connected with an API token — set one
@@ -158,11 +160,11 @@ export default function InboxPage() {
 
       <div className="flex gap-1.5 flex-wrap">
         <button onClick={() => setView('open')}>
-          <Chip variant={view === 'open' ? 'active' : 'available'}>✉️ Open{items.length > 0 ? ` (${items.length})` : ''}</Chip>
+          <Chip variant={view === 'open' ? 'active' : 'available'}>{t('notes.tabOpen')}{items.length > 0 ? ` (${items.length})` : ''}</Chip>
         </button>
         <button onClick={() => setView('history')}>
           <Chip variant={view === 'history' ? 'active' : 'available'}>
-            ✅ History{resolvedItems.length > 0 ? ` (${resolvedItems.length})` : ''}
+            {t('notes.tabHistory')}{resolvedItems.length > 0 ? ` (${resolvedItems.length})` : ''}
           </Chip>
         </button>
       </div>
@@ -175,7 +177,7 @@ export default function InboxPage() {
         </Card>
       ) : view === 'open' ? (
         items.length === 0 ? (
-          <EmptyState icon="✉️" title="Inbox clear" hint="No open items — nothing waiting to be resolved." />
+          <EmptyState icon="✉️" title={t('notes.inboxClearTitle')} hint={t('notes.inboxClearHint')} />
         ) : (
           <div className="space-y-3">
             {items.map((item) => (
@@ -192,7 +194,7 @@ export default function InboxPage() {
           </div>
         )
       ) : resolvedItems.length === 0 ? (
-        <EmptyState icon="🗂" title="No history yet" hint="Resolved items land here, linked to the entities they became." />
+        <EmptyState icon="🗂" title={t('notes.noHistoryTitle')} hint={t('notes.noHistoryHint')} />
       ) : (
         <div className="space-y-3">
           {resolvedItems.map((item) => (
@@ -214,6 +216,7 @@ function entityHref(campaignId: number, item: Note): string | null {
 }
 
 function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) {
+  const { t } = useTranslation();
   const href = entityHref(campaignId, item);
   const resolvedOn = item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : null;
   return (
@@ -225,14 +228,14 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
         <div className="flex-1 min-w-0">
           <Markdown>{item.body}</Markdown>
           <p className="text-muted text-[11px] mt-0.5 mb-0">
-            from {item.authorName || 'Someone'}
-            {resolvedOn && <> · resolved {resolvedOn}</>}
+            {t('notes.fromAuthor', { name: item.authorName || 'Someone' })}
+            {resolvedOn && <> · {t('notes.resolvedLabel')} {resolvedOn}</>}
           </p>
         </div>
       </div>
 
       <div className="cf-inset p-3 space-y-1.5">
-        <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest m-0">Resolved into</p>
+        <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest m-0">{t('notes.resolvedInto')}</p>
         {item.entityType && href && (
           <Link to={href} className="inline-flex text-xs text-purple-400 hover:underline">
             {entityIcon[item.entityType]} {capitalize(item.entityType)}
@@ -242,7 +245,7 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
         {item.resolvedNote ? (
           <p className="text-xs text-slate-400 m-0">{item.resolvedNote}</p>
         ) : (
-          !item.entityType && <p className="text-xs text-slate-500 m-0">No resolution note.</p>
+          !item.entityType && <p className="text-xs text-slate-500 m-0">{t('notes.noResolutionNote')}</p>
         )}
       </div>
     </Card>
@@ -268,6 +271,7 @@ function InboxItem({
   onResolve: (resolvedNote: string, link: { entityType: EntityTypeValue; entityId: number } | null) => void;
   onDismiss: () => void;
 }) {
+  const { t } = useTranslation();
   const [resolutionNote, setResolutionNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [linkType, setLinkType] = useState<EntityTypeValue | ''>('');
@@ -326,18 +330,18 @@ function InboxItem({
         </span>
         <div className="flex-1 min-w-0">
           <Markdown>{item.body}</Markdown>
-          <p className="text-muted text-[11px] mt-0.5 mb-0">from {item.authorName || 'Someone'}</p>
+          <p className="text-muted text-[11px] mt-0.5 mb-0">{t('notes.fromAuthor', { name: item.authorName || 'Someone' })}</p>
         </div>
       </div>
 
       {expanded && (
         <div className="cf-inset p-3 space-y-2.5 border-amber-500/30">
-          <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Resolve into…</p>
+          <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">{t('notes.resolveInto')}</p>
           <TextArea
             style={{ minHeight: 70 }}
             value={resolutionNote}
             onChange={(e) => setResolutionNote(e.target.value)}
-            placeholder="Resolution note — what this became…"
+            placeholder={t('notes.resolutionPlaceholder')}
           />
           <div className="flex gap-2 flex-wrap">
             <select
@@ -345,7 +349,7 @@ function InboxItem({
               value={linkType}
               onChange={(e) => setLinkType(e.target.value as EntityTypeValue | '')}
             >
-              <option value="">No entity link</option>
+              <option value="">{t('notes.noEntityLink')}</option>
               {LINKABLE.map((l) => (
                 <option key={l.value} value={l.value}>
                   {l.label}
@@ -359,7 +363,7 @@ function InboxItem({
                 onChange={(e) => setLinkId(e.target.value === '' ? '' : Number(e.target.value))}
                 disabled={optionsLoading}
               >
-                <option value="">{optionsLoading ? 'Loading…' : options.length === 0 ? 'Nothing to link' : 'Pick one…'}</option>
+                <option value="">{optionsLoading ? t('notes.loading') : options.length === 0 ? t('notes.nothingToLink') : t('notes.pickOne')}</option>
                 {options.map((o) => (
                   <option key={o.id} value={o.id}>
                     {o.label}
@@ -370,14 +374,14 @@ function InboxItem({
           </div>
           <div className="flex items-center justify-between pt-1 gap-2 flex-wrap">
             <p className="text-[11px] text-slate-500">
-              Marks this item resolved{linkType && linkId !== '' ? ', linked to the entity it became' : ' with your note attached'}.
+              {t('notes.resolvePreamble')}{linkType && linkId !== '' ? t('notes.resolveLinked') : t('notes.resolveNote')}.
             </p>
             <div className="flex gap-2 shrink-0">
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={handleDismiss} disabled={busy}>
-                Dismiss
+                {t('notes.dismiss')}
               </Btn>
               <Btn className="!min-h-0 !py-1.5 text-xs" onClick={handleResolve} disabled={busy}>
-                Resolve
+                {t('notes.resolve')}
               </Btn>
             </div>
           </div>
@@ -386,7 +390,7 @@ function InboxItem({
 
       <div className="flex justify-end">
         <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onToggle}>
-          {expanded ? 'Collapse' : 'Resolve →'}
+          {expanded ? t('notes.collapse') : t('notes.resolveArrow')}
         </Btn>
       </div>
     </Card>

@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { SharedRecap } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { formatDate as formatLocaleDate } from '../../lib/format';
 import { Card, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 
@@ -96,5 +97,5 @@ function formatDate(iso: string | null): string {
   if (!iso) return 'Undated';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return 'Undated';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return formatLocaleDate(d, { month: 'short', day: 'numeric', year: 'numeric' });
 }
