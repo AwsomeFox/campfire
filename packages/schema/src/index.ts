@@ -44,6 +44,30 @@ export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updated
 export const CampaignUpdate = CampaignCreate.partial();
 
 // ---------- character ----------
+export const AbilityKey = z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']);
+export type AbilityKey = z.infer<typeof AbilityKey>;
+
+/** Skill proficiency rank; a skill absent from the record is unproficient. */
+export const SkillRank = z.enum(['proficient', 'expertise']);
+export type SkillRank = z.infer<typeof SkillRank>;
+
+/** One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5", "1d8+3 slashing") so non-attack actions stay valid. */
+export const CharacterAction = z.object({
+  name: z.string().min(1).max(120),
+  kind: z.string().max(40).default(''), // "melee", "ranged", "spell", "feature"…
+  toHit: z.string().max(20).default(''),
+  damage: z.string().max(80).default(''),
+  notes: z.string().max(500).default(''),
+});
+export type CharacterAction = z.infer<typeof CharacterAction>;
+
+/** Slots at one spell level. `used` is clamped server-side to [0, max]. */
+export const SpellSlotLevel = z.object({
+  max: z.number().int().min(0).max(20),
+  used: z.number().int().min(0).max(20).default(0),
+});
+export type SpellSlotLevel = z.infer<typeof SpellSlotLevel>;
+
 export const Character = z.object({
   id: Id,
   campaignId: Id,
@@ -58,6 +82,10 @@ export const Character = z.object({
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(1).default(10),
   conditions: z.array(z.string().max(40)).default([]),
+  saveProficiencies: z.array(AbilityKey).default([]), // abilities with saving-throw proficiency
+  skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
+  actions: z.array(CharacterAction).max(100).default([]),
+  spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
@@ -73,6 +101,11 @@ export const HpPatch = z.union([
 export const ConditionsPatch = z.object({
   add: z.array(z.string().max(40)).optional(),
   remove: z.array(z.string().max(40)).optional(),
+});
+/** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
+export const SpellSlotPatch = z.object({
+  level: z.number().int().min(1).max(9),
+  delta: z.number().int(),
 });
 
 // ---------- quest ----------
