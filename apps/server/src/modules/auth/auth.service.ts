@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { eq, lt } from 'drizzle-orm';
 import type { z } from 'zod';
-import { SetupRequest, LoginRequest } from '@campfire/schema';
+import { SetupRequest, LoginRequest, SignupRequest } from '@campfire/schema';
 import type { Me } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { users, userSessions, campaignMembers } from '../../db/schema';
@@ -21,6 +21,7 @@ import { SESSION_MAX_AGE_MS, SESSION_SLIDING_UPDATE_INTERVAL_MS } from './auth.c
 
 type SetupInput = z.infer<typeof SetupRequest>;
 type LoginInput = z.infer<typeof LoginRequest>;
+type SignupInput = z.infer<typeof SignupRequest>;
 
 export interface SessionIssueResult {
   token: string;
@@ -82,6 +83,39 @@ export class AuthService implements OnApplicationBootstrap {
       password: input.password,
       displayName: input.displayName,
       serverRole: 'admin',
+    });
+    return this.issueSession(user.id);
+  }
+
+  /**
+   * Self-service signup (POST /auth/signup) — gated on the admin-controlled
+   * allowSignup server setting (default OFF). Always creates a serverRole
+   * 'user' account (never admin; the request shape has no role field at all)
+   * and starts a session, mirroring setup()'s create-then-issueSession flow.
+   *
+   * Also gated on allowLocalLogin: a non-admin account minted while local
+   * login is disabled would be locally unusable the moment its signup session
+   * expires (verifyCredentials() 403s non-admins in that state), so refusing
+   * up front keeps the two settings consistent. Same reasoning blocks signup
+   * before first-run setup: POST /auth/setup is the only way to create the
+   * first (admin) account.
+   */
+  async signup(input: SignupInput): Promise<SessionIssueResult> {
+    if (await this.setupRequired()) {
+      throw new ConflictException('Server setup is not complete');
+    }
+    const [allowSignup, allowLocalLogin] = await Promise.all([
+      this.settingsService.getAllowSignup(),
+      this.settingsService.getAllowLocalLogin(),
+    ]);
+    if (!allowSignup || !allowLocalLogin) {
+      throw new ForbiddenException('Self-service signup is disabled');
+    }
+    const user = await this.usersService.create({
+      username: input.username,
+      password: input.password,
+      displayName: input.displayName,
+      serverRole: 'user',
     });
     return this.issueSession(user.id);
   }
