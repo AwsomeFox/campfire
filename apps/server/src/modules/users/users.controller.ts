@@ -1,25 +1,51 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query, BadRequestException } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { ApiTokenCreated } from '@campfire/schema';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { RequestUser } from '../../common/user.types';
+import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
+import { RoleResolver } from '../membership/role-resolver.service';
 import { UsersService } from './users.service';
 import { TokensService } from '../tokens/tokens.service';
 import { UserCreateDto, UserUpdateDto, PasswordChangeDto, AdminTokenCreateDto } from './users.dto';
 
-/** Any authenticated user — used by the member-picker. Must be declared before UsersController so /users/lookup doesn't get swallowed by /users/:id-shaped routes in admin controller ordering. */
+/**
+ * User directory lookup — used by the DM's add-member picker. Declared before
+ * UsersController so /users/lookup doesn't get swallowed by /users/:id-shaped
+ * routes in admin controller ordering.
+ *
+ * AUTHZ (issue #88): this is NOT open to every authenticated principal. The
+ * server-wide user table is a directory-enumeration oracle (usernames feed the
+ * login/timing oracle), so it exposed every account to any player/viewer token.
+ * The lookup only exists to serve one legitimate flow — a dm resolving a
+ * username to add someone to their campaign (POST /campaigns/:id/members is
+ * dm-gated) — so it is now gated to callers who are a dm of at least one
+ * campaign, or who hold real server-admin power. A viewer/player (or a token
+ * scoped below dm) gets 403.
+ */
 @ApiTags('users')
 @Controller('users')
 export class UsersLookupController {
-  constructor(private readonly users: UsersService) {}
+  constructor(
+    private readonly users: UsersService,
+    private readonly roleResolver: RoleResolver,
+  ) {}
 
   @Get('lookup')
-  @ApiOperation({ summary: 'Look up users by username/display name', description: 'Any authenticated user. Used by member pickers. Requires query >= 2 chars.' })
+  @ApiOperation({
+    summary: 'Look up users by username/display name',
+    description:
+      'Restricted to a dm of at least one campaign (the add-member picker) or a server admin. Requires query >= 2 chars.',
+  })
   @ApiQuery({ name: 'query', required: true, description: 'Substring match against username or displayName, min length 2.' })
   @ApiResponse({ status: 200, description: 'Up to 10 matching users (id, username, displayName).' })
   @ApiResponse({ status: 400, description: 'query missing or shorter than 2 characters.' })
-  lookup(@Query('query') query: string | undefined) {
+  @ApiResponse({ status: 403, description: 'Caller is neither a dm of any campaign nor a server admin.' })
+  async lookup(@Query('query') query: string | undefined, @CurrentUser() user: RequestUser) {
+    const allowed = hasServerAdminPower(user) || (await this.roleResolver.isDmOfAnyCampaign(user));
+    if (!allowed) {
+      throw new ForbiddenException('User lookup is restricted to campaign DMs and server admins');
+    }
     if (!query || query.trim().length < 2) {
       throw new BadRequestException('query must be at least 2 characters');
     }
