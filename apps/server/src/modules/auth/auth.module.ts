@@ -7,11 +7,12 @@ import { OidcService } from './oidc.service';
 import { PasswordResetService } from './password-reset.service';
 import { AuthController, MeController } from './auth.controller';
 import { OidcController } from './oidc.controller';
+import { OidcAdminController } from './oidc-admin.controller';
 import { PasswordResetAdminController } from './password-reset.controller';
 
 @Module({
   imports: [UsersModule, SettingsModule, TokensModule],
-  controllers: [AuthController, MeController, OidcController, PasswordResetAdminController],
+  controllers: [AuthController, MeController, OidcController, OidcAdminController, PasswordResetAdminController],
   providers: [AuthService, OidcService, PasswordResetService],
   exports: [AuthService, OidcService],
 })

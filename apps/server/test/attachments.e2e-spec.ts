@@ -1,4 +1,6 @@
 import zlib from 'node:zlib';
+import fs from 'node:fs';
+import path from 'node:path';
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
@@ -278,6 +280,53 @@ describe('attachments (e2e)', () => {
     it('GET on a nonexistent attachment id is 404', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).get(`/api/v1/attachments/999999/file`).set(viewer);
+      expect(res.status).toBe(404);
+    });
+
+    // Issue #84 regression: DB row present but the on-disk file is gone (orphaned row).
+    // Previously `fs.createReadStream(...).pipe(res)` had no 'error' listener, so the
+    // ENOENT surfaced as an uncaught exception and crashed the whole server process.
+    // It must instead return 404 and leave the process alive to serve further requests.
+    it('GET is 404 (not a crash) when the DB row exists but the file was deleted from disk', async () => {
+      const server = ctx.app.getHttpServer();
+      const uploadRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'orphan.png', contentType: 'image/png' });
+      expect(uploadRes.status).toBe(201);
+      const orphanId = uploadRes.body.id;
+
+      // Delete the bytes on disk, keeping the DB row — manufacture an orphan.
+      const diskPath = path.join(ctx.dataDir, 'uploads', String(campaignId), `${orphanId}.png`);
+      expect(fs.existsSync(diskPath)).toBe(true);
+      fs.rmSync(diskPath);
+
+      const res = await request(server).get(`/api/v1/attachments/${orphanId}/file`).set(dm);
+      expect(res.status).toBe(404);
+
+      // The process is still up: an unrelated request served fine right after.
+      const stillAlive = await request(server).get(`/api/v1/attachments/999998/file`).set(dm);
+      expect(stillAlive.status).toBe(404);
+    });
+
+    // Same orphaned-file case via the ?size=thumb variant — thumbnail generation reads
+    // the (now-missing) original, so it must also yield a clean 404, never a crash.
+    it('GET ?size=thumb is 404 (not a crash) when the file is missing', async () => {
+      const server = ctx.app.getHttpServer();
+      const uploadRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'orphan-thumb.png', contentType: 'image/png' });
+      expect(uploadRes.status).toBe(201);
+      const orphanId = uploadRes.body.id;
+
+      const diskPath = path.join(ctx.dataDir, 'uploads', String(campaignId), `${orphanId}.png`);
+      expect(fs.existsSync(diskPath)).toBe(true);
+      fs.rmSync(diskPath);
+
+      const res = await request(server).get(`/api/v1/attachments/${orphanId}/file?size=thumb`).set(dm);
       expect(res.status).toBe(404);
     });
   });

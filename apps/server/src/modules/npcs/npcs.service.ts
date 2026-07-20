@@ -6,7 +6,7 @@ import type { Npc, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import { redactSecret, redactSecrets } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -24,6 +24,7 @@ export function toDomain(row: typeof npcs.$inferSelect): Npc {
     locationId: row.locationId,
     body: row.body,
     dmSecret: row.dmSecret,
+    hidden: row.hidden,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -38,7 +39,8 @@ export class NpcsService {
 
   async listForCampaign(campaignId: number, role: Role): Promise<Npc[]> {
     const rows = await this.db.select().from(npcs).where(eq(npcs.campaignId, campaignId));
-    return redactSecrets(rows.map(toDomain), role);
+    // Drop hidden NPCs wholesale for non-DM BEFORE redacting dmSecret (issue #42).
+    return redactSecrets(filterHidden(rows.map(toDomain), role), role);
   }
 
   async getRowOrThrow(id: number) {
@@ -49,7 +51,10 @@ export class NpcsService {
 
   async getOrThrow(id: number, role: Role): Promise<Npc> {
     const row = await this.getRowOrThrow(id);
-    return redactSecret(toDomain(row), role);
+    const npc = toDomain(row);
+    // Hidden NPC → 404 for non-DM, so its existence isn't leaked (issue #42).
+    if (!isVisibleTo(npc, role)) throw new NotFoundException(`NPC ${id} not found`);
+    return redactSecret(npc, role);
   }
 
   async create(campaignId: number, input: NpcCreateInput, user: RequestUser, role: Role): Promise<Npc> {
@@ -64,6 +69,7 @@ export class NpcsService {
         locationId: input.locationId ?? null,
         body: input.body ?? '',
         dmSecret: input.dmSecret ?? '',
+        hidden: input.hidden ?? false,
         createdAt: ts,
         updatedAt: ts,
       })
