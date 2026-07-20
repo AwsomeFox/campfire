@@ -116,6 +116,31 @@ describe('characters (e2e)', () => {
     expect(res.body.hpCurrent).toBe(0);
   });
 
+  // Issue #112 — create() now clamps hpCurrent/ac like every other write path,
+  // instead of persisting out-of-range values verbatim.
+  it('POST create clamps out-of-range hpCurrent and ac', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Overflow Ogre', hpMax: 10, hpCurrent: 99999, ac: -50 });
+    expect(res.status).toBe(201);
+    // hpCurrent above hpMax clamps to hpMax; ac below 0 clamps to 0 (AC_MIN).
+    expect(res.body.hpCurrent).toBe(10);
+    expect(res.body.ac).toBe(0);
+  });
+
+  it('POST create clamps negative hpCurrent to 0 and huge ac to AC_MAX', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Underflow Imp', hpMax: 12, hpCurrent: -500, ac: 999 });
+    expect(res.status).toBe(201);
+    expect(res.body.hpCurrent).toBe(0);
+    expect(res.body.ac).toBe(40); // AC_MAX
+  });
+
   // Sheet depth (issue #1): saving throws, skills, actions, spell slots.
   it('new characters default to empty sheet-depth fields', async () => {
     const server = ctx.app.getHttpServer();
