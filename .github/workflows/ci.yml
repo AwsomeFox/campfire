@@ -61,8 +61,11 @@ jobs:
           if-no-files-found: warn
 
   # Browser E2E (Playwright). Guarded: no Playwright project exists yet (tracked
-  # in #81), so `--if-present` makes this a clean no-op until a root `test:e2e`
-  # script is added — at which point this job runs it with no workflow change.
+  # in #81) — now implemented: the root `test:e2e` script builds schema + server +
+  # web and runs the Playwright suite (apps/web/e2e) against the real server
+  # serving the built SPA on one origin, with a seeded per-role backend. The
+  # `--if-present` guard is kept so the job still no-ops if the script is ever
+  # removed. The browser is installed explicitly (npm ci does not fetch it).
   e2e-web:
     runs-on: ubuntu-latest
     steps:
@@ -72,7 +75,16 @@ jobs:
           node-version: '24.4.1'
           cache: npm
       - run: npm ci
+      # Chromium only — the suite runs a single headless project (see playwright.config.ts).
+      - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e --if-present
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          if-no-files-found: ignore
 
   # Multi-arch image → GHCR. Only runs on version tags (v1.2.3), and only after
   # build-test passes on that same ref.

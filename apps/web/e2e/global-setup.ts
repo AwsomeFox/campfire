@@ -1,0 +1,154 @@
+import { request, type APIRequestContext, type FullConfig } from '@playwright/test';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+/**
+ * One-time backend seed for the web E2E suite (issue #81).
+ *
+ * Builds a deterministic, fully role-scoped fixture against a fresh server:
+ *  - first-run /auth/setup   -> `admin` (server admin)
+ *  - admin creates users     -> `dm`, `player`, `viewer` (serverRole 'user')
+ *  - `dm` creates a campaign -> becomes its DM; adds player + viewer as members
+ *  - `dm` creates an NPC with a dmSecret (the visibility fixture)
+ *  - `dm` creates a running encounter with two monsters at known initiative/HP
+ *    (the combat-tracker turn/HP-redaction fixture)
+ *
+ * Then it captures a real cookie-session storageState per role so specs just
+ * `test.use({ storageState })` and land already-authenticated. Seed ids are
+ * written to e2e/.auth/seed.json for specs to read.
+ *
+ * Everything goes through the public HTTP API (no DB poking), so the seed also
+ * doubles as a smoke test that the whole auth + membership + encounter stack
+ * boots and agrees with the client.
+ */
+
+// __dirname is provided by Playwright's CJS transform (this file is not run as an
+// ES module), so avoid import.meta here — it isn't available in that context.
+export const AUTH_DIR = resolve(__dirname, '.auth');
+
+export const CREDS = {
+  admin: { username: 'admin', password: 'campfire-admin-pw-1' },
+  dm: { username: 'dm', password: 'campfire-dm-pw-1' },
+  player: { username: 'player', password: 'campfire-player-pw-1' },
+  viewer: { username: 'viewer', password: 'campfire-viewer-pw-1' },
+} as const;
+
+/** The dmSecret string that must be visible to the DM and invisible to everyone else. */
+export const NPC_SECRET = 'THE-INNKEEPER-IS-A-DISGUISED-DRAGON';
+export const NPC_NAME = 'Bram the Innkeeper';
+
+export const MONSTERS = [
+  { name: 'Goblin Boss', hpMax: 30, initiative: 18 },
+  { name: 'Goblin Skirmisher', hpMax: 12, initiative: 7 },
+] as const;
+
+export interface SeedData {
+  baseURL: string;
+  campaignId: number;
+  encounterId: number;
+  npcId: number;
+}
+
+async function okJson(ctx: APIRequestContext, method: 'post' | 'get', path: string, data?: unknown) {
+  const res = await ctx[method](path, data === undefined ? undefined : { data });
+  if (!res.ok()) {
+    const body = await res.text();
+    throw new Error(`${method.toUpperCase()} ${path} -> ${res.status()} ${res.statusText()}: ${body}`);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : undefined;
+}
+
+async function loginContext(baseURL: string, who: keyof typeof CREDS): Promise<APIRequestContext> {
+  const ctx = await request.newContext({ baseURL });
+  await okJson(ctx, 'post', '/api/v1/auth/login', CREDS[who]);
+  return ctx;
+}
+
+export default async function globalSetup(config: FullConfig) {
+  const baseURL = config.projects[0]?.use?.baseURL ?? 'http://127.0.0.1:8123';
+  mkdirSync(AUTH_DIR, { recursive: true });
+
+  // --- first-run setup: creates the server admin + its session -----------------
+  const admin = await request.newContext({ baseURL });
+  const status = await okJson(admin, 'get', '/api/v1/auth/status');
+  if (status.setupRequired) {
+    await okJson(admin, 'post', '/api/v1/auth/setup', {
+      username: CREDS.admin.username,
+      password: CREDS.admin.password,
+      displayName: 'Server Admin',
+    });
+  } else {
+    // Server was reused (local `reuseExistingServer`) and already seeded — re-login.
+    await okJson(admin, 'post', '/api/v1/auth/login', CREDS.admin);
+  }
+
+  // --- admin provisions the three campaign users -------------------------------
+  const userIds: Record<'dm' | 'player' | 'viewer', number> = { dm: 0, player: 0, viewer: 0 };
+  for (const who of ['dm', 'player', 'viewer'] as const) {
+    // Idempotent for reused servers: a duplicate username 409s — fall back to login+/me.
+    const res = await admin.post('/api/v1/users', {
+      data: { username: CREDS[who].username, password: CREDS[who].password, serverRole: 'user' },
+    });
+    if (res.ok()) {
+      userIds[who] = (await res.json()).id;
+    } else {
+      const ctx = await loginContext(baseURL, who);
+      userIds[who] = (await okJson(ctx, 'get', '/api/v1/me')).user.id;
+      await ctx.dispose();
+    }
+  }
+
+  // --- DM builds the campaign + memberships + fixtures -------------------------
+  const dm = await loginContext(baseURL, 'dm');
+  const campaign = await okJson(dm, 'post', '/api/v1/campaigns', { name: 'E2E — Cinderhaven' });
+  const campaignId: number = campaign.id;
+
+  await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.player, role: 'player' });
+  await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
+
+  const npc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
+    name: NPC_NAME,
+    role: 'Tavern keeper',
+    body: 'A round, cheerful man who runs the Ember Hearth inn.',
+    dmSecret: NPC_SECRET,
+  });
+  const npcId: number = npc.id;
+
+  const encounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'Ambush at the Ember Hearth',
+  });
+  const encounterId: number = encounter.id;
+
+  for (const m of MONSTERS) {
+    const c = await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/combatants`, {
+      kind: 'monster',
+      name: m.name,
+      hpMax: m.hpMax,
+    });
+    // Fix initiative deterministically (roll-initiative is random) so turn order is stable.
+    const patched = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
+      data: { initiative: m.initiative },
+    });
+    if (!patched.ok()) {
+      throw new Error(`PATCH combatant initiative -> ${patched.status()}: ${await patched.text()}`);
+    }
+  }
+  // Start the fight: status -> running, round 1, current actor = highest initiative.
+  await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/start`);
+
+  // --- capture a real session storageState per role ----------------------------
+  await admin.storageState({ path: resolve(AUTH_DIR, 'admin.json') });
+  await dm.storageState({ path: resolve(AUTH_DIR, 'dm.json') });
+
+  const player = await loginContext(baseURL, 'player');
+  await player.storageState({ path: resolve(AUTH_DIR, 'player.json') });
+
+  const viewer = await loginContext(baseURL, 'viewer');
+  await viewer.storageState({ path: resolve(AUTH_DIR, 'viewer.json') });
+
+  const seed: SeedData = { baseURL, campaignId, encounterId, npcId };
+  writeFileSync(resolve(AUTH_DIR, 'seed.json'), JSON.stringify(seed, null, 2));
+
+  await Promise.all([admin.dispose(), dm.dispose(), player.dispose(), viewer.dispose()]);
+}
