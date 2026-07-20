@@ -70,8 +70,13 @@ export class UsersController {
 
   @Post(':id/password')
   @HttpCode(204)
-  @ApiOperation({ summary: "Reset a user's password", description: 'Server-admin only. No currentPassword check (admin reset, not self-service).' })
-  @ApiResponse({ status: 204, description: 'Password reset.' })
+  @ApiOperation({
+    summary: "Reset a user's password",
+    description:
+      'Server-admin only. No currentPassword check (admin reset, not self-service). ' +
+      "Treated as a credential-compromise response: revokes ALL of the user's sessions AND personal access tokens — a leaked cf_pat_… token or stolen cookie does not survive the reset.",
+  })
+  @ApiResponse({ status: 204, description: 'Password reset; all sessions and personal access tokens revoked.' })
   async setPassword(@Param('id', ParseIntPipe) id: number, @Body() body: PasswordChangeDto) {
     await this.users.setPassword(id, body.newPassword);
   }
@@ -113,5 +118,51 @@ export class UsersController {
     const target = await this.users.getOrThrow(id);
     const owner: RequestUser = { id: String(target.id), name: target.displayName || target.username, serverRole: target.serverRole };
     return this.tokens.mintFor(owner, target.id, body, requester);
+  }
+
+  /**
+   * Admin token lifecycle (issue #44): before these routes existed, an admin
+   * responding to a leaked `cf_pat_…` token had no way to even SEE another
+   * user's tokens, let alone revoke one — the only remedy was disabling or
+   * deleting the whole account. List returns the same metadata-only shape as
+   * self-service GET /tokens (raw values are never retrievable after mint).
+   */
+  @Get(':id/tokens')
+  @ApiOperation({
+    summary: "List a user's personal access tokens",
+    description: "Server-admin only. Metadata only (name, scope, campaignId, prefix, lastUsedAt) — raw token values are never retrievable after creation.",
+  })
+  @ApiResponse({ status: 200, description: "The target user's tokens." })
+  @ApiResponse({ status: 404, description: 'User not found.' })
+  async listTokens(@Param('id', ParseIntPipe) id: number) {
+    await this.users.getOrThrow(id);
+    return this.tokens.listOwn(id);
+  }
+
+  @Delete(':id/tokens')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: "Revoke ALL of a user's personal access tokens",
+    description: 'Server-admin only. Compromise response: immediately invalidates every PAT owned by the user. Idempotent — succeeds even if the user has no tokens.',
+  })
+  @ApiResponse({ status: 204, description: 'All tokens revoked.' })
+  @ApiResponse({ status: 404, description: 'User not found.' })
+  async revokeAllTokens(@Param('id', ParseIntPipe) id: number): Promise<void> {
+    await this.users.getOrThrow(id);
+    await this.tokens.removeAllFor(id);
+  }
+
+  @Delete(':id/tokens/:tokenId')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: "Revoke one of a user's personal access tokens",
+    description: 'Server-admin only. Immediately invalidates the token for future requests.',
+  })
+  @ApiResponse({ status: 204, description: 'Token revoked.' })
+  @ApiResponse({ status: 404, description: 'User not found, or token not found / not owned by that user.' })
+  async revokeToken(@Param('id', ParseIntPipe) id: number, @Param('tokenId', ParseIntPipe) tokenId: number): Promise<void> {
+    await this.users.getOrThrow(id);
+    // Ownership-scoped: 404s (not cross-revokes) when tokenId belongs to a different user.
+    await this.tokens.remove(id, tokenId);
   }
 }
