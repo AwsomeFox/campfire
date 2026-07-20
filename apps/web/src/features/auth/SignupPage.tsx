@@ -80,6 +80,8 @@ export function SignupPage() {
         setError('That username is already taken.');
       } else if (err instanceof ApiError && err.status === 403) {
         setError('Signup is disabled — ask your server admin for an account.');
+      } else if (err instanceof ApiError && err.status === 429) {
+        setError('Too many attempts — wait a minute and try again.');
       } else {
         setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
       }
