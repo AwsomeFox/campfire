@@ -714,6 +714,14 @@ export class EncountersService {
    */
   async rollDiceForCampaign(campaignId: number, input: RollRequestInput, user: RequestUser, role: Role): Promise<DiceRoll> {
     const result = rollDice(input.expr);
+    // Optional check context (issue #130): echo the label and compute success server-side
+    // so every member's feed shows the same pass/fail, not a client's interpretation.
+    const label = input.label?.trim();
+    if (label) result.label = label;
+    if (typeof input.dc === 'number') {
+      result.dc = input.dc;
+      result.success = result.total >= input.dc;
+    }
     const persisted = await this.rolls.record(campaignId, result, user);
 
     await this.audit.log({
@@ -723,7 +731,9 @@ export class EncountersService {
       entityType: null,
       entityId: null,
       campaignId,
-      detail: `${result.expr} = ${result.total}`,
+      detail:
+        `${result.label ? `${result.label}: ` : ''}${result.expr} = ${result.total}` +
+        (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'})` : ''),
     });
 
     return persisted;

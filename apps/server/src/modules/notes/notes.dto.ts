@@ -1,7 +1,12 @@
 import { createZodDto } from 'nestjs-zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve } from '@campfire/schema';
 
-export class NoteCreateDto extends createZodDto(NoteCreate) {}
-export class NoteUpdateDto extends createZodDto(NoteUpdate) {}
-export class InboxCreateDto extends createZodDto(InboxCreate) {}
+// .strict() at the DTO layer only (shared exports stay lenient for mcp-tools.ts /
+// proposals.service.ts — see encounters.dto.ts): an unrecognized body key 400s
+// instead of being silently stripped and written as a partial create/update.
+// InboxResolve is `.strict()` at its source in @campfire/schema — it's a
+// `.refine()`-wrapped ZodEffects, which has no `.strict()` to apply here.
+export class NoteCreateDto extends createZodDto(NoteCreate.strict()) {}
+export class NoteUpdateDto extends createZodDto(NoteUpdate.strict()) {}
+export class InboxCreateDto extends createZodDto(InboxCreate.strict()) {}
 export class InboxResolveDto extends createZodDto(InboxResolve) {}

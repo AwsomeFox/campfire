@@ -41,6 +41,36 @@ describe('shared dice log (e2e)', () => {
     expect(typeof res.body.createdAt).toBe('string');
   });
 
+  it('accepts advantage (2d20kh1): rolls both d20s, keeps the higher, total = kept', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/roll`).set(player).send({ expr: '2d20kh1' });
+    expect(res.status).toBe(201);
+    expect(res.body.expr).toBe('2d20kh1');
+    expect(res.body.rolls).toHaveLength(2); // both dice recorded (attestable)
+    expect(res.body.kept).toHaveLength(1);
+    expect(res.body.kept[0]).toBe(Math.max(res.body.rolls[0], res.body.rolls[1]));
+    expect(res.body.total).toBe(res.body.kept[0]);
+  });
+
+  it('records a labelled check with a DC and computes success server-side', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .set(player)
+      .send({ expr: '1d20+100', label: 'DEX save', dc: 15 });
+    expect(res.status).toBe(201);
+    expect(res.body.label).toBe('DEX save');
+    expect(res.body.dc).toBe(15);
+    // 1d20+100 is always >= 15, so success is deterministic here.
+    expect(res.body.success).toBe(true);
+  });
+
+  it('rejects an unsupported keep clause (2d20kh3 keeps more dice than rolled)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/roll`).set(player).send({ expr: '2d20kh3' });
+    expect(res.status).toBe(400);
+  });
+
   it('other members see the roll in GET /campaigns/:id/rolls (shared feed, newest first)', async () => {
     const server = ctx.app.getHttpServer();
     const dmRoll = await request(server).post(`/api/v1/campaigns/${campaignId}/roll`).set(dm).send({ expr: '1d20' });
