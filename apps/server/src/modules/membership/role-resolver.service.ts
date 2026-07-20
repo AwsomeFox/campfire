@@ -3,11 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import type { Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaignMembers } from '../../db/schema';
-import { ROLE_RANK, type RequestUser } from '../../common/user.types';
-
-function minRole(a: Role, b: Role): Role {
-  return ROLE_RANK[a] <= ROLE_RANK[b] ? a : b;
-}
+import { minRole, type RequestUser } from '../../common/user.types';
 
 /**
  * Resolves a user's effective role within a specific campaign.
