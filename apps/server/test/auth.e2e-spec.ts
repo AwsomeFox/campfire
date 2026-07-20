@@ -474,6 +474,37 @@ describe('POST /auth/token — headless PAT bootstrap (e2e)', () => {
     expect(otherRes.status).toBe(403);
   });
 
+  // Issue #88: /users/lookup is gated to a dm-of-any-campaign (or server admin). A
+  // token scoped BELOW dm can never act as a dm (RoleResolver caps effective role),
+  // so it must not be able to enumerate the user directory — even when minted for a
+  // user who really is a dm. A dm-scoped token keeps the add-member flow working.
+  it('a viewer-scoped PAT (even for a real dm) cannot enumerate the user directory (403)', async () => {
+    const mint = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-dm', password: 'dm-password-1', tokenName: 'viewer-lookup', scope: 'viewer' });
+    expect(mint.status).toBe(201);
+
+    const res = await request(baseUrl)
+      .get('/api/v1/users/lookup')
+      .query({ query: 'bootstrap' })
+      .set('Authorization', `Bearer ${mint.body.token}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('a dm-scoped PAT can use the lookup (add-member flow over a headless agent)', async () => {
+    const mint = await request(baseUrl)
+      .post('/api/v1/auth/token')
+      .send({ username: 'bootstrap-dm', password: 'dm-password-1', tokenName: 'dm-lookup', scope: 'dm' });
+    expect(mint.status).toBe(201);
+
+    const res = await request(baseUrl)
+      .get('/api/v1/users/lookup')
+      .query({ query: 'bootstrap-player' })
+      .set('Authorization', `Bearer ${mint.body.token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.some((u: { username: string }) => u.username === 'bootstrap-player')).toBe(true);
+  });
+
   it('oversized password (>200 chars) is rejected 400, before scrypt runs', async () => {
     const res = await request(baseUrl)
       .post('/api/v1/auth/token')
