@@ -86,7 +86,10 @@ export default function ReaderPage() {
             <h3 style={{ margin: 0, fontFamily: 'var(--font-heading)' }}>{entry.name}</h3>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
           </div>
-          <Markdown>{entry.body}</Markdown>
+          {/* Older imports stored literal escape sequences (backslash-n) that break
+              markdown tables/paragraphs; normalise defensively so already-installed
+              packs render correctly without a reinstall. */}
+          <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
           <p className="text-muted" style={{ margin: 0, fontSize: 11, borderTop: '1px solid var(--color-divider)', paddingTop: 12 }}>
             From {pack?.name ?? 'the installed rule system'}.
           </p>
