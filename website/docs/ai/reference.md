@@ -27,7 +27,10 @@ claude mcp add --transport http campfire \
 
 - **Base:** `https://<your-host>/api/v1`.
 - **Docs:** interactive Swagger UI at `/api/docs`; the OpenAPI spec at
-  `/api/openapi.json` (annotated across every endpoint).
+  `/api/openapi.json` (annotated across every endpoint). Disabled in
+  production by default — set the `API_DOCS=1` environment variable on the
+  server to enable them (see
+  [Installation → Configuration](../getting-started/installation.md#configuration)).
 - **Auth:** the same bearer token, or a session cookie for the web app.
 
 ### Headless bootstrap
