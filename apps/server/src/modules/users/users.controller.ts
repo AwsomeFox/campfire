@@ -3,9 +3,10 @@ import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { ApiTokenCreated } from '@campfire/schema';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { RequestUser } from '../../common/user.types';
+import { type RequestUser, auditActor } from '../../common/user.types';
 import { UsersService } from './users.service';
 import { TokensService } from '../tokens/tokens.service';
+import { AuditService } from '../audit/audit.service';
 import { UserCreateDto, UserUpdateDto, PasswordChangeDto, AdminTokenCreateDto } from './users.dto';
 
 /** Any authenticated user — used by the member-picker. Must be declared before UsersController so /users/lookup doesn't get swallowed by /users/:id-shaped routes in admin controller ordering. */
@@ -34,6 +35,7 @@ export class UsersController {
   constructor(
     private readonly users: UsersService,
     private readonly tokens: TokensService,
+    private readonly audit: AuditService,
   ) {}
 
   @Get()
@@ -47,16 +49,41 @@ export class UsersController {
   @ApiOperation({ summary: 'Create a user', description: 'Server-admin only.' })
   @ApiResponse({ status: 201, description: 'Created user.' })
   @ApiResponse({ status: 409, description: 'Username already taken.' })
-  create(@Body() body: UserCreateDto) {
-    return this.users.create(body);
+  async create(@Body() body: UserCreateDto, @CurrentUser() actor: RequestUser) {
+    const created = await this.users.create(body);
+    // #23: server-wide admin trail (campaignId null) — account creation.
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: 'dm',
+      action: 'user.create',
+      entityType: 'user',
+      entityId: created.id,
+      detail: `${created.username} (role ${created.serverRole})`,
+    });
+    return created;
   }
 
   @Patch(':id')
   @ApiOperation({ summary: 'Update a user', description: 'Server-admin only. Refuses to demote/disable the last enabled admin.' })
   @ApiResponse({ status: 200, description: 'Updated user.' })
   @ApiResponse({ status: 409, description: 'Would demote or disable the last enabled admin.' })
-  update(@Param('id', ParseIntPipe) id: number, @Body() body: UserUpdateDto) {
-    return this.users.update(id, body);
+  async update(@Param('id', ParseIntPipe) id: number, @Body() body: UserUpdateDto, @CurrentUser() actor: RequestUser) {
+    const updated = await this.users.update(id, body);
+    // #23: log the admin-meaningful transitions (role change / disable-enable),
+    // naming which one fired so the trail reads at a glance.
+    const changes: string[] = [];
+    if (body.serverRole !== undefined) changes.push(`role=${updated.serverRole}`);
+    if (body.disabled !== undefined) changes.push(updated.disabled ? 'disabled' : 'enabled');
+    if (body.displayName !== undefined) changes.push('displayName');
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: 'dm',
+      action: 'user.update',
+      entityType: 'user',
+      entityId: id,
+      detail: `${updated.username}: ${changes.join(', ') || 'no-op'}`,
+    });
+    return updated;
   }
 
   @Delete(':id')
@@ -64,16 +91,40 @@ export class UsersController {
   @ApiOperation({ summary: 'Delete a user', description: 'Server-admin only. Refuses to delete the last enabled admin, or a user who is the sole DM of any campaign.' })
   @ApiResponse({ status: 204, description: 'Deleted.' })
   @ApiResponse({ status: 409, description: 'Last enabled admin, or sole DM of one or more campaigns.' })
-  async remove(@Param('id', ParseIntPipe) id: number) {
+  async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() actor: RequestUser) {
+    // Capture the username before the row is gone, so the trail names the target.
+    const target = await this.users.getOrThrow(id);
     await this.users.remove(id);
+    // #23: server-wide admin trail — account deletion.
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: 'dm',
+      action: 'user.delete',
+      entityType: 'user',
+      entityId: id,
+      detail: target.username,
+    });
   }
 
   @Post(':id/password')
   @HttpCode(204)
-  @ApiOperation({ summary: "Reset a user's password", description: 'Server-admin only. No currentPassword check (admin reset, not self-service).' })
-  @ApiResponse({ status: 204, description: 'Password reset.' })
-  async setPassword(@Param('id', ParseIntPipe) id: number, @Body() body: PasswordChangeDto) {
+  @ApiOperation({
+    summary: "Reset a user's password",
+    description:
+      'Server-admin only. No currentPassword check (admin reset, not self-service). ' +
+      "Treated as a credential-compromise response: revokes ALL of the user's sessions AND personal access tokens — a leaked cf_pat_… token or stolen cookie does not survive the reset.",
+  })
+  @ApiResponse({ status: 204, description: 'Password reset; all sessions and personal access tokens revoked.' })
+  async setPassword(@Param('id', ParseIntPipe) id: number, @Body() body: PasswordChangeDto, @CurrentUser() actor: RequestUser) {
     await this.users.setPassword(id, body.newPassword);
+    // #23: log that a reset happened — never the password itself.
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: 'dm',
+      action: 'user.password_reset',
+      entityType: 'user',
+      entityId: id,
+    });
   }
 
   /**
@@ -112,6 +163,62 @@ export class UsersController {
   ): Promise<ApiTokenCreated> {
     const target = await this.users.getOrThrow(id);
     const owner: RequestUser = { id: String(target.id), name: target.displayName || target.username, serverRole: target.serverRole };
-    return this.tokens.mintFor(owner, target.id, body, requester);
+    const minted = await this.tokens.mintFor(owner, target.id, body, requester);
+    // #23: server-wide admin trail — admin minted a PAT on another user's behalf.
+    await this.audit.log({
+      actor: auditActor(requester),
+      actorRole: 'dm',
+      action: 'user.token.mint',
+      entityType: 'user',
+      entityId: target.id,
+      detail: `token "${minted.apiToken.name}" for ${target.username}${body.adminEnabled ? ' (admin-enabled)' : ''}`,
+    });
+    return minted;
+  }
+
+  /**
+   * Admin token lifecycle (issue #44): before these routes existed, an admin
+   * responding to a leaked `cf_pat_…` token had no way to even SEE another
+   * user's tokens, let alone revoke one — the only remedy was disabling or
+   * deleting the whole account. List returns the same metadata-only shape as
+   * self-service GET /tokens (raw values are never retrievable after mint).
+   */
+  @Get(':id/tokens')
+  @ApiOperation({
+    summary: "List a user's personal access tokens",
+    description: "Server-admin only. Metadata only (name, scope, campaignId, prefix, lastUsedAt) — raw token values are never retrievable after creation.",
+  })
+  @ApiResponse({ status: 200, description: "The target user's tokens." })
+  @ApiResponse({ status: 404, description: 'User not found.' })
+  async listTokens(@Param('id', ParseIntPipe) id: number) {
+    await this.users.getOrThrow(id);
+    return this.tokens.listOwn(id);
+  }
+
+  @Delete(':id/tokens')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: "Revoke ALL of a user's personal access tokens",
+    description: 'Server-admin only. Compromise response: immediately invalidates every PAT owned by the user. Idempotent — succeeds even if the user has no tokens.',
+  })
+  @ApiResponse({ status: 204, description: 'All tokens revoked.' })
+  @ApiResponse({ status: 404, description: 'User not found.' })
+  async revokeAllTokens(@Param('id', ParseIntPipe) id: number): Promise<void> {
+    await this.users.getOrThrow(id);
+    await this.tokens.removeAllFor(id);
+  }
+
+  @Delete(':id/tokens/:tokenId')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: "Revoke one of a user's personal access tokens",
+    description: 'Server-admin only. Immediately invalidates the token for future requests.',
+  })
+  @ApiResponse({ status: 204, description: 'Token revoked.' })
+  @ApiResponse({ status: 404, description: 'User not found, or token not found / not owned by that user.' })
+  async revokeToken(@Param('id', ParseIntPipe) id: number, @Param('tokenId', ParseIntPipe) tokenId: number): Promise<void> {
+    await this.users.getOrThrow(id);
+    // Ownership-scoped: 404s (not cross-revokes) when tokenId belongs to a different user.
+    await this.tokens.remove(id, tokenId);
   }
 }

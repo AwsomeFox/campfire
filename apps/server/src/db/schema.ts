@@ -52,6 +52,8 @@ export const characters = sqliteTable('characters', {
   portraitUrl: text('portrait_url'),
   ddbId: text('ddb_id'),
   notes: text('notes').notNull().default(''),
+  // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  dmSecret: text('dm_secret').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -113,6 +115,8 @@ export const sessions = sqliteTable('sessions', {
   title: text('title').notNull().default(''),
   playedAt: text('played_at'),
   recap: text('recap').notNull().default(''),
+  // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
+  dmSecret: text('dm_secret').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -350,6 +354,9 @@ export const encounters = sqliteTable('encounters', {
   status: text('status').notNull().default('preparing'),
   round: integer('round').notNull().default(0),
   turnIndex: integer('turn_index').notNull().default(0),
+  // Identity-based turn pointer (issue #49) — the combatant whose turn it is,
+  // independent of positional shuffling on add/remove. null when not running/empty.
+  currentCombatantId: integer('current_combatant_id'),
   endedAt: text('ended_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),

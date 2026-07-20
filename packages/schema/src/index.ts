@@ -64,6 +64,28 @@ export const UserIdRef = z.union([z.string().max(120), Id.transform((n) => Strin
 export const AbilityKey = z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']);
 export type AbilityKey = z.infer<typeof AbilityKey>;
 
+/** Canonical ability keys in sheet order. */
+export const ABILITY_KEYS = AbilityKey.options;
+
+/**
+ * Fold an ability-score record to canonical uppercase keys (STR/DEX/…). The stats
+ * record is typed `z.record(z.string(), …)`, so any key case is schema-valid, and an
+ * API/MCP writer may store lowercase keys (`{ str: 16 }`). Callers that look scores up
+ * by canonical key — the character sheet, and the initiative engine's `stats.DEX` —
+ * would otherwise miss every lowercase entry and read a default of 10 (issue #48).
+ * An exact-uppercase key is authoritative, so a lowercase duplicate never clobbers it.
+ */
+export function normalizeStats(stats: Record<string, number> | null | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!stats) return out;
+  for (const [key, value] of Object.entries(stats)) {
+    const upper = key.toUpperCase();
+    if (upper in out && key !== upper) continue;
+    out[upper] = value;
+  }
+  return out;
+}
+
 /** Skill proficiency rank; a skill absent from the record is unproficient. */
 export const SkillRank = z.enum(['proficient', 'expertise']);
 export type SkillRank = z.infer<typeof SkillRank>;
@@ -110,6 +132,7 @@ export const Character = z.object({
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (a secret curse, hidden true identity…)
   ...timestamps,
 });
 export type Character = z.infer<typeof Character>;
@@ -245,11 +268,20 @@ export const Session = z.object({
   title: z.string().max(200).default(''),
   playedAt: IsoDate.nullable().default(null),
   recap: z.string().max(100_000).default(''), // markdown
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (session prep notes)
   ...timestamps,
 });
 export type Session = z.infer<typeof Session>;
 export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
 export const SessionUpdate = SessionCreate.partial();
+
+// The canonical recap scaffold — the structured headings a DM fills instead of
+// staring at a blank box. Shared by the web "Insert template" affordance and the
+// MCP `draft_session_recap` tool so a hand-written recap and an AI-drafted one
+// use the same shape. Headings are `##` so they render under the recap's own
+// `#`/title in the Markdown viewer.
+export const RECAP_HEADINGS = ['Recap', 'Loot', 'NPCs met', 'Cliffhanger'] as const;
+export const RECAP_TEMPLATE = RECAP_HEADINGS.map((h) => `## ${h}\n\n`).join('').trimEnd() + '\n';
 
 // ---------- session share links (public read-only recap access) ----------
 // A DM-minted, unguessable capability URL for one session recap — viewable
@@ -623,9 +655,31 @@ export const InviteAccept = z.object({
 });
 export type InviteAccept = z.infer<typeof InviteAccept>;
 
+// Present on Me only when the request authenticated via a PAT (Authorization:
+// Bearer cf_pat_...). Describes what THAT token can actually do, so /me is
+// truthful for debugging scoped AI access (issue #55): `scope` caps every
+// per-campaign role, `campaignId` (when set) restricts the token to one
+// campaign, and `serverAdmin` is the token's EFFECTIVE server-admin power
+// (owner is a server admin AND the token was minted adminEnabled) — see
+// hasServerAdminPower() on the server.
+export const MeToken = z.object({
+  tokenId: Id,
+  name: z.string(),
+  scope: Role,
+  campaignId: Id.nullable(),
+  adminEnabled: z.boolean(),
+  serverAdmin: z.boolean(),
+});
+export type MeToken = z.infer<typeof MeToken>;
+
 export const Me = z.object({
   user: User,
+  // When `token` is present (PAT auth), memberships reflect the token's
+  // EFFECTIVE view: role is capped to min(token scope, membership role) and a
+  // campaign-bound token only lists that campaign. Cookie sessions see raw
+  // membership roles and no `token` field.
   memberships: z.array(z.object({ campaignId: Id, role: Role, characterId: Id.nullable() })),
+  token: MeToken.optional(),
 });
 export type Me = z.infer<typeof Me>;
 
@@ -652,6 +706,11 @@ export const ApiToken = z.object({
 export type ApiToken = z.infer<typeof ApiToken>;
 export const ApiTokenCreate = z.object({
   name: z.string().min(1).max(80),
+  // When the caller is itself authenticated via a PAT, both scope and campaignId are
+  // additionally capped to the CALLING token (TokensService.create): scope is silently
+  // downgraded to min(requested, calling token's scope), and a campaign-bound calling
+  // token can only mint tokens bound to that same campaign — a scoped-down token can
+  // never mint a broader sibling.
   scope: TokenScope,
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // requires the caller to currently hold real server-admin power; silently forced false otherwise
@@ -734,7 +793,15 @@ export const Encounter = z.object({
   name: z.string().min(1).max(120),
   status: EncounterStatus.default('preparing'),
   round: z.number().int().nonnegative().default(0),
+  // Positional turn cursor, kept in lockstep with `currentCombatantId` as a
+  // display/back-compat convenience — it is the index of the current combatant in
+  // the server-sorted order. `currentCombatantId` is the AUTHORITATIVE pointer
+  // (issue #49): a positional index alone corrupts when a combatant is added or
+  // removed mid-fight (everyone after the removed row shifts a slot and the
+  // "current turn" highlight jumps to the wrong creature). null = no current
+  // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
+  currentCombatantId: Id.nullable().default(null),
   endedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
@@ -895,3 +962,48 @@ export const AuditEntry = z.object({
   createdAt: IsoDate,
 });
 export type AuditEntry = z.infer<typeof AuditEntry>;
+
+// ---------- admin observability (issue #22) ----------
+// Server-wide operational snapshot for the admin console (GET /admin/metrics,
+// @ServerRoles('admin')). Everything here is cheap to compute — COUNT(*) per
+// table plus PRAGMA page_count/page_size for on-disk DB size — so the dashboard
+// can be polled without straining the server. Nothing here is per-campaign or
+// exposes story secrets: it's counts, sizes, uptime, and version only.
+
+// COUNT(*) of each top-level entity. Kept as an explicit object (not a generic
+// map) so the shape is typed end-to-end and the web dashboard can label each row.
+export const AdminMetricsCounts = z.object({
+  users: z.number().int().nonnegative(),
+  campaigns: z.number().int().nonnegative(),
+  characters: z.number().int().nonnegative(),
+  npcs: z.number().int().nonnegative(),
+  locations: z.number().int().nonnegative(),
+  quests: z.number().int().nonnegative(),
+  sessions: z.number().int().nonnegative(),
+  notes: z.number().int().nonnegative(),
+  encounters: z.number().int().nonnegative(),
+  attachments: z.number().int().nonnegative(),
+  apiTokens: z.number().int().nonnegative(),
+  rulePacks: z.number().int().nonnegative(),
+  ruleEntries: z.number().int().nonnegative(),
+});
+export type AdminMetricsCounts = z.infer<typeof AdminMetricsCounts>;
+
+export const AdminMetricsDatabase = z.object({
+  sizeBytes: z.number().int().nonnegative(), // page_count * page_size (on-disk file size)
+  pageCount: z.number().int().nonnegative(),
+  pageSize: z.number().int().nonnegative(),
+});
+export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
+
+export const AdminMetrics = z.object({
+  version: z.string(), // server package.json version (same source as /healthz)
+  now: IsoDate, // server clock when this snapshot was taken
+  startedAt: IsoDate, // process start (now - uptime)
+  uptimeSeconds: z.number().nonnegative(),
+  activeSessions: z.number().int().nonnegative(), // non-expired rows in user_sessions
+  counts: AdminMetricsCounts,
+  database: AdminMetricsDatabase,
+  recentActivity: z.array(AuditEntry), // most-recent audit rows (read-only, newest first)
+});
+export type AdminMetrics = z.infer<typeof AdminMetrics>;

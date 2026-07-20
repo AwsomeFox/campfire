@@ -7,13 +7,15 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Query,
+  Req,
   Res,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiConsumes, ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
-import type { Response } from 'express';
+import { ApiConsumes, ApiTags, ApiOperation, ApiQuery, ApiResponse } from '@nestjs/swagger';
+import type { Request, Response } from 'express';
 import fs from 'node:fs';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -23,6 +25,20 @@ import { AttachmentUploadDto } from './attachments.dto';
 
 // Express.Multer.File augments the Express namespace via @types/multer; import side-effect only.
 type MulterFile = Express.Multer.File;
+
+/**
+ * True when an `If-None-Match` request header means the client's cached copy is
+ * still current for `etag` — i.e. it is `*` or lists this (strong) etag. Handles
+ * the comma-separated multi-value form. Used to answer a revalidation with 304.
+ */
+function ifNoneMatchSatisfied(header: string | string[] | undefined, etag: string): boolean {
+  if (!header) return false;
+  const raw = Array.isArray(header) ? header.join(',') : header;
+  return raw
+    .split(',')
+    .map((v) => v.trim())
+    .some((v) => v === '*' || v === etag);
+}
 
 @ApiTags('attachments')
 @Controller('campaigns/:campaignId/attachments')
@@ -38,12 +54,15 @@ export class CampaignAttachmentsController {
    * allowlist + size cap are enforced by the FileInterceptor options below;
    * fileFilter rejections surface as 400s (via BadRequestException), size overages
    * as 413s (Multer's LIMIT_FILE_SIZE, translated by Nest's built-in exception filter).
+   * The declared mimetype is additionally verified against the actual file bytes
+   * (magic-byte sniffing) in AttachmentsService.create — the fileFilter runs before
+   * the buffer exists, so content sniffing can't happen there.
    */
   @Post()
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Upload an attachment', description: "Multipart upload. `kind` in the form body selects the bucket and minimum role: player+ for 'portrait', dm-only for 'map'/'image'. Allowed mime types: image/png, image/jpeg, image/webp." })
   @ApiResponse({ status: 201, description: 'Attachment created.' })
-  @ApiResponse({ status: 400, description: 'Missing file, or unsupported mime type.' })
+  @ApiResponse({ status: 400, description: 'Missing file, unsupported mime type, or file content that does not match the declared type.' })
   @ApiResponse({ status: 413, description: 'File exceeds the max upload size.' })
   @UseInterceptors(
     FileInterceptor('file', {
@@ -83,22 +102,55 @@ export class AttachmentsController {
     private readonly access: CampaignAccessService,
   ) {}
 
-  /** Streams the file bytes. Requires campaign membership — never a public URL. */
+  /**
+   * Streams the file bytes. Requires campaign membership — never a public URL.
+   *
+   * Attachment content is immutable for a given id (write-once, deleted with the
+   * row), so responses carry a strong content-hash `ETag` and a long-lived
+   * `Cache-Control: immutable`. A matching `If-None-Match` short-circuits to a
+   * 304 so the browser never re-downloads an unchanged (e.g. multi-MB map) file.
+   *
+   * `?size=thumb` serves a downscaled PNG preview for list/dashboard use (see
+   * AttachmentsService.resolveFile / thumbnail.ts).
+   */
   @Get(':id/file')
-  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL.' })
-  @ApiResponse({ status: 200, description: 'Raw file bytes, with Content-Type/Content-Disposition set from the stored attachment.' })
-  async getFile(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser, @Res() res: Response) {
+  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses are cacheable (strong ETag + immutable Cache-Control); a matching If-None-Match returns 304. `?size=thumb` serves a downscaled PNG preview.' })
+  @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for the full-size original; `thumb` for a downscaled PNG preview.' })
+  @ApiResponse({ status: 200, description: 'Raw file bytes, with Content-Type/Content-Disposition/ETag set from the stored attachment.' })
+  @ApiResponse({ status: 304, description: 'Client cache is current (If-None-Match matched the ETag).' })
+  @ApiResponse({ status: 400, description: 'Unsupported `size` value.' })
+  async getFile(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: RequestUser,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query('size') size?: string,
+  ) {
+    if (size !== undefined && size !== 'thumb') {
+      throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
+    }
     const row = await this.attachmentsService.getRowOrThrow(id);
     await this.access.requireMember(user, row.campaignId);
 
-    const filePath = this.attachmentsService.filePath(row);
+    const variant = size === 'thumb' ? 'thumb' : 'original';
+    const file = this.attachmentsService.resolveFile(row, variant);
+
     res.set({
-      'Content-Type': row.mime,
-      'Content-Length': String(row.size),
-      'Content-Disposition': `inline; filename="${encodeURIComponent(row.filename)}"`,
       'Cache-Control': 'private, max-age=31536000, immutable',
+      ETag: file.etag,
     });
-    fs.createReadStream(filePath).pipe(res);
+
+    if (ifNoneMatchSatisfied(req.headers['if-none-match'], file.etag)) {
+      res.status(304).end();
+      return;
+    }
+
+    res.set({
+      'Content-Type': file.mime,
+      'Content-Length': String(file.size),
+      'Content-Disposition': `inline; filename="${encodeURIComponent(row.filename)}"`,
+    });
+    fs.createReadStream(file.path).pipe(res);
   }
 
   @Delete(':id')

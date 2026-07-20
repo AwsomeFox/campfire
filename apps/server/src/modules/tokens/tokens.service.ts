@@ -7,7 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { apiTokens, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateApiToken, hashApiToken, apiTokenPrefix } from '../../common/crypto';
-import { hasServerAdminPower, type RequestUser, type TokenContext } from '../../common/user.types';
+import { hasServerAdminPower, minRole, type RequestUser, type TokenContext } from '../../common/user.types';
 import { RoleResolver } from '../membership/role-resolver.service';
 
 type ApiTokenCreateInput = z.infer<typeof ApiTokenCreate>;
@@ -84,10 +84,44 @@ export class TokensService {
    * unauthorized request for adminEnabled:true is silently downgraded to
    * false rather than rejected outright, matching the existing
    * least-privilege default behavior for an omitted `scope`.
+   *
+   * Issue #41 (privilege escalation, same class as the adminEnabled cap
+   * above): when `caller` is itself authenticated via a PAT
+   * (caller.tokenContext set), the NEW token must never be broader than the
+   * CALLING token — otherwise a viewer-scoped "read-only" PAT handed to an
+   * AI agent could simply mint itself a sibling dm-scoped PAT (both capped
+   * only by the owner's membership role, which for a DM member allows 'dm')
+   * and escalate. Two dimensions are capped here:
+   *  - `scope`: silently downgraded to min(requested, calling token's scope)
+   *    — same silent-downgrade convention as adminEnabled above, and the
+   *    stored scope then participates in RoleResolver's use-time
+   *    min(scope, membership role) as usual.
+   *  - `campaignId`: a campaign-bound calling token can only mint tokens
+   *    bound to that SAME campaign — an explicit request for a different
+   *    campaign is 403 (mirroring effectiveRole(), which would resolve null
+   *    there), and an unbound request (campaignId omitted/null, i.e. "all my
+   *    campaigns") is silently narrowed to the calling token's campaign.
+   * Session-cookie callers have no tokenContext and are unaffected; the
+   * membership-based campaign-access check below applies to everyone as
+   * before.
    */
   async create(userId: number, input: ApiTokenCreateInput, caller: RequestUser): Promise<ApiTokenCreated> {
-    if (input.campaignId != null) {
-      const base = await this.roleResolver.baseEffectiveRole(caller, input.campaignId);
+    let scope = input.scope;
+    let campaignId = input.campaignId ?? null;
+
+    const callingToken = caller.tokenContext;
+    if (callingToken) {
+      scope = minRole(scope, callingToken.scope);
+      if (callingToken.campaignId !== null) {
+        if (campaignId !== null && campaignId !== callingToken.campaignId) {
+          throw new ForbiddenException('You do not have access to this campaign');
+        }
+        campaignId = callingToken.campaignId;
+      }
+    }
+
+    if (campaignId != null) {
+      const base = await this.roleResolver.baseEffectiveRole(caller, campaignId);
       if (!base) {
         throw new ForbiddenException('You do not have access to this campaign');
       }
@@ -102,8 +136,8 @@ export class TokensService {
       .values({
         userId,
         name: input.name,
-        scope: input.scope,
-        campaignId: input.campaignId ?? null,
+        scope,
+        campaignId,
         adminEnabled,
         tokenHash: hashApiToken(raw),
         tokenPrefix: apiTokenPrefix(raw),
@@ -156,6 +190,18 @@ export class TokensService {
       .limit(1);
     if (!row) throw new NotFoundException(`Token ${id} not found`);
     await this.db.delete(apiTokens).where(eq(apiTokens.id, id));
+  }
+
+  /**
+   * Revokes EVERY PAT owned by `userId` in one shot. Admin lifecycle only
+   * (DELETE /users/:id/tokens — compromise response: "cut off everything this
+   * account's leaked tokens can do"), never exposed self-service. Returns the
+   * number of tokens revoked so the caller can report it. Idempotent — zero
+   * tokens is not an error.
+   */
+  async removeAllFor(userId: number): Promise<number> {
+    const rows = await this.db.delete(apiTokens).where(eq(apiTokens.userId, userId)).returning();
+    return rows.length;
   }
 
   /**

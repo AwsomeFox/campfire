@@ -57,7 +57,7 @@ just dev       # backend :8080 + frontend :5173, hot reload
 - Web: http://localhost:5173
 - API: http://localhost:8080/api/v1
 - Swagger UI: http://localhost:8080/api/docs · spec: http://localhost:8080/api/openapi.json
-- Health: http://localhost:8080/healthz
+- Health: http://localhost:8080/healthz (liveness) · http://localhost:8080/readyz (readiness, checks the DB)
 
 ### Dev auth
 
@@ -121,6 +121,7 @@ running on 8080 — maps to the container's internal 8080).
 | `DATA_DIR` | `/data` | SQLite DB + attachment uploads live here (the volume mount point) |
 | `ORIGIN` | *(unset)* | Comma-separated allowed CORS origin(s). Leave unset for same-origin deployments (the default — SPA + API on one origin) |
 | `TRUST_PROXY` | `1` (trust one hop) | Express `trust proxy` setting — pass a hop count or `false`. Needed for rate limiting and `req.ip` to see the real client IP behind a reverse proxy (Traefik in the reference deployment) |
+| `API_DOCS` | *(unset)* | Swagger UI (`/api/docs`) + OpenAPI JSON (`/api/openapi.json`) exposure. Unset: enabled in dev, **disabled in production**. Set `1` to force-enable (e.g. agent self-discovery on a trusted network) or `0` to force-disable |
 | `OIDC_ISSUER` | *(unset)* | OIDC provider issuer URL (enables SSO login when set, alongside local auth) |
 | `OIDC_CLIENT_ID` | *(unset)* | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | *(unset)* | OIDC client secret |
@@ -128,6 +129,7 @@ running on 8080 — maps to the container's internal 8080).
 | `OIDC_SCOPE` | `openid profile email` | OIDC scopes requested |
 | `OIDC_GROUPS_CLAIM` | `groups` | Claim in the ID token holding the user's group memberships |
 | `OIDC_ADMIN_GROUP` | *(unset)* | Group name that grants the Campfire **server admin** role (campaign roles dm/player/viewer are per-campaign memberships managed in-app) |
+| `OIDC_ALLOWED_GROUP` | *(unset)* | Group name required to **sign in at all** — users outside it get a 403 and no account is provisioned. Unset = any authenticated IdP user may sign in. Members of `OIDC_ADMIN_GROUP` always have access |
 | `OIDC_ALLOW_INSECURE` | *(unset)* | Set to allow OIDC over plain HTTP — dev/testing only, never in production |
 | `TZ` | *(unset, UTC)* | Container timezone, e.g. `America/Denver` — affects displayed session/log timestamps |
 
