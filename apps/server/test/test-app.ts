@@ -34,7 +34,7 @@ export async function createTestApp(): Promise<TestAppContext> {
   const app = moduleRef.createNestApplication();
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1', {
-    exclude: ['healthz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
+    exclude: ['healthz', 'readyz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
   });
   await app.init();
 
@@ -62,7 +62,7 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
   const app = moduleRef.createNestApplication();
   app.use(cookieParser());
   app.setGlobalPrefix('api/v1', {
-    exclude: ['healthz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
+    exclude: ['healthz', 'readyz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
   });
   await app.init();
 

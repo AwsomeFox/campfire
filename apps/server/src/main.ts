@@ -72,7 +72,7 @@ export function configureApp(app: INestApplication): void {
   }
 
   app.setGlobalPrefix('api/v1', {
-    exclude: ['healthz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
+    exclude: ['healthz', 'readyz', 'mcp', 'api/docs', 'api/docs-json', 'api/openapi.json'],
   });
 }
 
