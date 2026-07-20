@@ -255,6 +255,17 @@ export function Layout() {
     return () => document.removeEventListener('mousedown', onClick);
   }, []);
 
+  // Escape dismisses the mobile More sheet (backdrop tap + close button cover the
+  // other exits). Only bound while open so it doesn't swallow Escape elsewhere.
+  useEffect(() => {
+    if (!moreOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setMoreOpen(false);
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [moreOpen]);
+
   async function onLogout() {
     setMenuOpen(false);
     setMoreOpen(false);
@@ -525,9 +536,10 @@ export function Layout() {
           onClick={() => setMoreOpen(false)}
         >
           <div
-            className="card elev-lg w-full"
+            className="card elev-lg w-full flex flex-col"
             style={{
               maxWidth: 440,
+              maxHeight: 'calc(100dvh - 16px)',
               borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
               padding: '18px 18px calc(18px + env(safe-area-inset-bottom))',
               gap: 4,
@@ -535,13 +547,25 @@ export function Layout() {
             onClick={(e) => e.stopPropagation()}
           >
             <div
-              className="mx-auto mb-2.5"
+              className="mx-auto mb-2.5 shrink-0"
               style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--color-neutral-700)' }}
             />
-            <div className="text-muted" style={{ fontSize: 11, padding: '0 6px 6px' }}>
-              Signed in as {displayName}
-              {roleLabel ? ` · viewing as ${roleLabel}` : ''}
+            <div className="flex items-start gap-2 shrink-0" style={{ padding: '0 6px 6px' }}>
+              <div className="text-muted flex-1 min-w-0" style={{ fontSize: 11 }}>
+                Signed in as {displayName}
+                {roleLabel ? ` · viewing as ${roleLabel}` : ''}
+              </div>
+              <button
+                type="button"
+                aria-label="Close menu"
+                onClick={() => setMoreOpen(false)}
+                className="shrink-0 -mt-1 -mr-1 flex items-center justify-center rounded-md"
+                style={{ width: 32, height: 32, color: 'var(--color-text)', fontSize: 18, lineHeight: 1 }}
+              >
+                ✕
+              </button>
             </div>
+            <div className="flex flex-col overflow-y-auto" style={{ gap: 4, margin: '0 -4px', padding: '0 4px' }}>
             {mainNav.map((item) => (
               <MoreSheetItem key={item.key} item={item} onNavigate={() => setMoreOpen(false)} />
             ))}
@@ -571,6 +595,7 @@ export function Layout() {
             >
               Sign out
             </button>
+            </div>
           </div>
         </div>
       )}
