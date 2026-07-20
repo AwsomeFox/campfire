@@ -182,7 +182,9 @@ export default function RunSessionPage() {
       }
       for (const c of encounter.combatants) {
         const before = prev.hp.get(c.id);
-        if (before != null && before !== c.hpCurrent) {
+        // Only announce concrete HP changes — skip when either value is null
+        // (a monster whose exact HP is redacted from this viewer, issue #43).
+        if (before != null && c.hpCurrent != null && before !== c.hpCurrent) {
           announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
         }
       }
