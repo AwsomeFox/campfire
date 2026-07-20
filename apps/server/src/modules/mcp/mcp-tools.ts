@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, HttpException, Injectable } from '@nestjs/common';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
   CampaignCreate,
@@ -239,10 +239,18 @@ export class McpToolsService {
         'ERRORS — a failed call returns isError:true with JSON text {"error":{"status","code","message"}} (e.g. ' +
         'status 404/code "not_found", status 403/code "forbidden", status 400/code "validation_failed"). Every ' +
         'tool\'s argument object is strict — an unknown/misspelled key is a validation_failed error, not a silent ' +
-        'no-op, so check the message and retry with corrected keys rather than assuming the call succeeded.',
+        'no-op, so check the message and retry with corrected keys rather than assuming the call succeeded.\n\n' +
+        'RESOURCES & PROMPTS — beyond tools, the server exposes read surfaces as MCP resources and a couple of ' +
+        'authoring prompts. Resources: the static campfire://campaigns index, plus the per-campaign templates ' +
+        'campfire://campaign/{campaignId}/summary, /party, and /recaps (each returns the same JSON as the ' +
+        'matching read tool, gated by the same membership/secrecy rules — resources/list enumerates one concrete ' +
+        'URI per accessible campaign). Prompts: recap-writer and session-prep, each taking a campaignId argument, ' +
+        'return a ready-to-run message that drives the corresponding tools.',
     });
     this.registerReadTools(server, user);
     this.registerWriteTools(server, user);
+    this.registerResources(server, user);
+    this.registerPrompts(server);
     return server;
   }
 
@@ -1365,6 +1373,180 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.encounters.end(encounterId as number, user, role);
       },
+    );
+  }
+
+  // ---------- RESOURCES ----------
+
+  /**
+   * Read surfaces exposed as MCP resources (in addition to the read tools).
+   *
+   * A static index resource (campfire://campaigns) plus three per-campaign
+   * templated resources (summary/party/recaps). Each resolves the caller's
+   * effective role via CampaignAccessService and calls the SAME domain services
+   * the read tools use — identical membership gating and DM-secrecy stripping, no
+   * new business logic. The template `list` callbacks enumerate one concrete URI
+   * per accessible campaign so a client can discover them without guessing ids.
+   */
+  private registerResources(server: McpServer, user: RequestUser): void {
+    const json = (uri: URL, data: unknown) => ({
+      contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(data, null, 2) }],
+    });
+
+    server.registerResource(
+      'campaigns',
+      'campfire://campaigns',
+      {
+        title: 'Campaigns',
+        description:
+          'Every campaign this user (or token) can access — the resource form of list_campaigns. Start here to ' +
+          'discover campaign ids for the campfire://campaign/{campaignId}/* resources.',
+        mimeType: 'application/json',
+      },
+      async (uri) => json(uri, await this.campaigns.listForUser(user)),
+    );
+
+    // Builds a campfire://campaign/{campaignId}/<suffix> templated resource whose
+    // list callback enumerates one URI per accessible campaign.
+    const perCampaign = (
+      name: string,
+      suffix: string,
+      meta: { title: string; description: string },
+      read: (campaignId: number) => Promise<unknown>,
+    ): void => {
+      const template = new ResourceTemplate(`campfire://campaign/{campaignId}/${suffix}`, {
+        list: async () => {
+          const campaigns = await this.campaigns.listForUser(user);
+          return {
+            resources: campaigns.map((c) => ({
+              name: `${c.name} — ${suffix}`,
+              uri: `campfire://campaign/${c.id}/${suffix}`,
+              mimeType: 'application/json',
+            })),
+          };
+        },
+      });
+      server.registerResource(name, template, { ...meta, mimeType: 'application/json' }, async (uri, variables) => {
+        const raw = Array.isArray(variables.campaignId) ? variables.campaignId[0] : variables.campaignId;
+        const campaignId = Number(raw);
+        if (!Number.isInteger(campaignId) || campaignId <= 0) {
+          throw new BadRequestException(`Invalid campaignId "${raw}" in resource URI`);
+        }
+        return json(uri, await read(campaignId));
+      });
+    };
+
+    perCampaign(
+      'campaign-summary',
+      'summary',
+      {
+        title: 'Campaign summary',
+        description:
+          'Full campaign dashboard (campaign, current location, quests with objectives, NPCs, locations, ' +
+          'characters, sessions, open inbox count) — the resource form of get_campaign_summary.',
+      },
+      async (campaignId) => {
+        const role = await this.access.requireMember(user, campaignId);
+        return this.campaigns.summary(campaignId, role);
+      },
+    );
+
+    perCampaign(
+      'campaign-party',
+      'party',
+      { title: 'Party', description: 'Every character (the party) in a campaign — the resource form of get_party.' },
+      async (campaignId) => {
+        const role = await this.access.requireMember(user, campaignId);
+        return this.characters.listForCampaign(campaignId, role);
+      },
+    );
+
+    perCampaign(
+      'campaign-recaps',
+      'recaps',
+      { title: 'Session recaps', description: 'Session recaps for a campaign, newest first — the resource form of get_session_recaps.' },
+      async (campaignId) => {
+        const role = await this.access.requireMember(user, campaignId);
+        return this.sessions.listForCampaign(campaignId, role);
+      },
+    );
+  }
+
+  // ---------- PROMPTS ----------
+
+  /**
+   * Authoring prompts (recap-writer, session-prep). These return ready-to-run
+   * messages parameterized by campaignId that drive the existing tools/resources;
+   * they do no data access themselves (so no role gating here — the tools they
+   * point at enforce it when actually invoked).
+   */
+  private registerPrompts(server: McpServer): void {
+    // Cast away the SDK's deep conditional generics over the argsSchema shape
+    // (TS2589 with a non-literal ZodRawShape) — same reason the tool() helper
+    // rebinds registerTool. Behavior is unchanged; the SDK still validates args.
+    type PromptMessage = { role: 'user' | 'assistant'; content: { type: 'text'; text: string } };
+    const registerPrompt = server.registerPrompt.bind(server) as (
+      name: string,
+      config: { title?: string; description?: string; argsSchema?: z.ZodRawShape },
+      cb: (args: Record<string, string>) => { messages: PromptMessage[] },
+    ) => void;
+
+    registerPrompt(
+      'recap-writer',
+      {
+        title: 'Session recap writer',
+        description: "Draft a polished session recap for a campaign in the DM's voice.",
+        argsSchema: {
+          campaignId: z.string().describe('Campaign id (as a string) — from list_campaigns or the campfire://campaigns resource'),
+        },
+      },
+      ({ campaignId }) => ({
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text:
+                `You are the Dungeon Master's writing assistant for Campfire campaign ${campaignId}.\n\n` +
+                `1. Call the draft_session_recap tool with { "campaignId": ${campaignId} } to pull the recap scaffold, ` +
+                `the encounters that were run this session, and the resolved player inbox threads.\n` +
+                `2. Rewrite the returned \`draft\` into a finished, engaging recap in the DM's voice, following this template:\n\n` +
+                `${RECAP_TEMPLATE}\n\n` +
+                `3. Delete the "Threads resolved this session" source-notes appendix, then publish the result with ` +
+                `add_session_recap (a new session) or update_session (an existing one).`,
+            },
+          },
+        ],
+      }),
+    );
+
+    registerPrompt(
+      'session-prep',
+      {
+        title: 'Session prep',
+        description: 'Prepare for the next session of a campaign: review open threads and draft what happens next.',
+        argsSchema: {
+          campaignId: z.string().describe('Campaign id (as a string) — from list_campaigns or the campfire://campaigns resource'),
+        },
+      },
+      ({ campaignId }) => ({
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text:
+                `You are the Dungeon Master's prep assistant for Campfire campaign ${campaignId}.\n\n` +
+                `1. Read campfire://campaign/${campaignId}/summary (or call get_campaign_summary) for the current state: ` +
+                `active quests and their objectives, the party's characters, the current location, and danger level.\n` +
+                `2. Call read_inbox { "campaignId": ${campaignId} } for open player questions, and list_proposals for anything pending your approval.\n` +
+                `3. Propose a focused prep plan for the next session: which active quests to advance, likely encounters to stat ` +
+                `up (use lookup_rule for monster statblocks), NPCs and locations to flesh out, and any secrets to seed. Offer to ` +
+                `create the encounters, quests, or locations you suggest via the matching tools.`,
+            },
+          },
+        ],
+      }),
     );
   }
 }
