@@ -26,6 +26,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useAnnounce } from '../../components/Announcer';
 
@@ -94,6 +95,7 @@ export default function RunSessionPage() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Mirrors `busy` but updates synchronously (state updates are batched/async in React,
@@ -103,16 +105,22 @@ export default function RunSessionPage() {
   const busyRef = useRef(false);
 
   const [confirmEnd, setConfirmEnd] = useState(false);
+  const [confirmReopen, setConfirmReopen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
+    setNotFound(false);
     try {
       const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
       setEncounter(data);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load this encounter.");
+      if (err instanceof ApiError && err.status === 404) {
+        setNotFound(true);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Couldn't load this encounter.");
+      }
     } finally {
       setLoading(false);
     }
@@ -162,7 +170,7 @@ export default function RunSessionPage() {
   // Announce turn/round changes and HP mutations for screen readers (issue #93).
   // Diffing the encounter (rather than hooking each action) covers every source —
   // own edits, other members' edits, and SSE-pushed updates — with one code path.
-  const prevAnnounceRef = useRef<{ hp: Map<number, number>; turnKey: string } | null>(null);
+  const prevAnnounceRef = useRef<{ hp: Map<number, number | null>; turnKey: string } | null>(null);
   useEffect(() => {
     if (!encounter) return;
     const currentId = encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
@@ -182,7 +190,9 @@ export default function RunSessionPage() {
       }
       for (const c of encounter.combatants) {
         const before = prev.hp.get(c.id);
-        if (before != null && before !== c.hpCurrent) {
+        // Only announce concrete HP changes — skip when either value is null
+        // (a monster whose exact HP is redacted from this viewer, issue #43).
+        if (before != null && c.hpCurrent != null && before !== c.hpCurrent) {
           announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
         }
       }
@@ -249,6 +259,14 @@ export default function RunSessionPage() {
     });
   }
 
+  async function reopenEncounter() {
+    await withBusy(async () => {
+      await api.post(`${API}/encounters/${eid}/reopen`);
+      setConfirmReopen(false);
+      await load();
+    });
+  }
+
   async function deleteEncounter() {
     await withBusy(async () => {
       await api.delete(`${API}/encounters/${eid}`);
@@ -285,6 +303,14 @@ export default function RunSessionPage() {
         <Card>
           <Skeleton lines={5} />
         </Card>
+      </div>
+    );
+  }
+
+  if (notFound && !encounter) {
+    return (
+      <div className="max-w-4xl mx-auto px-4 mt-5">
+        <NotFoundState title="Encounter not found" backTo={`/c/${cid}/encounters`} backLabel="← Back to encounters" />
       </div>
     );
   }
@@ -346,6 +372,15 @@ export default function RunSessionPage() {
         <div className="flex-1" />
         {isDm && (
           <div className="flex gap-2 flex-wrap">
+            {/* Cast the secret-free player display to the table (issue #60). */}
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={() => navigate(`/c/${cid}/screen`)}
+              title="Open the player display — initiative + revealed info, no secrets"
+            >
+              📺 Cast
+            </Btn>
             {encounter.status === 'preparing' && (
               <>
                 <Btn ghost disabled={busy} onClick={rollInitiative}>
@@ -372,6 +407,11 @@ export default function RunSessionPage() {
             {encounter.status !== 'ended' && (
               <Btn ghost danger disabled={busy} onClick={() => setConfirmEnd(true)}>
                 End
+              </Btn>
+            )}
+            {encounter.status === 'ended' && (
+              <Btn ghost disabled={busy} onClick={() => setConfirmReopen(true)}>
+                Reopen
               </Btn>
             )}
             {(encounter.status === 'ended' || encounter.status === 'preparing') && (
@@ -437,6 +477,16 @@ export default function RunSessionPage() {
           busy={busy}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
+        />
+      )}
+      {confirmReopen && (
+        <ConfirmDialog
+          title="Reopen this encounter?"
+          body="It returns to Running where combat left off. HP was written back to character sheets when it ended; it will write back again the next time you End."
+          confirmLabel={busy ? 'Reopening…' : 'Reopen encounter'}
+          busy={busy}
+          onConfirm={reopenEncounter}
+          onCancel={() => setConfirmReopen(false)}
         />
       )}
       {confirmDelete && (
@@ -507,6 +557,12 @@ function CombatantRow({
 
   const edgeColor = isCurrentTurn ? 'var(--color-accent)' : 'transparent';
   const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : 'tag tag-neutral';
+  // Issue #107: a combatant at 0 HP got no visual treatment mid-fight — the row
+  // looked identical bar an empty HP bar, so a "dead" creature was invisible in the
+  // order (the end-of-combat summary already counted it as Fallen). Dim + desaturate
+  // the whole row and skull/strike-through the name. `isDown` works off the HP band
+  // too, so a redacted monster (exact HP hidden, band 'down') gets the same treatment.
+  const down = isDown(combatant);
 
   return (
     <div
@@ -519,6 +575,8 @@ function CombatantRow({
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
         boxShadow: isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+        opacity: down ? 0.55 : 1,
+        filter: down ? 'grayscale(0.75)' : 'none',
       }}
     >
       {canSetInitiative ? (
@@ -570,10 +628,18 @@ function CombatantRow({
       )}
       <div style={{ flex: 1, minWidth: 160 }}>
         <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-          {combatant.name}
+          <span style={down ? { textDecoration: 'line-through' } : undefined}>
+            {down && <span aria-hidden="true" style={{ marginRight: 5 }}>💀</span>}
+            {combatant.name}
+          </span>
           <span className={kindTagClass} style={{ fontSize: 9 }}>
             {combatant.kind}
           </span>
+          {down && (
+            <span className="tag tag-outline" style={{ fontSize: 9 }}>
+              Down
+            </span>
+          )}
         </div>
         {combatant.conditions.length > 0 && (
           <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>

@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest, normalizeStats } from '@campfire/schema';
-import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, HpBand, Role } from '@campfire/schema';
+import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters, combatants, encounters, ruleEntries } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -13,6 +13,7 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { abilityMod, advanceTurn, hpBandFor, sortCombatants, turnIndexFor } from './encounters.logic';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
@@ -52,15 +53,6 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
   };
 }
 
-/** Coarse status band for a monster's HP shown to non-DM viewers (issue #43). */
-function hpBandFor(hpCurrent: number, hpMax: number): HpBand {
-  if (hpCurrent <= 0) return 'down';
-  const pct = hpMax > 0 ? hpCurrent / hpMax : 0;
-  if (pct <= 0.25) return 'critical';
-  if (pct <= 0.5) return 'bloodied';
-  return 'healthy';
-}
-
 /**
  * Issue #43: non-DM viewers must not see a monster's exact HP — a player polling
  * the run-session view would otherwise read the boss at an exact `3/150`, a live
@@ -75,36 +67,6 @@ function redactMonsterHp(c: Combatant): Combatant {
 }
 
 /** floor((score - 10) / 2), the standard 5e ability-modifier formula. */
-function abilityMod(score: number): number {
-  return Math.floor((score - 10) / 2);
-}
-
-/** running: initiative desc, nulls last (tie-broken by sortOrder). otherwise: sortOrder asc. */
-function sortCombatants(rows: Combatant[], status: EncounterStatus): Combatant[] {
-  if (status !== 'running') {
-    return [...rows].sort((a, b) => a.sortOrder - b.sortOrder);
-  }
-  return [...rows].sort((a, b) => {
-    if (a.initiative === null && b.initiative === null) return a.sortOrder - b.sortOrder;
-    if (a.initiative === null) return 1;
-    if (b.initiative === null) return -1;
-    if (a.initiative !== b.initiative) return b.initiative - a.initiative;
-    return a.sortOrder - b.sortOrder;
-  });
-}
-
-/**
- * Position of `currentCombatantId` in the server-sorted running order — the
- * positional `turnIndex` we keep in lockstep with the identity pointer (issue
- * #49) for display/back-compat. 0 when there's no current combatant or it's no
- * longer present (e.g. just removed with an empty encounter).
- */
-function turnIndexFor(sorted: Combatant[], currentCombatantId: number | null): number {
-  if (currentCombatantId === null) return 0;
-  const i = sorted.findIndex((c) => c.id === currentCombatantId);
-  return i < 0 ? 0 : i;
-}
-
 @Injectable()
 export class EncountersService {
   constructor(
@@ -575,23 +537,11 @@ export class EncountersService {
     // next one, and wrap (round+1) past the end. Because the pointer is an id, a mid-
     // fight add/remove that reshuffled positions can't desync who's "current".
     const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
-    const count = sorted.length;
-    let { turnIndex, round } = encounterRow;
-    let currentCombatantId = encounterRow.currentCombatantId;
-    if (count === 0) {
-      turnIndex = 0;
-      currentCombatantId = null;
-    } else {
-      // Missing/unset pointer (legacy row, or it was just removed) restarts at the top.
-      const currentIdx = currentCombatantId === null ? -1 : sorted.findIndex((c) => c.id === currentCombatantId);
-      let nextIdx = currentIdx + 1;
-      if (nextIdx >= count) {
-        nextIdx = 0;
-        round += 1;
-      }
-      turnIndex = nextIdx;
-      currentCombatantId = sorted[nextIdx].id;
-    }
+    const { turnIndex, round, currentCombatantId } = advanceTurn(
+      sorted,
+      encounterRow.currentCombatantId,
+      encounterRow.round,
+    );
 
     await this.db
       .update(encounters)
@@ -643,6 +593,40 @@ export class EncountersService {
       actor: auditActor(user),
       actorRole: role,
       action: 'encounter.end',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounterRow.campaignId,
+    });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
+    return this.getWithCombatantsOrThrow(encounterId, role);
+  }
+
+  /**
+   * Reopens an 'ended' encounter back to 'running' (issue #109) — an accidental /end
+   * was previously unrecoverable (the ended page offered only Refresh/Delete). Requires
+   * status 'ended'; clears endedAt and restores 'running' while PRESERVING round /
+   * turnIndex / currentCombatantId, so combat resumes exactly where it stopped rather
+   * than resetting to the top of the order. Combatant HP is untouched by /end (only the
+   * write-back onto character sheets happened), so reopening leaves combat state
+   * self-consistent. The same HP-writeback caveat applies on the next /end.
+   */
+  async reopen(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    if (encounterRow.status !== 'ended') {
+      throw new BadRequestException(`Encounter must be 'ended' to reopen (currently '${encounterRow.status}')`);
+    }
+
+    await this.db
+      .update(encounters)
+      .set({ status: 'running', endedAt: null, updatedAt: nowIso() })
+      .where(eq(encounters.id, encounterId));
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.reopen',
       entityType: 'encounter',
       entityId: encounterId,
       campaignId: encounterRow.campaignId,

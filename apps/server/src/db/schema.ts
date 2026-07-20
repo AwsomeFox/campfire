@@ -348,6 +348,11 @@ export const attachments = sqliteTable('attachments', {
   filename: text('filename').notNull(),
   mime: text('mime').notNull(),
   size: integer('size').notNull(),
+  // Per-attachment visibility / staged reveal (issue #97). hidden=1 => DM-only:
+  // the file bytes and the row are withheld from non-DM members until revealed.
+  // New map/image uploads default hidden; portraits default visible. Migrated via
+  // migrateAttachmentsTableForHidden().
+  hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

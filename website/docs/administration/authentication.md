@@ -51,6 +51,16 @@ login a Campfire account is provisioned automatically from the token's claims;
 membership in the admin group grants the server-admin role. Campaign roles
 (dm/player/viewer) are still assigned inside Campfire.
 
+!!! warning "Admin membership is re-synced on every login"
+    When `OIDC_ADMIN_GROUP` is set, the server-admin role is applied **both
+    directions on every login**: a user added to the group is promoted, and a
+    user removed from the group is **demoted** back to a plain user the next time
+    they sign in. Managing admin membership at your IdP is therefore enough to
+    grant or revoke server-admin — you don't also have to change it in Campfire.
+    The one exception: the **last enabled admin** is never demoted this way (a
+    warning is logged and the role is left in place), so an IdP misconfiguration
+    can't lock you out of the server.
+
 By default **any** user who can authenticate at your IdP gets a Campfire account
 on first login. On a shared corporate or family IdP that's usually too broad —
 set `OIDC_ALLOWED_GROUP` to an IdP group (e.g. `campfire-users`) and Campfire
@@ -73,3 +83,13 @@ next time they sign in. Members of `OIDC_ADMIN_GROUP` can always sign in.
 
 Local first-run setup also works **before** OIDC is configured, so you can stand the
 server up, create the admin, then layer SSO on later.
+
+## Rate limiting
+
+Public authentication endpoints (login, invite acceptance, and similar) are
+**rate-limited per client IP** to blunt credential-stuffing and brute-force
+attempts. Behind a reverse proxy you must set `TRUST_PROXY` (default: trust one
+hop) so the limiter sees the real client address instead of the proxy's — see
+[Installation → Configuration](../getting-started/installation.md#configuration).
+The limiter can be turned off with `THROTTLE_DISABLED=1`, which is intended for
+tests only; leave it on in production.

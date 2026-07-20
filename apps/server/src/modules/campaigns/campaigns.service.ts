@@ -196,6 +196,17 @@ export class CampaignsService {
     await this.validateRuleSystem(input.ruleSystem);
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
+    // Assigning a map as the campaign background is an explicit, DM-only act of
+    // sharing it with the whole party — the background renders for every member.
+    // Attachments now default to DM-only (issue #97), so reveal the newly-wired
+    // map here, otherwise players would 404 on the background image they're meant
+    // to see. (Clearing the map to null doesn't re-hide — reveal is one-way here.)
+    if (input.mapAttachmentId != null) {
+      await this.db
+        .update(attachments)
+        .set({ hidden: false, updatedAt: nowIso() })
+        .where(and(eq(attachments.id, input.mapAttachmentId), eq(attachments.campaignId, id)));
+    }
     const [row] = await this.db
       .update(campaigns)
       .set({ ...input, updatedAt: nowIso() })

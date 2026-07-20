@@ -8,6 +8,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
+import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
 import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
@@ -134,6 +135,39 @@ type NavItem = {
   soon?: boolean;
   badge?: number;
 };
+
+/** Campaign-wide search box (issue #64). Submits to /c/:id/search?q=. */
+function SidebarSearch({ campaignId }: { campaignId: number }) {
+  const [q, setQ] = useState('');
+  const navigate = useNavigate();
+  return (
+    <form
+      className="px-0.5 mb-1"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const term = q.trim();
+        navigate(term ? `/c/${campaignId}/search?q=${encodeURIComponent(term)}` : `/c/${campaignId}/search`);
+      }}
+    >
+      <input
+        type="search"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder="Search…"
+        aria-label="Search this campaign"
+        className="w-full text-sm"
+        style={{
+          background: 'var(--color-surface, rgba(255,255,255,0.03))',
+          border: '1px solid var(--color-divider)',
+          borderRadius: 'var(--radius-md)',
+          padding: '6px 10px',
+          color: 'var(--color-text)',
+          minHeight: 34,
+        }}
+      />
+    </form>
+  );
+}
 
 function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: boolean; onClick?: () => void }) {
   const inner = (
@@ -365,6 +399,8 @@ export function Layout() {
             <NotificationsBell />
           </div>
 
+          {campaignId !== undefined && <SidebarSearch campaignId={campaignId} />}
+
           <nav className="flex flex-col gap-0.5">
             {mainNav.map((item) => (
               <SidebarNavButton key={item.key} item={item} active={isActivePath(item.to)} />
@@ -519,7 +555,9 @@ export function Layout() {
         )}
 
         <main className="flex-1 w-full pb-20 md:pb-10">
-          <Outlet />
+          <MentionsProvider campaignId={campaignId}>
+            <Outlet />
+          </MentionsProvider>
         </main>
       </div>
 

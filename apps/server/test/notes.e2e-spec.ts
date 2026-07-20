@@ -141,6 +141,82 @@ describe('notes privacy (e2e)', () => {
 });
 
 /**
+ * Issue #65: free-text search over a player's own notes. GET /campaigns/:cid/notes?q=
+ * filters by body (case-insensitive substring), composes with mine=true and the
+ * visibility rules, and never surfaces notes the caller can't already see.
+ */
+describe('notes search (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Search Campaign' });
+    campaignId = campRes.body.id;
+
+    // authorPlayer's own notes
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'The one about the relic in the vault', visibility: 'private' });
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'Remember to buy more torches', visibility: 'private' });
+    // a party_shared note from another player (visible to authorPlayer) that also mentions "relic"
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(otherPlayer)
+      .send({ body: 'The RELIC glows near water', visibility: 'party_shared' });
+    // a private note from another player mentioning "relic" — must NOT be visible to authorPlayer
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(otherPlayer)
+      .send({ body: 'Secret relic theory', visibility: 'private' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('q filters by body, case-insensitively', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/notes?q=relic`).set(authorPlayer);
+    expect(res.status).toBe(200);
+    const bodies = res.body.map((n: { body: string }) => n.body).sort();
+    // authorPlayer's own "relic" note + the party_shared one; NOT other player's private note
+    expect(bodies).toEqual(['The RELIC glows near water', 'The one about the relic in the vault']);
+  });
+
+  it('q composes with mine=true (only the caller\'s own matching notes)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/notes?q=relic&mine=true`)
+      .set(authorPlayer);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].body).toBe('The one about the relic in the vault');
+  });
+
+  it('q never surfaces notes the caller cannot see', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/notes?q=secret`).set(authorPlayer);
+    expect(res.status).toBe(200);
+    // "Secret relic theory" is otherPlayer's private note — invisible to authorPlayer.
+    expect(res.body).toHaveLength(0);
+  });
+
+  it('blank/whitespace q returns all visible notes (no-op filter)', async () => {
+    const server = ctx.app.getHttpServer();
+    const all = await request(server).get(`/api/v1/campaigns/${campaignId}/notes`).set(authorPlayer);
+    const blank = await request(server).get(`/api/v1/campaigns/${campaignId}/notes?q=%20%20`).set(authorPlayer);
+    expect(blank.status).toBe(200);
+    expect(blank.body).toHaveLength(all.body.length);
+  });
+});
+
+/**
  * Issue #5: entity-anchored notes carry the anchored entity's display name
  * (entityName) so list views can show "The Sunken Crypt" instead of "Quest #12".
  * Resolved server-side at read time, never stored; null when unanchored, when the
