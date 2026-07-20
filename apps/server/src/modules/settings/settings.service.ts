@@ -10,6 +10,7 @@ type SettingsUpdateInput = z.infer<typeof SettingsUpdate>;
 const DEFAULTS: z.infer<typeof ServerSettings> = {
   allowLocalLogin: true,
   allowSignup: false,
+  experimentalAiDm: false,
 };
 
 @Injectable()

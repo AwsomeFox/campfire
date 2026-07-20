@@ -386,6 +386,19 @@ CREATE TABLE IF NOT EXISTS party_treasury (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ai_dm_seats (
+  campaign_id INTEGER PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  model TEXT NOT NULL DEFAULT '',
+  instructions TEXT NOT NULL DEFAULT '',
+  token_budget INTEGER NOT NULL DEFAULT 0,
+  tokens_used INTEGER NOT NULL DEFAULT 0,
+  turn_count INTEGER NOT NULL DEFAULT 0,
+  last_turn_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL,
