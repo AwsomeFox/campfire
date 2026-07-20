@@ -12,6 +12,21 @@ const TINY_PNG = Buffer.from(
   'hex',
 );
 
+// Minimal valid 1x1 JPEG (SOI + DQT + SOF + minimal scan + EOI).
+const TINY_JPEG = Buffer.from(
+  'ffd8ffdb004300030202020202030202020303030304060404040404080606' +
+    '050609080a0a090809090a0c0f0c0a0b0e0b09090d110d0e0f101011100a0c' +
+    '12131210130f101010ffc9000b080001000101011100ffcc000600101005ff' +
+    'da0008010100003f00d2cf20ffd9',
+  'hex',
+);
+
+// Minimal valid 1x1 WebP (RIFF container + lossy VP8 bitstream).
+const TINY_WEBP = Buffer.from(
+  '5249464624000000574542505650382018000000300100' + '9d012a0100010002003425a4000370' + '00fefbfd5000',
+  'hex',
+);
+
 describe('attachments (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
@@ -99,6 +114,82 @@ describe('attachments (e2e)', () => {
       .attach('file', Buffer.from('not an image'), { filename: 'evil.svg', contentType: 'image/svg+xml' });
 
     expect(res.status).toBe(400);
+  });
+
+  // Issue #47 — the declared mimetype must match the actual file bytes (magic-byte
+  // sniffing in AttachmentsService.create); the multipart header alone is not trusted.
+  describe('content sniffing (magic bytes)', () => {
+    it('HTML bytes declared as image/png are rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', Buffer.from('<html><script>alert(1)</script></html>'), {
+          filename: 'sneaky.png',
+          contentType: 'image/png',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('does not match');
+    });
+
+    it('PNG bytes declared as image/jpeg are rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'notjpeg.jpg', contentType: 'image/jpeg' });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('JPEG bytes declared as image/webp are rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_JPEG, { filename: 'notwebp.webp', contentType: 'image/webp' });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('a real JPEG declared as image/jpeg is accepted', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_JPEG, { filename: 'real.jpg', contentType: 'image/jpeg' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.mime).toBe('image/jpeg');
+    });
+
+    it('a real WebP declared as image/webp is accepted', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_WEBP, { filename: 'real.webp', contentType: 'image/webp' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.mime).toBe('image/webp');
+    });
+
+    it('a buffer too short to carry any magic bytes is rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', Buffer.from([0x89]), { filename: 'stub.png', contentType: 'image/png' });
+
+      expect(res.status).toBe(400);
+    });
   });
 
   it('missing file is rejected (400)', async () => {
