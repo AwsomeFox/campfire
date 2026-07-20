@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { characters, combatants, encounters } from '../../db/schema';
+import { characters, combatants, encounters, campaignMembers } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { redactSecret, redactSecrets } from '../../common/redact';
@@ -224,8 +224,16 @@ export class CharactersService {
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    // Deletion is a canon write -> dm only, enforced at controller
-    await this.db.delete(characters).where(eq(characters.id, id));
+    // Deletion is a canon write -> dm only, enforced at controller.
+    // Unlink inbound references in the same transaction as the delete so nothing dangles
+    // on a deleted character: the member's characterId link (campaignMembers.characterId,
+    // whose denormalized join would otherwise point at a ghost) and any combatant row
+    // (combatants.characterId — the combatant stays in the fight, just no longer HP-synced).
+    this.db.transaction((tx) => {
+      tx.update(campaignMembers).set({ characterId: null, updatedAt: nowIso() }).where(eq(campaignMembers.characterId, id)).run();
+      tx.update(combatants).set({ characterId: null }).where(eq(combatants.characterId, id)).run();
+      tx.delete(characters).where(eq(characters.id, id)).run();
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

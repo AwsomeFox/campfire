@@ -378,4 +378,42 @@ describe('characters (e2e)', () => {
     expect(removeRes.status).toBe(201);
     expect(removeRes.body.conditions).toEqual(['poisoned']);
   });
+
+  // Issue #96: deleting a character must unlink any combatant that references it, so
+  // combatants.characterId never dangles (combat HP-sync silently no-ops on a ghost id).
+  // The combatant stays in the fight — only the link is cleared.
+  describe('delete cleanup: character↔combatant (issue #96)', () => {
+    it('deleting a character nulls combatants.characterId but keeps the combatant', async () => {
+      const server = ctx.app.getHttpServer();
+      const delCampRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Delete Combatant Campaign' });
+      const delCampId = delCampRes.body.id;
+
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${delCampId}/characters`)
+        .set(dm)
+        .send({ name: 'Doomed Hero', hpMax: 20, hpCurrent: 20 });
+      expect(charRes.status).toBe(201);
+      const doomedId = charRes.body.id;
+
+      // Encounter create auto-adds every party character as a combatant.
+      const encRes = await request(server).post(`/api/v1/campaigns/${delCampId}/encounters`).set(dm).send({ name: 'Ambush' });
+      expect(encRes.status).toBe(201);
+      const encId = encRes.body.id;
+      const combatant = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === doomedId,
+      );
+      expect(combatant).toBeDefined();
+
+      const delRes = await request(server).delete(`/api/v1/characters/${doomedId}`).set(dm);
+      expect(delRes.status).toBe(200);
+
+      const encAfter = await request(server).get(`/api/v1/encounters/${encId}`).set(dm);
+      expect(encAfter.status).toBe(200);
+      const combatantAfter = (encAfter.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.id === combatant!.id,
+      );
+      expect(combatantAfter).toBeDefined();
+      expect(combatantAfter!.characterId).toBeNull();
+    });
+  });
 });
