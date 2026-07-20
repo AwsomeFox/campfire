@@ -332,6 +332,7 @@ export function Layout() {
         { key: 'inventory', label: 'Inventory', to: `/c/${campaignId}/inventory` },
         { key: 'sessions', label: 'Sessions', to: `/c/${campaignId}/sessions` },
         { key: 'timeline', label: 'Timeline', to: `/c/${campaignId}/timeline` },
+        { key: 'session-zero', label: 'Session Zero', to: `/c/${campaignId}/session-zero` },
         { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
         { key: 'compendium', label: 'Compendium', to: `/c/${campaignId}/compendium` },
         { key: 'notes', label: 'My Notes', to: `/c/${campaignId}/notes` },

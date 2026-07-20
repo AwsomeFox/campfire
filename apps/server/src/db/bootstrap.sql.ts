@@ -123,6 +123,17 @@ CREATE TABLE IF NOT EXISTS timeline_calendars (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_zero (
+  campaign_id INTEGER PRIMARY KEY,
+  lines TEXT NOT NULL DEFAULT '[]',
+  veils TEXT NOT NULL DEFAULT '[]',
+  safety_tools TEXT NOT NULL DEFAULT '[]',
+  house_rules TEXT NOT NULL DEFAULT '',
+  tone_and_expectations TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS npcs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
@@ -499,6 +510,10 @@ CREATE TABLE IF NOT EXISTS combatants (
   init_mod INTEGER NOT NULL DEFAULT 0,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
+  hp_temp INTEGER NOT NULL DEFAULT 0,
+  death_state TEXT NOT NULL DEFAULT 'none',
+  death_save_successes INTEGER NOT NULL DEFAULT 0,
+  death_save_failures INTEGER NOT NULL DEFAULT 0,
   conditions TEXT NOT NULL DEFAULT '[]',
   rule_entry_id INTEGER,
   sort_order INTEGER NOT NULL DEFAULT 0

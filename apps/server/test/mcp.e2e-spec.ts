@@ -18,6 +18,7 @@ const ALL_TOOLS = [
   // read
   'list_campaigns',
   'get_campaign_summary',
+  'get_session_zero',
   'get_quest',
   'list_quests',
   'list_arcs',
@@ -176,7 +177,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(84);
+    expect(tools).toHaveLength(85);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -1083,6 +1084,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(uris).toContain(`campfire://campaign/${campaignId}/summary`);
     expect(uris).toContain(`campfire://campaign/${campaignId}/party`);
     expect(uris).toContain(`campfire://campaign/${campaignId}/recaps`);
+    expect(uris).toContain(`campfire://campaign/${campaignId}/session-zero`);
 
     // The URI templates themselves are advertised via resources/templates/list.
     const { resourceTemplates } = await client.listResourceTemplates();
@@ -1090,6 +1092,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(templates).toContain('campfire://campaign/{campaignId}/summary');
     expect(templates).toContain('campfire://campaign/{campaignId}/party');
     expect(templates).toContain('campfire://campaign/{campaignId}/recaps');
+    expect(templates).toContain('campfire://campaign/{campaignId}/session-zero');
   });
 
   it('reading campfire://campaigns and campfire://campaign/{id}/summary returns the same JSON as the read tools (issue #26)', async () => {
