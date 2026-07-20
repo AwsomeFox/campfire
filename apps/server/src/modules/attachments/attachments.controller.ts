@@ -38,12 +38,15 @@ export class CampaignAttachmentsController {
    * allowlist + size cap are enforced by the FileInterceptor options below;
    * fileFilter rejections surface as 400s (via BadRequestException), size overages
    * as 413s (Multer's LIMIT_FILE_SIZE, translated by Nest's built-in exception filter).
+   * The declared mimetype is additionally verified against the actual file bytes
+   * (magic-byte sniffing) in AttachmentsService.create — the fileFilter runs before
+   * the buffer exists, so content sniffing can't happen there.
    */
   @Post()
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Upload an attachment', description: "Multipart upload. `kind` in the form body selects the bucket and minimum role: player+ for 'portrait', dm-only for 'map'/'image'. Allowed mime types: image/png, image/jpeg, image/webp." })
   @ApiResponse({ status: 201, description: 'Attachment created.' })
-  @ApiResponse({ status: 400, description: 'Missing file, or unsupported mime type.' })
+  @ApiResponse({ status: 400, description: 'Missing file, unsupported mime type, or file content that does not match the declared type.' })
   @ApiResponse({ status: 413, description: 'File exceeds the max upload size.' })
   @UseInterceptors(
     FileInterceptor('file', {
