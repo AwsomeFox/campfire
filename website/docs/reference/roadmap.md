@@ -31,7 +31,7 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **Per-campaign roles** — dm / player / viewer, with last-DM & last-admin protection
 - ✅ **MCP server** — AI-operable over streamable HTTP, PAT-authenticated, scope-capped
 - ✅ **Single-image deploy** — multi-arch Docker image, one data volume, same-origin SPA serving, Traefik/Authentik ready
-- ✅ **Preferences** — per-user accent colour
+- ✅ **Preferences** — per-user accent colour and text size
 
 ## AI operability ✅
 
@@ -60,7 +60,6 @@ Honest rough edges that exist but aren't finished:
 - 🟡 **Proposal diffs** — show the proposed new values only; there's no before/after snapshot to compare against current state
 - 🟡 **Real-time updates** — the run-session and dashboard use polling; live push (SSE) is planned for smoother at-the-table multi-device play
 - 🟡 **Notes anchor labels** — entity-linked notes show `Quest #12`-style references rather than the entity's name in some list views
-- 🟡 **Preferences extras** — "text size" and "notifications" cards are placeholders with no backing yet
 - 🟡 **AI scribe automation** — the proposal queue is real, but there's no built-in scheduled/automatic scribe; today it's client-driven (connect an MCP client and ask it to act)
 
 ## Planned ⬜

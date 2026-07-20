@@ -3,7 +3,7 @@
  * On mount: GET /me. 401 -> me:null. Exposes ready/isAdmin/roleIn/refresh/logout.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { Me, Role } from '@campfire/schema';
+import type { Me, Role, TextSize } from '@campfire/schema';
 import { api, ApiError, API } from '../lib/api';
 import { AuthContext, type AuthState } from './auth';
 
@@ -38,6 +38,18 @@ function applyAccentColor(accentColor: string | null): void {
   }
 }
 
+/**
+ * Applies (or clears, for 'default') the user's text-size preference as a
+ * data attribute on <html>; index.css scales the UI off it.
+ */
+function applyTextSize(textSize: TextSize): void {
+  if (textSize === 'large') {
+    document.documentElement.dataset.textSize = 'large';
+  } else {
+    delete document.documentElement.dataset.textSize;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [ready, setReady] = useState(false);
@@ -49,11 +61,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setMe(nextMe);
       setConnectionError(false);
       applyAccentColor(nextMe.user.accentColor);
+      applyTextSize(nextMe.user.textSize);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setMe(null);
         setConnectionError(false);
         applyAccentColor(null);
+        applyTextSize('default');
       } else {
         // Network error or non-401 server failure (API down, 5xx, etc). Don't treat
         // this as "not logged in" — that would bounce a real session to /login. Surface

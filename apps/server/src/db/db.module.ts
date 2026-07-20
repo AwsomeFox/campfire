@@ -121,6 +121,25 @@ function migrateUsersTableForAccentColor(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-user text size: `users.text_size`
+ * didn't exist. Plain NOT NULL DEFAULT 'default' ADD COLUMN — no table
+ * rebuild needed, same as migrateUsersTableForAccentColor above. New DBs
+ * never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateUsersTableForTextSize(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasTextSize = columns.some((c) => c.name === 'text_size');
+  if (hasTextSize) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN text_size TEXT NOT NULL DEFAULT 'default'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -180,6 +199,7 @@ export function createDb(): DrizzleDb {
   migrateUsersTableForOidc(sqlite);
   migrateCampaignsTableForRuleSystem(sqlite);
   migrateUsersTableForAccentColor(sqlite);
+  migrateUsersTableForTextSize(sqlite);
   migrateCampaignsTableForMapAttachment(sqlite);
   migrateApiTokensTableForAdminEnabled(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);

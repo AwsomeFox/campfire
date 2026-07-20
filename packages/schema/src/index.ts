@@ -276,6 +276,12 @@ export type ServerRole = z.infer<typeof ServerRole>;
 // Hex color, e.g. #9184d9. Shared by User.accentColor and PreferencesUpdate below.
 const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 
+// UI text-size preference. 'default' follows the design's base scale; 'large'
+// scales the whole UI up for readability. Shared by User.textSize and
+// PreferencesUpdate below.
+export const TextSize = z.enum(['default', 'large']);
+export type TextSize = z.infer<typeof TextSize>;
+
 export const User = z.object({
   id: Id,
   username: z.string().min(2).max(60).regex(/^[a-z0-9_.-]+$/i, 'letters, numbers, _ . - only'),
@@ -284,6 +290,8 @@ export const User = z.object({
   disabled: z.boolean().default(false),
   // Personal accent color override (per-user UI theming). null = follow the server default (Nocturne blurple).
   accentColor: HexColor.nullable().default(null),
+  // Personal text-size preference (per-user UI scaling).
+  textSize: TextSize.default('default'),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -305,6 +313,7 @@ export const PasswordChange = z.object({ currentPassword: z.string().optional(),
 export const PreferencesUpdate = z.object({
   displayName: z.string().max(120).optional(),
   accentColor: HexColor.nullable().optional(),
+  textSize: TextSize.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 

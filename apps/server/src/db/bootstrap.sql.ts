@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS users (
   disabled INTEGER NOT NULL DEFAULT 0,
   oidc_sub TEXT,
   accent_color TEXT,
+  text_size TEXT NOT NULL DEFAULT 'default',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
