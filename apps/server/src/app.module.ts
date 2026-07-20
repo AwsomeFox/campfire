@@ -44,6 +44,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { ObservabilityModule } from './modules/observability/observability.module';
 import { BackupModule } from './modules/backup/backup.module';
+import { AiDmModule } from './modules/ai-dm/ai-dm.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -141,6 +142,7 @@ function serveStaticImports(): DynamicModule[] {
     InventoryModule,
     ObservabilityModule,
     BackupModule,
+    AiDmModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },

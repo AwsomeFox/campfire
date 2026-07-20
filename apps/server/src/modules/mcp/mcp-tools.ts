@@ -30,6 +30,7 @@ import {
   SessionCreate,
   SessionUpdate,
   XpAward,
+  AiDmTurnKind,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -47,6 +48,7 @@ import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
+import { AiDmService } from '../ai-dm/ai-dm.service';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -195,6 +197,7 @@ export class McpToolsService {
     private readonly encounters: EncountersService,
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
+    private readonly aiDm: AiDmService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
@@ -588,6 +591,19 @@ export class McpToolsService {
       async ({ campaignId }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.exportService.buildExport(campaignId as number, user);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_ai_dm_seat',
+      'EXPERIMENTAL (issue #28): read the AI Dungeon Master seat for a campaign — whether an AI holds the DM seat, its ' +
+        'persona/instructions, and the per-campaign token budget/usage. Requires membership. A connected agent that is ' +
+        'meant to run the game reads this first to learn its instructions and remaining budget before ai_dm_narrate.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.aiDm.getSeat(campaignId as number);
       },
     );
   }
@@ -1402,6 +1418,35 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.encounters.end(encounterId as number, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'ai_dm_narrate',
+      'EXPERIMENTAL (issue #28): the AI Dungeon Master takes a turn. DM role required (the AI holds the DM seat), the ' +
+        'server-wide experimental flag must be on, the seat must be enabled, and the per-campaign token budget must not ' +
+        'be exhausted (otherwise a forbidden error). Narration is produced by the server\'s injected AI_DM_PROVIDER — the ' +
+        'shipped default is a no-op scaffold that makes NO vendor call, so in a stock install this returns a placeholder ' +
+        'and it is the connected agent (you) that authors the real narration and drives the other write tools. Metered ' +
+        'against the budget and audited as ai-dm.',
+      {
+        campaignId: CampaignIdArg,
+        prompt: z.string().min(1).max(20_000).describe('The situation / what the players just did, for the DM to respond to'),
+        kind: AiDmTurnKind.optional().describe("Turn kind: 'narrate' (default), 'combat', or 'recap'"),
+        maxTokens: z.number().int().min(1).max(4096).optional().describe('Optional cap on this turn\'s output tokens (clamped to remaining budget)'),
+      },
+      async ({ campaignId, prompt, kind, maxTokens }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.aiDm.takeTurn(
+          campaignId as number,
+          {
+            prompt: prompt as string,
+            kind: (kind as AiDmTurnKind | undefined) ?? 'narrate',
+            ...(maxTokens !== undefined ? { maxTokens: maxTokens as number } : {}),
+          },
+          user,
+        );
       },
     );
   }
