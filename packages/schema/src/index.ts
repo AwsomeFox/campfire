@@ -628,6 +628,19 @@ export const RollResult = z.object({
 });
 export type RollResult = z.infer<typeof RollResult>;
 
+// ---------- real-time campaign events (SSE) ----------
+// Thin invalidation signals pushed over GET /campaigns/:id/events — they carry ids, not
+// entity payloads, so clients refetch through the normal (permission-checked) REST reads.
+export const CampaignEventType = z.enum(['encounter.updated', 'encounter.deleted']);
+export type CampaignEventType = z.infer<typeof CampaignEventType>;
+export const CampaignEvent = z.object({
+  type: CampaignEventType,
+  campaignId: Id,
+  encounterId: Id,
+  at: IsoDate,
+});
+export type CampaignEvent = z.infer<typeof CampaignEvent>;
+
 // ---------- audit ----------
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
 export type DangerLevel = z.infer<typeof DangerLevel>;

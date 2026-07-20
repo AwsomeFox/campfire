@@ -22,6 +22,7 @@ import type {
   RuleEntry,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -110,26 +111,24 @@ export default function RunSessionPage() {
     };
   }, [cid]);
 
-  // Poll while preparing or running (and the tab is visible) — players waiting for the
-  // DM to hit "Start" need to see it happen without a manual reload. Stop once ended.
-  useEffect(() => {
-    if (!encounter || encounter.status === 'ended') return;
-    let cancelled = false;
-    const tick = async () => {
-      if (document.visibilityState !== 'visible') return;
-      try {
-        const data = await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`);
-        if (!cancelled) setEncounter(data);
-      } catch {
-        /* keep last-known state; next tick retries */
-      }
-    };
-    const handle = setInterval(tick, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(handle);
-    };
-  }, [eid, encounter?.status]);
+  // Live updates over SSE (replaces the old 5s poll) — players waiting for the DM to
+  // hit "Start" (or take a turn, adjust HP, …) see it pushed instantly. On a remote
+  // delete, bounce back to the encounters list rather than surfacing a 404.
+  useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
+    onEvent: useCallback(
+      (event) => {
+        if (event.encounterId !== eid) return;
+        if (event.type === 'encounter.deleted') {
+          navigate(`/c/${cid}/encounters`);
+          return;
+        }
+        void load();
+      },
+      [eid, cid, navigate, load],
+    ),
+    // The stream was down for a while — refetch to catch anything missed.
+    onReconnect: useCallback(() => void load(), [load]),
+  });
 
   const myUserId = me?.user.id;
   const ownedCharacterIds = useMemo(
