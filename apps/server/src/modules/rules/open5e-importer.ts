@@ -90,7 +90,11 @@ interface Open5ePage {
 }
 
 function asString(v: unknown): string {
-  return typeof v === 'string' ? v : '';
+  if (typeof v !== 'string') return '';
+  // Some Open5e entries carry LITERAL escape sequences (a backslash followed by
+  // "n"/"t") in their text instead of real whitespace, which breaks markdown
+  // tables and paragraph breaks in the reader. Normalise to real characters.
+  return v.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t');
 }
 
 function nestedName(v: unknown): string {
