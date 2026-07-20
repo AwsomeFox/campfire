@@ -61,6 +61,11 @@ export const router = createBrowserRouter([
     element: page(<JoinPage />),
   },
   {
+    // Public read-only recap share link — no auth, outside AuthedLayout on purpose.
+    path: '/share/:token',
+    element: lazyPage(() => import('../features/sessions/SharedRecapPage')),
+  },
+  {
     element: <AuthedLayout />,
     children: [
       {

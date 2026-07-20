@@ -92,3 +92,28 @@ export function looksLikeApiToken(token: string): boolean {
 export function generateInviteCode(): string {
   return randomBytes(16).toString('base64url');
 }
+
+/**
+ * Recap share-link token: `cf_share_<48 hex chars>` (24 random bytes — 192 bits,
+ * unguessable). DB stores sha256(token); `tokenPrefix` (first 13 chars, e.g.
+ * `cf_share_9f2a`) is kept alongside for display purposes only — never enough
+ * to reconstruct the link. Same storage policy as PATs above.
+ */
+const SHARE_TOKEN_PREFIX = 'cf_share_';
+const SHARE_TOKEN_DISPLAY_PREFIX_LEN = 13;
+
+export function generateShareToken(): string {
+  return `${SHARE_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
+}
+
+export function hashShareToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export function shareTokenPrefix(token: string): string {
+  return token.slice(0, SHARE_TOKEN_DISPLAY_PREFIX_LEN);
+}
+
+export function looksLikeShareToken(token: string): boolean {
+  return /^cf_share_[0-9a-f]{48}$/.test(token);
+}
