@@ -46,7 +46,9 @@ just dev       # backend :8080 + frontend :5173, hot reload
 | Recipe | What it does |
 |---|---|
 | `just dev` | Run server + web together (`just dev-server` / `just dev-web` for one) |
-| `just test` | API test suite (Jest + Supertest e2e) |
+| `just test` | Server suite — unit (`test/unit`) + API e2e (Jest + Supertest) |
+| `just test-e2e` | Browser E2E across roles (Playwright; run `just e2e-install` once) |
+| `just test-all` | Whole regression safety net — lint + server + web build + Playwright |
 | `just build` | Type-check + production build of all workspaces |
 | `just db-reset` | Delete the local SQLite db (recreated on next boot) |
 | `just api-docs` | Open Swagger UI (server must be running) |
