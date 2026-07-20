@@ -11,7 +11,15 @@ import { OidcService } from './oidc.service';
 import { SettingsService } from '../settings/settings.service';
 import { UsersService } from '../users/users.service';
 import { TokensService } from '../tokens/tokens.service';
-import { SetupRequestDto, LoginRequestDto, PasswordChangeDto, AuthTokenRequestDto } from './auth.dto';
+import { PasswordResetService } from './password-reset.service';
+import {
+  SetupRequestDto,
+  LoginRequestDto,
+  PasswordChangeDto,
+  AuthTokenRequestDto,
+  PasswordResetRequestCreateDto,
+  PasswordResetConfirmDto,
+} from './auth.dto';
 import { PreferencesUpdateDto } from '../users/users.dto';
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, VERSION } from './auth.constants';
 import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
@@ -42,6 +50,7 @@ export class AuthController {
     private readonly settings: SettingsService,
     private readonly oidc: OidcService,
     private readonly tokens: TokensService,
+    private readonly passwordReset: PasswordResetService,
   ) {}
 
   @Public()
@@ -117,6 +126,47 @@ export class AuthController {
     const row = await this.auth.verifyCredentials(body.username, body.password);
     const owner: RequestUser = { id: String(row.id), name: row.displayName || row.username, serverRole: row.serverRole as RequestUser['serverRole'] };
     return this.tokens.mintFor(owner, row.id, body);
+  }
+
+  /**
+   * Forgot-password step 1 (admin-approved flow — see PasswordResetService).
+   * ALWAYS answers 202 with the same body, whether or not the username exists
+   * (no user-enumeration signal). Throttled like login: unauthenticated,
+   * writes a row per unknown-to-attacker username.
+   */
+  @Public()
+  @AUTH_THROTTLE
+  @Post('reset-request')
+  @HttpCode(202)
+  @ApiOperation({
+    summary: 'Request a password reset (forgot password)',
+    description:
+      'Files a self-service reset request for a server admin to approve — this server may have no mail transport, so the admin relays the one-time reset code out-of-band. ' +
+      'Always returns 202 with the same body whether or not the account exists.',
+  })
+  @ApiResponse({ status: 202, description: 'Accepted (regardless of whether the account exists).' })
+  async resetRequest(@Body() body: PasswordResetRequestCreateDto): Promise<{ message: string }> {
+    await this.passwordReset.request(body.username);
+    return { message: 'Request received. Ask your server admin to approve it — they will give you a one-time reset code.' };
+  }
+
+  /**
+   * Forgot-password step 2: redeem the admin-issued one-time code. Single-use;
+   * kills every session for the account on success. Generic 400 for every
+   * failure mode (unknown/expired code) — the code is the only credential.
+   */
+  @Public()
+  @AUTH_THROTTLE
+  @Post('reset-confirm')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: 'Redeem a password-reset code',
+    description: 'Sets a new password using the one-time code an admin approved. Single-use, expires after 1 hour; all existing sessions for the account are revoked.',
+  })
+  @ApiResponse({ status: 204, description: 'Password reset; log in with the new password.' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired reset code (generic — no detail leaked).' })
+  async resetConfirm(@Body() body: PasswordResetConfirmDto): Promise<void> {
+    await this.passwordReset.confirm(body.code, body.newPassword);
   }
 
   @Post('logout')

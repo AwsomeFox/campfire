@@ -4,13 +4,15 @@ import { SettingsModule } from '../settings/settings.module';
 import { TokensModule } from '../tokens/tokens.module';
 import { AuthService } from './auth.service';
 import { OidcService } from './oidc.service';
+import { PasswordResetService } from './password-reset.service';
 import { AuthController, MeController } from './auth.controller';
 import { OidcController } from './oidc.controller';
+import { PasswordResetAdminController } from './password-reset.controller';
 
 @Module({
   imports: [UsersModule, SettingsModule, TokensModule],
-  controllers: [AuthController, MeController, OidcController],
-  providers: [AuthService, OidcService],
+  controllers: [AuthController, MeController, OidcController, PasswordResetAdminController],
+  providers: [AuthService, OidcService, PasswordResetService],
   exports: [AuthService, OidcService],
 })
 export class AuthModule {}

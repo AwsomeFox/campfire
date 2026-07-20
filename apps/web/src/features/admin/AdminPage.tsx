@@ -4,7 +4,7 @@
  * users + settings + members (PAT tokens shown as a disabled "coming soon" card).
  */
 import { useCallback, useEffect, useState } from 'react';
-import type { ServerRole, User, ServerSettings, Campaign } from '@campfire/schema';
+import type { ServerRole, User, ServerSettings, Campaign, PasswordResetRequest, PasswordResetApproval } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -80,6 +80,7 @@ export default function AdminPage() {
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <UsersCard users={users ?? []} onChange={load} />
+      <ResetRequestsCard />
       <SettingsCard settings={settings} onChange={load} />
       <RulePacksCard />
       <TokensCard />
@@ -461,6 +462,142 @@ function ResetPasswordRow({
         </div>
       </td>
     </tr>
+  );
+}
+
+// ---------- Password reset requests ----------
+
+/**
+ * Forgot-password (issue #10): users file requests from the login screen;
+ * approving one mints a ONE-TIME reset code (shown here once) that the admin
+ * relays out-of-band. The admin never learns the user's new password.
+ */
+function ResetRequestsCard() {
+  const [requests, setRequests] = useState<PasswordResetRequest[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  // Raw one-time codes by request id — only lives in this render; gone on reload.
+  const [codes, setCodes] = useState<Record<number, PasswordResetApproval>>({});
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      setRequests(await api.get<PasswordResetRequest[]>(`${API}/users/reset-requests`));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load reset requests.");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function approve(id: number) {
+    setBusyId(id);
+    setError(null);
+    try {
+      const approval = await api.post<PasswordResetApproval>(`${API}/users/reset-requests/${id}/approve`);
+      setCodes((prev) => ({ ...prev, [id]: approval }));
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't approve request.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function dismiss(id: number) {
+    setBusyId(id);
+    setError(null);
+    try {
+      await api.delete(`${API}/users/reset-requests/${id}`);
+      setCodes((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't dismiss request.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function copy(id: number) {
+    const approval = codes[id];
+    if (!approval) return;
+    try {
+      await navigator.clipboard.writeText(`${window.location.origin}/reset-password?code=${approval.code}`);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((v) => (v === id ? null : v)), 1500);
+    } catch {
+      /* clipboard unavailable — code is still visible to copy manually */
+    }
+  }
+
+  return (
+    <Card className="space-y-3">
+      <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Password reset requests</h2>
+      {error && <p className="text-xs text-rose-400">{error}</p>}
+      {!requests || requests.length === 0 ? (
+        <p className="text-xs text-slate-500">
+          None right now. When someone taps &ldquo;Forgot password?&rdquo; on the sign-in screen, their request shows up
+          here — approve it to get a one-time reset code to hand to them.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {requests.map((r) => (
+            <div key={r.id} className="cf-inset p-3.5 space-y-2">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="text-sm font-semibold text-white">
+                    {r.username}
+                    {r.displayName && <span className="text-slate-500 font-normal"> · {r.displayName}</span>}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Requested {new Date(r.requestedAt).toLocaleString()}
+                    {r.status === 'approved' && r.expiresAt && (
+                      <> · code expires {new Date(r.expiresAt).toLocaleTimeString()}</>
+                    )}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Btn
+                    className="!min-h-0 !py-1.5 text-xs"
+                    onClick={() => approve(r.id)}
+                    disabled={busyId === r.id}
+                  >
+                    {r.status === 'approved' ? 'New code' : 'Approve'}
+                  </Btn>
+                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => dismiss(r.id)} disabled={busyId === r.id}>
+                    Dismiss
+                  </Btn>
+                </div>
+              </div>
+              {codes[r.id] && (
+                <div className="border border-amber-500/30 rounded p-2.5 space-y-1">
+                  <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
+                    One-time reset code — shown once, give it to {codes[r.id].request.username} now
+                  </p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <code className="text-xs text-emerald-400 break-all">{codes[r.id].code}</code>
+                    <Btn ghost className="!min-h-0 !py-1 text-[11px]" onClick={() => copy(r.id)}>
+                      {copiedId === r.id ? 'Copied!' : 'Copy reset link'}
+                    </Btn>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Expires {new Date(codes[r.id].expiresAt).toLocaleTimeString()} · single-use · they set their own
+                    password at /reset-password.
+                  </p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
 

@@ -11,6 +11,7 @@ import { RouteErrorBoundary } from './RouteErrorBoundary';
 import { Skeleton } from '../components/ui';
 import { SetupPage } from '../features/auth/SetupPage';
 import { LoginPage } from '../features/auth/LoginPage';
+import { ResetPasswordPage } from '../features/auth/ResetPasswordPage';
 import { HomePage } from '../features/home/HomePage';
 import { NotFoundPage } from '../features/home/NotFoundPage';
 
@@ -43,6 +44,10 @@ export const router = createBrowserRouter([
   {
     path: '/login',
     element: page(<LoginPage />),
+  },
+  {
+    path: '/reset-password',
+    element: page(<ResetPasswordPage />),
   },
   {
     element: <AuthedLayout />,
