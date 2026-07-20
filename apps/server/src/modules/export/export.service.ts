@@ -244,6 +244,7 @@ export class ExportService {
       `- Species: ${c.species || '_unknown_'}`,
       `- Class: ${c.className || '_unknown_'}`,
       `- Level: ${c.level}`,
+      `- XP: ${c.xp}`,
       `- HP: ${c.hpCurrent}/${c.hpMax}`,
       `- AC: ${c.ac ?? '_unset_'}`,
       '',

@@ -81,7 +81,7 @@ who hits them. Grouped by theme:
 
 **Table depth**
 
-- ⬜ **XP & levelling** — _(today `level` is a plain editable number)_
+- ✅ **XP & levelling** — XP tracking with 5e thresholds, party-wide DM awards, and a guided level-up (level +1, new max HP, damage carried over)
 - ⬜ **Inventory & loot** — party treasury and per-character items _(today loot lives in prose)_
 - ⬜ **Campaign archive** — a real read-only "completed" state _(today `status` is stored but cosmetic; completed campaigns stay fully editable in the hub)_
 - ⬜ **Campaign templates / cloning** — reuse prep instead of rebuilding from scratch
