@@ -19,7 +19,7 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **Notes** — private / share-with-DM / share-with-party, anchored to any entity
 - ✅ **Scribe inbox** — zero-friction quick capture → DM resolves into canon
 - ✅ **Encounters / run-session** — initiative (auto-rolled d20+DEX), turn order, next-turn, at-table HP & conditions, add monsters from the compendium, HP writes back to sheets on end
-- ✅ **Dice roller** — server-side, audited, on the dashboard and in combat
+- ✅ **Dice roller** — server-side, audited, on the dashboard and in combat, with a campaign-shared roll log every member sees
 - ✅ **Compendium** — Open5e SRD import, full-text search, reader
 - ✅ **Proposals** — AI/collab writes queue for DM approval
 - ✅ **Export** — whole campaign to JSON or Markdown zip
