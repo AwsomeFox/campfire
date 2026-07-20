@@ -1,10 +1,10 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest, normalizeStats } from '@campfire/schema';
+import { CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, RollRequest, normalizeStats } from '@campfire/schema';
 import type { Combatant, DiceRoll, Encounter, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
+import { attachments, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
@@ -17,9 +17,15 @@ import { abilityMod, advanceTurn, applyCombatantHp, hpBandFor, sortCombatants, t
 import type { CombatantHpState } from './encounters.logic';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
+type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
+
+/** Clamp a 0–100 percent overlay coordinate, mirroring the campaign map's location-pin drag. */
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
 
 function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
   return {
@@ -30,6 +36,7 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     round: row.round,
     turnIndex: row.turnIndex,
     currentCombatantId: row.currentCombatantId,
+    mapAttachmentId: row.mapAttachmentId,
     endedAt: row.endedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -55,6 +62,8 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditions: fromJsonText<string[]>(row.conditions, []),
     ruleEntryId: row.ruleEntryId,
     sortOrder: row.sortOrder,
+    tokenX: row.tokenX,
+    tokenY: row.tokenY,
   };
 }
 
@@ -204,6 +213,59 @@ export class EncountersService {
       .limit(1);
     if (!row) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
     return row;
+  }
+
+  /**
+   * mapAttachmentId is an FK-shaped field (issue #39) — mirror CampaignsService's
+   * validateAttachmentRef: the attachment must exist AND belong to THIS encounter's
+   * campaign, so another campaign's attachment id can't be smuggled in. null clears it.
+   */
+  private async validateAttachmentRef(attachmentId: number | null | undefined, campaignId: number): Promise<void> {
+    if (attachmentId == null) return;
+    const [row] = await this.db
+      .select({ id: attachments.id })
+      .from(attachments)
+      .where(and(eq(attachments.id, attachmentId), eq(attachments.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`mapAttachmentId ${attachmentId} does not exist in this campaign`);
+  }
+
+  /**
+   * DM-only: attach (or clear) the encounter's battle map (issue #39). Setting a map is an
+   * explicit act of sharing it with the party — the background renders for every member —
+   * so, mirroring CampaignsService.update, we reveal the attachment (attachments default to
+   * DM-only since issue #97), otherwise players would 404 on the image they're meant to see.
+   * Clearing to null doesn't re-hide (reveal is one-way here).
+   */
+  async updateEncounter(encounterId: number, input: EncounterUpdateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    if (input.mapAttachmentId !== undefined) {
+      await this.validateAttachmentRef(input.mapAttachmentId, encounterRow.campaignId);
+      if (input.mapAttachmentId != null) {
+        await this.db
+          .update(attachments)
+          .set({ hidden: false, updatedAt: nowIso() })
+          .where(and(eq(attachments.id, input.mapAttachmentId), eq(attachments.campaignId, encounterRow.campaignId)));
+      }
+      await this.db
+        .update(encounters)
+        .set({ mapAttachmentId: input.mapAttachmentId, updatedAt: nowIso() })
+        .where(eq(encounters.id, encounterId));
+
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.update',
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounterRow.campaignId,
+        detail: input.mapAttachmentId == null ? 'cleared battle map' : `set battle map to attachment ${input.mapAttachmentId}`,
+      });
+
+      this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    }
+
+    return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
   /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
@@ -470,6 +532,12 @@ export class EncountersService {
     if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
+    // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
+    // already restricts a non-DM to a combatant linked to a character they own, which is
+    // exactly the "a player moves only their own token" rule. Clamp to 0–100 (mirrors the
+    // campaign map's pin drag). Both coordinates move together.
+    if (patch.tokenX !== undefined) staticUpdate.tokenX = clampPercent(patch.tokenX);
+    if (patch.tokenY !== undefined) staticUpdate.tokenY = clampPercent(patch.tokenY);
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).

@@ -8,6 +8,7 @@ import {
   CharacterUpdate,
   CombatantCreate,
   CombatantUpdate,
+  EncounterUpdate,
   DangerLevel,
   EntityType,
   Id,
@@ -1899,6 +1900,22 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'update_encounter',
+      'DM only: attach or clear an encounter\'s battle map (issue #39). Pass mapAttachmentId = an uploaded image ' +
+        'attachment id (kind map|image, in this campaign) to render it as the run-session background, or null to ' +
+        'clear it. Combatant token positions are set with update_combatant (tokenX/tokenY, 0–100).',
+      { encounterId: Id.describe('Encounter id — from list_encounters'), ...EncounterUpdate.shape },
+      async ({ encounterId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const validated = EncounterUpdate.parse(fields);
+        return this.encounters.updateEncounter(encounterId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'add_combatant',
       '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
@@ -1927,8 +1944,9 @@ export class McpToolsService {
       'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
         'successes = stable), addConditions/removeConditions. DM-only fields: initiative, and the identity edits ' +
-        'name / hpMax / initMod (rename a duplicate, fix a mistyped stat). DM may modify any combatant; a player may ' +
-        'only touch hp/temp-hp/death-saves/conditions on a combatant linked to a character they own.',
+        'name / hpMax / initMod (rename a duplicate, fix a mistyped stat). Battle-map token position tokenX/tokenY ' +
+        '(0–100 percent overlay, clamped) moves the combatant\'s token on the encounter map. DM may modify any ' +
+        'combatant; a player may only touch hp/temp-hp/death-saves/conditions/token on a combatant linked to a character they own.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantUpdate.shape },
       async ({ encounterId, combatantId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

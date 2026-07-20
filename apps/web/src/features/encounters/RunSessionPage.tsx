@@ -11,9 +11,10 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type {
+  Attachment,
   Character,
   Combatant,
   CombatantKind,
@@ -28,6 +29,7 @@ import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useAnnounce } from '../../components/Announcer';
@@ -364,6 +366,23 @@ export default function RunSessionPage() {
     });
   }
 
+  // Battle map (issue #39): attach/clear the encounter's map image (DM only).
+  async function setEncounterMap(attachmentId: number | null) {
+    await withBusy(async () => {
+      await api.patch(`${API}/encounters/${eid}`, { mapAttachmentId: attachmentId });
+      await load();
+    });
+  }
+
+  // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
+  // role (DM moves any; a player only their own character's token).
+  async function moveToken(combatantId: number, x: number, y: number) {
+    await withBusy(async () => {
+      await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { tokenX: x, tokenY: y });
+      await load();
+    });
+  }
+
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
@@ -506,6 +525,22 @@ export default function RunSessionPage() {
         </p>
       )}
 
+      {/* Optional battle map (issue #39) — a DM-uploaded image with draggable combatant
+          tokens. Shown to the DM always (so they can attach one), and to players only once
+          a map exists. Encounters without a map are unchanged. */}
+      {(isDm || encounter.mapAttachmentId != null) && (
+        <BattleMap
+          encounter={encounter}
+          campaignId={cid}
+          isDm={isDm}
+          busy={busy}
+          canMoveToken={canEditCombatant}
+          onSetMap={setEncounterMap}
+          onMoveToken={moveToken}
+          onError={setActionError}
+        />
+      )}
+
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
@@ -590,6 +625,213 @@ export default function RunSessionPage() {
           onConfirm={() => removeCombatant(confirmRemoveCombatantId)}
           onCancel={() => setConfirmRemoveCombatantId(null)}
         />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+/** Two-letter token initials from a combatant name ("Ashen cultist" -> "AC", "Goblin 1" -> "G1"). */
+function tokenInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+/**
+ * Battle map (issue #39): a DM-uploaded image rendered as the encounter background with
+ * combatant tokens overlaid at combatant.tokenX/tokenY (0–100 percent). Mirrors the
+ * campaign world-map + location-pin drag (features/dashboard/RegionMap) — same 0–100
+ * coordinate convention and pointer-drag → PATCH flow. DM may move any token; a player
+ * only their own character's (canMoveToken). Unplaced combatants sit in a tray below the
+ * map; clicking a movable one drops it at the center to start.
+ */
+function BattleMap({
+  encounter,
+  campaignId,
+  isDm,
+  busy,
+  canMoveToken,
+  onSetMap,
+  onMoveToken,
+  onError,
+}: {
+  encounter: EncounterWithCombatants;
+  campaignId: number;
+  isDm: boolean;
+  busy: boolean;
+  canMoveToken: (c: Combatant) => boolean;
+  onSetMap: (attachmentId: number | null) => void;
+  onMoveToken: (combatantId: number, x: number, y: number) => void;
+  onError: (message: string) => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [draggingId, setDraggingId] = useState<number | null>(null);
+  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+
+  const mapImageUrl = encounter.mapAttachmentId != null ? attachmentFileUrl(encounter.mapAttachmentId) : null;
+  const placed = encounter.combatants.filter((c) => c.tokenX != null && c.tokenY != null);
+  const unplaced = encounter.combatants.filter((c) => c.tokenX == null || c.tokenY == null);
+
+  async function uploadMapFile(file: File) {
+    setUploading(true);
+    try {
+      const attachment: Attachment = await uploadAttachment(campaignId, 'map', file);
+      onSetMap(attachment.id);
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't upload the map.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function pointerToPercent(e: ReactPointerEvent): { x: number; y: number } | null {
+    const rect = surfaceRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return null;
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    return { x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) };
+  }
+
+  function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
+    if (!mapImageUrl || !canMoveToken(c)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    setDraggingId(c.id);
+    setDragPos(pointerToPercent(e));
+  }
+
+  function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (draggingId == null) return;
+    const pct = pointerToPercent(e);
+    if (pct) setDragPos(pct);
+  }
+
+  function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
+    if (draggingId == null) return;
+    const pct = pointerToPercent(e) ?? dragPos;
+    const id = draggingId;
+    setDraggingId(null);
+    setDragPos(null);
+    if (!pct) return;
+    onMoveToken(id, pct.x, pct.y);
+  }
+
+  return (
+    <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
+        <span className="card-kicker">Battle map</span>
+        <div style={{ flex: 1 }} />
+        {isDm && mapImageUrl && (
+          <MapUploadButton
+            campaignId={campaignId}
+            hasMap
+            uploading={uploading || busy}
+            onPick={(file) => void uploadMapFile(file)}
+            onRemove={() => onSetMap(null)}
+          />
+        )}
+      </div>
+
+      {isDm && !mapImageUrl && (
+        <div style={{ padding: '8px 14px' }}>
+          <ImageUpload
+            campaignId={campaignId}
+            kind="map"
+            shape="rect"
+            label="Drop a battle map image, or click to choose"
+            onUploaded={(a) => onSetMap(a.id)}
+            onError={onError}
+          />
+        </div>
+      )}
+
+      {mapImageUrl && (
+        <>
+          <div
+            ref={surfaceRef}
+            className="relative overflow-hidden"
+            style={{ margin: '8px 14px', aspectRatio: '16 / 9', touchAction: draggingId != null ? 'none' : undefined }}
+            onPointerMove={onSurfacePointerMove}
+            onPointerUp={onSurfacePointerUp}
+          >
+            <img src={mapImageUrl} alt="Battle map" className="absolute inset-0 w-full h-full object-contain" style={{ background: 'rgba(15,23,42,.4)' }} />
+            {placed.map((c) => {
+              const isDragging = draggingId === c.id && dragPos != null;
+              const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
+              const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
+              const movable = canMoveToken(c);
+              const isCharacter = c.kind === 'character';
+              return (
+                <div
+                  key={c.id}
+                  className="absolute -translate-x-1/2 -translate-y-1/2"
+                  style={{
+                    left: `${left}%`,
+                    top: `${top}%`,
+                    touchAction: 'none',
+                    cursor: movable ? 'grab' : 'default',
+                    opacity: isDragging ? 0.85 : 1,
+                    zIndex: isDragging ? 10 : 1,
+                  }}
+                  onPointerDown={(e) => onTokenPointerDown(e, c)}
+                  title={c.name}
+                >
+                  <span
+                    style={{
+                      display: 'grid',
+                      placeItems: 'center',
+                      width: 32,
+                      height: 32,
+                      borderRadius: '50%',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: '#fff',
+                      background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
+                      border: '2px solid rgba(15,23,42,.85)',
+                      boxShadow: '0 1px 3px rgba(0,0,0,.5)',
+                    }}
+                  >
+                    {tokenInitials(c.name)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {unplaced.length > 0 && (
+            <div className="flex flex-wrap gap-2 items-center" style={{ padding: '0 14px 10px' }}>
+              <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
+              {unplaced.map((c) => {
+                const movable = canMoveToken(c);
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className="cf-chip"
+                    disabled={!movable || busy}
+                    onClick={() => onMoveToken(c.id, 50, 50)}
+                    title={movable ? 'Place token at center' : 'You can only move your own token'}
+                    style={{ cursor: movable && !busy ? 'pointer' : 'default', border: '1px dashed var(--color-divider)' }}
+                  >
+                    {tokenInitials(c.name)} · {c.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div
+            className="text-muted"
+            style={{ padding: '8px 14px', borderTop: '1px solid var(--color-divider)', fontSize: 11 }}
+          >
+            {isDm ? 'Drag a token to move it. Click an unplaced token to drop it on the map.' : 'Drag your own token to move it.'}
+          </div>
+        </>
       )}
     </div>
   );
