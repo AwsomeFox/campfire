@@ -162,7 +162,7 @@ export default function RunSessionPage() {
   // Announce turn/round changes and HP mutations for screen readers (issue #93).
   // Diffing the encounter (rather than hooking each action) covers every source —
   // own edits, other members' edits, and SSE-pushed updates — with one code path.
-  const prevAnnounceRef = useRef<{ hp: Map<number, number>; turnKey: string } | null>(null);
+  const prevAnnounceRef = useRef<{ hp: Map<number, number | null>; turnKey: string } | null>(null);
   useEffect(() => {
     if (!encounter) return;
     const currentId = encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
@@ -182,7 +182,9 @@ export default function RunSessionPage() {
       }
       for (const c of encounter.combatants) {
         const before = prev.hp.get(c.id);
-        if (before != null && before !== c.hpCurrent) {
+        // Only announce concrete HP changes — skip when either value is null
+        // (a monster whose exact HP is redacted from this viewer, issue #43).
+        if (before != null && c.hpCurrent != null && before !== c.hpCurrent) {
           announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
         }
       }
