@@ -239,17 +239,12 @@ export default function RunSessionPage() {
 
   if (!encounter) return null;
 
-  const sortedCombatants = [...encounter.combatants].sort((a, b) => {
-    const ai = a.initiative ?? -Infinity;
-    const bi = b.initiative ?? -Infinity;
-    if (ai !== bi) return bi - ai;
-    return a.sortOrder - b.sortOrder;
-  });
-
-  const currentCombatantId =
-    encounter.status === 'running' && sortedCombatants.length > 0
-      ? sortedCombatants[encounter.turnIndex % sortedCombatants.length]?.id
-      : undefined;
+  // The server returns combatants already in initiative order and names the current
+  // actor by id (issue #49) — no client-side re-sort, and no positional
+  // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
+  // removed mid-fight.
+  const orderedCombatants = encounter.combatants;
+  const currentCombatantId = encounter.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
 
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
@@ -302,9 +297,17 @@ export default function RunSessionPage() {
               </>
             )}
             {encounter.status === 'running' && (
-              <Btn disabled={busy} onClick={nextTurn}>
-                Next turn →
-              </Btn>
+              <>
+                {/* Reinforcements added mid-fight land at null initiative and sort last —
+                    keep Roll initiative reachable so the DM can fill them (issue #54).
+                    Already-set initiatives are left untouched server-side. */}
+                <Btn ghost disabled={busy} onClick={rollInitiative}>
+                  Roll initiative
+                </Btn>
+                <Btn disabled={busy} onClick={nextTurn}>
+                  Next turn →
+                </Btn>
+              </>
             )}
             {encounter.status !== 'ended' && (
               <Btn ghost danger disabled={busy} onClick={() => setConfirmEnd(true)}>
@@ -329,20 +332,22 @@ export default function RunSessionPage() {
       )}
 
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
-        {sortedCombatants.length === 0 ? (
+        {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
             <EmptyState icon="⚔️" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
           </div>
         ) : (
-          sortedCombatants.map((c) => (
+          orderedCombatants.map((c) => (
             <CombatantRow
               key={c.id}
               combatant={c}
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
               canRemove={isDm}
+              canSetInitiative={isDm && encounter.status !== 'ended'}
               busy={busy}
               onHpDelta={(delta) => patchCombatant(c.id, { hpDelta: delta })}
+              onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
               onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
               onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
@@ -404,8 +409,10 @@ function CombatantRow({
   isCurrentTurn,
   canEdit,
   canRemove,
+  canSetInitiative,
   busy,
   onHpDelta,
+  onSetInitiative,
   onAddCondition,
   onRemoveCondition,
   onRemove,
@@ -414,13 +421,29 @@ function CombatantRow({
   isCurrentTurn: boolean;
   canEdit: boolean;
   canRemove: boolean;
+  canSetInitiative: boolean;
   busy: boolean;
   onHpDelta: (delta: number) => void;
+  onSetInitiative: (value: number) => void;
   onAddCondition: (cond: string) => void;
   onRemoveCondition: (cond: string) => void;
   onRemove: () => void;
 }) {
   const [addingCondition, setAddingCondition] = useState(false);
+  // Draft of the initiative field (DM only). Kept local so typing doesn't fire a
+  // PATCH per keystroke — committed on blur / Enter.
+  const [initDraft, setInitDraft] = useState<string>(combatant.initiative?.toString() ?? '');
+  useEffect(() => {
+    setInitDraft(combatant.initiative?.toString() ?? '');
+  }, [combatant.initiative]);
+
+  function commitInitiative() {
+    const trimmed = initDraft.trim();
+    if (trimmed === '') return; // empty = leave as-is (can't clear back to null from the UI)
+    const value = Number(trimmed);
+    if (!Number.isInteger(value) || value === combatant.initiative) return;
+    onSetInitiative(value);
+  }
 
   const edgeColor = isCurrentTurn ? 'var(--color-accent)' : 'transparent';
   const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : 'tag tag-neutral';
@@ -438,22 +461,53 @@ function CombatantRow({
         boxShadow: isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
       }}
     >
-      <span
-        style={{
-          width: 30,
-          height: 30,
-          flex: 'none',
-          borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--color-divider)',
-          display: 'grid',
-          placeItems: 'center',
-          fontSize: 13,
-          fontFamily: 'var(--font-heading)',
-          color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
-        }}
-      >
-        {combatant.initiative ?? '–'}
-      </span>
+      {canSetInitiative ? (
+        <input
+          type="number"
+          aria-label={`Initiative for ${combatant.name}`}
+          title="Set initiative"
+          value={initDraft}
+          disabled={busy}
+          placeholder="–"
+          onChange={(e) => setInitDraft(e.target.value)}
+          onBlur={commitInitiative}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          style={{
+            width: 34,
+            height: 30,
+            flex: 'none',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--color-divider)',
+            background: 'transparent',
+            textAlign: 'center',
+            fontSize: 13,
+            fontFamily: 'var(--font-heading)',
+            color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
+          }}
+        />
+      ) : (
+        <span
+          style={{
+            width: 30,
+            height: 30,
+            flex: 'none',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--color-divider)',
+            display: 'grid',
+            placeItems: 'center',
+            fontSize: 13,
+            fontFamily: 'var(--font-heading)',
+            color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
+          }}
+        >
+          {combatant.initiative ?? '–'}
+        </span>
+      )}
       <div style={{ flex: 1, minWidth: 160 }}>
         <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
           {combatant.name}

@@ -734,7 +734,15 @@ export const Encounter = z.object({
   name: z.string().min(1).max(120),
   status: EncounterStatus.default('preparing'),
   round: z.number().int().nonnegative().default(0),
+  // Positional turn cursor, kept in lockstep with `currentCombatantId` as a
+  // display/back-compat convenience — it is the index of the current combatant in
+  // the server-sorted order. `currentCombatantId` is the AUTHORITATIVE pointer
+  // (issue #49): a positional index alone corrupts when a combatant is added or
+  // removed mid-fight (everyone after the removed row shifts a slot and the
+  // "current turn" highlight jumps to the wrong creature). null = no current
+  // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
+  currentCombatantId: Id.nullable().default(null),
   endedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
