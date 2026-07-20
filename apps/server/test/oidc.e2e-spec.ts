@@ -456,15 +456,20 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       // "last-admin protection is isolated" below).
     });
 
-    it('local login attempt on an SSO-provisioned (passwordless) user returns 403 with a clear message', async () => {
+    it('local login attempt on an SSO-provisioned (passwordless) user returns the generic 401, not an SSO-revealing 403 (issue #89)', async () => {
+      // Previously this returned 403 "This account uses SSO", which let an
+      // unauthenticated caller enumerate which usernames are SSO-only (and it
+      // fired before any scrypt work, so timing confirmed existence too). It now
+      // collapses to the same generic 401 as an unknown user / wrong password.
       const res = await fetch(`${app.baseUrl}/api/v1/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: 'alice', password: 'whatever' }),
       });
       const body = await res.json();
-      expect(res.status).toBe(403);
-      expect(body.message).toMatch(/SSO/i);
+      expect(res.status).toBe(401);
+      expect(body.message).toBe('Invalid username or password');
+      expect(JSON.stringify(body)).not.toMatch(/SSO/i);
     });
   });
 
