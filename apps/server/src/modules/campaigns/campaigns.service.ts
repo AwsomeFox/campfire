@@ -56,6 +56,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
+    storageQuotaBytes: row.storageQuotaBytes ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

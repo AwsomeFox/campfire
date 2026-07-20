@@ -37,10 +37,14 @@ export const Campaign = z.object({
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
+  // Per-campaign upload quota in bytes, or null for no limit (issue #24). Set by a
+  // server admin via the storage console — NOT part of CampaignCreate/Update, so a
+  // DM can never lift their own campaign's cap. Enforced on attachment upload.
+  storageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // Clone/template input — POST /campaigns/:id/clone.
@@ -1129,6 +1133,57 @@ export const AdminMetrics = z.object({
   recentActivity: z.array(AuditEntry), // most-recent audit rows (read-only, newest first)
 });
 export type AdminMetrics = z.infer<typeof AdminMetrics>;
+
+// ---------- storage management (issue #24) ----------
+// Server-admin storage console: upload-size visibility, per-campaign quotas, and
+// orphan cleanup. All surfaces are gated by @ServerRoles('admin'). Byte counts
+// come from the attachments table (metadata) plus a walk of DATA_DIR/uploads.
+
+// One campaign's slice of upload usage.
+export const StorageCampaignUsage = z.object({
+  campaignId: Id,
+  name: z.string(),
+  fileCount: z.number().int().nonnegative(), // attachment rows for this campaign
+  totalBytes: z.number().int().nonnegative(), // sum of attachment.size for this campaign
+  quotaBytes: z.number().int().nonnegative().nullable(), // per-campaign cap, or null for unlimited
+  overQuota: z.boolean(), // totalBytes > quotaBytes (always false when unlimited)
+});
+export type StorageCampaignUsage = z.infer<typeof StorageCampaignUsage>;
+
+// Orphans: DB rows whose bytes are missing on disk, and on-disk files with no row.
+export const StorageOrphans = z.object({
+  rowsWithoutFile: z.number().int().nonnegative(), // attachment rows whose file is gone from disk
+  filesWithoutRow: z.number().int().nonnegative(), // upload files (incl. thumbs) with no backing row
+  orphanBytes: z.number().int().nonnegative(), // bytes occupied by files-without-row (reclaimable)
+});
+export type StorageOrphans = z.infer<typeof StorageOrphans>;
+
+export const StorageStats = z.object({
+  totalBytes: z.number().int().nonnegative(), // sum of attachment.size across all campaigns (DB view)
+  fileCount: z.number().int().nonnegative(), // total attachment rows
+  diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
+  campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
+  orphans: StorageOrphans,
+});
+export type StorageStats = z.infer<typeof StorageStats>;
+
+// Set (or clear, with null) a campaign's upload quota.
+export const StorageQuotaUpdate = z.object({
+  quotaBytes: z.number().int().nonnegative().nullable(),
+});
+export type StorageQuotaUpdate = z.infer<typeof StorageQuotaUpdate>;
+
+// Result of an orphan-cleanup run. With dryRun=true nothing is deleted and the
+// *Deleted counts are 0 — only the found counts are populated, for a preview.
+export const StorageCleanupResult = z.object({
+  dryRun: z.boolean(),
+  rowsWithoutFile: z.number().int().nonnegative(), // orphan rows found
+  filesWithoutRow: z.number().int().nonnegative(), // orphan files found
+  rowsDeleted: z.number().int().nonnegative(),
+  filesDeleted: z.number().int().nonnegative(),
+  bytesReclaimed: z.number().int().nonnegative(), // disk bytes freed by deleting orphan files
+});
+export type StorageCleanupResult = z.infer<typeof StorageCleanupResult>;
 
 // ---------- campaign-wide search + @-mention cross-linking (issue #64) ----------
 // The kinds of things a campaign-wide search can turn up. `campaign` from

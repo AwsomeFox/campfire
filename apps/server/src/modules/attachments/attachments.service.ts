@@ -1,9 +1,22 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { desc, eq, like } from 'drizzle-orm';
-import type { Attachment, AttachmentKind, Role } from '@campfire/schema';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+  PayloadTooLargeException,
+} from '@nestjs/common';
+import { desc, eq, like, sql } from 'drizzle-orm';
+import type {
+  Attachment,
+  AttachmentKind,
+  Role,
+  StorageCleanupResult,
+  StorageStats,
+} from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -244,6 +257,11 @@ export class AttachmentsService {
       );
     }
 
+    // Per-campaign upload quota (issue #24). When a quota is set, an upload that
+    // would push the campaign's total attachment bytes past it is rejected with a
+    // 413 — same status the size cap uses, so callers treat "too big" uniformly.
+    await this.enforceQuota(campaignId, file.size);
+
     const ts = nowIso();
     const [row] = await this.db
       .insert(attachments)
@@ -319,5 +337,206 @@ export class AttachmentsService {
       campaignId: existing.campaignId,
       detail: existing.kind,
     });
+  }
+
+  // ---------- storage management (issue #24) ----------
+
+  /**
+   * Reject an upload that would push a campaign's total attachment bytes past its
+   * quota (413). No-op when the campaign has no quota set (the common case).
+   * `additionalBytes` is the size of the incoming file.
+   */
+  private async enforceQuota(campaignId: number, additionalBytes: number): Promise<void> {
+    const [camp] = await this.db
+      .select({ quota: campaigns.storageQuotaBytes })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    const quota = camp?.quota;
+    if (quota === null || quota === undefined) return; // unlimited
+
+    const [used] = await this.db
+      .select({ total: sql<number>`coalesce(sum(${attachments.size}), 0)` })
+      .from(attachments)
+      .where(eq(attachments.campaignId, campaignId));
+    const currentBytes = Number(used?.total ?? 0);
+
+    if (currentBytes + additionalBytes > quota) {
+      throw new PayloadTooLargeException(
+        `Upload would exceed this campaign's storage quota (${quota} bytes; ${currentBytes} used).`,
+      );
+    }
+  }
+
+  /**
+   * Set (bytes) or clear (null) a campaign's upload quota. Server-admin action —
+   * the controller gates it with @ServerRoles('admin'). Throws 404 if the campaign
+   * doesn't exist. Returns the persisted quota (echoes the input).
+   */
+  async setCampaignQuota(campaignId: number, quotaBytes: number | null): Promise<number | null> {
+    const [camp] = await this.db.select({ id: campaigns.id }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
+    if (!camp) throw new NotFoundException(`Campaign ${campaignId} not found`);
+
+    await this.db
+      .update(campaigns)
+      .set({ storageQuotaBytes: quotaBytes, updatedAt: nowIso() })
+      .where(eq(campaigns.id, campaignId));
+    return quotaBytes;
+  }
+
+  /**
+   * Server-wide upload-size snapshot: total bytes (from attachment metadata), a
+   * per-campaign breakdown (with each campaign's quota + over-quota flag), the
+   * actual on-disk byte total, and an orphan summary (rows-without-file &
+   * files-without-row). Used by the admin storage console.
+   */
+  async storageStats(): Promise<StorageStats> {
+    const rows = await this.db.select().from(attachments);
+    const campRows = await this.db
+      .select({ id: campaigns.id, name: campaigns.name, quota: campaigns.storageQuotaBytes })
+      .from(campaigns);
+
+    // Aggregate attachment metadata per campaign.
+    const perCampaign = new Map<number, { totalBytes: number; fileCount: number }>();
+    let totalBytes = 0;
+    for (const r of rows) {
+      totalBytes += r.size;
+      const agg = perCampaign.get(r.campaignId) ?? { totalBytes: 0, fileCount: 0 };
+      agg.totalBytes += r.size;
+      agg.fileCount += 1;
+      perCampaign.set(r.campaignId, agg);
+    }
+
+    const campaignsUsage = campRows
+      .map((c) => {
+        const agg = perCampaign.get(c.id) ?? { totalBytes: 0, fileCount: 0 };
+        const quotaBytes = c.quota ?? null;
+        return {
+          campaignId: c.id,
+          name: c.name,
+          fileCount: agg.fileCount,
+          totalBytes: agg.totalBytes,
+          quotaBytes,
+          overQuota: quotaBytes !== null && agg.totalBytes > quotaBytes,
+        };
+      })
+      .sort((a, b) => b.totalBytes - a.totalBytes);
+
+    const validIds = new Set(rows.map((r) => r.id));
+    const disk = this.scanDisk(validIds);
+
+    // Rows whose backing original file is gone from disk.
+    let rowsWithoutFile = 0;
+    for (const r of rows) {
+      if (!fs.existsSync(this.filePath(r))) rowsWithoutFile += 1;
+    }
+
+    return {
+      totalBytes,
+      fileCount: rows.length,
+      diskBytes: disk.totalBytes,
+      campaigns: campaignsUsage,
+      orphans: {
+        rowsWithoutFile,
+        filesWithoutRow: disk.orphanFiles.length,
+        orphanBytes: disk.orphanBytes,
+      },
+    };
+  }
+
+  /**
+   * Delete orphans: attachment rows whose file is missing on disk, and on-disk
+   * upload files (originals or thumbnails) with no backing row. With `dryRun` the
+   * counts are reported but nothing is deleted. Server-admin action.
+   *
+   * Row deletion also clears dangling references (campaign map / character
+   * portrait), mirroring remove(), so cleanup never leaves a pointer to a row it
+   * just dropped.
+   */
+  async cleanupOrphans(dryRun: boolean): Promise<StorageCleanupResult> {
+    const rows = await this.db.select().from(attachments);
+    const validIds = new Set(rows.map((r) => r.id));
+
+    const orphanRows = rows.filter((r) => !fs.existsSync(this.filePath(r)));
+    const disk = this.scanDisk(validIds);
+
+    let rowsDeleted = 0;
+    let filesDeleted = 0;
+    let bytesReclaimed = 0;
+
+    if (!dryRun) {
+      for (const r of orphanRows) {
+        const portraitSuffix = `%/attachments/${r.id}/file`;
+        this.db.transaction((tx) => {
+          tx.delete(attachments).where(eq(attachments.id, r.id)).run();
+          tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, r.id)).run();
+          tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
+        });
+        this.etagCache.delete(this.filePath(r));
+        rowsDeleted += 1;
+      }
+      for (const f of disk.orphanFiles) {
+        try {
+          fs.rmSync(f.path, { force: true });
+          this.etagCache.delete(f.path);
+          filesDeleted += 1;
+          bytesReclaimed += f.size;
+        } catch {
+          /* best-effort — a file we couldn't unlink stays counted as an orphan next run */
+        }
+      }
+    }
+
+    return {
+      dryRun,
+      rowsWithoutFile: orphanRows.length,
+      filesWithoutRow: disk.orphanFiles.length,
+      rowsDeleted,
+      filesDeleted,
+      bytesReclaimed,
+    };
+  }
+
+  /**
+   * Walk DATA_DIR/uploads once, returning the total on-disk byte size and the set
+   * of orphan files — those whose leading numeric id (from `<id>.<ext>` or
+   * `<id>.thumb.png`) has no matching attachment row in `validIds`. Non-numeric
+   * or unparseable entries are treated as orphans too (nothing else writes here).
+   */
+  private scanDisk(validIds: Set<number>): {
+    totalBytes: number;
+    orphanFiles: Array<{ path: string; size: number }>;
+    orphanBytes: number;
+  } {
+    const root = uploadsRoot();
+    const orphanFiles: Array<{ path: string; size: number }> = [];
+    let totalBytes = 0;
+    let orphanBytes = 0;
+
+    if (!fs.existsSync(root)) return { totalBytes, orphanFiles, orphanBytes };
+
+    for (const campaignDir of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!campaignDir.isDirectory()) continue;
+      const dirPath = path.join(root, campaignDir.name);
+      for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const filePath = path.join(dirPath, entry.name);
+        let size = 0;
+        try {
+          size = fs.statSync(filePath).size;
+        } catch {
+          continue;
+        }
+        totalBytes += size;
+        // Leading integer is the attachment id (`12.png`, `12.thumb.png`).
+        const id = Number.parseInt(entry.name, 10);
+        if (!Number.isInteger(id) || id <= 0 || !validIds.has(id)) {
+          orphanFiles.push({ path: filePath, size });
+          orphanBytes += size;
+        }
+      }
+    }
+
+    return { totalBytes, orphanFiles, orphanBytes };
   }
 }
