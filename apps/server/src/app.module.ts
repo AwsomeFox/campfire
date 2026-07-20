@@ -41,6 +41,7 @@ import { EventsModule } from './modules/events/events.module';
 import { RollsModule } from './modules/rolls/rolls.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
+import { BackupModule } from './modules/backup/backup.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -134,6 +135,7 @@ function serveStaticImports(): DynamicModule[] {
     RollsModule,
     NotificationsModule,
     InventoryModule,
+    BackupModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },
