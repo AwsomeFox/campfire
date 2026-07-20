@@ -12,6 +12,7 @@ import { SetupRequest, LoginRequest, SignupRequest } from '@campfire/schema';
 import type { Me } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { users, userSessions, campaignMembers } from '../../db/schema';
+import { randomBytes } from 'node:crypto';
 import { nowIso } from '../../common/time';
 import { hashPassword, verifyPassword, generateSessionToken, hashSessionToken } from '../../common/crypto';
 import type { RequestUser } from '../../common/user.types';
@@ -30,6 +31,18 @@ export interface SessionIssueResult {
 
 /** Sweep expired sessions once an hour — see AuthService.onApplicationBootstrap(). */
 const SESSION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Fixed decoy hash used by verifyCredentials() to spend one scrypt round even
+ * when there is no real password to check (unknown username, or an SSO-only
+ * account with no local hash). Verifying against this — instead of skipping
+ * scrypt — keeps failure timing indistinguishable from a genuine wrong-password
+ * attempt, closing the timing side channel that would otherwise confirm whether
+ * a username exists / is SSO-only. It is produced by hashPassword() so it uses
+ * the exact same scrypt cost parameters as real hashes; the input is random and
+ * discarded, so no real password ever matches it. See issue #89.
+ */
+const DUMMY_PASSWORD_HASH = hashPassword(randomBytes(32).toString('hex'));
 
 @Injectable()
 export class AuthService implements OnApplicationBootstrap {
@@ -129,21 +142,34 @@ export class AuthService implements OnApplicationBootstrap {
    * Shared credential-check path for both cookie login (login() above) and the
    * headless PAT bootstrap (POST /auth/token — see AuthController.token() /
    * TokensService.mintFor()). Same checks, same order, same exception types as
-   * login() so both entry points behave identically for a given username/password:
-   * unknown user or bad password -> 401 (generic, no user-enumeration signal);
-   * SSO-provisioned or disabled account -> 403; non-admin while local login is
-   * disabled -> 403. Returns the raw users row (never leaves the service layer).
+   * login() so both entry points behave identically for a given username/password.
+   *
+   * Anti-enumeration (issue #89): every "these credentials don't grant access"
+   * outcome — unknown username, wrong password, or an SSO-provisioned account
+   * with no local password — collapses to ONE identical 401 with an identical
+   * body, so the response never reveals whether a username exists or is SSO-only.
+   * To match on timing too, we ALWAYS run exactly one scrypt verification: when
+   * there is no real hash to check (absent user / SSO-only) we verify against a
+   * fixed decoy hash (DUMMY_PASSWORD_HASH) and discard the result, so the absent
+   * and SSO cases cost the same CPU as a real wrong-password attempt.
+   *
+   * The remaining 403s (account disabled; non-admin while local login is
+   * disabled) are NOT enumeration oracles: they are only ever reached AFTER a
+   * correct password, i.e. by someone who already possesses valid credentials
+   * and therefore already knows the account exists. They stay distinct so a
+   * legitimately-authenticating user gets an accurate reason. Returns the raw
+   * users row (never leaves the service layer).
    */
   async verifyCredentials(username: string, password: string) {
     const row = await this.usersService.getRowByUsername(username);
-    if (!row) {
-      throw new UnauthorizedException('Invalid username or password');
-    }
-    if (row.passwordHash === null) {
-      // SSO-provisioned user (OIDC) — no local password to check.
-      throw new ForbiddenException('This account uses SSO');
-    }
-    if (!verifyPassword(password, row.passwordHash)) {
+
+    // Constant-work password check: spend one scrypt round regardless of whether
+    // the account exists or has a local hash, so failure timing can't be used as
+    // an existence/type oracle. For absent or SSO-only accounts the decoy hash
+    // never matches, so passwordOk is false in exactly the cases we reject below.
+    const passwordOk = verifyPassword(password, row?.passwordHash ?? DUMMY_PASSWORD_HASH);
+
+    if (!row || row.passwordHash === null || !passwordOk) {
       throw new UnauthorizedException('Invalid username or password');
     }
     if (row.disabled) {
