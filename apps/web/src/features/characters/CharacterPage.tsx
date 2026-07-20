@@ -23,6 +23,7 @@ import { xpForLevel, CONDITIONS } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
+import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
@@ -93,16 +94,22 @@ export default function CharacterPage() {
   const [members, setMembers] = useState<CampaignMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [editingSheet, setEditingSheet] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
+    setNotFound(false);
     try {
       const data = await api.get<Character>(`${API}/characters/${id}`);
       setCharacter(data);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load this character.");
+      if (err instanceof ApiError && err.status === 404) {
+        setNotFound(true);
+      } else {
+        setError(err instanceof ApiError ? err.message : "Couldn't load this character.");
+      }
     } finally {
       setLoading(false);
     }
@@ -150,6 +157,14 @@ export default function CharacterPage() {
         <Card>
           <Skeleton lines={4} />
         </Card>
+      </div>
+    );
+  }
+
+  if (notFound && !character) {
+    return (
+      <div className="max-w-5xl mx-auto px-4 mt-5">
+        <NotFoundState title="Character not found" backTo={`/c/${cid}/party`} backLabel="← Back to party" />
       </div>
     );
   }

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import type { Note, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Chip, TextInput, Btn, ErrorNote, EmptyState, type ChipVariant } from '../../components/ui';
+import { EntityPicker, type EntityLink } from '../notes/EntityPicker';
 
 const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string }> = {
   private: { chip: 'private', label: '🔒 Private' },
@@ -39,6 +40,10 @@ export function NotesQuickRail({
   // allows any member to submit, so we simply hide it for the DM rather than gate it.
   const [dest, setDest] = useState<'private' | 'inbox'>('private');
   const [savedTo, setSavedTo] = useState<'private' | 'inbox' | null>(null);
+  // Optional entity to anchor a private quick note to (issue #65). Inbox items are
+  // unanchored — the DM links them on resolve — so this only applies to private notes.
+  const [attach, setAttach] = useState<EntityLink | null>(null);
+  const [attachResetKey, setAttachResetKey] = useState(0);
 
   const load = useCallback(async () => {
     // Server allows private notes for every role, including viewers.
@@ -69,8 +74,14 @@ export function NotesQuickRail({
         setSavedTo('inbox');
       } else {
         // Personal quick capture — a private note, same as MyNotesPage's quickCapture.
-        await api.post(`${API}/campaigns/${campaignId}/notes`, { body: quickNote.trim(), visibility: 'private' });
+        await api.post(`${API}/campaigns/${campaignId}/notes`, {
+          body: quickNote.trim(),
+          visibility: 'private',
+          ...(attach ? { entityType: attach.entityType, entityId: attach.entityId } : {}),
+        });
         setQuickNote('');
+        setAttach(null);
+        setAttachResetKey((k) => k + 1);
         setSavedTo('private');
         await load();
       }
@@ -148,6 +159,12 @@ export function NotesQuickRail({
           {dest === 'inbox' ? 'Send' : 'Save'}
         </Btn>
       </form>
+      {dest === 'private' && (
+        <div className="flex items-center gap-2 flex-wrap pt-1">
+          <span className="text-[11px] text-slate-500">Attach to:</span>
+          <EntityPicker campaignId={campaignId} onChange={setAttach} resetKey={attachResetKey} disabled={saving} />
+        </div>
+      )}
       {savedTo === 'private' && <p className="text-[11px] text-emerald-400">Saved to your notes.</p>}
       {savedTo === 'inbox' && <p className="text-[11px] text-emerald-400">Sent to the DM&apos;s inbox.</p>}
       {!isDm && (

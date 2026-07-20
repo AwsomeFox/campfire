@@ -133,7 +133,7 @@ export class NotesService {
     campaignId: number,
     user: RequestUser,
     role: Role,
-    filters: { entityType?: string; entityId?: number; mine?: boolean },
+    filters: { entityType?: string; entityId?: number; mine?: boolean; q?: string },
   ): Promise<Note[]> {
     const rows = await this.db.select().from(notes).where(eq(notes.campaignId, campaignId));
     let visible = rows.filter((r) => canSee(r, user, role) && r.kind === 'note');
@@ -141,6 +141,12 @@ export class NotesService {
     if (filters.entityType) visible = visible.filter((r) => r.entityType === filters.entityType);
     if (filters.entityId !== undefined) visible = visible.filter((r) => r.entityId === filters.entityId);
     if (filters.mine) visible = visible.filter((r) => r.authorUserId === user.id);
+
+    // Free-text search over note bodies (issue #65) — case-insensitive substring match.
+    // Scoped to NOTES only (campaign-wide search across other entities is #64); combines
+    // with mine=true so a player can search just their own theories ("the one about the relic").
+    const q = filters.q?.trim().toLowerCase();
+    if (q) visible = visible.filter((r) => r.body.toLowerCase().includes(q));
 
     const names = await this.resolveEntityNames(campaignId, visible);
     return visible.map((r) => toDomain(r, entityNameFor(r, names)));

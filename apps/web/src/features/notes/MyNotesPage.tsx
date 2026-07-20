@@ -14,6 +14,7 @@ import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote, type ChipVariant } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Markdown } from '../../components/Markdown';
+import { EntityPicker, type EntityLink } from './EntityPicker';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 
@@ -62,8 +63,11 @@ export default function MyNotesPage() {
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [filter, setFilter] = useState<FilterValue>('all');
+  const [search, setSearch] = useState('');
 
   const [draft, setDraft] = useState('');
+  const [attach, setAttach] = useState<EntityLink | null>(null);
+  const [attachResetKey, setAttachResetKey] = useState(0);
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Note | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -98,8 +102,14 @@ export default function MyNotesPage() {
     setSaving(true);
     setError(null);
     try {
-      await api.post(`${API}/campaigns/${cid}/notes`, { body: draft.trim(), visibility: 'private' });
+      await api.post(`${API}/campaigns/${cid}/notes`, {
+        body: draft.trim(),
+        visibility: 'private',
+        ...(attach ? { entityType: attach.entityType, entityId: attach.entityId } : {}),
+      });
       setDraft('');
+      setAttach(null);
+      setAttachResetKey((k) => k + 1);
       await load();
     } catch {
       setError("Couldn't save the note.");
@@ -134,10 +144,16 @@ export default function MyNotesPage() {
     }
   }
 
-  const filtered = useMemo(
-    () => (filter === 'all' ? notes : notes.filter((n) => n.visibility === filter)),
-    [notes, filter],
-  );
+  const filtered = useMemo(() => {
+    const byVis = filter === 'all' ? notes : notes.filter((n) => n.visibility === filter);
+    const q = search.trim().toLowerCase();
+    if (!q) return byVis;
+    // Ten sessions in, find "the one about the relic": match body or the anchored
+    // entity's name (issue #65). Client-side over the already-loaded, visible set.
+    return byVis.filter(
+      (n) => n.body.toLowerCase().includes(q) || (n.entityName?.toLowerCase().includes(q) ?? false),
+    );
+  }, [notes, filter, search]);
 
   const mine = useMemo(
     () => filtered.filter((n) => !myUserId || n.authorUserId === myUserId),
@@ -211,9 +227,28 @@ export default function MyNotesPage() {
         </FilterChip>
       </div>
 
+      {/* Search over note bodies (and anchored entity names) */}
+      <div className="relative">
+        <TextInput
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="🔍 Search your notes…"
+          aria-label="Search notes"
+        />
+        {search && (
+          <button
+            onClick={() => setSearch('')}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-sm"
+            aria-label="Clear search"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+
       {/* Quick capture */}
       <div id="note-quick-capture">
-        <Card className="!p-4">
+        <Card className="!p-4 space-y-2">
           <form className="flex gap-2" onSubmit={quickCapture}>
             <TextInput
               value={draft}
@@ -224,6 +259,10 @@ export default function MyNotesPage() {
               Save
             </Btn>
           </form>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] text-slate-500">Attach to:</span>
+            <EntityPicker campaignId={cid} onChange={setAttach} resetKey={attachResetKey} disabled={saving} />
+          </div>
         </Card>
       </div>
 
@@ -260,13 +299,16 @@ export default function MyNotesPage() {
             </section>
           )}
 
-          {filtered.length === 0 && (
-            <EmptyState
-              icon="🕯️"
-              title="No notes yet"
-              hint="Jot your first thought above."
-            />
-          )}
+          {filtered.length === 0 &&
+            (search.trim() ? (
+              <EmptyState
+                icon="🔍"
+                title="No notes match your search"
+                hint={`Nothing found for "${search.trim()}". Try a different word.`}
+              />
+            ) : (
+              <EmptyState icon="🕯️" title="No notes yet" hint="Jot your first thought above." />
+            ))}
         </div>
       )}
 

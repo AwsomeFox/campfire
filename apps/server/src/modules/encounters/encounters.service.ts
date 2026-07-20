@@ -653,6 +653,40 @@ export class EncountersService {
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
+  /**
+   * Reopens an 'ended' encounter back to 'running' (issue #109) — an accidental /end
+   * was previously unrecoverable (the ended page offered only Refresh/Delete). Requires
+   * status 'ended'; clears endedAt and restores 'running' while PRESERVING round /
+   * turnIndex / currentCombatantId, so combat resumes exactly where it stopped rather
+   * than resetting to the top of the order. Combatant HP is untouched by /end (only the
+   * write-back onto character sheets happened), so reopening leaves combat state
+   * self-consistent. The same HP-writeback caveat applies on the next /end.
+   */
+  async reopen(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    if (encounterRow.status !== 'ended') {
+      throw new BadRequestException(`Encounter must be 'ended' to reopen (currently '${encounterRow.status}')`);
+    }
+
+    await this.db
+      .update(encounters)
+      .set({ status: 'running', endedAt: null, updatedAt: nowIso() })
+      .where(eq(encounters.id, encounterId));
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.reopen',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounterRow.campaignId,
+    });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
+    return this.getWithCombatantsOrThrow(encounterId, role);
+  }
+
   async remove(encounterId: number, user: RequestUser, role: Role): Promise<void> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     await this.db.delete(combatants).where(eq(combatants.encounterId, encounterId));
