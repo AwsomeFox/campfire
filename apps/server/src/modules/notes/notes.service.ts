@@ -1,11 +1,12 @@
 import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
-import type { Note, Role } from '@campfire/schema';
+import type { Note, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaigns, characters, locations, notes, npcs, quests, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { applyPage } from '../../common/pagination';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
@@ -133,14 +134,28 @@ export class NotesService {
     campaignId: number,
     user: RequestUser,
     role: Role,
-    filters: { entityType?: string; entityId?: number; mine?: boolean },
+    filters: { entityType?: string; entityId?: number; mine?: boolean; limit?: number; offset?: number },
   ): Promise<Note[]> {
-    const rows = await this.db.select().from(notes).where(eq(notes.campaignId, campaignId));
-    let visible = rows.filter((r) => canSee(r, user, role) && r.kind === 'note');
+    // Visibility is pushed into SQL (was a JS post-filter, issue #71) so limit/offset
+    // page over the ACTUALLY-visible rows: party_shared to everyone, own notes always,
+    // dm_shared additionally to a dm. Mirrors canSee() exactly.
+    const visibility: SQL[] = [eq(notes.visibility, 'party_shared'), eq(notes.authorUserId, user.id)];
+    if (role === 'dm') visibility.push(eq(notes.visibility, 'dm_shared'));
 
-    if (filters.entityType) visible = visible.filter((r) => r.entityType === filters.entityType);
-    if (filters.entityId !== undefined) visible = visible.filter((r) => r.entityId === filters.entityId);
-    if (filters.mine) visible = visible.filter((r) => r.authorUserId === user.id);
+    const conds: SQL[] = [eq(notes.campaignId, campaignId), eq(notes.kind, 'note'), or(...visibility)!];
+    if (filters.entityType) conds.push(eq(notes.entityType, filters.entityType));
+    if (filters.entityId !== undefined) conds.push(eq(notes.entityId, filters.entityId));
+    if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
+
+    const page: PageParams = { limit: filters.limit, offset: filters.offset };
+    let q = this.db
+      .select()
+      .from(notes)
+      .where(and(...conds))
+      .orderBy(asc(notes.id)) // deterministic order for stable paging (insertion order)
+      .$dynamic();
+    q = applyPage(q, page);
+    const visible = await q;
 
     const names = await this.resolveEntityNames(campaignId, visible);
     return visible.map((r) => toDomain(r, entityNameFor(r, names)));
@@ -358,12 +373,18 @@ export class NotesService {
    * dm; inbox items. Defaults to open (unresolved) items; pass `resolved: true`
    * for the resolved history (newest resolution first).
    */
-  async listInbox(campaignId: number, resolved = false): Promise<Note[]> {
-    const rows = await this.db
+  async listInbox(campaignId: number, resolved = false, page?: PageParams): Promise<Note[]> {
+    // Ordering pushed into SQL (was a JS sort) so limit/offset page correctly:
+    // resolved history is newest-resolution-first (updatedAt desc); the open list
+    // keeps insertion order (id asc). issue #71.
+    let q = this.db
       .select()
       .from(notes)
-      .where(and(eq(notes.campaignId, campaignId), eq(notes.kind, 'inbox'), eq(notes.resolved, resolved)));
-    if (resolved) rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      .where(and(eq(notes.campaignId, campaignId), eq(notes.kind, 'inbox'), eq(notes.resolved, resolved)))
+      .orderBy(resolved ? desc(notes.updatedAt) : asc(notes.id))
+      .$dynamic();
+    q = applyPage(q, page);
+    const rows = await q;
     return rows.map((r) => toDomain(r));
   }
 

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, count, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CampaignClone, CampaignCreate, CampaignUpdate } from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
@@ -597,11 +597,12 @@ export class CampaignsService {
       ? (locationList.find((l) => l.id === campaign.currentLocationId) ?? null)
       : null;
 
-    const openInboxRows = await this.db
-      .select()
+    // issue #71: count in SQL instead of loading every note row (incl. bodies) into
+    // JS just to count the open inbox items.
+    const [{ value: openInboxCount }] = await this.db
+      .select({ value: count() })
       .from(notes)
-      .where(eq(notes.campaignId, id));
-    const openInboxCount = openInboxRows.filter((n) => n.kind === 'inbox' && !n.resolved).length;
+      .where(and(eq(notes.campaignId, id), eq(notes.kind, 'inbox'), eq(notes.resolved, false)));
 
     return {
       campaign,

@@ -3,8 +3,12 @@ import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
+import { parsePageParams } from '../../common/pagination';
 import { NotesService } from './notes.service';
 import { NoteCreateDto, NoteUpdateDto, InboxCreateDto, InboxResolveDto } from './notes.dto';
+
+/** Upper bound for `?limit` on the notes and inbox lists (issue #71). */
+const NOTES_LIST_MAX_LIMIT = 200;
 
 @ApiTags('notes')
 @Controller('campaigns/:campaignId')
@@ -19,6 +23,8 @@ export class CampaignNotesController {
   @ApiQuery({ name: 'entityType', required: false, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign'], description: 'Filter to notes attached to this entity type.' })
   @ApiQuery({ name: 'entityId', required: false, type: Number, description: 'Filter to notes attached to this specific entity id (used together with entityType).' })
   @ApiQuery({ name: 'mine', required: false, type: Boolean, description: 'If true, only notes authored by the caller.' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max notes to return (default: all, capped at 200).' })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Notes to skip, for paging (default 0).' })
   @ApiResponse({ status: 200, description: 'Notes visible to the caller, per the visibility rules above.' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
@@ -26,12 +32,17 @@ export class CampaignNotesController {
     @Query('entityType') entityType?: string,
     @Query('entityId') entityId?: string,
     @Query('mine') mine?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
   ) {
     const role = await this.access.requireMember(user, campaignId);
+    const page = parsePageParams({ limit, offset }, NOTES_LIST_MAX_LIMIT);
     return this.notes.listForCampaign(campaignId, user, role, {
       entityType,
       entityId: entityId !== undefined ? Number(entityId) : undefined,
       mine: mine === 'true',
+      limit: page.limit,
+      offset: page.offset,
     });
   }
 
@@ -62,15 +73,19 @@ export class CampaignNotesController {
   @Get('inbox')
   @ApiOperation({ summary: 'List inbox items', description: 'dm role required. Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest resolution first), including any entity link each item was resolved into.' })
   @ApiQuery({ name: 'resolved', required: false, type: Boolean, description: 'If true, list resolved items instead of open ones.' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max inbox items to return (default: all, capped at 200).' })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Inbox items to skip, for paging (default 0).' })
   @ApiResponse({ status: 200, description: 'Inbox items.' })
   async listInbox(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
     @Query('resolved') resolved?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
   ) {
     // allowArchived: listing the inbox is a read — fine on an archived campaign.
     await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
-    return this.notes.listInbox(campaignId, resolved === 'true');
+    return this.notes.listInbox(campaignId, resolved === 'true', parsePageParams({ limit, offset }, NOTES_LIST_MAX_LIMIT));
   }
 }
 
