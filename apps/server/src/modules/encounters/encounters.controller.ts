@@ -104,14 +104,28 @@ export class EncountersController {
   @Patch(':id')
   @ApiOperation({
     summary: 'Update an encounter',
-    description: "dm role required. Edit the name and/or attach it to a location/quest/session (issue #126). Pass null to clear a link.",
+    description: "dm role required. Edit the name, attach/clear a location/quest/session link (issue #126), and/or attach/clear the battle map via mapAttachmentId (issue #39).",
   })
   @ApiResponse({ status: 200, description: 'Updated encounter with combatants.' })
+  @ApiResponse({ status: 400, description: 'mapAttachmentId does not exist in this campaign.' })
   @ApiResponse({ status: 404, description: 'A linked location/quest/session id is not in this encounter\'s campaign.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.encounters.update(id, body, user, role);
+    return this.encounters.updateEncounter(id, body, user, role);
+  }
+
+  @Get(':id/events')
+  @ApiOperation({
+    summary: "List an encounter's persistent combat log",
+    description:
+      'Requires campaign membership. Chronological per-encounter event history (damage/heal, conditions, deaths, turns) that survives reload — issue #61. Member-visible; details record only HP deltas, never a monster’s exact HP totals.',
+  })
+  @ApiResponse({ status: 200, description: 'Encounter events in chronological order.' })
+  async events(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.listEvents(id, role);
   }
 
   @Delete(':id')

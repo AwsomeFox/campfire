@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, Param, ParseIntPipe, Post } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiCookieAuth } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { TokensService } from './tokens.service';
 import { ApiTokenCreateDto } from './tokens.dto';
@@ -16,6 +17,11 @@ function requireRealUserId(user: RequestUser): number {
 @ApiTags('tokens')
 @ApiCookieAuth('campfire_session')
 @ApiBearerAuth('bearer')
+// Self-service token management is exempt from WriteModeGuard's propose/none
+// tightening (issue #158): minting is escalation-safe (children are capped to the
+// caller's writeScope), so even a read-only token may only ever spawn an equally
+// restricted child. Read scope still applies as normal.
+@WriteModeExempt()
 @Controller('tokens')
 export class TokensController {
   constructor(private readonly tokens: TokensService) {}

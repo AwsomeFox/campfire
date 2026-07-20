@@ -11,14 +11,16 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type {
+  Attachment,
   Character,
   Combatant,
   CombatantKind,
   DifficultyBand,
   EncounterDifficulty,
+  EncounterEvent,
   EncounterWithCombatants,
   RuleEntry,
 } from '@campfire/schema';
@@ -27,7 +29,9 @@ import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useAnnounce } from '../../components/Announcer';
@@ -339,6 +343,9 @@ export default function RunSessionPage() {
 
   const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
   const [difficulty, setDifficulty] = useState<EncounterDifficulty | null>(null);
+  // Persistent combat log (issue #61) — fetched alongside the encounter so it survives
+  // reload and refreshes on every mutation / SSE-pushed update.
+  const [events, setEvents] = useState<EncounterEvent[]>([]);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -368,6 +375,13 @@ export default function RunSessionPage() {
         .get<EncounterDifficulty>(`${API}/encounters/${eid}/difficulty`)
         .then(setDifficulty)
         .catch(() => setDifficulty(null));
+      // Fetch the persisted combat log too; a failure here shouldn't break the tracker.
+      try {
+        const evs = await api.get<EncounterEvent[]>(`${API}/encounters/${eid}/events`);
+        setEvents(evs);
+      } catch {
+        /* leave prior events in place */
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true);
@@ -542,6 +556,23 @@ export default function RunSessionPage() {
     });
   }
 
+  // Battle map (issue #39): attach/clear the encounter's map image (DM only).
+  async function setEncounterMap(attachmentId: number | null) {
+    await withBusy(async () => {
+      await api.patch(`${API}/encounters/${eid}`, { mapAttachmentId: attachmentId });
+      await load();
+    });
+  }
+
+  // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
+  // role (DM moves any; a player only their own character's token).
+  async function moveToken(combatantId: number, x: number, y: number) {
+    await withBusy(async () => {
+      await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { tokenX: x, tokenY: y });
+      await load();
+    });
+  }
+
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
@@ -692,6 +723,22 @@ export default function RunSessionPage() {
         </p>
       )}
 
+      {/* Optional battle map (issue #39) — a DM-uploaded image with draggable combatant
+          tokens. Shown to the DM always (so they can attach one), and to players only once
+          a map exists. Encounters without a map are unchanged. */}
+      {(isDm || encounter.mapAttachmentId != null) && (
+        <BattleMap
+          encounter={encounter}
+          campaignId={cid}
+          isDm={isDm}
+          busy={busy}
+          canMoveToken={canEditCombatant}
+          onSetMap={setEncounterMap}
+          onMoveToken={moveToken}
+          onError={setActionError}
+        />
+      )}
+
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
@@ -705,6 +752,7 @@ export default function RunSessionPage() {
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
               canEditIdentity={isDm && encounter.status !== 'ended'}
+              canViewStatblock={isDm}
               canRemove={isDm}
               canSetInitiative={isDm && encounter.status !== 'ended'}
               busy={busy}
@@ -732,6 +780,8 @@ export default function RunSessionPage() {
           onAdded={load}
         />
       )}
+
+      <CombatLog events={events} />
 
       <SharedDiceLog campaignId={cid} />
 
@@ -780,11 +830,219 @@ export default function RunSessionPage() {
 
 // ---------------------------------------------------------------------------
 
+/** Two-letter token initials from a combatant name ("Ashen cultist" -> "AC", "Goblin 1" -> "G1"). */
+function tokenInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+/**
+ * Battle map (issue #39): a DM-uploaded image rendered as the encounter background with
+ * combatant tokens overlaid at combatant.tokenX/tokenY (0–100 percent). Mirrors the
+ * campaign world-map + location-pin drag (features/dashboard/RegionMap) — same 0–100
+ * coordinate convention and pointer-drag → PATCH flow. DM may move any token; a player
+ * only their own character's (canMoveToken). Unplaced combatants sit in a tray below the
+ * map; clicking a movable one drops it at the center to start.
+ */
+function BattleMap({
+  encounter,
+  campaignId,
+  isDm,
+  busy,
+  canMoveToken,
+  onSetMap,
+  onMoveToken,
+  onError,
+}: {
+  encounter: EncounterWithCombatants;
+  campaignId: number;
+  isDm: boolean;
+  busy: boolean;
+  canMoveToken: (c: Combatant) => boolean;
+  onSetMap: (attachmentId: number | null) => void;
+  onMoveToken: (combatantId: number, x: number, y: number) => void;
+  onError: (message: string) => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [draggingId, setDraggingId] = useState<number | null>(null);
+  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+
+  const mapImageUrl = encounter.mapAttachmentId != null ? attachmentFileUrl(encounter.mapAttachmentId) : null;
+  const placed = encounter.combatants.filter((c) => c.tokenX != null && c.tokenY != null);
+  const unplaced = encounter.combatants.filter((c) => c.tokenX == null || c.tokenY == null);
+
+  async function uploadMapFile(file: File) {
+    setUploading(true);
+    try {
+      const attachment: Attachment = await uploadAttachment(campaignId, 'map', file);
+      onSetMap(attachment.id);
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't upload the map.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function pointerToPercent(e: ReactPointerEvent): { x: number; y: number } | null {
+    const rect = surfaceRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return null;
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    return { x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) };
+  }
+
+  function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
+    if (!mapImageUrl || !canMoveToken(c)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    setDraggingId(c.id);
+    setDragPos(pointerToPercent(e));
+  }
+
+  function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (draggingId == null) return;
+    const pct = pointerToPercent(e);
+    if (pct) setDragPos(pct);
+  }
+
+  function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
+    if (draggingId == null) return;
+    const pct = pointerToPercent(e) ?? dragPos;
+    const id = draggingId;
+    setDraggingId(null);
+    setDragPos(null);
+    if (!pct) return;
+    onMoveToken(id, pct.x, pct.y);
+  }
+
+  return (
+    <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
+        <span className="card-kicker">Battle map</span>
+        <div style={{ flex: 1 }} />
+        {isDm && mapImageUrl && (
+          <MapUploadButton
+            campaignId={campaignId}
+            hasMap
+            uploading={uploading || busy}
+            onPick={(file) => void uploadMapFile(file)}
+            onRemove={() => onSetMap(null)}
+          />
+        )}
+      </div>
+
+      {isDm && !mapImageUrl && (
+        <div style={{ padding: '8px 14px' }}>
+          <ImageUpload
+            campaignId={campaignId}
+            kind="map"
+            shape="rect"
+            label="Drop a battle map image, or click to choose"
+            onUploaded={(a) => onSetMap(a.id)}
+            onError={onError}
+          />
+        </div>
+      )}
+
+      {mapImageUrl && (
+        <>
+          <div
+            ref={surfaceRef}
+            className="relative overflow-hidden"
+            style={{ margin: '8px 14px', aspectRatio: '16 / 9', touchAction: draggingId != null ? 'none' : undefined }}
+            onPointerMove={onSurfacePointerMove}
+            onPointerUp={onSurfacePointerUp}
+          >
+            <img src={mapImageUrl} alt="Battle map" className="absolute inset-0 w-full h-full object-contain" style={{ background: 'rgba(15,23,42,.4)' }} />
+            {placed.map((c) => {
+              const isDragging = draggingId === c.id && dragPos != null;
+              const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
+              const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
+              const movable = canMoveToken(c);
+              const isCharacter = c.kind === 'character';
+              return (
+                <div
+                  key={c.id}
+                  className="absolute -translate-x-1/2 -translate-y-1/2"
+                  style={{
+                    left: `${left}%`,
+                    top: `${top}%`,
+                    touchAction: 'none',
+                    cursor: movable ? 'grab' : 'default',
+                    opacity: isDragging ? 0.85 : 1,
+                    zIndex: isDragging ? 10 : 1,
+                  }}
+                  onPointerDown={(e) => onTokenPointerDown(e, c)}
+                  title={c.name}
+                >
+                  <span
+                    style={{
+                      display: 'grid',
+                      placeItems: 'center',
+                      width: 32,
+                      height: 32,
+                      borderRadius: '50%',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: '#fff',
+                      background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
+                      border: '2px solid rgba(15,23,42,.85)',
+                      boxShadow: '0 1px 3px rgba(0,0,0,.5)',
+                    }}
+                  >
+                    {tokenInitials(c.name)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {unplaced.length > 0 && (
+            <div className="flex flex-wrap gap-2 items-center" style={{ padding: '0 14px 10px' }}>
+              <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
+              {unplaced.map((c) => {
+                const movable = canMoveToken(c);
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className="cf-chip"
+                    disabled={!movable || busy}
+                    onClick={() => onMoveToken(c.id, 50, 50)}
+                    title={movable ? 'Place token at center' : 'You can only move your own token'}
+                    style={{ cursor: movable && !busy ? 'pointer' : 'default', border: '1px dashed var(--color-divider)' }}
+                  >
+                    {tokenInitials(c.name)} · {c.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div
+            className="text-muted"
+            style={{ padding: '8px 14px', borderTop: '1px solid var(--color-divider)', fontSize: 11 }}
+          >
+            {isDm ? 'Drag a token to move it. Click an unplaced token to drop it on the map.' : 'Drag your own token to move it.'}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
 function CombatantRow({
   combatant,
   isCurrentTurn,
   canEdit,
   canEditIdentity,
+  canViewStatblock,
   canRemove,
   canSetInitiative,
   busy,
@@ -802,6 +1060,7 @@ function CombatantRow({
   isCurrentTurn: boolean;
   canEdit: boolean;
   canEditIdentity: boolean;
+  canViewStatblock: boolean;
   canRemove: boolean;
   canSetInitiative: boolean;
   busy: boolean;
@@ -1075,6 +1334,13 @@ function CombatantRow({
             )}
           </div>
         )}
+        {/* Compendium statblock (issue #56): a monster combatant keeps its ruleEntryId —
+            surface the linked entry's AC / attacks / ability scores inline so the DM can
+            answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
+            stays scannable; lazily fetched on first expand. */}
+        {canViewStatblock && combatant.ruleEntryId != null && (
+          <CombatantStatblock ruleEntryId={combatant.ruleEntryId} />
+        )}
       </div>
       <div style={{ minWidth: 130, flex: 'none' }}>
         {combatant.hpCurrent != null && combatant.hpMax != null ? (
@@ -1161,6 +1427,133 @@ function CombatantRow({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Collapsible statblock for a compendium-linked monster combatant (issue #56). The
+ * combatant only stores a `ruleEntryId`; the entry's AC / attacks / ability scores live
+ * in its `dataJson`, fetched lazily from the existing rules read path on first expand
+ * and rendered with the shared StatBlock component (added by #142). Kept collapsed by
+ * default so the initiative row stays scannable mid-fight.
+ */
+function CombatantStatblock({ ruleEntryId }: { ruleEntryId: number }) {
+  const [open, setOpen] = useState(false);
+  const [entry, setEntry] = useState<RuleEntry | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  async function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && entry === null && !loading) {
+      setLoading(true);
+      setFailed(false);
+      try {
+        const e = await api.get<RuleEntry>(`${API}/rules/entries/${ruleEntryId}`);
+        setEntry(e);
+      } catch {
+        setFailed(true);
+      } finally {
+        setLoading(false);
+      }
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 5 }}>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        aria-expanded={open}
+        onClick={toggle}
+        style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+      >
+        {open ? '▾' : '▸'} Statblock
+      </button>
+      {open && (
+        <div
+          style={{
+            marginTop: 6,
+            padding: '10px 12px',
+            border: '1px solid var(--color-divider)',
+            borderRadius: 'var(--radius-md)',
+            background: 'color-mix(in srgb, var(--color-accent) 4%, transparent)',
+            maxWidth: 460,
+          }}
+        >
+          {loading ? (
+            <Skeleton lines={3} />
+          ) : failed ? (
+            <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+              Couldn&apos;t load the statblock.
+            </p>
+          ) : entry && hasMonsterStatblock(entry.dataJson) ? (
+            <StatBlock data={entry.dataJson} />
+          ) : (
+            <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+              No statblock details for this entry.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const EVENT_ICON: Record<string, string> = {
+  damage: '⚔️',
+  heal: '✨',
+  condition: '🌀',
+  death: '💀',
+  turn: '⏱️',
+  roll: '🎲',
+  note: '📝',
+};
+
+/**
+ * Persistent per-encounter combat log (issue #61). Renders the server-stored event
+ * trail (damage/heal, conditions, deaths, turns) in chronological order — it survives
+ * reload and updates live with the rest of the tracker. Scrollable so a long fight
+ * doesn't push the page down.
+ */
+function CombatLog({ events }: { events: EncounterEvent[] }) {
+  return (
+    <Card className="space-y-2">
+      <span className="card-kicker">Combat log</span>
+      {events.length === 0 ? (
+        <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+          Nothing yet — damage, conditions, deaths and turns will show here as the fight unfolds.
+        </p>
+      ) : (
+        <div style={{ maxHeight: 260, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {events.map((ev) => (
+            <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5, lineHeight: 1.4 }}>
+              <span aria-hidden="true" style={{ flex: 'none' }}>
+                {EVENT_ICON[ev.type] ?? '•'}
+              </span>
+              {ev.round > 0 && (
+                <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>
+                  R{ev.round}
+                </span>
+              )}
+              <span style={{ minWidth: 0 }}>
+                {ev.type === 'turn' ? (
+                  <span>{ev.detail}</span>
+                ) : (
+                  <>
+                    {ev.target && <span style={{ fontWeight: 600 }}>{ev.target}</span>}{' '}
+                    <span className="text-muted" style={{ color: 'var(--color-text)' }}>
+                      {ev.detail}
+                    </span>
+                  </>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
 

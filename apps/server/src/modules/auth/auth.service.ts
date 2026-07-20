@@ -267,6 +267,7 @@ export class AuthService implements OnApplicationBootstrap {
         tokenId: tokenContext.tokenId,
         name: tokenContext.name,
         scope: tokenContext.scope,
+        writeScope: tokenContext.writeScope,
         campaignId: tokenContext.campaignId,
         adminEnabled: tokenContext.adminEnabled,
         serverAdmin: user.serverRole === 'admin' && tokenContext.adminEnabled === true,

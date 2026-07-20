@@ -2,6 +2,8 @@ import { createZodDto } from 'nestjs-zod';
 import { EncounterCreate, EncounterUpdate, CombatantCreate, CombatantUpdate, RollRequest } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
+// .strict() (see CombatantUpdateDto below): an unknown key in an encounter PATCH body
+// 400s instead of silently no-op'ing.
 export class EncounterUpdateDto extends createZodDto(EncounterUpdate.strict()) {}
 
 // .strict() here (not on the shared CombatantCreate/CombatantUpdate exports in

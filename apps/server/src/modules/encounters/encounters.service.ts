@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, RollRequest, normalizeStats } from '@campfire/schema';
-import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
+import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { characters, combatants, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
+import { attachments, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
@@ -22,6 +22,11 @@ type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
 
+/** Clamp a 0–100 percent overlay coordinate, mirroring the campaign map's location-pin drag. */
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
+
 function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
   return {
     id: row.id,
@@ -34,6 +39,7 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     locationId: row.locationId,
     questId: row.questId,
     sessionId: row.sessionId,
+    mapAttachmentId: row.mapAttachmentId,
     endedAt: row.endedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -59,6 +65,21 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditions: fromJsonText<string[]>(row.conditions, []),
     ruleEntryId: row.ruleEntryId,
     sortOrder: row.sortOrder,
+    tokenX: row.tokenX,
+    tokenY: row.tokenY,
+  };
+}
+
+function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent {
+  return {
+    id: row.id,
+    encounterId: row.encounterId,
+    round: row.round,
+    type: row.type as EncounterEventType,
+    actor: row.actor,
+    target: row.target,
+    detail: row.detail,
+    createdAt: row.createdAt,
   };
 }
 
@@ -119,6 +140,47 @@ export class EncountersService {
     return this.db.select().from(combatants).where(eq(combatants.encounterId, encounterId));
   }
 
+  /**
+   * Persist one combat-log event (issue #61). Called from the combat mutations (HP
+   * damage/heal, condition add/remove, death, turn/round) so the run view can show a
+   * scrollable history that survives reload. `detail` must never carry a monster's
+   * exact HP total — only deltas — so the list endpoint can be member-visible without
+   * leaking what issue #43 redacts on the combatant rows.
+   */
+  private async appendEvent(
+    encounterId: number,
+    round: number,
+    type: EncounterEventType,
+    fields: { actor?: string | null; target?: string | null; detail?: string },
+  ): Promise<void> {
+    await this.db.insert(encounterEvents).values({
+      encounterId,
+      round,
+      type,
+      actor: fields.actor ?? null,
+      target: fields.target ?? null,
+      detail: fields.detail ?? '',
+      createdAt: nowIso(),
+    });
+  }
+
+  /**
+   * Lists an encounter's persisted combat log in chronological (insertion) order —
+   * issue #61. Member-visible: `viewerRole` is accepted for symmetry with the redaction
+   * story, but the events are stored already-safe (deltas, never exact monster HP
+   * totals), so no per-row redaction is required — a non-DM sees the same trail the DM
+   * does, minus nothing that the combatant rows don't already show them.
+   */
+  async listEvents(encounterId: number, _viewerRole?: Role): Promise<EncounterEvent[]> {
+    await this.getRowOrThrow(encounterId); // 404 if the encounter doesn't exist
+    const rows = await this.db
+      .select()
+      .from(encounterEvents)
+      .where(eq(encounterEvents.encounterId, encounterId))
+      .orderBy(encounterEvents.id);
+    return rows.map(eventToDomain);
+  }
+
   async listForCampaign(campaignId: number, status?: EncounterStatus): Promise<Encounter[]> {
     const conditions = [eq(encounters.campaignId, campaignId), status ? eq(encounters.status, status) : undefined].filter(
       (c): c is NonNullable<typeof c> => c !== undefined,
@@ -154,6 +216,78 @@ export class EncountersService {
       .limit(1);
     if (!row) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
     return row;
+  }
+
+  /**
+   * mapAttachmentId is an FK-shaped field (issue #39) — mirror CampaignsService's
+   * validateAttachmentRef: the attachment must exist AND belong to THIS encounter's
+   * campaign, so another campaign's attachment id can't be smuggled in. null clears it.
+   */
+  private async validateAttachmentRef(attachmentId: number | null | undefined, campaignId: number): Promise<void> {
+    if (attachmentId == null) return;
+    const [row] = await this.db
+      .select({ id: attachments.id })
+      .from(attachments)
+      .where(and(eq(attachments.id, attachmentId), eq(attachments.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`mapAttachmentId ${attachmentId} does not exist in this campaign`);
+  }
+
+  /**
+   * DM-only: edit an encounter's name, its location/quest/session links (issue #126), and/or
+   * its battle map (issue #39). Only fields present in `input` are written; `null` clears a
+   * link/map. A linked location/quest/session must belong to THIS campaign (404). Setting a
+   * battle map reveals the attachment (attachments default DM-only since #97) so every member
+   * can see the shared background; clearing to null doesn't re-hide (reveal is one-way).
+   */
+  async updateEncounter(encounterId: number, input: EncounterUpdateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+
+    const set: Partial<typeof encounters.$inferInsert> = {};
+    if (input.name !== undefined) set.name = input.name;
+    if (input.locationId !== undefined) {
+      if (input.locationId !== null) await this.assertEntityInCampaign('location', input.locationId, encounterRow.campaignId);
+      set.locationId = input.locationId;
+    }
+    if (input.questId !== undefined) {
+      if (input.questId !== null) await this.assertEntityInCampaign('quest', input.questId, encounterRow.campaignId);
+      set.questId = input.questId;
+    }
+    if (input.sessionId !== undefined) {
+      if (input.sessionId !== null) await this.assertEntityInCampaign('session', input.sessionId, encounterRow.campaignId);
+      set.sessionId = input.sessionId;
+    }
+    if (input.mapAttachmentId !== undefined) {
+      await this.validateAttachmentRef(input.mapAttachmentId, encounterRow.campaignId);
+      if (input.mapAttachmentId != null) {
+        await this.db
+          .update(attachments)
+          .set({ hidden: false, updatedAt: nowIso() })
+          .where(and(eq(attachments.id, input.mapAttachmentId), eq(attachments.campaignId, encounterRow.campaignId)));
+      }
+      set.mapAttachmentId = input.mapAttachmentId;
+    }
+
+    if (Object.keys(set).length === 0) {
+      return this.getWithCombatantsOrThrow(encounterId, role);
+    }
+
+    set.updatedAt = nowIso();
+    await this.db.update(encounters).set(set).where(eq(encounters.id, encounterId));
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.update',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounterRow.campaignId,
+      detail: JSON.stringify(input),
+    });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
+    return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
   /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
@@ -224,53 +358,6 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id);
 
     return this.getWithCombatantsOrThrow(encounterRow.id, role);
-  }
-
-  /**
-   * Edit an encounter's name and/or its location/quest/session links (issue #126).
-   * Only the fields present in `patch` are written; passing `null` for a link clears it,
-   * omitting a field leaves it unchanged. A linked location/quest/session id is validated
-   * to belong to THIS encounter's campaign (404 otherwise, matching addCombatant's
-   * cross-campaign handling) so an encounter can never point at another campaign's entity.
-   */
-  async update(encounterId: number, patch: EncounterUpdateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
-    const encounterRow = await this.getRowOrThrow(encounterId);
-
-    const set: Partial<typeof encounters.$inferInsert> = {};
-    if (patch.name !== undefined) set.name = patch.name;
-    if (patch.locationId !== undefined) {
-      if (patch.locationId !== null) await this.assertEntityInCampaign('location', patch.locationId, encounterRow.campaignId);
-      set.locationId = patch.locationId;
-    }
-    if (patch.questId !== undefined) {
-      if (patch.questId !== null) await this.assertEntityInCampaign('quest', patch.questId, encounterRow.campaignId);
-      set.questId = patch.questId;
-    }
-    if (patch.sessionId !== undefined) {
-      if (patch.sessionId !== null) await this.assertEntityInCampaign('session', patch.sessionId, encounterRow.campaignId);
-      set.sessionId = patch.sessionId;
-    }
-
-    if (Object.keys(set).length === 0) {
-      return this.getWithCombatantsOrThrow(encounterId, role);
-    }
-
-    set.updatedAt = nowIso();
-    await this.db.update(encounters).set(set).where(eq(encounters.id, encounterId));
-
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'encounter.update',
-      entityType: 'encounter',
-      entityId: encounterId,
-      campaignId: encounterRow.campaignId,
-      detail: JSON.stringify(patch),
-    });
-
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
-
-    return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
   /** Guard that a link target exists in the same campaign as the encounter (issue #126). */
@@ -564,6 +651,12 @@ export class EncountersService {
     if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
+    // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
+    // already restricts a non-DM to a combatant linked to a character they own, which is
+    // exactly the "a player moves only their own token" rule. Clamp to 0–100 (mirrors the
+    // campaign map's pin drag). Both coordinates move together.
+    if (patch.tokenX !== undefined) staticUpdate.tokenX = clampPercent(patch.tokenX);
+    if (patch.tokenY !== undefined) staticUpdate.tokenY = clampPercent(patch.tokenY);
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
@@ -594,8 +687,20 @@ export class EncountersService {
     // back onto the live character sheet even if that guard is ever relaxed.
     const mirrorHp = existing.kind === 'character' && existing.characterId !== null && recomputeHp && encounterRow.status !== 'ended';
     let row!: typeof combatants.$inferSelect;
+    // Captured inside the transaction (off the fresh committed read + the write result)
+    // so the combat-log events appended after commit reflect the real before/after HP
+    // and death state, even when concurrent deltas composed (issue #61).
+    let beforeHp = 0;
+    let beforeTemp = 0;
+    let beforeDeath = 'none';
+    let afterHp = 0;
+    let afterTemp = 0;
+    let afterDeath = 'none';
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      beforeHp = fresh.hpCurrent;
+      beforeTemp = fresh.hpTemp;
+      beforeDeath = fresh.deathState;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
       if (recomputeHp) {
         const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
@@ -624,6 +729,9 @@ export class EncountersService {
       }
       const [updated] = tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).returning().all();
       row = updated;
+      afterHp = updated.hpCurrent;
+      afterTemp = updated.hpTemp;
+      afterDeath = updated.deathState;
       if (mirrorHp) {
         tx.update(characters).set({ hpCurrent: updated.hpCurrent, updatedAt: nowIso() }).where(eq(characters.id, existing.characterId!)).run();
       }
@@ -651,6 +759,43 @@ export class EncountersService {
         campaignId: encounterRow.campaignId,
         detail: JSON.stringify(patch),
       });
+    }
+
+    // Persistent combat-log events (issue #61). Appended AFTER the write commits — a
+    // log-append failure must never roll back a legitimate HP/condition mutation. All
+    // phrasing records only deltas (never a monster's exact HP total), so the list
+    // endpoint stays member-visible without leaking issue #43's redaction.
+    const round = encounterRow.round;
+    const targetName = row.name;
+
+    // HP damage/heal — only when an HP change was actually requested (not a pure temp-HP
+    // grant or a death-save toggle). Compare the TOTAL pool (hp + temp) so temp-HP
+    // absorption shows as the real change; record only the magnitude.
+    if (patch.hpDelta !== undefined || patch.hpSet !== undefined) {
+      const poolDelta = afterHp + afterTemp - (beforeHp + beforeTemp);
+      if (poolDelta < 0) {
+        await this.appendEvent(encounterId, round, 'damage', { target: targetName, detail: `took ${-poolDelta} damage` });
+      } else if (poolDelta > 0) {
+        await this.appendEvent(encounterId, round, 'heal', { target: targetName, detail: `healed ${poolDelta} HP` });
+      }
+    }
+
+    // Death — a character reaching `dead` (3 failed saves / massive damage), or a monster
+    // dropping to 0 HP (monsters don't roll saves; 0 HP is simply "down").
+    if (afterDeath === 'dead' && beforeDeath !== 'dead') {
+      await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'died' });
+    } else if (existing.kind === 'monster' && afterHp <= 0 && beforeHp > 0) {
+      await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'dropped to 0 HP' });
+    }
+
+    // Conditions actually changed (adding an already-present, or removing an absent one,
+    // is a no-op and not logged).
+    const conditionsBefore = new Set(fromJsonText<string[]>(existing.conditions, []));
+    for (const c of patch.addConditions ?? []) {
+      if (!conditionsBefore.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `gained ${c}` });
+    }
+    for (const c of patch.removeConditions ?? []) {
+      if (conditionsBefore.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `cleared ${c}` });
     }
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
@@ -780,6 +925,14 @@ export class EncountersService {
       .set({ status: 'running', round: 1, turnIndex: 0, currentCombatantId, updatedAt: nowIso() })
       .where(eq(encounters.id, encounterId));
 
+    // Seed the combat log with the opening turn (issue #61).
+    const first = sorted[0];
+    await this.appendEvent(encounterId, 1, 'turn', {
+      actor: first?.name ?? null,
+      target: first?.name ?? null,
+      detail: first ? `Combat started — ${first.name}'s turn (round 1)` : 'Combat started (round 1)',
+    });
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -815,6 +968,15 @@ export class EncountersService {
       .update(encounters)
       .set({ turnIndex, round, currentCombatantId, updatedAt: nowIso() })
       .where(eq(encounters.id, encounterId));
+
+    // Combat-log turn marker (issue #61) — names whose turn it now is, and the round,
+    // so the persisted history reads "round 2 — Lyra's turn".
+    const current = sorted.find((c) => c.id === currentCombatantId);
+    await this.appendEvent(encounterId, round, 'turn', {
+      actor: current?.name ?? null,
+      target: current?.name ?? null,
+      detail: current ? `${current.name}'s turn (round ${round})` : `Round ${round}`,
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -908,6 +1070,7 @@ export class EncountersService {
   async remove(encounterId: number, user: RequestUser, role: Role): Promise<void> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     await this.db.delete(combatants).where(eq(combatants.encounterId, encounterId));
+    await this.db.delete(encounterEvents).where(eq(encounterEvents.encounterId, encounterId));
     await this.db.delete(encounters).where(eq(encounters.id, encounterId));
 
     await this.audit.log({

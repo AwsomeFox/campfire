@@ -188,6 +188,32 @@ function migrateApiTokensTableForAdminEnabled(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #158 migration: `api_tokens.write_scope` didn't exist before a token's
+ * write authority was split from its read `scope`. Before this, a dm-scoped
+ * token wrote canon DIRECTLY and the proposal path was purely voluntary
+ * (?proposed=true) — an AI/DM token meant to only PROPOSE could just omit the
+ * flag. Plain NOT NULL DEFAULT 'direct' ADD COLUMN — no table rebuild, same
+ * shape as migrateApiTokensTableForAdminEnabled above. Defaulting to 'direct' is
+ * the safe/back-compat direction: every pre-existing token keeps writing exactly
+ * as it did (none are silently downgraded to read-only, which would break live
+ * integrations). Operators who want a propose-only or read-only token mint a new
+ * one with writeScope set. New DBs never hit this path — BOOTSTRAP_SQL already
+ * declares the column.
+ */
+function migrateApiTokensTableForWriteScope(sqlite: Database.Database): void {
+  const hasApiTokensTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='api_tokens'")
+    .get();
+  if (!hasApiTokensTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(api_tokens)').all() as Array<{ name: string }>;
+  const hasWriteScope = columns.some((c) => c.name === 'write_scope');
+  if (hasWriteScope) return;
+
+  sqlite.exec("ALTER TABLE api_tokens ADD COLUMN write_scope TEXT NOT NULL DEFAULT 'direct'");
+}
+
+/**
  * Migration for DBs created before proposal before/after diffs:
  * `proposals.snapshot` didn't exist. Plain nullable ADD COLUMN — no table
  * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
@@ -207,6 +233,29 @@ function migrateProposalsTableForSnapshot(sqlite: Database.Database): void {
   if (hasSnapshot) return;
 
   sqlite.exec('ALTER TABLE proposals ADD COLUMN snapshot TEXT');
+}
+
+/**
+ * Migration for DBs created before proposer attribution (issue #124): the
+ * proposals table stored only a single `proposer` string (the token name or a
+ * bare user id). `proposer_user_id` powers the proposer self-view filter, and
+ * `proposer_token` keeps token provenance as secondary info. Plain defaulted /
+ * nullable ADD COLUMNs — no table rebuild. Pre-existing rows get an empty
+ * proposer_user_id (so they surface only to the DM's all-view, never a member
+ * self-view) and NULL proposer_token. New DBs never hit this path — BOOTSTRAP_SQL
+ * already declares both columns.
+ */
+function migrateProposalsTableForAttribution(sqlite: Database.Database): void {
+  const hasProposalsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'")
+    .get();
+  if (!hasProposalsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(proposals)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+
+  if (!has('proposer_user_id')) sqlite.exec("ALTER TABLE proposals ADD COLUMN proposer_user_id TEXT NOT NULL DEFAULT ''");
+  if (!has('proposer_token')) sqlite.exec('ALTER TABLE proposals ADD COLUMN proposer_token TEXT');
 }
 
 /**
@@ -390,11 +439,8 @@ function migrateEncountersTableForCurrentCombatant(sqlite: Database.Database): v
 /**
  * Migration for DBs created before encounter linking (issue #126): encounters carried
  * only campaignId + name + status/round/turn, with no way to attach a fight to WHERE
- * (locationId), WHY (questId), or WHEN (sessionId) it happened — leaving combat an
- * unlinked island invisible to the continuity/recap layer. Plain nullable ADD COLUMNs,
- * each guarded independently so a partially-migrated DB completes — no table rebuild,
- * same shape as migrateEncountersTableForCurrentCombatant above. Existing rows get
- * NULL (unlinked), preserving prior behavior. New DBs never hit this path — BOOTSTRAP_SQL
+ * (locationId), WHY (questId), or WHEN (sessionId) it happened. Plain nullable ADD
+ * COLUMNs, each guarded independently. New DBs never hit this path — BOOTSTRAP_SQL
  * already declares the columns.
  */
 function migrateEncountersTableForLinks(sqlite: Database.Database): void {
@@ -408,6 +454,39 @@ function migrateEncountersTableForLinks(sqlite: Database.Database): void {
   if (!has('location_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN location_id INTEGER');
   if (!has('quest_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN quest_id INTEGER');
   if (!has('session_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN session_id INTEGER');
+}
+
+/**
+ * Migration for DBs created before per-encounter battle maps (issue #39):
+ * `encounters.map_attachment_id` didn't exist. Plain nullable ADD COLUMN. New DBs never
+ * hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateEncountersTableForMapAttachment(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'map_attachment_id')) return;
+  sqlite.exec('ALTER TABLE encounters ADD COLUMN map_attachment_id INTEGER');
+}
+
+/**
+ * Migration for DBs created before battle-map combatant tokens (issue #39):
+ * `combatants.token_x` / `token_y` didn't exist. Plain nullable ADD COLUMNs. New DBs
+ * never hit this path — BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateCombatantsTableForTokenPosition(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('token_x')) sqlite.exec('ALTER TABLE combatants ADD COLUMN token_x REAL');
+  if (!has('token_y')) sqlite.exec('ALTER TABLE combatants ADD COLUMN token_y REAL');
 }
 
 /**
@@ -595,7 +674,9 @@ export function openDatabase(dataDir: string): {
   migrateUsersTableForTextSize(sqlite);
   migrateCampaignsTableForMapAttachment(sqlite);
   migrateApiTokensTableForAdminEnabled(sqlite);
+  migrateApiTokensTableForWriteScope(sqlite);
   migrateProposalsTableForSnapshot(sqlite);
+  migrateProposalsTableForAttribution(sqlite);
   migrateCharactersTableForSheetDepth(sqlite);
   migrateCampaignsTableForIcsToken(sqlite);
   migrateCampaignsTableForStorageQuota(sqlite);
@@ -606,7 +687,9 @@ export function openDatabase(dataDir: string): {
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
   migrateEncountersTableForLinks(sqlite);
+  migrateEncountersTableForMapAttachment(sqlite);
   migrateCombatantsTableForHpModel(sqlite);
+  migrateCombatantsTableForTokenPosition(sqlite);
   migrateQuestsTableForHidden(sqlite);
   migrateNpcsTableForHidden(sqlite);
   migrateAttachmentsTableForHidden(sqlite);

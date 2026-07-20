@@ -403,6 +403,12 @@ export const apiTokens = sqliteTable('api_tokens', {
   userId: integer('user_id').notNull(),
   name: text('name').notNull(),
   scope: text('scope').notNull(),
+  // Server-enforced WRITE authority ('direct' | 'propose' | 'none'), orthogonal
+  // to `scope` (which caps read/role). See WriteScope in @campfire/schema. Existing
+  // DBs get this added via migrateApiTokensTableForWriteScope(), defaulting to
+  // 'direct' — the safe/back-compat value: pre-existing tokens write exactly as
+  // before, none are silently downgraded to read-only.
+  writeScope: text('write_scope').notNull().default('direct'),
   campaignId: integer('campaign_id'),
   // See db/db.module.ts ALTER TABLE note — existing DBs get this added via
   // migrateApiTokensTableForAdminEnabled(), defaulting to 0 (false), which is the
@@ -522,7 +528,13 @@ export const proposals = sqliteTable('proposals', {
   // JSON snapshot of the target entity at propose time (update proposals only; NULL for
   // creates and for rows written before this column existed) — powers before/after diffs.
   snapshot: text('snapshot'),
+  // Human-readable display name of the submitting user (issue #124).
   proposer: text('proposer').notNull(),
+  // Stable id of the submitting user (String(users.id) or dev:<name>) — powers the
+  // proposer self-view filter. Empty on rows written before this column existed.
+  proposerUserId: text('proposer_user_id').notNull().default(''),
+  // Token name when submitted via a PAT (secondary provenance), else NULL.
+  proposerToken: text('proposer_token'),
   status: text('status').notNull().default('pending'),
   resolvedBy: text('resolved_by').notNull().default(''),
   note: text('note').notNull().default(''),
@@ -561,11 +573,12 @@ export const encounters = sqliteTable('encounters', {
   // Identity-based turn pointer (issue #49) — the combatant whose turn it is,
   // independent of positional shuffling on add/remove. null when not running/empty.
   currentCombatantId: integer('current_combatant_id'),
-  // Optional where/why/when links (issue #126). Nullable/absent in older DBs
-  // pre-migration; see db/db.module.ts migrateEncountersTableForLinks().
+  // Optional where/why/when links (issue #126) + battle map (issue #39). Nullable;
+  // added by migration on older DBs (see db/db.module.ts).
   locationId: integer('location_id'),
   questId: integer('quest_id'),
   sessionId: integer('session_id'),
+  mapAttachmentId: integer('map_attachment_id'),
   endedAt: text('ended_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -668,4 +681,26 @@ export const combatants = sqliteTable('combatants', {
   conditions: text('conditions').notNull().default('[]'),
   ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
   sortOrder: integer('sort_order').notNull().default(0),
+  // Battle-map token position (issue #39) — 0–100 percent overlay on the encounter's
+  // map image, mirroring locations.map_x/map_y. Nullable; added by migration on older
+  // DBs — see db/db.module.ts migrateCombatantsTableForTokenPosition. null = not placed.
+  tokenX: real('token_x'),
+  tokenY: real('token_y'),
+});
+
+// Persistent per-encounter combat log (issue #61) — see modules/encounters. One row
+// per meaningful combat mutation (damage/heal, condition add/remove, death, turn/round),
+// written by EncountersService so the run view can show a scrollable history that
+// survives reload. actor/target are denormalized combatant NAMES (nullable) so the log
+// renders even after a combatant is removed; `detail` never carries a monster's exact HP
+// total (only the delta), so listing the log to a non-DM can't leak issue #43's redaction.
+export const encounterEvents = sqliteTable('encounter_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  encounterId: integer('encounter_id').notNull(),
+  round: integer('round').notNull().default(0),
+  type: text('type').notNull(), // EncounterEventType in @campfire/schema
+  actor: text('actor'),
+  target: text('target'),
+  detail: text('detail').notNull().default(''),
+  createdAt: text('created_at').notNull(),
 });

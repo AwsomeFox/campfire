@@ -1228,6 +1228,24 @@ export const InviteAccept = z.object({
 });
 export type InviteAccept = z.infer<typeof InviteAccept>;
 
+// Server-enforced WRITE authority, orthogonal to token `scope` (which caps
+// READ/role). A token's read role (dm/player/viewer) and its write mode are
+// independent dimensions: a dm-scoped token can READ every secret yet still be
+// forced to route every mutation through the DM's proposal queue.
+//  - 'direct'  — writes apply immediately when the caller's role allows; the
+//                per-request `?proposed=true` flag is honored as an opt-in. This
+//                is the back-compat default: every pre-existing token behaves as
+//                it always did.
+//  - 'propose' — every mutation is COERCED into a pending proposal server-side,
+//                regardless of the `?proposed=` flag; the token can never write
+//                canon directly. Intended for AI/DM agents (issue #158).
+//  - 'none'    — read-only: every write is rejected outright, no proposal path.
+// Ordering (broadest → narrowest): direct > propose > none. A token minted BY a
+// token can never be granted a broader writeScope than the calling token (see
+// TokensService.create), mirroring the scope/adminEnabled caps.
+export const WriteScope = z.enum(['direct', 'propose', 'none']);
+export type WriteScope = z.infer<typeof WriteScope>;
+
 // Present on Me only when the request authenticated via a PAT (Authorization:
 // Bearer cf_pat_...). Describes what THAT token can actually do, so /me is
 // truthful for debugging scoped AI access (issue #55): `scope` caps every
@@ -1239,6 +1257,10 @@ export const MeToken = z.object({
   tokenId: Id,
   name: z.string(),
   scope: Role,
+  // Server-enforced write authority of THIS token (see WriteScope). Surfaced on
+  // /me so an AI agent can see whether its writes are read-only ('none'), forced
+  // to the proposal queue ('propose'), or direct ('direct').
+  writeScope: WriteScope,
   campaignId: Id.nullable(),
   adminEnabled: z.boolean(),
   serverAdmin: z.boolean(),
@@ -1264,6 +1286,11 @@ export const ApiToken = z.object({
   userId: Id,
   name: z.string().min(1).max(80),
   scope: TokenScope,
+  // Server-enforced write authority, independent of `scope` — see WriteScope.
+  // Defaults 'direct' (back-compat: existing tokens write exactly as before).
+  // Existing DBs get the column added defaulting to 'direct' via
+  // migrateApiTokensTableForWriteScope() (db.module.ts).
+  writeScope: WriteScope.default('direct'),
   campaignId: Id.nullable().default(null), // null = all campaigns the owner can access
   // Whether this token may exercise SERVER-admin powers (ServerRolesGuard-gated routes,
   // install_rule_pack, etc) on behalf of an admin owner. Independent of `scope`, which
@@ -1285,6 +1312,11 @@ export const ApiTokenCreate = z.object({
   // token can only mint tokens bound to that same campaign — a scoped-down token can
   // never mint a broader sibling.
   scope: TokenScope,
+  // Server-enforced write authority (default 'direct'). When the caller is itself
+  // authenticated via a PAT, this is additionally capped to the calling token's
+  // writeScope (min in the direct>propose>none order) — a propose-only token can
+  // never mint a direct-write sibling. See WriteScope / TokensService.create.
+  writeScope: WriteScope.optional(),
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // requires the caller to currently hold real server-admin power; silently forced false otherwise
 });
@@ -1298,6 +1330,7 @@ export const AuthTokenRequest = z.object({
   password: z.string().min(1).max(200), // same cap as LoginRequest.password — scrypt DoS guard on an unauthenticated path
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer' (least privilege) — see TokensService.mintFor
+  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // caller (the just-authenticated user) must currently be a server admin — see TokensService.create
 });
@@ -1309,6 +1342,7 @@ export type AuthTokenRequest = z.infer<typeof AuthTokenRequest>;
 export const AdminTokenCreate = z.object({
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer'
+  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
   campaignId: Id.nullable().optional(),
   // May only be set true when the TARGET user (owner of the minted token) is themself
   // a server admin, AND the calling admin currently holds real (non-token-capped)
@@ -1319,20 +1353,35 @@ export type AdminTokenCreate = z.infer<typeof AdminTokenCreate>;
 
 // ---------- proposals (AI/collab writes pending DM approval) ----------
 export const ProposalAction = z.enum(['create', 'update', 'delete']);
-export const ProposalStatus = z.enum(['pending', 'approved', 'rejected']);
+// `withdrawn` is a self-service terminal state (issue #124): the proposer pulled
+// their own still-pending proposal before the DM acted. Distinct from `rejected`
+// (a DM decision) so provenance/history stays honest about who ended it.
+export const ProposalStatus = z.enum(['pending', 'approved', 'rejected', 'withdrawn']);
 
 export const Proposal = z.object({
   id: Id,
   campaignId: Id,
   entityType: EntityType,
-  entityId: Id.nullable().default(null), // null for creates
+  // For creates this is null at propose time; once an approved create-proposal has
+  // been applied it is backfilled with the created row's id, so the record's
+  // provenance points at the entity it produced (issue #124).
+  entityId: Id.nullable().default(null),
   action: ProposalAction,
   payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
   // The target entity's state captured at propose time (update proposals only; null for
   // creates) — lets the DM review UI render a real before/after diff even if the entity
   // changes between propose and review.
   snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
-  proposer: z.string().max(200), // user id or token name
+  // Human-readable attribution: the display name of the USER who submitted, even when
+  // the write came in over a PAT (resolved to the token's owning user — issue #124).
+  proposer: z.string().max(200),
+  // Stable id of the submitting user (String(users.id), or `dev:<name>` under DEV_AUTH).
+  // Powers the proposer self-view: a non-DM member lists only proposals where this
+  // matches them. Empty string on rows written before this column existed.
+  proposerUserId: z.string().max(200).default(''),
+  // Secondary provenance: the token name when submitted via a PAT, else null. Lets the
+  // DM see "acting as <user> via token <name>" without losing the human attribution.
+  proposerToken: z.string().max(200).nullable().default(null),
   status: ProposalStatus.default('pending'),
   resolvedBy: z.string().max(200).default(''),
   note: z.string().max(1000).default(''),
@@ -1340,6 +1389,11 @@ export const Proposal = z.object({
 });
 export type Proposal = z.infer<typeof Proposal>;
 export const ProposalResolve = z.object({ note: z.string().max(1000).optional() });
+// Revise a still-pending proposal (issue #124): the proposer amends their own
+// proposed create/update body before the DM acts. Validated against the target
+// entity's Create/Update schema server-side, same as an edit-before-approve.
+export const ProposalRevise = z.object({ payload: z.record(z.string(), z.unknown()) });
+export type ProposalRevise = z.infer<typeof ProposalRevise>;
 // Approve may carry an amended `payload` (edit-before-approve): the DM tweaks the
 // proposed create/update body before it's applied through the normal write path.
 // Ignored for `delete` proposals (which carry no payload). Omit `payload` to apply
@@ -1462,14 +1516,14 @@ export const Encounter = z.object({
   // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
   currentCombatantId: Id.nullable().default(null),
-  // Optional links to WHERE / WHY / WHEN the encounter happened (issue #126). An
-  // encounter used to be an unlinked island — carrying only campaignId + name — so
-  // "the ambush at Thornbridge for the Everflame quest" couldn't be attached to
-  // either, and combat was invisible to the continuity/recap layer. All nullable;
-  // absent in older DBs pre-migration (see db/db.module.ts).
+  // Optional links to WHERE / WHY / WHEN the encounter happened (issue #126) and an
+  // optional battle map (issue #39). All nullable; absent in older DBs pre-migration.
   locationId: Id.nullable().default(null),
   questId: Id.nullable().default(null),
   sessionId: Id.nullable().default(null),
+  // Battle map: a DM-uploaded image (attachment kind='map'|'image') rendered as the
+  // run-session background, with combatant tokens overlaid at combatant.tokenX/tokenY (0–100).
+  mapAttachmentId: Id.nullable().default(null),
   endedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
@@ -1481,13 +1535,15 @@ export const EncounterCreate = z.object({
   questId: Id.nullable().optional(),
   sessionId: Id.nullable().optional(),
 });
-// Edit an encounter's name and/or its location/quest/session links (issue #126).
-// Every field optional; passing `null` for a link clears it, omitting leaves it as-is.
+// Edit an encounter's name, its location/quest/session links (issue #126), and/or its
+// battle-map attachment (issue #39). Every field optional; `null` clears a link/map,
+// omitting leaves it as-is. round/turn/status are driven by the lifecycle endpoints.
 export const EncounterUpdate = z.object({
   name: z.string().min(1).max(120).optional(),
   locationId: Id.nullable().optional(),
   questId: Id.nullable().optional(),
   sessionId: Id.nullable().optional(),
+  mapAttachmentId: Id.nullable().optional(),
 });
 
 // ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
@@ -1565,6 +1621,10 @@ export const Combatant = z.object({
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
+  // Battle-map token position (issue #39): 0–100 percent overlay on the encounter's
+  // map image, mirroring location.mapX/mapY. null = not yet placed on the map.
+  tokenX: z.number().nullable().default(null),
+  tokenY: z.number().nullable().default(null),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -1598,10 +1658,43 @@ export const CombatantUpdate = z.object({
   name: z.string().min(1).max(120).optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  // Battle-map token position (issue #39), 0–100 percent overlay. The DM may move any
+  // token; a player may move only their own character's. Values are clamped to 0–100
+  // server-side (mirrors the campaign map's location-pin drag). Both must be sent together.
+  tokenX: z.number().optional(),
+  tokenY: z.number().optional(),
 });
 
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
+
+// ---------- persistent per-encounter combat log (issue #61) ----------
+// The in-encounter dice/turn history used to be client-only React state, capped and
+// lost on reload. `encounter_events` persists a per-encounter trail written by the
+// encounters service on the meaningful combat mutations (HP damage/heal, condition
+// add/remove, death, next-turn/round), so the DM can reconstruct "round 2: Ember
+// Hound took 8 damage" for a recap and a refresh no longer wipes it.
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note']);
+export type EncounterEventType = z.infer<typeof EncounterEventType>;
+
+export const EncounterEvent = z.object({
+  id: Id,
+  encounterId: Id,
+  // The encounter round the event happened in (0 while still preparing).
+  round: z.number().int().nonnegative().default(0),
+  type: EncounterEventType,
+  // Free-text names, denormalized so the log renders without joining combatants
+  // (which may since have been removed). `actor` is who acted (turn events, or a
+  // heal source when known); `target` is who it happened to. Either may be null.
+  actor: z.string().max(200).nullable().default(null),
+  target: z.string().max(200).nullable().default(null),
+  // Human phrasing of the event, deliberately kept free of exact monster HP totals
+  // so listing the log to a non-DM viewer can't leak what issue #43 redacts on the
+  // combatant rows (only the damage/heal delta is recorded, never the resulting HP).
+  detail: z.string().max(500).default(''),
+  createdAt: IsoDate,
+});
+export type EncounterEvent = z.infer<typeof EncounterEvent>;
 
 // ---------- inventory & loot (party treasury + per-character items) ----------
 export const ItemOwnerType = z.enum(['party', 'character']);

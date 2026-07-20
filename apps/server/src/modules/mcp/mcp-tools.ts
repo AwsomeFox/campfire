@@ -40,6 +40,7 @@ import {
   AiDmTurnKind,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
+import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
@@ -310,6 +311,34 @@ export class McpToolsService {
     });
   }
 
+  /**
+   * Registers a MUTATING tool with server-enforced write-mode (issue #158). MCP
+   * tools call services directly, bypassing the HTTP WriteModeGuard, so write
+   * authority must be enforced here:
+   *  - Proposal-capable tools (those exposing a `propose` arg) enforce it inside
+   *    their own handler via requireWriteMode(user, propose) — a 'propose' token is
+   *    coerced to the proposal path, a 'none' token is rejected.
+   *  - Every other (direct-only) write tool is gated HERE with
+   *    assertDirectWriteAllowed(user): a 'propose'- or 'none'-mode token can't drive
+   *    a mutation that has no review path, exactly as the REST WriteModeGuard blocks
+   *    the equivalent non-@Proposable endpoints.
+   * Read tools keep using this.tool() directly and are never gated.
+   */
+  private writeTool(
+    server: McpServer,
+    user: RequestUser,
+    name: string,
+    description: string,
+    shape: z.ZodRawShape,
+    handler: (args: Record<string, unknown>) => Promise<unknown>,
+  ): void {
+    const proposalCapable = Object.prototype.hasOwnProperty.call(shape, 'propose');
+    this.tool(server, name, description, shape, async (args) => {
+      if (!proposalCapable) assertDirectWriteAllowed(user);
+      return handler(args);
+    });
+  }
+
   // ---------- READ ----------
 
   private registerReadTools(server: McpServer, user: RequestUser): void {
@@ -543,11 +572,14 @@ export class McpToolsService {
     this.tool(
       server,
       'list_proposals',
-      'DM only: list proposals for a campaign, optionally filtered by status (pending|approved|rejected).',
-      { campaignId: CampaignIdArg, status: z.enum(['pending', 'approved', 'rejected']).optional().describe('Filter by status') },
+      'List proposals for a campaign, optionally filtered by status (pending|approved|rejected|withdrawn). The DM ' +
+        'sees ALL proposals; a non-DM member sees only their OWN submissions (proposer self-view, issue #124).',
+      { campaignId: CampaignIdArg, status: z.enum(['pending', 'approved', 'rejected', 'withdrawn']).optional().describe('Filter by status') },
       async ({ campaignId, status }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        return this.proposals.listForCampaign(campaignId as number, status as string | undefined);
+        // Any member may list; the DM sees all, a non-DM member sees only their own.
+        const role = await this.access.requireMember(user, campaignId as number);
+        const opts = role === 'dm' ? undefined : { proposerUserId: user.id };
+        return this.proposals.listForCampaign(campaignId as number, status as string | undefined, opts);
       },
     );
 
@@ -755,8 +787,9 @@ export class McpToolsService {
   // ---------- WRITE ----------
 
   private registerWriteTools(server: McpServer, user: RequestUser): void {
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'create_campaign',
       'Create a new campaign. Any authenticated user may create one; the creator is auto-added as its dm.',
       { name: z.string().min(1).max(120).describe('Campaign name'), description: z.string().max(10_000).optional().describe('Campaign description') },
@@ -766,8 +799,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_campaign',
       'DM only: permanently delete a campaign and ALL of its data (quests, npcs, locations, characters, encounters, ' +
         'notes, sessions, proposals, members, tokens, attachments). Irreversible.',
@@ -779,8 +813,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'create_quest',
       'Create a quest in a campaign (DM). With propose:true any member may submit it as a proposal instead. ' +
         'Supports subquests via parentId (another quest\'s id in the same campaign), an optional giverNpcId, a ' +
@@ -789,7 +824,7 @@ export class McpToolsService {
       { campaignId: CampaignIdArg, propose: ProposeArg, ...QuestCreate.shape },
       async ({ campaignId, propose, ...fields }) => {
         const validated = QuestCreate.parse(fields);
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'quest', null, 'create', validated, user, role);
           return { proposal };
@@ -799,8 +834,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_quest',
       'Update a quest (DM). With propose:true any member may submit the change as a proposal instead. Supports ' +
         'subquests via parentId, an optional giverNpcId, a dmSecret field (DM-only text), and a hidden flag ' +
@@ -809,7 +845,7 @@ export class McpToolsService {
       async ({ questId, propose, ...fields }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
         const validated = QuestUpdate.parse(fields);
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'update', validated, user, role);
           return { proposal };
@@ -819,15 +855,16 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_quest',
       'Delete a quest (DM). Any subquests (parentId pointing at this quest) are promoted to top-level rather than ' +
         'deleted. With propose:true any member may submit the deletion as a pending proposal instead.',
       { questId: Id.describe('Quest id'), propose: ProposeArg },
       async ({ questId, propose }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'delete', {}, user, role);
           return { proposal };
@@ -838,14 +875,15 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'set_quest_status',
       'Set a quest status: available | active | completed | failed (DM). With propose:true submits a quest-update proposal.',
       { questId: Id.describe('Quest id'), status: QuestStatus, propose: ProposeArg },
       async ({ questId, status, propose }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const validated = QuestUpdate.parse({ status });
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'update', validated, user, role);
@@ -856,8 +894,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'add_objective',
       'Add an objective to a quest (DM).',
       { questId: Id.describe('Quest id'), text: z.string().min(1).max(500).describe('Objective text') },
@@ -868,8 +907,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_objective',
       'Update a quest objective\'s text and/or done state. Any member (player+) may toggle `done`; changing `text` ' +
         'requires dm. Use check_objective for a done-only toggle.',
@@ -892,8 +932,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'check_objective',
       'Mark a quest objective done/undone (player or DM).',
       { questId: Id.describe('Quest id'), objectiveId: Id.describe('Objective id'), done: z.boolean().describe('Done state') },
@@ -904,8 +945,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'remove_objective',
       'DM only: delete a quest objective.',
       { questId: Id.describe('Quest id'), objectiveId: Id.describe('Objective id') },
@@ -918,8 +960,9 @@ export class McpToolsService {
     );
 
     // ---------- storylines (issue #27) — DM-only branching arc/beat planner ----------
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'create_arc',
       'DM only: create a story arc — the top-level container for a branching plan of future beats. Status defaults ' +
         'to "planned" (planned | active | resolved | abandoned).',
@@ -931,8 +974,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_arc',
       'DM only: update a story arc\'s title, summary, status, or sortOrder.',
       { arcId: Id.describe('Story arc id'), ...StoryArcUpdate.shape },
@@ -944,8 +988,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'set_arc_status',
       'DM only: set a story arc status: planned | active | resolved | abandoned.',
       { arcId: Id.describe('Story arc id'), status: ArcStatus },
@@ -956,8 +1001,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_arc',
       'DM only: delete a story arc and ALL of its beats, plus any branch pointing at or out of those beats. Irreversible.',
       { arcId: Id.describe('Story arc id') },
@@ -969,8 +1015,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'create_beat',
       'DM only: add a beat to a story arc. A beat is one planned story moment; it defaults to sortOrder = end of the ' +
         'arc and status "planned" (planned | active | done | skipped). Wire beats together with add_branch.',
@@ -983,8 +1030,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_beat',
       'DM only: update a beat\'s title, body, status, or sortOrder.',
       { beatId: Id.describe('Story beat id'), ...StoryBeatUpdate.shape },
@@ -996,8 +1044,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'set_beat_status',
       'DM only: set a beat status: planned | active | done | skipped.',
       { beatId: Id.describe('Story beat id'), status: BeatStatus },
@@ -1008,8 +1057,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_beat',
       'DM only: delete a beat, plus any branch pointing at or out of it.',
       { beatId: Id.describe('Story beat id') },
@@ -1021,8 +1071,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'add_branch',
       'DM only: add a branch (a labelled, ordered next-option) FROM a beat. `label` is the trigger/condition ' +
         '(e.g. "if the party spares the goblin"); optional `toBeatId` targets another beat in the same campaign, or ' +
@@ -1049,8 +1100,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'remove_branch',
       'DM only: delete a branch from a beat.',
       { beatId: Id.describe('Source beat id'), branchId: Id.describe('Branch id') },
@@ -1062,8 +1114,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'upsert_npc',
       'Create or update an NPC. Pass npcId to update a specific NPC; omit it and an existing NPC with the same ' +
         'name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical re-run is ' +
@@ -1083,7 +1136,7 @@ export class McpToolsService {
             throw new BadRequestException(`NPC ${npcId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
           }
           const validated = NpcUpdate.parse(fields);
-          if (propose) {
+          if (requireWriteMode(user, propose)) {
             const role = await this.access.requireMember(user, row.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(row.campaignId, 'npc', npcId as number, 'update', validated, user, role);
             return { proposal };
@@ -1098,7 +1151,7 @@ export class McpToolsService {
         // idempotent. A genuinely different name still creates a new NPC.
         const existingByName = await this.npcs.findRowByName(campaignId as number, validated.name);
         if (existingByName) {
-          if (propose) {
+          if (requireWriteMode(user, propose)) {
             const role = await this.access.requireMember(user, existingByName.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(existingByName.campaignId, 'npc', existingByName.id, 'update', validated, user, role);
             return { proposal };
@@ -1106,7 +1159,7 @@ export class McpToolsService {
           const role = await this.access.requireRole(user, existingByName.campaignId, 'dm');
           return this.npcs.update(existingByName.id, validated, user, role);
         }
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'npc', null, 'create', validated, user, role);
           return { proposal };
@@ -1116,14 +1169,15 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_npc',
       'Delete an NPC (DM). With propose:true any member may submit the deletion as a pending proposal instead.',
       { npcId: Id.describe('NPC id'), propose: ProposeArg },
       async ({ npcId, propose }) => {
         const row = await this.npcs.getRowOrThrow(npcId as number);
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'npc', npcId as number, 'delete', {}, user, role);
           return { proposal };
@@ -1134,8 +1188,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'upsert_location',
       'Create or update a location. Pass locationId to update a specific location; omit it and an existing location ' +
         'with the same name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical ' +
@@ -1155,7 +1210,7 @@ export class McpToolsService {
             throw new BadRequestException(`Location ${locationId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
           }
           const validated = LocationUpdate.parse(fields);
-          if (propose) {
+          if (requireWriteMode(user, propose)) {
             const role = await this.access.requireMember(user, row.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(row.campaignId, 'location', locationId as number, 'update', validated, user, role);
             return { proposal };
@@ -1170,7 +1225,7 @@ export class McpToolsService {
         // different name still creates a new location.
         const existingByName = await this.locations.findRowByName(campaignId as number, validated.name);
         if (existingByName) {
-          if (propose) {
+          if (requireWriteMode(user, propose)) {
             const role = await this.access.requireMember(user, existingByName.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(existingByName.campaignId, 'location', existingByName.id, 'update', validated, user, role);
             return { proposal };
@@ -1178,7 +1233,7 @@ export class McpToolsService {
           const role = await this.access.requireRole(user, existingByName.campaignId, 'dm');
           return this.locations.update(existingByName.id, validated, user, role);
         }
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'location', null, 'create', validated, user, role);
           return { proposal };
@@ -1188,14 +1243,15 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_location',
       'Delete a location (DM). With propose:true any member may submit the deletion as a pending proposal instead.',
       { locationId: Id.describe('Location id'), propose: ProposeArg },
       async ({ locationId, propose }) => {
         const row = await this.locations.getRowOrThrow(locationId as number);
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'location', locationId as number, 'delete', {}, user, role);
           return { proposal };
@@ -1206,8 +1262,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'set_location_discovery',
       'DM only: set a location\'s status (unexplored|explored|current). Setting "current" demotes any other ' +
         '"current" location in the campaign to "explored" and updates the campaign\'s currentLocationId.',
@@ -1219,8 +1276,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'add_session_recap',
       'Add a session recap (DM). Omit number and the server assigns the next available session number at write time ' +
         '(for propose:true, at APPROVAL time) — so a drafted recap still approves cleanly if other sessions were logged ' +
@@ -1250,7 +1308,7 @@ export class McpToolsService {
           ...(dmSecret !== undefined ? { dmSecret } : {}),
           recap,
         });
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const proposal = await this.proposalRecords.create(campaignId as number, 'session', null, 'create', validated, user, memberRole);
           return { proposal };
         }
@@ -1259,8 +1317,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_session',
       'Update a session recap\'s title, recap text, playedAt date, and/or dmSecret (DM-only prep notes, stripped ' +
         'from non-DM reads) (DM). With propose:true any member may submit the change as a proposal instead.',
@@ -1280,7 +1339,7 @@ export class McpToolsService {
           ...(playedAt !== undefined ? { playedAt } : {}),
           ...(dmSecret !== undefined ? { dmSecret } : {}),
         });
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'session', sessionId as number, 'update', validated, user, role);
           return { proposal };
@@ -1340,8 +1399,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'upsert_character',
       'Create a character (omit characterId) or update one (pass characterId). player may create/update their own ' +
         'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
@@ -1361,7 +1421,7 @@ export class McpToolsService {
             throw new BadRequestException(`Character ${characterId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
           }
           const validated = CharacterUpdate.parse(fields);
-          if (propose) {
+          if (requireWriteMode(user, propose)) {
             const role = await this.access.requireMember(user, row.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(row.campaignId, 'character', characterId as number, 'update', validated, user, role);
             return { proposal };
@@ -1370,7 +1430,7 @@ export class McpToolsService {
           return this.characters.update(characterId as number, validated, user, role);
         }
         const validated = CharacterCreate.parse(fields); // name required on create
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'character', null, 'create', validated, user, role);
           return { proposal };
@@ -1399,8 +1459,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_character_hp',
       "Adjust a character's HP by delta, or set it absolutely (player owner or DM). Pass exactly one of delta | set.",
       {
@@ -1419,8 +1480,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'award_xp',
       "Award XP. Either to one character by characterId (player owner or DM; delta may be negative to correct a mistake, XP never drops below 0), or DM-only to the whole party / a characterIds subset via amount.",
       {
@@ -1444,8 +1506,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'level_up_character',
       'Level a character up by 1 (player owner or DM; 400 at level 20). Optionally pass the new hpMax — hit points gained are added to current HP too. Not gated on XP thresholds (milestone campaigns level without XP).',
       {
@@ -1459,8 +1522,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'set_character_conditions',
       'Add and/or remove status conditions (e.g. "poisoned", "prone") on a character (player owner or DM).',
       {
@@ -1480,8 +1544,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'add_note',
       'Add a note to a campaign (any member). Visibility: private (default) | dm_shared | party_shared | whisper. ' +
         'A `whisper` is a per-player secret: pass `recipientUserId` (a campaign member id) and the note is visible ' +
@@ -1548,8 +1613,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_note',
       'Edit a note\'s body and/or visibility. Author only — dm may NOT edit another member\'s note. Set visibility to ' +
         '"whisper" together with recipientUserId to re-target it at one member; switching away from whisper clears the recipient.',
@@ -1580,8 +1646,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_note',
       'Delete a note. Author only — dm may NOT delete another member\'s note.',
       { noteId: Id.describe('Note id') },
@@ -1593,8 +1660,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'submit_inbox_item',
       'Any member may send a message up to the DM (e.g. a player asking a rules question, flagging something out ' +
         'of character). Appears in read_inbox until a dm calls resolve_inbox_item.',
@@ -1605,8 +1673,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'resolve_inbox_item',
       'DM only: resolve a player inbox item, optionally with a resolution note and/or a link to the entity it ' +
         'became (entityType + entityId together) — shown in the resolved history (read_inbox with resolved=true).',
@@ -1635,8 +1704,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_campaign_status',
       'DM only: update campaign state — status (active|paused|completed), current location, and/or danger level. ' +
         '(sessionCount is intentionally NOT settable here — it\'s a denormalized count auto-recomputed by ' +
@@ -1683,8 +1753,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'approve_proposal',
       'DM only: approve a pending proposal — applies it through the normal service write path.',
       { proposalId: Id.describe('Proposal id'), note: z.string().max(1000).optional().describe('Resolution note') },
@@ -1695,8 +1766,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'reject_proposal',
       'DM only: reject a pending proposal.',
       { proposalId: Id.describe('Proposal id'), note: z.string().max(1000).optional().describe('Resolution note') },
@@ -1709,6 +1781,20 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'withdraw_proposal',
+      'Withdraw YOUR OWN still-pending proposal before a DM reviews it (issue #124). Only the original proposer may ' +
+        'withdraw; 403 otherwise, 409 if the DM already resolved it. No entity write is applied.',
+      { proposalId: Id.describe('Proposal id') },
+      async ({ proposalId }) => {
+        const row = await this.proposals.getRowOrThrow(proposalId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.proposals.withdraw(proposalId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'add_member',
       'DM only: add a campaign member by user id, with a role (dm|player|viewer) and optional linked characterId.',
       { campaignId: CampaignIdArg, ...MemberCreate.shape },
@@ -1719,8 +1805,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_member',
       'DM only: update a campaign member\'s role and/or linked characterId. Cannot demote the campaign\'s last dm.',
       { campaignId: CampaignIdArg, memberId: Id.describe('Member id — from list_members'), ...MemberUpdate.shape },
@@ -1731,8 +1818,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'remove_member',
       'DM only: remove a campaign member. Cannot remove the campaign\'s last dm.',
       { campaignId: CampaignIdArg, memberId: Id.describe('Member id — from list_members') },
@@ -1743,8 +1831,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'install_rule_pack',
       'Server admin only: install (or incrementally update) the Open5e SRD rule pack — spells, monsters, items, ' +
         'conditions, classes, races, feats — so lookup_rule/get_rule_entry and add_combatant\'s ruleEntryId can find them.',
@@ -1784,8 +1873,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'roll_dice',
       'Roll a dice expression in the context of a campaign, e.g. "1d20+3", "2d6", or with keep/drop for ' +
         'advantage/disadvantage/stat-gen: "2d20kh1" (advantage), "2d20kl1" (disadvantage), "4d6dl1" (drop lowest). ' +
@@ -1808,8 +1898,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'create_encounter',
       'DM only: create a new encounter (combat tracker) in a campaign, status=preparing. Auto-adds every campaign ' +
         'character as a combatant with hp from their sheet and initiative modifier from DEX. Optionally attach it to a ' +
@@ -1832,25 +1923,26 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_encounter',
-      'DM only: edit an encounter\'s name and/or attach it to a location/quest/session (issue #126). Pass null for a ' +
-        'link to clear it; omit a field to leave it unchanged.',
-      {
-        encounterId: Id.describe('Encounter id — from list_encounters'),
-        ...EncounterUpdate.shape,
-      },
+      'DM only: edit an encounter\'s name, its location/quest/session links (issue #126), and/or its battle map ' +
+        '(issue #39: mapAttachmentId = an uploaded image attachment id, kind map|image, rendered as the run-session ' +
+        'background; combatant token positions are set with update_combatant tokenX/tokenY, 0–100). Pass null to clear ' +
+        'a link or the map; omit a field to leave it unchanged.',
+      { encounterId: Id.describe('Encounter id — from list_encounters'), ...EncounterUpdate.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         const validated = EncounterUpdate.parse(fields);
-        return this.encounters.update(encounterId as number, validated, user, role);
+        return this.encounters.updateEncounter(encounterId as number, validated, user, role);
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'add_combatant',
       '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
@@ -1872,14 +1964,16 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_combatant',
       'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
         'successes = stable), addConditions/removeConditions. DM-only fields: initiative, and the identity edits ' +
-        'name / hpMax / initMod (rename a duplicate, fix a mistyped stat). DM may modify any combatant; a player may ' +
-        'only touch hp/temp-hp/death-saves/conditions on a combatant linked to a character they own.',
+        'name / hpMax / initMod (rename a duplicate, fix a mistyped stat). Battle-map token position tokenX/tokenY ' +
+        '(0–100 percent overlay, clamped) moves the combatant\'s token on the encounter map. DM may modify any ' +
+        'combatant; a player may only touch hp/temp-hp/death-saves/conditions/token on a combatant linked to a character they own.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantUpdate.shape },
       async ({ encounterId, combatantId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -1889,8 +1983,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'remove_combatant',
       'DM only: remove a combatant from an encounter.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter') },
@@ -1902,8 +1997,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'roll_initiative',
       'DM only: roll d20+initMod for every combatant in an encounter that does not already have an initiative set.',
       { encounterId: Id.describe('Encounter id') },
@@ -1914,8 +2010,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'begin_encounter',
       'DM only: start an encounter (status=running, round=1, turn 0). Fails with a 400 if any combatant is missing ' +
         'initiative — roll_initiative first.',
@@ -1927,8 +2024,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'next_turn',
       'DM only: advance an encounter to the next combatant’s turn, wrapping to the next round when past the last combatant.',
       { encounterId: Id.describe('Encounter id') },
@@ -1939,8 +2037,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'end_encounter',
       'DM only: end an encounter and write every character combatant’s current hp back onto their character record.',
       { encounterId: Id.describe('Encounter id') },
@@ -1965,8 +2064,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'ai_dm_narrate',
       'EXPERIMENTAL (issue #28): the AI Dungeon Master takes a turn. DM role required (the AI holds the DM seat), the ' +
         'server-wide experimental flag must be on, the seat must be enabled, and the per-campaign token budget must not ' +

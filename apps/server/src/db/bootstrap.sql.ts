@@ -331,6 +331,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   user_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   scope TEXT NOT NULL,
+  write_scope TEXT NOT NULL DEFAULT 'direct',
   campaign_id INTEGER,
   admin_enabled INTEGER NOT NULL DEFAULT 0,
   token_hash TEXT NOT NULL UNIQUE,
@@ -420,6 +421,8 @@ CREATE TABLE IF NOT EXISTS proposals (
   payload TEXT NOT NULL DEFAULT '{}',
   snapshot TEXT,
   proposer TEXT NOT NULL,
+  proposer_user_id TEXT NOT NULL DEFAULT '',
+  proposer_token TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   resolved_by TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
@@ -451,6 +454,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   location_id INTEGER,
   quest_id INTEGER,
   session_id INTEGER,
+  map_attachment_id INTEGER,
   ended_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -535,7 +539,24 @@ CREATE TABLE IF NOT EXISTS combatants (
   death_save_failures INTEGER NOT NULL DEFAULT 0,
   conditions TEXT NOT NULL DEFAULT '[]',
   rule_entry_id INTEGER,
-  sort_order INTEGER NOT NULL DEFAULT 0
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  token_x REAL,
+  token_y REAL
+);
+
+-- Persistent per-encounter combat log (issue #61). New table, so a plain
+-- CREATE TABLE IF NOT EXISTS in bootstrap (no migrate fn needed). See db/schema.ts
+-- for column docs; detail deliberately omits monster exact-HP totals (only deltas)
+-- so listing it to a non-DM can't leak issue #43's redaction.
+CREATE TABLE IF NOT EXISTS encounter_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  encounter_id INTEGER NOT NULL,
+  round INTEGER NOT NULL DEFAULT 0,
+  type TEXT NOT NULL,
+  actor TEXT,
+  target TEXT,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
@@ -592,6 +613,7 @@ CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
+CREATE INDEX IF NOT EXISTS idx_encounter_events_encounter ON encounter_events(encounter_id);
 CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);

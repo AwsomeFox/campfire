@@ -160,14 +160,10 @@ export default function ProposalsPage() {
     );
   }
 
+  // Non-DM members get a self-view of the proposals THEY submitted (issue #124):
+  // status, the DM's resolution note, and a withdraw action while still pending.
   if (role !== null && !isDm) {
-    return (
-      <div className="max-w-3xl mx-auto px-4 mt-5">
-        <Card>
-          <EmptyState icon="🎩" title="DM only" hint="Proposals are only visible to the DM." />
-        </Card>
-      </div>
-    );
+    return <MyProposalsView campaignId={cid} />;
   }
 
   if (forbidden) {
@@ -519,17 +515,156 @@ function formatValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * Proposer self-view (issue #124) — /c/:id/proposals for a non-DM member. Lists
+ * only the proposals THEY submitted (the server scopes it), so a player who
+ * suggests a change can see whether it's still pending, was approved/rejected
+ * (with the DM's note), or was withdrawn — and can withdraw a still-pending one.
+ */
+function MyProposalsView({ campaignId }: { campaignId: number }) {
+  const [proposals, setProposals] = useState<Proposal[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const rows = await api.get<Proposal[]>(`${API}/campaigns/${campaignId}/proposals`);
+      setProposals(rows);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load your proposals.");
+    }
+  }, [campaignId]);
+
+  useEffect(() => {
+    if (Number.isFinite(campaignId)) void load();
+  }, [campaignId, load]);
+
+  async function withdraw(id: number) {
+    setBusyId(id);
+    setError(null);
+    try {
+      await api.post(`${API}/proposals/${id}/withdraw`, {});
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't withdraw this proposal.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const pending = (proposals ?? []).filter((p) => p.status === 'pending');
+  const resolved = (proposals ?? []).filter((p) => p.status !== 'pending');
+
+  return (
+    <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
+      <h1 className="text-xl font-extrabold text-white m-0">My proposals</h1>
+      <p className="text-muted text-xs m-0">
+        Changes you suggest to the DM land here. Nothing touches the campaign until the DM approves it — you can
+        withdraw anything that's still pending.
+      </p>
+
+      {error && <ErrorNote message={error} onRetry={load} />}
+
+      {proposals === null ? (
+        <Card>
+          <Skeleton lines={4} />
+        </Card>
+      ) : proposals.length === 0 ? (
+        <EmptyState
+          icon="🔮"
+          title="You haven't proposed anything yet"
+          hint="Use “Suggest to the DM” on a quest, NPC, or location to send a change here for approval."
+        />
+      ) : (
+        <>
+          {pending.length > 0 && (
+            <section className="space-y-3">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Pending</p>
+              {pending.map((p) => (
+                <MyProposalCard
+                  key={p.id}
+                  proposal={p}
+                  campaignId={campaignId}
+                  busy={busyId === p.id}
+                  onWithdraw={() => withdraw(p.id)}
+                />
+              ))}
+            </section>
+          )}
+          {resolved.length > 0 && (
+            <section className="space-y-2">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Resolved</p>
+              {resolved.map((p) => (
+                <HistoryRow key={p.id} proposal={p} />
+              ))}
+            </section>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** A single pending proposal in the proposer's self-view, with a withdraw action (#124). */
+function MyProposalCard({
+  proposal,
+  campaignId,
+  busy,
+  onWithdraw,
+}: {
+  proposal: Proposal;
+  campaignId: number;
+  busy: boolean;
+  onWithdraw: () => void;
+}) {
+  const href = targetHref(proposal.entityType, proposal.entityId, campaignId);
+  const isDelete = proposal.action === 'delete';
+  return (
+    <Card className="space-y-2.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <p className="card-title text-[15px] m-0">
+          {entityIcon[proposal.entityType]} {proposalTitle(proposal)}
+        </p>
+        <Chip variant="proposal">pending</Chip>
+      </div>
+      <p className="text-muted text-xs m-0">
+        {actionVerb[proposal.action]} {proposal.entityType}
+        {href ? (
+          <>
+            {' '}
+            · <Link to={href} className="text-purple-400 hover:underline">view target</Link>
+          </>
+        ) : null}
+        {' '}· {timeAgo(proposal.createdAt)}
+      </p>
+      {isDelete ? <DeleteView snapshot={proposal.snapshot} /> : <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />}
+      <div className="flex items-center justify-end">
+        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onWithdraw} disabled={busy}>
+          Withdraw
+        </Btn>
+      </div>
+    </Card>
+  );
+}
+
 function HistoryRow({ proposal }: { proposal: Proposal }) {
-  const failed = proposal.status === 'rejected';
+  const approved = proposal.status === 'approved';
+  // Rejected (a DM decision, carries a note) and withdrawn (the proposer pulled it)
+  // are both neutral outcomes; only an approval is accented.
+  const label =
+    proposal.status === 'rejected'
+      ? `Rejected${proposal.note ? ` — ${proposal.note}` : ''}`
+      : proposal.status === 'withdrawn'
+        ? 'Withdrawn'
+        : 'Approved';
   return (
     <div className="cf-card p-3.5 flex items-center justify-between gap-2 opacity-70">
       <p className="text-sm text-slate-400 m-0">
         {entityIcon[proposal.entityType]} {proposalTitle(proposal)}{' '}
         <span className="text-slate-600">· {proposal.proposer}</span>
       </p>
-      <span className={`tag ${failed ? 'tag-neutral' : 'tag-accent'}`}>
-        {failed ? `Rejected${proposal.note ? ` — ${proposal.note}` : ''}` : 'Approved'}
-      </span>
+      <span className={`tag ${approved ? 'tag-accent' : 'tag-neutral'}`}>{label}</span>
     </div>
   );
 }
