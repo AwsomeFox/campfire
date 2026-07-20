@@ -664,3 +664,20 @@ export const combatants = sqliteTable('combatants', {
   ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
   sortOrder: integer('sort_order').notNull().default(0),
 });
+
+// Persistent per-encounter combat log (issue #61) — see modules/encounters. One row
+// per meaningful combat mutation (damage/heal, condition add/remove, death, turn/round),
+// written by EncountersService so the run view can show a scrollable history that
+// survives reload. actor/target are denormalized combatant NAMES (nullable) so the log
+// renders even after a combatant is removed; `detail` never carries a monster's exact HP
+// total (only the delta), so listing the log to a non-DM can't leak issue #43's redaction.
+export const encounterEvents = sqliteTable('encounter_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  encounterId: integer('encounter_id').notNull(),
+  round: integer('round').notNull().default(0),
+  type: text('type').notNull(), // EncounterEventType in @campfire/schema
+  actor: text('actor'),
+  target: text('target'),
+  detail: text('detail').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
