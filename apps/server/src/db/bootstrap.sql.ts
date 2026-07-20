@@ -277,6 +277,26 @@ CREATE TABLE IF NOT EXISTS comments (
   updated_at TEXT NOT NULL
 );
 
+-- Prose revision history (issue #157). NEW table, so a plain CREATE TABLE IF NOT EXISTS
+-- in bootstrap reaches both fresh and existing DBs (it runs every boot) — no migrate fn
+-- needed, same as encounter_events (#61). campaign_id carries ON DELETE CASCADE so a
+-- DELETE FROM campaigns tears revisions down with the rest of the tree (FK enforced on
+-- this newly-created table on every DB, fresh or upgraded). entity_type/entity_id is a
+-- POLYMORPHIC reference across sessions/quests/npcs/locations — no single FK can span
+-- four tables — so the owning service's remove() deletes its own entity's revisions
+-- (mirroring the session_attendees hand-cleanup), keeping no orphan behind a single
+-- entity delete. See db/schema.ts for column docs.
+CREATE TABLE IF NOT EXISTS entity_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  snapshot TEXT NOT NULL DEFAULT '{}',
+  author_user_id TEXT NOT NULL DEFAULT '',
+  author_name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
 -- audit_log deliberately carries NO foreign key on campaign_id (issue #69). Audit
 -- records must OUTLIVE the entities they describe: CampaignsService.remove writes its
 -- own campaign.delete row AFTER the campaign row is gone, so a REFERENCES campaigns(id)
@@ -619,6 +639,10 @@ CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
 -- #123: comment threads are always read for one entity (campaign + type + id),
 -- newest-thread-context ordering handled in SQL; this composite covers the lookup.
 CREATE INDEX IF NOT EXISTS idx_comments_entity ON comments(campaign_id, entity_type, entity_id);
+-- #157: revisions are always listed for one entity (type + id), newest-first; this
+-- composite covers the lookup. The campaign index backs the cascade/teardown scans.
+CREATE INDEX IF NOT EXISTS idx_entity_revisions_entity ON entity_revisions(entity_type, entity_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_entity_revisions_campaign ON entity_revisions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_audit_campaign ON audit_log(campaign_id);
 -- #74: most-recent-first reads are always scoped by campaign (or by the null-campaign
 -- server-admin bucket) and ordered by id DESC. The plain campaign_id index above can't

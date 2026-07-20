@@ -14,7 +14,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
+import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character, EntityRevision } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { formatDate as formatLocaleDate } from '../../lib/format';
@@ -313,6 +313,13 @@ function SessionDetail({
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The `updatedAt` we last loaded — sent back on save as the optimistic-concurrency
+  // guard (#157) so a co-DM's or a connected AI's interleaved edit 409s instead of being
+  // silently clobbered. Bumped to null on a stale-conflict so the user must reload first.
+  const [loadedUpdatedAt, setLoadedUpdatedAt] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  // Bumped after a save/restore to tell the history panel to refetch.
+  const [historyNonce, setHistoryNonce] = useState(0);
 
   useEffect(() => {
     setEditing(false);
@@ -327,6 +334,8 @@ function SessionDetail({
         if (cancelled) return;
         setRecap(full.recap);
         setRecapDraft(full.recap);
+        setLoadedUpdatedAt(full.updatedAt);
+        setConflict(false);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -340,19 +349,51 @@ function SessionDetail({
   async function save() {
     setSaving(true);
     setError(null);
+    setConflict(false);
     try {
       const updated = await api.patch<Session>(`${API}/sessions/${session.id}`, {
         title: titleDraft,
         playedAt: dateDraft ? dateDraft : null,
         recap: recapDraft,
+        // Optimistic-concurrency guard (#157): echo back the updatedAt we loaded, so a
+        // concurrent edit is caught (409) instead of overwriting the other author's work.
+        ...(loadedUpdatedAt ? { expectedUpdatedAt: loadedUpdatedAt } : {}),
       });
       setRecap(updated.recap);
+      setLoadedUpdatedAt(updated.updatedAt);
       setEditing(false);
+      setHistoryNonce((n) => n + 1);
       onChange();
-    } catch {
-      setError("Couldn't save the recap.");
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // Someone saved between our load and this save — keep the user's draft intact,
+        // stop them from clobbering, and prompt a reload of the latest version.
+        setConflict(true);
+        setError(
+          e.message ||
+            'This recap changed since you opened it — reload to see the latest version before saving, so you don\'t erase the other edit.',
+        );
+      } else {
+        setError("Couldn't save the recap.");
+      }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function reloadLatest() {
+    setError(null);
+    setConflict(false);
+    setRecapLoading(true);
+    try {
+      const full = await api.get<Session>(`${API}/sessions/${session.id}`);
+      setRecap(full.recap);
+      setRecapDraft(full.recap);
+      setLoadedUpdatedAt(full.updatedAt);
+    } catch {
+      setError("Couldn't reload the latest recap.");
+    } finally {
+      setRecapLoading(false);
     }
   }
 
@@ -406,7 +447,12 @@ function SessionDetail({
               placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."
             />
           </div>
-          <div className="flex gap-2 justify-end">
+          <div className="flex gap-2 justify-end items-center">
+            {conflict && (
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={reloadLatest} disabled={saving}>
+                Reload latest
+              </Btn>
+            )}
             <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
               Cancel
             </Btn>
@@ -445,6 +491,20 @@ function SessionDetail({
 
       {isDm && !editing && sharing && <SharePanel sessionId={session.id} />}
 
+      {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
+          regretted edit can be recovered. Refetches whenever a save/restore happens. */}
+      {isDm && !editing && (
+        <RecapHistoryPanel
+          sessionId={session.id}
+          reloadNonce={historyNonce}
+          onRestored={() => {
+            setHistoryNonce((n) => n + 1);
+            void reloadLatest();
+            onChange();
+          }}
+        />
+      )}
+
       {confirmingDelete && (
         <ConfirmDialog
           title={`Delete Session ${session.number}?`}
@@ -462,6 +522,109 @@ function SessionDetail({
         <CommentsThread campaignId={campaignId} entityType="session" entityId={session.id} />
       </Card>
     </div>
+  );
+}
+
+/**
+ * Recap revision history + restore (issue #157). DM-only. Lists the prior-content
+ * snapshots the server records on every committed recap change (newest first) and lets
+ * the DM restore any of them — the restore is itself recorded, so it's reversible.
+ * Collapsed by default so it doesn't crowd the recap; expands on demand.
+ */
+function RecapHistoryPanel({
+  sessionId,
+  reloadNonce,
+  onRestored,
+}: {
+  sessionId: number;
+  reloadNonce: number;
+  onRestored: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [revisions, setRevisions] = useState<EntityRevision[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [restoringId, setRestoringId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    api
+      .get<EntityRevision[]>(`${API}/revisions/session/${sessionId}`)
+      .then((rows) => {
+        if (!cancelled) setRevisions(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Couldn't load history.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, sessionId, reloadNonce]);
+
+  async function restore(revisionId: number) {
+    setRestoringId(revisionId);
+    setError(null);
+    try {
+      const res = await api.post<{ revisions: EntityRevision[] }>(
+        `${API}/revisions/session/${sessionId}/${revisionId}/restore`,
+      );
+      if (res?.revisions) setRevisions(res.revisions);
+      onRestored();
+    } catch {
+      setError("Couldn't restore that version.");
+    } finally {
+      setRestoringId(null);
+    }
+  }
+
+  return (
+    <Card>
+      <button
+        className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wide w-full"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span>{open ? '▾' : '▸'}</span>
+        <span>Recap history</span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          {error && <ErrorNote message={error} />}
+          {loading ? (
+            <p className="text-sm text-slate-600">Loading history…</p>
+          ) : revisions.length === 0 ? (
+            <p className="text-sm text-slate-600">No earlier versions yet — edits are recorded here from now on.</p>
+          ) : (
+            revisions.map((rev) => {
+              const prior = rev.snapshot.recap ?? '';
+              const preview = prior.replace(/\s+/g, ' ').trim().slice(0, 120);
+              return (
+                <div key={rev.id} className="flex items-start gap-2 border-t border-slate-800 pt-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-muted">
+                      {rev.authorName || 'Someone'} · {new Date(rev.createdAt).toLocaleString()}
+                    </div>
+                    <div className="text-[13px] text-slate-400 truncate">{preview || '(empty recap)'}</div>
+                  </div>
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-1 text-xs shrink-0"
+                    onClick={() => restore(rev.id)}
+                    disabled={restoringId !== null}
+                  >
+                    {restoringId === rev.id ? 'Restoring…' : 'Restore'}
+                  </Btn>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 

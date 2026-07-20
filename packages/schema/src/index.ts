@@ -36,6 +36,25 @@ export const PageParams = z.object({
 });
 export type PageParams = z.infer<typeof PageParams>;
 
+// ---------- optimistic concurrency (issue #157) ----------
+// The `updatedAt` timestamp a client last read for an entity, echoed back on a
+// PATCH/update as a compare-and-swap guard. When provided and it no longer matches
+// the row's current `updatedAt` (someone else — a co-DM, or a connected AI over MCP
+// — saved in the meantime), the write is rejected with 409 Conflict instead of blindly
+// overwriting their edit. Omitted => unconditional write (unchanged back-compat). Kept
+// OUT of the entity Create/Update schemas on purpose: it's a request-time concern, not
+// a stored field, and must never leak into a proposal payload — the server DTO layer and
+// the MCP update tools attach it explicitly.
+export const ExpectedUpdatedAt = z
+  .string()
+  .max(64)
+  .optional()
+  .describe(
+    'Optimistic-concurrency guard: the `updatedAt` timestamp you last read for this entity. If provided and it no ' +
+      'longer matches the stored row (someone else saved since you loaded it), the update is rejected with 409 ' +
+      'Conflict instead of silently overwriting their edit. Omit to force an unconditional write.',
+  );
+
 // ---------- campaign ----------
 export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
 
@@ -765,6 +784,34 @@ export const InboxResolve = z
   .refine((v) => (v.entityType == null) === (v.entityId == null), {
     message: 'entityType and entityId must be provided together',
   });
+
+// ---------- entity revisions (issue #157) ----------
+// A revision-history layer for the prose entities most at risk of a blind
+// last-write-wins clobber (a co-DM polishing a recap while a connected AI saves its
+// own edit). On every committed prose update the server snapshots the PRIOR content
+// here; the history can then be listed and any prior snapshot RESTORED (re-applied as
+// a new update, itself recorded). Scoped to the DM-authored world-building prose whose
+// edit path is uniformly dm-gated — sessions (recap), quests/npcs/locations (body).
+// Notes get optimistic concurrency (ExpectedUpdatedAt) but not this history layer:
+// their per-note visibility/author-only-edit model makes a generic revision endpoint a
+// redaction hazard.
+export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location']);
+export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
+
+export const EntityRevision = z.object({
+  id: Id,
+  campaignId: Id,
+  entityType: RevisionEntityType,
+  entityId: Id,
+  // The snapshotted PRIOR prose, keyed by the entity's prose field ('recap' for a
+  // session, 'body' for quest/npc/location). A plain string map so the shape is uniform
+  // across entity types and the web can render whichever key is present.
+  snapshot: z.record(z.string(), z.string()).default({}),
+  authorUserId: z.string().max(120).default(''),
+  authorName: z.string().max(120).default(''),
+  createdAt: IsoDate,
+});
+export type EntityRevision = z.infer<typeof EntityRevision>;
 
 // ---------- comments (threaded discussion / play-by-post — issue #123) ----------
 // A first-class DISCUSSION layer, distinct from private-or-shared `notes`: every

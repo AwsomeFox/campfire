@@ -8,6 +8,7 @@ import { quests, questObjectives, npcs, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -51,6 +52,7 @@ export class QuestsService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   async listForCampaign(campaignId: number, role: Role): Promise<Quest[]> {
@@ -275,10 +277,28 @@ export class QuestsService {
     return redactSecret(toDomain(row), role);
   }
 
-  async update(id: number, input: QuestUpdateInput, user: RequestUser, role: Role): Promise<Quest> {
+  async update(
+    id: number,
+    input: QuestUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<Quest> {
     const existing = await this.getRowOrThrow(id);
+    // Optimistic concurrency (#157): 409 on a stale expectedUpdatedAt before any write.
+    this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
     await this.validateParentRef(input.parentId, existing.campaignId, id);
     await this.validateGiverNpcRef(input.giverNpcId, existing.campaignId);
+    // Snapshot the PRIOR body into revision history when it changes (#157).
+    if (input.body !== undefined && input.body !== existing.body) {
+      await this.revisions.record({
+        entityType: 'quest',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.body,
+        user,
+      });
+    }
     const [row] = await this.db
       .update(quests)
       .set({ ...input, updatedAt: nowIso() })
@@ -309,6 +329,8 @@ export class QuestsService {
       tx.delete(questObjectives).where(eq(questObjectives.questId, id)).run();
       tx.delete(quests).where(eq(quests.id, id)).run();
     });
+    // Drop this quest's prose revisions (polymorphic soft ref, no FK cascade — #157).
+    await this.revisions.removeForEntity('quest', id);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
