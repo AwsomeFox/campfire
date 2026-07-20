@@ -1104,11 +1104,14 @@ export class McpToolsService {
     this.tool(
       server,
       'add_session_recap',
-      'Add a session recap (DM). number defaults to max existing session number + 1. Supports a dmSecret field ' +
-        '(DM-only prep notes, stripped from non-DM reads). With propose:true any member may submit a proposal instead.',
+      'Add a session recap (DM). Omit number and the server assigns the next available session number at write time ' +
+        '(for propose:true, at APPROVAL time) — so a drafted recap still approves cleanly if other sessions were logged ' +
+        'in between, and re-running without a number is retry-safe (an identical recap is deduped, not duplicated). ' +
+        'Supports a dmSecret field (DM-only prep notes, stripped from non-DM reads). With propose:true any member may ' +
+        'submit a proposal instead.',
       {
         campaignId: CampaignIdArg,
-        number: z.number().int().positive().optional().describe('Session number; defaults to max + 1'),
+        number: z.number().int().positive().optional().describe('Session number; omit to auto-assign next available (max + 1) at write/approval time'),
         title: z.string().max(200).optional().describe('Session title'),
         recap: z.string().max(100_000).describe('Session recap (markdown)'),
         playedAt: z.string().optional().describe('ISO date the session was played'),
@@ -1116,15 +1119,14 @@ export class McpToolsService {
         propose: ProposeArg,
       },
       async ({ campaignId, number, title, recap, playedAt, dmSecret, propose }) => {
-        // Membership is required even to compute the default number.
+        // Do NOT precompute the number here: freezing max+1 into the payload stranded
+        // proposals on a stale number (#125) and let retries sidestep the campaign-unique
+        // guard (#160). We pass number through only when the caller was explicit; otherwise
+        // SessionsService.create assigns it atomically at write time (or the proposal apply
+        // path does, at approval time).
         const memberRole = await this.access.requireMember(user, campaignId as number, { write: true });
-        let sessionNumber = number as number | undefined;
-        if (sessionNumber === undefined) {
-          const existing = await this.sessions.listForCampaign(campaignId as number, memberRole);
-          sessionNumber = existing.reduce((max, s) => Math.max(max, s.number), 0) + 1;
-        }
         const validated = SessionCreate.parse({
-          number: sessionNumber,
+          ...(number !== undefined ? { number } : {}),
           ...(title !== undefined ? { title } : {}),
           ...(playedAt !== undefined ? { playedAt } : {}),
           ...(dmSecret !== undefined ? { dmSecret } : {}),

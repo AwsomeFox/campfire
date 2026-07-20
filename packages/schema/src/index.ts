@@ -418,7 +418,12 @@ export const Session = z.object({
   ...timestamps,
 });
 export type Session = z.infer<typeof Session>;
-export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
+// `number` is OPTIONAL on create: when omitted, the server assigns the next
+// available session number atomically at write time (and, for a proposed recap,
+// at APPROVAL time) — see SessionsService.create. Precomputing it in the caller
+// froze stale numbers into proposals (#125) and let retries sidestep the
+// campaign-unique guard (#160).
+export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial();
 export const SessionUpdate = SessionCreate.partial();
 
 // The list-shape of a session (issue #71): a session's `recap` markdown can be up
