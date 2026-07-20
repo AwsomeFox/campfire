@@ -44,11 +44,18 @@ Players need an account, then a seat at your campaign.
 
 Players sign in and see your campaign on their hub.
 
-## 5. Session zero — characters
+## 5. Session zero — the charter & characters
 
-Each player opens **Party → New character**: name, species, class, level, stats, HP,
-an optional portrait and bio. As DM you can create or edit any character; players
-edit only their own.
+Before the dice come out, set the table's expectations. Open **Session zero** and fill
+in the **charter**: **lines** (hard limits — content that never appears), **veils**
+(soft limits — kept off-screen), the **safety tools** you'll use (X-Card, Open Door…),
+any **house rules**, and the **tone** you're playing in. The DM edits it; the whole
+table can read it.
+
+Then each player opens **Party → New character**: name, species, class, level, stats,
+HP, an optional portrait and bio — or **import a public D&D Beyond sheet** by pasting
+its id or URL. As DM you can create or edit any character; players edit only their own,
+and a player can keep **more than one** (a backup PC, a familiar).
 
 ## 6. Prep the world
 
