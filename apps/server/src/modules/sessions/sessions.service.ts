@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, sessionShares, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -31,6 +32,7 @@ export class SessionsService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async listForCampaign(campaignId: number): Promise<Session[]> {
@@ -62,6 +64,20 @@ export class SessionsService {
   private async recomputeSessionCount(campaignId: number): Promise<void> {
     const rows = await this.db.select({ id: sessions.id }).from(sessions).where(eq(sessions.campaignId, campaignId));
     await this.db.update(campaigns).set({ sessionCount: rows.length, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
+  }
+
+  /**
+   * "Upcoming" for session_scheduled notifications: playedAt on/after today.
+   * playedAt is a date-ish ISO string (the web sends YYYY-MM-DD), so compare
+   * date prefixes — a session scheduled for later today still counts.
+   */
+  private isUpcoming(playedAt: string | null | undefined): boolean {
+    if (!playedAt) return false;
+    return playedAt.slice(0, 10) >= nowIso().slice(0, 10);
+  }
+
+  private sessionLabel(row: { number: number; title: string }): string {
+    return row.title ? `Session ${row.number}: ${row.title}` : `Session ${row.number}`;
   }
 
   /** Session `number` must be unique within a campaign — 409 on a duplicate. */
@@ -99,6 +115,26 @@ export class SessionsService {
       entityId: row.id,
       campaignId,
     });
+
+    if (row.recap.trim() !== '') {
+      await this.notifications.notifyCampaign(campaignId, user, {
+        type: 'recap_posted',
+        title: `Recap posted for ${this.sessionLabel(row)}`,
+        body: excerpt(row.recap),
+        entityType: 'session',
+        entityId: row.id,
+        actorName: user.name,
+      });
+    }
+    if (this.isUpcoming(row.playedAt)) {
+      await this.notifications.notifyCampaign(campaignId, user, {
+        type: 'session_scheduled',
+        title: `${this.sessionLabel(row)} scheduled for ${row.playedAt!.slice(0, 10)}`,
+        entityType: 'session',
+        entityId: row.id,
+        actorName: user.name,
+      });
+    }
     return toDomain(row);
   }
 
@@ -121,6 +157,29 @@ export class SessionsService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+
+    // recap_posted fires only on the empty -> non-empty transition (posting the
+    // recap), never on subsequent edits — no notification spam per typo fix.
+    if (existing.recap.trim() === '' && row.recap.trim() !== '') {
+      await this.notifications.notifyCampaign(existing.campaignId, user, {
+        type: 'recap_posted',
+        title: `Recap posted for ${this.sessionLabel(row)}`,
+        body: excerpt(row.recap),
+        entityType: 'session',
+        entityId: id,
+        actorName: user.name,
+      });
+    }
+    // session_scheduled fires when playedAt is (re)set to an upcoming date.
+    if (input.playedAt !== undefined && row.playedAt !== existing.playedAt && this.isUpcoming(row.playedAt)) {
+      await this.notifications.notifyCampaign(existing.campaignId, user, {
+        type: 'session_scheduled',
+        title: `${this.sessionLabel(row)} scheduled for ${row.playedAt!.slice(0, 10)}`,
+        entityType: 'session',
+        entityId: id,
+        actorName: user.name,
+      });
+    }
     return toDomain(row);
   }
 
