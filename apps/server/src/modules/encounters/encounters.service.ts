@@ -1,10 +1,10 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest, normalizeStats } from '@campfire/schema';
-import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
+import { CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, RollRequest, normalizeStats } from '@campfire/schema';
+import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { characters, combatants, encounters, ruleEntries } from '../../db/schema';
+import { characters, combatants, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
@@ -13,10 +13,11 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { abilityMod, advanceTurn, applyCombatantHp, hpBandFor, sortCombatants, turnIndexFor } from './encounters.logic';
+import { abilityMod, advanceTurn, applyCombatantHp, computeEncounterDifficulty, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
 import type { CombatantHpState } from './encounters.logic';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
+type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
@@ -30,6 +31,9 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     round: row.round,
     turnIndex: row.turnIndex,
     currentCombatantId: row.currentCombatantId,
+    locationId: row.locationId,
+    questId: row.questId,
+    sessionId: row.sessionId,
     endedAt: row.endedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -163,6 +167,10 @@ export class EncountersService {
         status: 'preparing',
         round: 0,
         turnIndex: 0,
+        // Optional where/why/when links (issue #126). undefined -> null.
+        locationId: input.locationId ?? null,
+        questId: input.questId ?? null,
+        sessionId: input.sessionId ?? null,
         endedAt: null,
         createdAt: ts,
         updatedAt: ts,
@@ -216,6 +224,146 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id);
 
     return this.getWithCombatantsOrThrow(encounterRow.id, role);
+  }
+
+  /**
+   * Edit an encounter's name and/or its location/quest/session links (issue #126).
+   * Only the fields present in `patch` are written; passing `null` for a link clears it,
+   * omitting a field leaves it unchanged. A linked location/quest/session id is validated
+   * to belong to THIS encounter's campaign (404 otherwise, matching addCombatant's
+   * cross-campaign handling) so an encounter can never point at another campaign's entity.
+   */
+  async update(encounterId: number, patch: EncounterUpdateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+
+    const set: Partial<typeof encounters.$inferInsert> = {};
+    if (patch.name !== undefined) set.name = patch.name;
+    if (patch.locationId !== undefined) {
+      if (patch.locationId !== null) await this.assertEntityInCampaign('location', patch.locationId, encounterRow.campaignId);
+      set.locationId = patch.locationId;
+    }
+    if (patch.questId !== undefined) {
+      if (patch.questId !== null) await this.assertEntityInCampaign('quest', patch.questId, encounterRow.campaignId);
+      set.questId = patch.questId;
+    }
+    if (patch.sessionId !== undefined) {
+      if (patch.sessionId !== null) await this.assertEntityInCampaign('session', patch.sessionId, encounterRow.campaignId);
+      set.sessionId = patch.sessionId;
+    }
+
+    if (Object.keys(set).length === 0) {
+      return this.getWithCombatantsOrThrow(encounterId, role);
+    }
+
+    set.updatedAt = nowIso();
+    await this.db.update(encounters).set(set).where(eq(encounters.id, encounterId));
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.update',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounterRow.campaignId,
+      detail: JSON.stringify(patch),
+    });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+
+    return this.getWithCombatantsOrThrow(encounterId, role);
+  }
+
+  /** Guard that a link target exists in the same campaign as the encounter (issue #126). */
+  private async assertEntityInCampaign(kind: 'location' | 'quest' | 'session', id: number, campaignId: number): Promise<void> {
+    const table = kind === 'location' ? locations : kind === 'quest' ? quests : sessions;
+    const [row] = await this.db.select({ campaignId: table.campaignId }).from(table).where(eq(table.id, id)).limit(1);
+    if (!row || row.campaignId !== campaignId) {
+      throw new NotFoundException(`${kind} ${id} not found in campaign ${campaignId}`);
+    }
+  }
+
+  /**
+   * Compute a read-only 5e difficulty band for an encounter (issue #58). Pulls the PC
+   * levels from the character-combatants' linked character sheets and the monster CRs
+   * from the monster-combatants' linked rule entries (dataJson.challengeRating), then
+   * runs the pure 5e XP-budget math. No new columns — everything is derived on read.
+   */
+  async getDifficulty(encounterId: number): Promise<EncounterDifficulty> {
+    await this.getRowOrThrow(encounterId);
+    const combatantRows = await this.listCombatantRows(encounterId);
+
+    // Party levels: from each character-combatant's linked character sheet.
+    const characterIds = combatantRows
+      .filter((c) => c.kind === 'character' && c.characterId !== null)
+      .map((c) => c.characterId as number);
+    const levelById = new Map<number, number>();
+    if (characterIds.length > 0) {
+      const charRows = await this.db
+        .select({ id: characters.id, level: characters.level })
+        .from(characters)
+        .where(inArray(characters.id, characterIds));
+      for (const r of charRows) levelById.set(r.id, r.level);
+    }
+    const partyLevels = characterIds.map((id) => levelById.get(id) ?? 1);
+
+    // Monster CRs: from each monster-combatant's linked rule entry statblock. A monster
+    // combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
+    // (0 XP) rather than being dropped, so the monster COUNT still drives the multiplier.
+    const monsterCombatants = combatantRows.filter((c) => c.kind === 'monster');
+    const ruleEntryIds = monsterCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
+    const crById = new Map<number, number | null>();
+    if (ruleEntryIds.length > 0) {
+      const entryRows = await this.db
+        .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+        .from(ruleEntries)
+        .where(inArray(ruleEntries.id, ruleEntryIds));
+      for (const r of entryRows) {
+        const data = fromJsonText<Record<string, unknown>>(r.dataJson, {});
+        crById.set(r.id, parseCr(data.challengeRating ?? data.challenge_rating ?? data.cr));
+      }
+    }
+    const monsterCrs = monsterCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
+
+    return computeEncounterDifficulty(partyLevels, monsterCrs);
+  }
+
+  /**
+   * Compact per-encounter digest for the campaign summary (issue #126) — enough for an
+   * AI recap to see combat happened, where/why/when it was pinned, and a down tally,
+   * without loading full combatant rows. One encounters query plus one grouped-count
+   * query over combatants, both scoped to the campaign.
+   */
+  async digestForCampaign(campaignId: number): Promise<EncounterDigest[]> {
+    const rows = await this.db.select().from(encounters).where(eq(encounters.campaignId, campaignId));
+    if (rows.length === 0) return [];
+
+    const encounterIds = rows.map((r) => r.id);
+    const tally = await this.db
+      .select({
+        encounterId: combatants.encounterId,
+        total: sql<number>`COUNT(*)`,
+        down: sql<number>`SUM(CASE WHEN ${combatants.hpCurrent} <= 0 OR ${combatants.deathState} = 'dead' THEN 1 ELSE 0 END)`,
+      })
+      .from(combatants)
+      .where(inArray(combatants.encounterId, encounterIds))
+      .groupBy(combatants.encounterId);
+    const tallyById = new Map(tally.map((t) => [t.encounterId, { total: Number(t.total), down: Number(t.down) }]));
+
+    return rows.map((r) => {
+      const t = tallyById.get(r.id) ?? { total: 0, down: 0 };
+      return {
+        id: r.id,
+        name: r.name,
+        status: r.status as EncounterStatus,
+        round: r.round,
+        endedAt: r.endedAt,
+        locationId: r.locationId,
+        questId: r.questId,
+        sessionId: r.sessionId,
+        combatantCount: t.total,
+        downCount: t.down,
+      };
+    });
   }
 
   /**

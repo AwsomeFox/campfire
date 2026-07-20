@@ -448,6 +448,9 @@ CREATE TABLE IF NOT EXISTS encounters (
   round INTEGER NOT NULL DEFAULT 0,
   turn_index INTEGER NOT NULL DEFAULT 0,
   current_combatant_id INTEGER,
+  location_id INTEGER,
+  quest_id INTEGER,
+  session_id INTEGER,
   ended_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

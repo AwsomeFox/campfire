@@ -561,6 +561,11 @@ export const encounters = sqliteTable('encounters', {
   // Identity-based turn pointer (issue #49) — the combatant whose turn it is,
   // independent of positional shuffling on add/remove. null when not running/empty.
   currentCombatantId: integer('current_combatant_id'),
+  // Optional where/why/when links (issue #126). Nullable/absent in older DBs
+  // pre-migration; see db/db.module.ts migrateEncountersTableForLinks().
+  locationId: integer('location_id'),
+  questId: integer('quest_id'),
+  sessionId: integer('session_id'),
   endedAt: text('ended_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),

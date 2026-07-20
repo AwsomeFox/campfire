@@ -388,6 +388,29 @@ function migrateEncountersTableForCurrentCombatant(sqlite: Database.Database): v
 }
 
 /**
+ * Migration for DBs created before encounter linking (issue #126): encounters carried
+ * only campaignId + name + status/round/turn, with no way to attach a fight to WHERE
+ * (locationId), WHY (questId), or WHEN (sessionId) it happened — leaving combat an
+ * unlinked island invisible to the continuity/recap layer. Plain nullable ADD COLUMNs,
+ * each guarded independently so a partially-migrated DB completes — no table rebuild,
+ * same shape as migrateEncountersTableForCurrentCombatant above. Existing rows get
+ * NULL (unlinked), preserving prior behavior. New DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the columns.
+ */
+function migrateEncountersTableForLinks(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('location_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN location_id INTEGER');
+  if (!has('quest_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN quest_id INTEGER');
+  if (!has('session_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN session_id INTEGER');
+}
+
+/**
  * Migration for DBs created before entity-level secrecy (issue #42):
  * `quests.hidden` / `npcs.hidden` didn't exist. Plain NOT NULL DEFAULT 0 ADD
  * COLUMNs — no table rebuild needed, same as migrateCharactersTableForXp above.
@@ -582,6 +605,7 @@ export function openDatabase(dataDir: string): {
   migrateNotesTableForRecipient(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
+  migrateEncountersTableForLinks(sqlite);
   migrateCombatantsTableForHpModel(sqlite);
   migrateQuestsTableForHidden(sqlite);
   migrateNpcsTableForHidden(sqlite);

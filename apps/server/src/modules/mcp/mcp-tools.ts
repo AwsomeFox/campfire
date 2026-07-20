@@ -8,6 +8,7 @@ import {
   CharacterUpdate,
   CombatantCreate,
   CombatantUpdate,
+  EncounterUpdate,
   DangerLevel,
   EntityType,
   Id,
@@ -588,6 +589,20 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         await this.access.requireMember(user, row.campaignId);
         return this.encounters.getWithCombatantsOrThrow(encounterId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_encounter_difficulty',
+      'Estimate an encounter\'s 5e difficulty (issue #58): a read-only Easy/Medium/Hard/Deadly band computed from the ' +
+        'party PCs\' levels vs the combatant monsters\' CRs, with the standard number-of-monsters XP multiplier. Returns ' +
+        'the band plus the party XP thresholds and the adjusted monster XP. No state change.',
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        await this.access.requireMember(user, row.campaignId);
+        return this.encounters.getDifficulty(encounterId as number);
       },
     );
 
@@ -1797,11 +1812,40 @@ export class McpToolsService {
       server,
       'create_encounter',
       'DM only: create a new encounter (combat tracker) in a campaign, status=preparing. Auto-adds every campaign ' +
-        'character as a combatant with hp from their sheet and initiative modifier from DEX.',
-      { campaignId: CampaignIdArg, name: z.string().min(1).max(120).describe('Encounter name') },
-      async ({ campaignId, name }) => {
+        'character as a combatant with hp from their sheet and initiative modifier from DEX. Optionally attach it to a ' +
+        'location/quest/session (issue #126) so combat is tied to where/why/when it happened.',
+      {
+        campaignId: CampaignIdArg,
+        name: z.string().min(1).max(120).describe('Encounter name'),
+        locationId: Id.optional().describe('Attach the encounter to a location (where it happens)'),
+        questId: Id.optional().describe('Attach the encounter to a quest (why it happens)'),
+        sessionId: Id.optional().describe('Attach the encounter to a session (when it happens)'),
+      },
+      async ({ campaignId, name, locationId, questId, sessionId }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
-        return this.encounters.create(campaignId as number, { name: name as string }, user, role);
+        return this.encounters.create(
+          campaignId as number,
+          { name: name as string, locationId: locationId as number | undefined, questId: questId as number | undefined, sessionId: sessionId as number | undefined },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.tool(
+      server,
+      'update_encounter',
+      'DM only: edit an encounter\'s name and/or attach it to a location/quest/session (issue #126). Pass null for a ' +
+        'link to clear it; omit a field to leave it unchanged.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        ...EncounterUpdate.shape,
+      },
+      async ({ encounterId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const validated = EncounterUpdate.parse(fields);
+        return this.encounters.update(encounterId as number, validated, user, role);
       },
     );
 

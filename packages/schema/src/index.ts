@@ -708,7 +708,7 @@ export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 // author-only, dm_shared flows up to the DM, party_shared broadcasts to everyone.
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared', 'whisper']);
 export const NoteKind = z.enum(['note', 'inbox']);
-export const EntityType = z.enum(['quest', 'npc', 'location', 'session', 'character', 'campaign']);
+export const EntityType = z.enum(['quest', 'npc', 'location', 'session', 'character', 'campaign', 'encounter']);
 
 export const Note = z.object({
   id: Id,
@@ -982,6 +982,24 @@ export const RuleSearchQuery = z.object({
 });
 
 // ---------- campaign summary (dashboard aggregate / AI primer) ----------
+// Compact per-encounter digest for the campaign summary (issue #126) — enough for an
+// AI drafting a recap or "the story so far" to SEE that combat happened, where/why/
+// when it was pinned, and a survivor/down tally, without pulling every combatant row.
+export const EncounterDigest = z.object({
+  id: Id,
+  name: z.string(),
+  // Inline enum (mirrors EncounterStatus, declared later in this file) to avoid a
+  // temporal-dead-zone reference — CampaignSummary sits above the encounter section.
+  status: z.enum(['preparing', 'running', 'ended']),
+  round: z.number().int().nonnegative(),
+  endedAt: IsoDate.nullable(),
+  locationId: Id.nullable(),
+  questId: Id.nullable(),
+  sessionId: Id.nullable(),
+  combatantCount: z.number().int().nonnegative(),
+  downCount: z.number().int().nonnegative(), // combatants at 0 HP / down / dead
+});
+export type EncounterDigest = z.infer<typeof EncounterDigest>;
 export const CampaignSummary = z.object({
   campaign: Campaign,
   currentLocation: Location.nullable(),
@@ -990,6 +1008,7 @@ export const CampaignSummary = z.object({
   locations: z.array(Location),
   characters: z.array(Character),
   sessions: z.array(SessionListItem), // list-shape (recapExcerpt, not full recap) — issue #71
+  encounters: z.array(EncounterDigest), // combat digest (issue #126) — makes fights visible to the continuity layer
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;
@@ -1443,11 +1462,57 @@ export const Encounter = z.object({
   // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
   currentCombatantId: Id.nullable().default(null),
+  // Optional links to WHERE / WHY / WHEN the encounter happened (issue #126). An
+  // encounter used to be an unlinked island — carrying only campaignId + name — so
+  // "the ambush at Thornbridge for the Everflame quest" couldn't be attached to
+  // either, and combat was invisible to the continuity/recap layer. All nullable;
+  // absent in older DBs pre-migration (see db/db.module.ts).
+  locationId: Id.nullable().default(null),
+  questId: Id.nullable().default(null),
+  sessionId: Id.nullable().default(null),
   endedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
 export type Encounter = z.infer<typeof Encounter>;
-export const EncounterCreate = z.object({ name: z.string().min(1).max(120) });
+export const EncounterCreate = z.object({
+  name: z.string().min(1).max(120),
+  // Optional attachment links (issue #126) — where/why/when this encounter belongs.
+  locationId: Id.nullable().optional(),
+  questId: Id.nullable().optional(),
+  sessionId: Id.nullable().optional(),
+});
+// Edit an encounter's name and/or its location/quest/session links (issue #126).
+// Every field optional; passing `null` for a link clears it, omitting leaves it as-is.
+export const EncounterUpdate = z.object({
+  name: z.string().min(1).max(120).optional(),
+  locationId: Id.nullable().optional(),
+  questId: Id.nullable().optional(),
+  sessionId: Id.nullable().optional(),
+});
+
+// ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
+// Computed (read-only) difficulty band for an encounter: the party's summed 5e XP
+// thresholds vs the total adjusted monster XP (monster CR->XP with the standard
+// number-of-monsters multiplier). `trivial` is below the party's Easy threshold.
+export const DifficultyBand = z.enum(['trivial', 'easy', 'medium', 'hard', 'deadly']);
+export type DifficultyBand = z.infer<typeof DifficultyBand>;
+export const EncounterDifficulty = z.object({
+  band: DifficultyBand,
+  // Party XP thresholds (sum across the PC combatants' per-level thresholds).
+  thresholds: z.object({
+    easy: z.number().int().nonnegative(),
+    medium: z.number().int().nonnegative(),
+    hard: z.number().int().nonnegative(),
+    deadly: z.number().int().nonnegative(),
+  }),
+  partySize: z.number().int().nonnegative(), // number of PC (character) combatants counted
+  partyLevels: z.array(z.number().int()), // the PC levels that fed the thresholds
+  monsterCount: z.number().int().nonnegative(), // number of monster combatants counted
+  totalMonsterXp: z.number().int().nonnegative(), // raw summed monster XP (pre-multiplier)
+  multiplier: z.number(), // 5e encounter multiplier for the monster count
+  adjustedXp: z.number().int().nonnegative(), // totalMonsterXp * multiplier, compared to thresholds
+});
+export type EncounterDifficulty = z.infer<typeof EncounterDifficulty>;
 
 export const CombatantKind = z.enum(['character', 'monster']);
 export type CombatantKind = z.infer<typeof CombatantKind>;

@@ -5,7 +5,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto } from './encounters.dto';
 
 @ApiTags('encounters')
 @Controller('campaigns/:campaignId/encounters')
@@ -86,6 +86,32 @@ export class EncountersController {
     // HP as a coarse band, never exact numbers.
     const role = await this.access.requireMember(user, row.campaignId);
     return this.encounters.getWithCombatantsOrThrow(id, role);
+  }
+
+  @Get(':id/difficulty')
+  @ApiOperation({
+    summary: 'Estimate encounter difficulty (5e XP budget)',
+    description:
+      'Requires campaign membership. Read-only: computes an Easy/Medium/Hard/Deadly band from the party PCs\' levels vs the combatant monsters\' CRs (issue #58). No state change.',
+  })
+  @ApiResponse({ status: 200, description: 'Difficulty band with the party thresholds and adjusted monster XP.' })
+  async difficulty(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    await this.access.requireMember(user, row.campaignId);
+    return this.encounters.getDifficulty(id);
+  }
+
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Update an encounter',
+    description: "dm role required. Edit the name and/or attach it to a location/quest/session (issue #126). Pass null to clear a link.",
+  })
+  @ApiResponse({ status: 200, description: 'Updated encounter with combatants.' })
+  @ApiResponse({ status: 404, description: 'A linked location/quest/session id is not in this encounter\'s campaign.' })
+  async update(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterUpdateDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.update(id, body, user, role);
   }
 
   @Delete(':id')

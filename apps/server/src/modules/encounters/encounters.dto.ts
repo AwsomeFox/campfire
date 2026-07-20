@@ -1,7 +1,8 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, CombatantCreate, CombatantUpdate, RollRequest } from '@campfire/schema';
+import { EncounterCreate, EncounterUpdate, CombatantCreate, CombatantUpdate, RollRequest } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
+export class EncounterUpdateDto extends createZodDto(EncounterUpdate.strict()) {}
 
 // .strict() here (not on the shared CombatantCreate/CombatantUpdate exports in
 // @campfire/schema — those are reused as-is by mcp-tools.ts and elsewhere, and

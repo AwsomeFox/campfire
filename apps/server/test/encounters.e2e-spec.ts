@@ -1469,3 +1469,170 @@ describe('encounters — issue #114: count add + rename (e2e)', () => {
     expect(hp.status).toBe(403);
   });
 });
+
+// Issue #126 (location/quest/session linking + summary + note pinning) and
+// issue #58 (difficulty band). Own campaign + fixtures so nothing else pollutes the
+// party or the campaign summary.
+describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #126 + #58)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let locationId: number;
+  let questId: number;
+  let sessionId: number;
+  let cr10EntryId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Linking Campaign' });
+    campaignId = camp.body.id;
+
+    // A four-PC level-5 party. Encounter create auto-adds every ACTIVE character, so
+    // these four become the party the difficulty math reads levels from.
+    for (const name of ['Aria', 'Borin', 'Cyra', 'Doran']) {
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name, level: 5, hpCurrent: 30, hpMax: 30 });
+      expect(res.status).toBe(201);
+    }
+
+    const loc = await request(server).post(`/api/v1/campaigns/${campaignId}/locations`).set(dm).send({ name: 'Thornbridge' });
+    locationId = loc.body.id;
+    const quest = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'The Everflame' });
+    questId = quest.body.id;
+    const session = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Session One' });
+    sessionId = session.body.id;
+
+    // A CR-10 monster (5900 XP) seeded directly so difficulty has a known statblock.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: 'link-pack', name: 'Link Pack', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 1 })
+      .returning();
+    const [entry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'cr10-ogre',
+        name: 'Fearsome Ogre',
+        type: 'monster',
+        summary: 'CR 10',
+        body: '',
+        dataJson: JSON.stringify({ challengeRating: 10, hitPoints: 90 }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+    cr10EntryId = entry.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('create with location/quest/session links round-trips', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Ambush at Thornbridge', locationId, questId, sessionId });
+    expect(res.status).toBe(201);
+    expect(res.body.locationId).toBe(locationId);
+    expect(res.body.questId).toBe(questId);
+    expect(res.body.sessionId).toBe(sessionId);
+
+    // GET reflects the persisted links.
+    const got = await request(server).get(`/api/v1/encounters/${res.body.id}`).set(dm);
+    expect(got.body.locationId).toBe(locationId);
+    expect(got.body.questId).toBe(questId);
+    expect(got.body.sessionId).toBe(sessionId);
+  });
+
+  it('update edits the name and re-attaches / clears links', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Loose fight' });
+    const id = created.body.id;
+    expect(created.body.locationId).toBeNull();
+
+    const patched = await request(server)
+      .patch(`/api/v1/encounters/${id}`)
+      .set(dm)
+      .send({ name: 'Named fight', locationId, questId });
+    expect(patched.status).toBe(200);
+    expect(patched.body.name).toBe('Named fight');
+    expect(patched.body.locationId).toBe(locationId);
+    expect(patched.body.questId).toBe(questId);
+
+    // null clears a link.
+    const cleared = await request(server).patch(`/api/v1/encounters/${id}`).set(dm).send({ locationId: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.locationId).toBeNull();
+    expect(cleared.body.questId).toBe(questId); // untouched field stays
+  });
+
+  it('rejects a cross-campaign link target with 404', async () => {
+    const server = ctx.app.getHttpServer();
+    const otherCamp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other' });
+    const otherLoc = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/locations`).set(dm).send({ name: 'Elsewhere' });
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'X' });
+    const res = await request(server).patch(`/api/v1/encounters/${enc.body.id}`).set(dm).send({ locationId: otherLoc.body.id });
+    expect(res.status).toBe(404);
+  });
+
+  it('get_campaign_summary (REST) now includes an encounters digest', async () => {
+    const server = ctx.app.getHttpServer();
+    const enc = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Digest fight', locationId, questId });
+    const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(dm);
+    expect(summary.status).toBe(200);
+    expect(Array.isArray(summary.body.encounters)).toBe(true);
+    const digest = summary.body.encounters.find((e: { id: number }) => e.id === enc.body.id);
+    expect(digest).toBeDefined();
+    expect(digest.name).toBe('Digest fight');
+    expect(digest.locationId).toBe(locationId);
+    expect(digest.questId).toBe(questId);
+    expect(digest.combatantCount).toBe(4); // the four auto-added PCs
+    expect(digest.downCount).toBe(0);
+  });
+
+  it("a note can pin to entityType 'encounter'", async () => {
+    const server = ctx.app.getHttpServer();
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Noted fight' });
+    const note = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(dm)
+      .send({ body: 'They fled north', entityType: 'encounter', entityId: enc.body.id });
+    expect(note.status).toBe(201);
+    expect(note.body.entityType).toBe('encounter');
+    expect(note.body.entityId).toBe(enc.body.id);
+    expect(note.body.entityName).toBe('Noted fight');
+  });
+
+  it('difficulty band computes correctly for a known party + monster set', async () => {
+    const server = ctx.app.getHttpServer();
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ogre fight' });
+    // Add the CR-10 ogre (5900 XP). Party = 4 level-5 PCs -> deadly threshold 4*1100=4400.
+    // One monster -> ×1 multiplier -> adjusted 5900 >= 4400 -> deadly.
+    const add = await request(server)
+      .post(`/api/v1/encounters/${enc.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: cr10EntryId });
+    expect(add.status).toBe(201);
+
+    const diff = await request(server).get(`/api/v1/encounters/${enc.body.id}/difficulty`).set(dm);
+    expect(diff.status).toBe(200);
+    expect(diff.body.partySize).toBe(4);
+    expect(diff.body.partyLevels.sort()).toEqual([5, 5, 5, 5]);
+    expect(diff.body.thresholds).toEqual({ easy: 1000, medium: 2000, hard: 3000, deadly: 4400 });
+    expect(diff.body.monsterCount).toBe(1);
+    expect(diff.body.totalMonsterXp).toBe(5900);
+    expect(diff.body.multiplier).toBe(1);
+    expect(diff.body.adjustedXp).toBe(5900);
+    expect(diff.body.band).toBe('deadly');
+  });
+});

@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
 import type { Note, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, campaigns, characters, locations, notes, npcs, quests, sessions, users } from '../../db/schema';
+import { campaignMembers, campaigns, characters, encounters, locations, notes, npcs, quests, sessions, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { applyPage } from '../../common/pagination';
 import { AuditService } from '../audit/audit.service';
@@ -361,6 +361,12 @@ export class NotesService {
           .select({ id: campaigns.id, name: campaigns.name })
           .from(campaigns)
           .where(and(eq(campaigns.id, campaignId), inArray(campaigns.id, ids)));
+      case 'encounter':
+        // Encounters can be pinned by a note (issue #126) — resolve their display names.
+        return this.db
+          .select({ id: encounters.id, name: encounters.name })
+          .from(encounters)
+          .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, ids)));
     }
   }
 
