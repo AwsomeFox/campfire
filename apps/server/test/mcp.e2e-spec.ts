@@ -18,6 +18,7 @@ const ALL_TOOLS = [
   // read
   'list_campaigns',
   'get_campaign_summary',
+  'get_session_zero',
   'get_quest',
   'list_quests',
   'list_arcs',
@@ -1068,6 +1069,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(uris).toContain(`campfire://campaign/${campaignId}/summary`);
     expect(uris).toContain(`campfire://campaign/${campaignId}/party`);
     expect(uris).toContain(`campfire://campaign/${campaignId}/recaps`);
+    expect(uris).toContain(`campfire://campaign/${campaignId}/session-zero`);
 
     // The URI templates themselves are advertised via resources/templates/list.
     const { resourceTemplates } = await client.listResourceTemplates();
@@ -1075,6 +1077,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(templates).toContain('campfire://campaign/{campaignId}/summary');
     expect(templates).toContain('campfire://campaign/{campaignId}/party');
     expect(templates).toContain('campfire://campaign/{campaignId}/recaps');
+    expect(templates).toContain('campfire://campaign/{campaignId}/session-zero');
   });
 
   it('reading campfire://campaigns and campfire://campaign/{id}/summary returns the same JSON as the read tools (issue #26)', async () => {
