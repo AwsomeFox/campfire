@@ -49,7 +49,7 @@ Requested and being built so the operator and the storyteller stay distinct
 
 - ⬜ **DM invite links / join codes** — let a DM bring players in without the server admin creating each account _(today: the "Invite" card is a disabled placeholder)_
 - ⬜ **Optional self-service signup** — a server setting for open registration
-- ⬜ **Admin ≠ auto-DM** — a server admin no longer implicitly sees every campaign's DM secrets; server power ≠ story access
+- ✅ **Admin ≠ auto-DM** — a server admin no longer implicitly sees every campaign's DM secrets; server power ≠ story access
 
 ## Half-built & stale 🟡
 

@@ -220,7 +220,8 @@ export function Layout() {
 
   // me.memberships is fetched once at login, so it's stale the moment a DM changes
   // someone's access mid-session. Once the campaign list has loaded, if this campaign
-  // isn't in it (removed, or never was — for a non-admin) treat it as lost access:
+  // isn't in it (removed, or never was — server admins included, since admin ≠
+  // auto-DM) treat it as lost access:
   // refresh both auth + campaigns once (covers the "promoted" case too, since a
   // promoted player's next campaign entry will now show DM nav) and bounce home.
   useEffect(() => {
@@ -235,13 +236,13 @@ export function Layout() {
     // of lost access, just that we couldn't check. Re-check per distinct campaignId.
     if (campaignsLoading || campaignsError || staleCheckedIdRef.current === campaignId) return;
     staleCheckedIdRef.current = campaignId;
-    const stillHasAccess = isAdmin || campaigns.some((c) => c.id === campaignId);
+    const stillHasAccess = campaigns.some((c) => c.id === campaignId);
     setLostAccess(!stillHasAccess);
     if (!stillHasAccess) {
       void refreshAuth();
       void refreshCampaigns();
     }
-  }, [campaignId, campaignsLoading, campaignsError, campaigns, isAdmin, lostAccess, refreshAuth, refreshCampaigns]);
+  }, [campaignId, campaignsLoading, campaignsError, campaigns, lostAccess, refreshAuth, refreshCampaigns]);
 
   useEffect(() => {
     function onClick(e: MouseEvent) {
