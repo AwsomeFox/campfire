@@ -214,7 +214,12 @@ export class MeController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'Current user + campaign memberships', description: 'Resolves the authenticated identity (cookie session or Bearer PAT) to a user profile and their campaign memberships/roles.' })
+  @ApiOperation({
+    summary: 'Current user + campaign memberships',
+    description:
+      'Resolves the authenticated identity (cookie session or Bearer PAT) to a user profile and their campaign memberships/roles. ' +
+      'When authenticated via a PAT, the response reflects the TOKEN\'s effective capabilities: membership roles are capped to the token scope, a campaign-bound token only lists its campaign, and a `token` block reports the scope/campaign binding and effective server-admin power.',
+  })
   @ApiResponse({ status: 200, description: 'Current user and memberships.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   async me(@CurrentUser() user: RequestUser): Promise<Me> {
@@ -235,7 +240,7 @@ export class MeController {
         memberships: [],
       };
     }
-    return this.auth.buildMe(Number(user.id));
+    return this.auth.buildMe(Number(user.id), user.tokenContext);
   }
 
   @Post('password')

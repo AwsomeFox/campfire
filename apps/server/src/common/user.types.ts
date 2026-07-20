@@ -53,7 +53,7 @@ export function roleAtLeast(role: Role, min: Role): boolean {
   return ROLE_RANK[role] >= ROLE_RANK[min];
 }
 
-/** The lower-privileged of two roles (dm > player > viewer). */
+/** Lower of the two roles by ROLE_RANK — how a token's scope caps an effective role (RoleResolver, /me). */
 export function minRole(a: Role, b: Role): Role {
   return ROLE_RANK[a] <= ROLE_RANK[b] ? a : b;
 }
