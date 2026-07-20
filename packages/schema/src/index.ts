@@ -131,6 +131,17 @@ export function normalizeStats(stats: Record<string, number> | null | undefined)
 export const SkillRank = z.enum(['proficient', 'expertise']);
 export type SkillRank = z.infer<typeof SkillRank>;
 
+/**
+ * Character lifecycle (issue #115). Only `active` PCs are auto-conscripted into a
+ * new encounter's combatant list; dead/retired/inactive characters stay on the
+ * roster (viewable, full sheet + history intact) but are skipped by the auto-add
+ * so a long campaign's graveyard of fallen and replaced PCs stops being force-added
+ * to every fight. Deleting a character remains the destructive alternative — this
+ * is the non-destructive shelf.
+ */
+export const CharacterStatus = z.enum(['active', 'dead', 'retired', 'inactive']);
+export type CharacterStatus = z.infer<typeof CharacterStatus>;
+
 /** One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5", "1d8+3 slashing") so non-attack actions stay valid. */
 export const CharacterAction = z.object({
   name: z.string().min(1).max(120),
@@ -161,6 +172,12 @@ export const Character = z.object({
   level: z.number().int().min(1).max(20).default(1),
   xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
+  // Lifecycle state (issue #115). `active` is the only status auto-added as a combatant
+  // on encounter create; dead/retired/inactive PCs are kept but skipped. Editable by the
+  // owning player or DM through the normal update path (and upsert_character over MCP).
+  status: CharacterStatus.default('active').describe(
+    "Lifecycle status: 'active' (default; auto-added to new encounters), 'dead', 'retired', or 'inactive'. Non-active PCs stay on the roster but are skipped by encounter auto-add.",
+  ),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),

@@ -44,6 +44,10 @@ export const characters = sqliteTable('characters', {
   level: integer('level').notNull().default(1),
   xp: integer('xp').notNull().default(0),
   background: text('background').notNull().default(''),
+  // Lifecycle status: active|dead|retired|inactive (issue #115). Only 'active' PCs are
+  // auto-added to a new encounter. Nullable in older DBs pre-migration; see
+  // db/db.module.ts ALTER TABLE note.
+  status: text('status').notNull().default('active'),
   stats: text('stats').notNull().default('{}'),
   ac: integer('ac'),
   hpCurrent: integer('hp_current').notNull().default(10),

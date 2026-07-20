@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { Character } from '@campfire/schema';
 import { EmptyState } from '../../components/ui';
+import { StatusTag } from '../characters/status';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/);
@@ -23,6 +24,8 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
       ) : (
         characters.map((c) => {
           const pct = c.hpMax > 0 ? Math.max(0, Math.min(100, (c.hpCurrent / c.hpMax) * 100)) : 0;
+          // Mute dead/retired/inactive PCs so the live party stands out (issue #115).
+          const isActive = c.status === 'active';
           return (
             <Link
               key={c.id}
@@ -36,6 +39,7 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
                 cursor: 'pointer',
                 padding: '6px 0',
                 minHeight: 44,
+                opacity: isActive ? 1 : 0.6,
               }}
             >
               <span
@@ -56,8 +60,11 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
               </span>
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 13.5 }}>
-                  <span>{c.name}</span>
-                  <span className="text-muted" style={{ fontSize: 11 }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                    {!isActive && <StatusTag status={c.status} />}
+                  </span>
+                  <span className="text-muted" style={{ fontSize: 11, flex: 'none' }}>
                     {c.hpCurrent}/{c.hpMax}
                   </span>
                 </span>

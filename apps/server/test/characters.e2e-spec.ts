@@ -152,6 +152,46 @@ describe('characters (e2e)', () => {
     expect(res.body.spellSlots).toEqual({});
   });
 
+  it('new characters default to status active (issue #115)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('active');
+  });
+
+  it('status can be set on create and round-trips through update (issue #115)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Create with an explicit non-active status.
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Fallen Knight', status: 'dead' });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.status).toBe('dead');
+    const id = createRes.body.id as number;
+
+    // PATCH to another status.
+    const patchRes = await request(server).patch(`/api/v1/characters/${id}`).set(dm).send({ status: 'retired' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.status).toBe('retired');
+
+    // Re-read confirms the value persisted.
+    const getRes = await request(server).get(`/api/v1/characters/${id}`).set(dm);
+    expect(getRes.status).toBe(200);
+    expect(getRes.body.status).toBe('retired');
+
+    // Bring it back to active.
+    const reviveRes = await request(server).patch(`/api/v1/characters/${id}`).set(dm).send({ status: 'active' });
+    expect(reviveRes.status).toBe(200);
+    expect(reviveRes.body.status).toBe('active');
+  });
+
+  it('PATCH status rejects an unknown lifecycle value (issue #115)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(dm).send({ status: 'zombie' });
+    expect(res.status).toBe(400);
+  });
+
   it('PATCH saveProficiencies round-trips', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
