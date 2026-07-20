@@ -161,4 +161,178 @@ describe('proposals (e2e, real cookie sessions)', () => {
     expect(proposal.payload.title).toBe('Snapshot Quest (proposed)');
     expect(proposal.payload.reward).toBe('50gp');
   });
+
+  // ---------- #98: delete proposal action ----------
+
+  it('member proposes a delete -> 202 pending, entity untouched; dm approves -> entity removed', async () => {
+    const questRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Doomed Quest', reward: '3gp' });
+    const doomedId = questRes.body.id;
+
+    const proposeRes = await playerAgent.delete(`/api/v1/quests/${doomedId}?proposed=true`);
+    expect(proposeRes.status).toBe(202);
+    expect(proposeRes.body.proposal.action).toBe('delete');
+    expect(proposeRes.body.proposal.entityType).toBe('quest');
+    expect(proposeRes.body.proposal.entityId).toBe(doomedId);
+    // Delete proposals snapshot the target so the DM sees what would be removed.
+    expect(proposeRes.body.proposal.snapshot).toBeDefined();
+    expect(proposeRes.body.proposal.snapshot.title).toBe('Doomed Quest');
+    const proposalId = proposeRes.body.proposal.id;
+
+    // Entity is still there until approved.
+    expect((await dmAgent.get(`/api/v1/quests/${doomedId}`)).status).toBe(200);
+
+    const approveRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect(approveRes.status).toBe(201);
+    expect(approveRes.body.status).toBe('approved');
+
+    // The delete was applied through the normal remove path.
+    expect((await dmAgent.get(`/api/v1/quests/${doomedId}`)).status).toBe(404);
+  });
+
+  // ---------- #98: character proposals (create + update) ----------
+
+  it('member proposes a character create -> 202; dm approves -> character exists', async () => {
+    const proposeRes = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters?proposed=true`)
+      .send({ name: 'Proposed Hero' });
+    expect(proposeRes.status).toBe(202);
+    expect(proposeRes.body.proposal.action).toBe('create');
+    expect(proposeRes.body.proposal.entityType).toBe('character');
+    expect(proposeRes.body.proposal.snapshot).toBeNull();
+    const proposalId = proposeRes.body.proposal.id;
+
+    // Not created yet.
+    let listRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/characters`);
+    expect(listRes.body.some((c: { name: string }) => c.name === 'Proposed Hero')).toBe(false);
+
+    const approveRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect(approveRes.status).toBe(201);
+
+    listRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/characters`);
+    expect(listRes.body.some((c: { name: string }) => c.name === 'Proposed Hero')).toBe(true);
+  });
+
+  it('member proposes a character update -> 202 with before-snapshot; dm approves applies it', async () => {
+    const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Update Me' });
+    const characterId = created.body.id;
+
+    const proposeRes = await playerAgent
+      .patch(`/api/v1/characters/${characterId}?proposed=true`)
+      .send({ name: 'Renamed Hero' });
+    expect(proposeRes.status).toBe(202);
+    expect(proposeRes.body.proposal.action).toBe('update');
+    expect(proposeRes.body.proposal.entityType).toBe('character');
+    expect(proposeRes.body.proposal.snapshot.name).toBe('Update Me');
+    const proposalId = proposeRes.body.proposal.id;
+
+    // Unchanged until approved.
+    expect((await dmAgent.get(`/api/v1/characters/${characterId}`)).body.name).toBe('Update Me');
+
+    await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect((await dmAgent.get(`/api/v1/characters/${characterId}`)).body.name).toBe('Renamed Hero');
+  });
+
+  // ---------- #98: edit-before-approve ----------
+
+  it('dm approves with an amended payload -> the edited values are applied, not the proposed ones', async () => {
+    const proposeRes = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: '90% Right Quest', reward: '1gp' });
+    expect(proposeRes.status).toBe(202);
+    const proposalId = proposeRes.body.proposal.id;
+
+    const approveRes = await dmAgent
+      .post(`/api/v1/proposals/${proposalId}/approve`)
+      .send({ payload: { title: 'Fixed By DM', reward: '100gp' }, note: 'tweaked before approving' });
+    expect(approveRes.status).toBe(201);
+    expect(approveRes.body.status).toBe('approved');
+    // The stored proposal payload reflects the amendment.
+    expect(approveRes.body.payload.title).toBe('Fixed By DM');
+
+    const questsRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
+    expect(questsRes.body.some((q: { title: string; reward: string }) => q.title === 'Fixed By DM' && q.reward === '100gp')).toBe(true);
+    // The original proposed title was never written.
+    expect(questsRes.body.some((q: { title: string }) => q.title === '90% Right Quest')).toBe(false);
+  });
+
+  it('an invalid amended payload is rejected (400) and nothing is applied', async () => {
+    const proposeRes = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: 'Guard Rail Quest' });
+    const proposalId = proposeRes.body.proposal.id;
+
+    // title must be a non-empty string — an amended payload with an empty title fails schema validation.
+    const approveRes = await dmAgent
+      .post(`/api/v1/proposals/${proposalId}/approve`)
+      .send({ payload: { title: '' } });
+    expect(approveRes.status).toBe(400);
+
+    // Still pending — the failed approve did not resolve it.
+    const pendingRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`);
+    expect(pendingRes.body.some((p: { id: number }) => p.id === proposalId)).toBe(true);
+  });
+
+  // ---------- #98: batch resolve ----------
+
+  it('dm batch-approves multiple proposals in one call', async () => {
+    const a = await playerAgent.post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`).send({ title: 'Batch A' });
+    const b = await playerAgent.post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`).send({ title: 'Batch B' });
+    const ids = [a.body.proposal.id, b.body.proposal.id];
+
+    const batchRes = await dmAgent.post(`/api/v1/proposals/batch/approve`).send({ ids, note: 'bulk ok' });
+    expect(batchRes.status).toBe(201);
+    expect(batchRes.body.results).toHaveLength(2);
+    expect(batchRes.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
+
+    const questsRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
+    expect(questsRes.body.some((q: { title: string }) => q.title === 'Batch A')).toBe(true);
+    expect(questsRes.body.some((q: { title: string }) => q.title === 'Batch B')).toBe(true);
+  });
+
+  it('dm batch-rejects multiple proposals in one call', async () => {
+    const a = await playerAgent.post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`).send({ title: 'Reject A' });
+    const b = await playerAgent.post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`).send({ title: 'Reject B' });
+    const ids = [a.body.proposal.id, b.body.proposal.id];
+
+    const batchRes = await dmAgent.post(`/api/v1/proposals/batch/reject`).send({ ids });
+    expect(batchRes.status).toBe(201);
+    expect(batchRes.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
+
+    const rejectedRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=rejected`);
+    expect(ids.every((id) => rejectedRes.body.some((p: { id: number }) => p.id === id))).toBe(true);
+
+    const questsRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
+    expect(questsRes.body.some((q: { title: string }) => q.title === 'Reject A')).toBe(false);
+  });
+
+  it('batch approve reports per-id failure without aborting the rest', async () => {
+    const good = await playerAgent.post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`).send({ title: 'Partial OK' });
+    const goodId = good.body.proposal.id;
+    const missingId = 9_999_999;
+
+    const batchRes = await dmAgent.post(`/api/v1/proposals/batch/approve`).send({ ids: [goodId, missingId] });
+    expect(batchRes.status).toBe(201);
+    const byId = Object.fromEntries(batchRes.body.results.map((r: { id: number }) => [r.id, r]));
+    expect(byId[goodId].ok).toBe(true);
+    expect(byId[missingId].ok).toBe(false);
+    expect(byId[missingId].status).toBe(404);
+
+    // The good one still applied.
+    const questsRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
+    expect(questsRes.body.some((q: { title: string }) => q.title === 'Partial OK')).toBe(true);
+  });
+
+  it('non-dm cannot batch-approve (per-item access is enforced)', async () => {
+    const p = await playerAgent.post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`).send({ title: 'Player Batch Attempt' });
+    const proposalId = p.body.proposal.id;
+
+    const batchRes = await playerAgent.post(`/api/v1/proposals/batch/approve`).send({ ids: [proposalId] });
+    expect(batchRes.status).toBe(201);
+    expect(batchRes.body.results[0].ok).toBe(false);
+    expect(batchRes.body.results[0].status).toBe(403);
+
+    // Untouched.
+    const pendingRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`);
+    expect(pendingRes.body.some((pp: { id: number }) => pp.id === proposalId)).toBe(true);
+  });
 });

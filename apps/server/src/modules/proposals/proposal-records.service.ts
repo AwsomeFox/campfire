@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { proposals, quests, npcs, locations, sessions, characters } from '../../db/schema';
@@ -68,7 +68,8 @@ export class ProposalRecordsService {
   ): Promise<Proposal> {
     // Capture the target's current state so the DM review UI can show a real
     // before/after diff (issue #3). Creates have no "before"; snapshot stays null.
-    const snapshot = action === 'update' && entityId !== null ? await this.snapshotEntity(entityType, entityId) : null;
+    // Deletes snapshot too, so the DM can see exactly what would be removed.
+    const snapshot = action !== 'create' && entityId !== null ? await this.snapshotEntity(entityType, entityId) : null;
 
     const ts = nowIso();
     const [row] = await this.db
@@ -161,17 +162,35 @@ export class ProposalRecordsService {
     return row;
   }
 
+  /**
+   * Persist an amended payload for a still-pending proposal (edit-before-approve):
+   * the DM tweaked the proposed create/update body at approval time, so the stored
+   * record matches what actually gets applied. Guarded on `status = 'pending'` so a
+   * concurrently-resolved proposal isn't rewritten.
+   */
+  async updatePayload(id: number, payload: Record<string, unknown>): Promise<void> {
+    await this.db
+      .update(proposals)
+      .set({ payload: toJsonText(payload), updatedAt: nowIso() })
+      .where(and(eq(proposals.id, id), eq(proposals.status, 'pending')));
+  }
+
+  /**
+   * Atomically flip a pending proposal to approved/rejected (compare-and-set on
+   * `status = 'pending'`), so two concurrent resolutions can't both win. Returns
+   * null when the row was already resolved (the caller turns that into a 409/403).
+   */
   async markResolved(
     id: number,
     status: 'approved' | 'rejected',
     note: string,
     user: RequestUser,
-  ): Promise<Proposal> {
+  ): Promise<Proposal | null> {
     const [row] = await this.db
       .update(proposals)
       .set({ status, resolvedBy: auditActor(user), note, updatedAt: nowIso() })
-      .where(eq(proposals.id, id))
+      .where(and(eq(proposals.id, id), eq(proposals.status, 'pending')))
       .returning();
-    return toDomain(row);
+    return row ? toDomain(row) : null;
   }
 }
