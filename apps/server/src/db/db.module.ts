@@ -185,6 +185,7 @@ function migrateApiTokensTableForAdminEnabled(sqlite: Database.Database): void {
 }
 
 /**
+<<<<<<< HEAD
  * Migration for DBs created before proposal before/after diffs:
  * `proposals.snapshot` didn't exist. Plain nullable ADD COLUMN — no table
  * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
@@ -247,6 +248,25 @@ function migrateCampaignsTableForIcsToken(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE campaigns ADD COLUMN ics_token TEXT');
 }
 
+/**
+ * Migration for DBs created before XP tracking (issue #14): `characters.xp`
+ * didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no table rebuild needed,
+ * same as migrateApiTokensTableForAdminEnabled above. New DBs never hit this
+ * path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCharactersTableForXp(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  const hasXp = columns.some((c) => c.name === 'xp');
+  if (hasXp) return;
+
+  sqlite.exec('ALTER TABLE characters ADD COLUMN xp INTEGER NOT NULL DEFAULT 0');
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -268,6 +288,7 @@ export function createDb(): DrizzleDb {
   migrateProposalsTableForSnapshot(sqlite);
   migrateCharactersTableForSheetDepth(sqlite);
   migrateCampaignsTableForIcsToken(sqlite);
+  migrateCharactersTableForXp(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.

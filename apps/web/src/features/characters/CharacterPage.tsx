@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, SkillRank } from '@campfire/schema';
+import { xpForLevel } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
@@ -246,6 +247,8 @@ export default function CharacterPage() {
             {canEdit && <HpEditor character={character} onChange={load} onError={setActionError} />}
           </Card>
 
+          <XpCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+
           <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
 
           <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
@@ -426,6 +429,166 @@ function SheetEditForm({
         </Btn>
       </div>
     </div>
+  );
+}
+
+/**
+ * Experience card — XP total, progress toward the next 5e threshold, a
+ * quick-award input, and the guided level-up flow (issue #14). The threshold
+ * is advisory only: "Level up" always works so milestone campaigns aren't
+ * blocked, but the card calls out when the XP actually qualifies.
+ */
+function XpCard({
+  character,
+  canEdit,
+  onChange,
+  onError,
+}: {
+  character: Character;
+  canEdit: boolean;
+  onChange: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [levellingUp, setLevellingUp] = useState(false);
+  const [newHpMax, setNewHpMax] = useState(String(character.hpMax));
+
+  const atCap = character.level >= 20;
+  const currentThreshold = xpForLevel(character.level);
+  const nextThreshold = atCap ? null : xpForLevel(character.level + 1);
+  const ready = nextThreshold != null && character.xp >= nextThreshold;
+  const pct =
+    nextThreshold == null
+      ? 100
+      : Math.max(0, Math.min(100, ((character.xp - currentThreshold) / (nextThreshold - currentThreshold)) * 100));
+
+  async function addXp() {
+    const delta = Number(amount);
+    if (!Number.isFinite(delta) || !Number.isInteger(delta) || delta === 0 || busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.post(`${API}/characters/${character.id}/xp`, { delta });
+      setAmount('');
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't award XP.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmLevelUp() {
+    if (busy) return;
+    const hpMaxNum = Number(newHpMax);
+    if (!Number.isInteger(hpMaxNum) || hpMaxNum < 1) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.post(`${API}/characters/${character.id}/level-up`, hpMaxNum !== character.hpMax ? { hpMax: hpMaxNum } : {});
+      setLevellingUp(false);
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't level up.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-3">
+      <div className="flex items-baseline gap-2.5 flex-wrap">
+        <p className="card-kicker mb-0">Experience</p>
+        {ready && (
+          <span className="tag tag-accent" style={{ fontSize: 10 }}>
+            Ready to level up
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-3.5 flex-wrap">
+        <span className="font-heading text-[34px] leading-none">
+          {character.xp.toLocaleString()}
+          <span className="text-base text-slate-500">
+            {nextThreshold != null ? ` / ${nextThreshold.toLocaleString()} XP` : ' XP'}
+          </span>
+        </span>
+        <div className="flex-1 min-w-[120px] h-[7px] rounded bg-[var(--color-neutral-800)] overflow-hidden">
+          <div className="h-full bg-[var(--color-accent)]" style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+      <p className="text-xs text-slate-500">
+        {atCap
+          ? 'Level 20 — the summit. XP still accrues for bragging rights.'
+          : ready
+            ? `Enough XP for level ${character.level + 1}!`
+            : `${(nextThreshold! - character.xp).toLocaleString()} XP to level ${character.level + 1}.`}
+      </p>
+      {canEdit && (
+        <div className="flex gap-2 flex-wrap items-center">
+          <input
+            type="number"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void addXp();
+            }}
+            placeholder="XP…"
+            className="cf-input !min-h-0 !w-24 text-sm"
+            style={{ minHeight: 44, padding: '4px 10px' }}
+          />
+          <Btn className="!min-h-0" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
+            + Award XP
+          </Btn>
+          {!atCap && !levellingUp && (
+            <Btn
+              ghost={!ready}
+              className="!min-h-0 ml-auto"
+              style={{ minHeight: 44 }}
+              disabled={busy}
+              onClick={() => {
+                setNewHpMax(String(character.hpMax));
+                setLevellingUp(true);
+              }}
+            >
+              ⬆ Level up
+            </Btn>
+          )}
+        </div>
+      )}
+      {canEdit && levellingUp && (
+        <div className="cf-inset p-3 space-y-2.5">
+          <p className="text-sm font-bold text-white">
+            Level {character.level} → {character.level + 1}
+          </p>
+          <p className="text-xs text-slate-500">
+            Set the new max HP (currently {character.hpMax}) — hit points gained are added to current HP too.
+          </p>
+          <div className="flex gap-2 items-center flex-wrap">
+            <div className="w-32">
+              <TextInput
+                type="number"
+                min={1}
+                value={newHpMax}
+                onChange={(e) => setNewHpMax(e.target.value)}
+                placeholder="New max HP"
+              />
+            </div>
+            <div className="flex-1" />
+            <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy} onClick={() => setLevellingUp(false)}>
+              Cancel
+            </Btn>
+            <Btn
+              className="!min-h-0 !py-1.5 text-xs"
+              disabled={busy || !Number.isInteger(Number(newHpMax)) || Number(newHpMax) < 1}
+              onClick={confirmLevelUp}
+            >
+              {busy ? 'Levelling…' : `Confirm level ${character.level + 1}`}
+            </Btn>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

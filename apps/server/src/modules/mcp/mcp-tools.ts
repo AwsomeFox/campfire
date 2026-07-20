@@ -28,6 +28,7 @@ import {
   RuleEntryType,
   SessionCreate,
   SessionUpdate,
+  XpAward,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -918,6 +919,46 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const patch = delta !== undefined ? { delta: delta as number } : { set: set as number };
         return this.characters.patchHp(characterId as number, patch, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'award_xp',
+      "Award XP. Either to one character by characterId (player owner or DM; delta may be negative to correct a mistake, XP never drops below 0), or DM-only to the whole party / a characterIds subset via amount.",
+      {
+        campaignId: CampaignIdArg,
+        characterId: Id.optional().describe('Single character to adjust (owner or DM); omit for a DM party-wide award'),
+        amount: z.number().int().describe('XP to add. Party-wide awards require a positive amount'),
+        characterIds: z.array(Id).optional().describe('Party-award only: limit the award to these characters'),
+      },
+      async ({ campaignId, characterId, amount, characterIds }) => {
+        if (characterId !== undefined) {
+          const row = await this.characters.getRowOrThrow(characterId as number);
+          if (row.campaignId !== (campaignId as number)) {
+            throw new BadRequestException(`Character ${characterId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
+          }
+          const role = await this.access.requireRole(user, row.campaignId, 'player');
+          return this.characters.patchXp(characterId as number, { delta: amount as number }, user, role);
+        }
+        const validated = XpAward.parse({ amount, ...(characterIds !== undefined ? { characterIds } : {}) });
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.characters.awardXp(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'level_up_character',
+      'Level a character up by 1 (player owner or DM; 400 at level 20). Optionally pass the new hpMax — hit points gained are added to current HP too. Not gated on XP thresholds (milestone campaigns level without XP).',
+      {
+        characterId: Id.describe('Character id'),
+        hpMax: z.number().int().min(1).optional().describe('New maximum HP after the level-up'),
+      },
+      async ({ characterId, hpMax }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.characters.levelUp(characterId as number, { ...(hpMax !== undefined ? { hpMax: hpMax as number } : {}) }, user, role);
       },
     );
 

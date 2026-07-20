@@ -57,8 +57,16 @@ characters. As DM you keep prepping the next beats. _(Notifications and a sharea
 read-only recap link for absent players are on the
 [roadmap](../reference/roadmap.md); today catching up means logging in.)_
 
-## Levelling up
+## XP & levelling up
 
-When it's time to level, the character sheet's **Edit** form (owner or DM) exposes
-level, HP max, stats, and AC. Bump them there. _(A guided XP/level-up flow is
-planned; today levelling is a manual sheet edit.)_
+After an encounter or a session, award XP from the **Party** page (**✦ Award XP**,
+DM only — every character gets the amount) or from a character sheet's
+**Experience** card (owner or DM, any amount, even negative to fix a mistake).
+The sheet shows progress toward the next D&D 5e threshold and flags the character
+when the XP qualifies for the next level.
+
+When it's time to level, hit **⬆ Level up** on the sheet's Experience card: it
+bumps the level by one and asks for the new max HP — the hit points gained are
+added to current HP too, so damage taken carries over. The flow is deliberately
+not gated on XP, so milestone campaigns can level whenever the story says so.
+The **Edit** form still exposes raw level/XP/HP max as an escape hatch.
