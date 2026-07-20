@@ -196,7 +196,16 @@ export const InboxCreate = z.object({
   authorName: z.string().max(120).default('someone'),
   body: z.string().min(1).max(20_000),
 });
-export const InboxResolve = z.object({ resolvedNote: z.string().max(1000).default('') });
+export const InboxResolve = z
+  .object({
+    resolvedNote: z.string().max(1000).default(''),
+    // Optional link to the entity this item was resolved into (drives the history view).
+    entityType: EntityType.nullable().optional(),
+    entityId: Id.nullable().optional(),
+  })
+  .refine((v) => (v.entityType == null) === (v.entityId == null), {
+    message: 'entityType and entityId must be provided together',
+  });
 
 // ---------- rule packs (Compendium backend) ----------
 // Installed, server-wide rules content (spells/monsters/items/…) imported from

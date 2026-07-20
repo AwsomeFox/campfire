@@ -60,11 +60,16 @@ export class CampaignNotesController {
   }
 
   @Get('inbox')
-  @ApiOperation({ summary: 'List unresolved inbox items', description: 'dm role required.' })
+  @ApiOperation({ summary: 'List inbox items', description: 'dm role required. Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest resolution first), including any entity link each item was resolved into.' })
+  @ApiQuery({ name: 'resolved', required: false, type: Boolean, description: 'If true, list resolved items instead of open ones.' })
   @ApiResponse({ status: 200, description: 'Inbox items.' })
-  async listInbox(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+  async listInbox(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('resolved') resolved?: string,
+  ) {
     await this.access.requireRole(user, campaignId, 'dm');
-    return this.notes.listInbox(campaignId);
+    return this.notes.listInbox(campaignId, resolved === 'true');
   }
 }
 
@@ -104,7 +109,7 @@ export class NotesController {
   }
 
   @Post(':id/resolve')
-  @ApiOperation({ summary: 'Resolve an inbox item', description: 'dm role required.' })
+  @ApiOperation({ summary: 'Resolve an inbox item', description: 'dm role required. Optionally link the entity the item became (entityType + entityId, provided together) — surfaced in the resolved history.' })
   @ApiResponse({ status: 201, description: 'Resolved inbox item.' })
   async resolve(@Param('id', ParseIntPipe) id: number, @Body() body: InboxResolveDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
