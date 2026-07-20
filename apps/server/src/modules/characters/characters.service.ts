@@ -11,6 +11,8 @@ import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, type DdbFetch } from './ddb-importer';
+import type { DdbCharacterImport } from '@campfire/schema';
 
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type CharacterUpdateInput = z.infer<typeof CharacterUpdate>;
@@ -127,6 +129,37 @@ export class CharactersService {
         .set({ hpCurrent: nextCurrent, hpMax: nextMax })
         .where(eq(combatants.id, combatant.id));
     }
+  }
+
+  /**
+   * Import a character from a PUBLIC D&D Beyond sheet (issue #18). Resolves the numeric
+   * character id from either `ddbId` or a character/share `url`, fetches the public
+   * character-service JSON (unofficial, read-only — no auth, no private data), maps it to a
+   * CharacterCreate, and creates it via the normal create() path so ownership, clamps and
+   * audit all apply uniformly. Private/not-found sheets surface as clean 400/404 errors from
+   * fetchDdbCharacter.
+   *
+   * The character-service base URL is read from `DDB_CHARACTER_SERVICE_BASE_URL` when set
+   * (an e2e test points this at an in-process fake server, mirroring the Open5e `url`
+   * override); otherwise the live service is used. `fetchImpl` is injectable for the same
+   * reason. Neither is exposed on the API surface.
+   */
+  async importFromDdb(
+    campaignId: number,
+    input: DdbCharacterImport,
+    user: RequestUser,
+    role: Role,
+    fetchImpl?: DdbFetch,
+  ): Promise<Character> {
+    const ddbId = parseDdbId(input.ddbId?.trim() || input.url?.trim() || '');
+    const baseUrl = process.env.DDB_CHARACTER_SERVICE_BASE_URL || undefined;
+    const data = await fetchDdbCharacter(ddbId, baseUrl, fetchImpl);
+    const create = mapDdbCharacter(data);
+    // The mapper never returns a ddbId that disagrees with the requested id, but pin the
+    // source id we actually fetched so the stored ddbId is authoritative even if the sheet's
+    // own `data.id` was absent.
+    create.ddbId = ddbId;
+    return this.create(campaignId, create, user, role);
   }
 
   async create(campaignId: number, input: CharacterCreateInput, user: RequestUser, role: Role): Promise<Character> {

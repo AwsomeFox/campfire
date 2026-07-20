@@ -8,7 +8,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { isProposed } from '../../common/proposed.util';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -53,6 +53,26 @@ export class CampaignCharactersController {
     const role = await this.access.requireRole(user, campaignId, 'player');
     res.status(201);
     return this.characters.create(campaignId, body, user, role);
+  }
+
+  @Post('import-ddb')
+  @ApiOperation({
+    summary: 'Import a character from a public D&D Beyond sheet',
+    description:
+      'player role required. Reads a PUBLIC D&D Beyond character sheet (unofficial, read-only — no auth, no private data) and creates a Campfire character from it. Body is `{ ddbId }` (the numeric character id) or `{ url }` (a character/share link, e.g. https://www.dndbeyond.com/characters/12345678). The sheet must have its privacy set to Public on D&D Beyond. Ownership follows the normal create rules (a player imports for themselves; a dm imports DM-managed).',
+  })
+  @ApiResponse({ status: 201, description: 'Created character imported from D&D Beyond.' })
+  @ApiResponse({ status: 400, description: 'The sheet is private, the id/URL is malformed, or D&D Beyond was unreachable.' })
+  @ApiResponse({ status: 404, description: 'No such D&D Beyond character.' })
+  async importDdb(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: DdbCharacterImportDto,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const role = await this.access.requireRole(user, campaignId, 'player');
+    res.status(201);
+    return this.characters.importFromDdb(campaignId, body, user, role);
   }
 
   @Post('xp')
