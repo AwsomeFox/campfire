@@ -41,6 +41,22 @@ export function hashSessionToken(token: string): string {
 }
 
 /**
+ * Password-reset code: `cf_reset_<32 hex chars>` (16 random bytes). Handed to
+ * an admin ONCE on approval (see PasswordResetService.approve); DB stores
+ * sha256(code), never the raw code. Single-use + short expiry, so 128 bits of
+ * entropy is ample for a code relayed out-of-band.
+ */
+const RESET_CODE_PREFIX = 'cf_reset_';
+
+export function generateResetCode(): string {
+  return `${RESET_CODE_PREFIX}${randomBytes(16).toString('hex')}`;
+}
+
+export function hashResetCode(code: string): string {
+  return createHash('sha256').update(code).digest('hex');
+}
+
+/**
  * API (PAT) token: `cf_pat_<48 hex chars>` (24 random bytes). DB stores
  * sha256(token); `tokenPrefix` (first 11 chars, e.g. `cf_pat_9f2a`) is kept
  * alongside for display purposes only — never enough to guess the token.

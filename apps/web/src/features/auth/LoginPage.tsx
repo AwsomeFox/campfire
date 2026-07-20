@@ -82,6 +82,12 @@ function LocalLoginForm({
       <button type="submit" className={`btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-block`} style={{ minHeight: 44 }} disabled={submitting}>
         {submitting ? 'Signing in…' : 'Sign in'}
       </button>
+
+      <p className="text-center" style={{ margin: 0, fontSize: 12 }}>
+        <Link to="/reset-password" className="text-muted">
+          Forgot password?
+        </Link>
+      </p>
     </form>
   );
 }

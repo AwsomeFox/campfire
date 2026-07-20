@@ -12,6 +12,7 @@ import { Skeleton } from '../components/ui';
 import { SetupPage } from '../features/auth/SetupPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { SignupPage } from '../features/auth/SignupPage';
+import { ResetPasswordPage } from '../features/auth/ResetPasswordPage';
 import { HomePage } from '../features/home/HomePage';
 import { NotFoundPage } from '../features/home/NotFoundPage';
 
@@ -48,6 +49,10 @@ export const router = createBrowserRouter([
   {
     path: '/signup',
     element: page(<SignupPage />),
+  },
+  {
+    path: '/reset-password',
+    element: page(<ResetPasswordPage />),
   },
   {
     element: <AuthedLayout />,
