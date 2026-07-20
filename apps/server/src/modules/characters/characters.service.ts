@@ -16,7 +16,7 @@ type CharacterUpdateInput = z.infer<typeof CharacterUpdate>;
 type HpPatchInput = z.infer<typeof HpPatch>;
 type ConditionsPatchInput = z.infer<typeof ConditionsPatch>;
 
-function toDomain(row: typeof characters.$inferSelect): Character {
+export function toDomain(row: typeof characters.$inferSelect): Character {
   return {
     id: row.id,
     campaignId: row.campaignId,

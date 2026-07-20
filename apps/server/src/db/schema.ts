@@ -265,6 +265,9 @@ export const proposals = sqliteTable('proposals', {
   entityId: integer('entity_id'),
   action: text('action').notNull(),
   payload: text('payload').notNull().default('{}'),
+  // JSON snapshot of the target entity at propose time (update proposals only; NULL for
+  // creates and for rows written before this column existed) — powers before/after diffs.
+  snapshot: text('snapshot'),
   proposer: text('proposer').notNull(),
   status: text('status').notNull().default('pending'),
   resolvedBy: text('resolved_by').notNull().default(''),

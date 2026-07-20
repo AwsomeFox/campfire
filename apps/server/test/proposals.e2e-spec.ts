@@ -52,6 +52,11 @@ describe('proposals (e2e, real cookie sessions)', () => {
     expect(res.body.proposal.entityType).toBe('quest');
     expect(res.body.proposal.entityId).toBe(questId);
     expect(res.body.proposal.payload.title).toBe('Player Suggested Title');
+    // Update proposals snapshot the target's current state at propose time,
+    // so the DM review UI can render a real before/after diff.
+    expect(res.body.proposal.snapshot).toBeDefined();
+    expect(res.body.proposal.snapshot.title).toBe('Original Title');
+    expect(res.body.proposal.snapshot.reward).toBe('10gp');
 
     const questRes = await dmAgent.get(`/api/v1/quests/${questId}`);
     expect(questRes.body.title).toBe('Original Title');
@@ -64,6 +69,8 @@ describe('proposals (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(202);
     expect(res.body.proposal.action).toBe('create');
     expect(res.body.proposal.entityType).toBe('quest');
+    // Creates have no "before" state to snapshot.
+    expect(res.body.proposal.snapshot).toBeNull();
   });
 
   it('non-dm cannot list or approve/reject proposals', async () => {
@@ -128,5 +135,30 @@ describe('proposals (e2e, real cookie sessions)', () => {
 
     const questRes = await dmAgent.get(`/api/v1/quests/${questId}`);
     expect(questRes.body.title).toBe('Player Suggested Title'); // unchanged until approved
+  });
+
+  it('snapshot is frozen at propose time, even if the entity changes before review', async () => {
+    const questRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Snapshot Quest', reward: '5gp' });
+    const snapshotQuestId = questRes.body.id;
+
+    const proposeRes = await playerAgent
+      .patch(`/api/v1/quests/${snapshotQuestId}?proposed=true`)
+      .send({ title: 'Snapshot Quest (proposed)', reward: '50gp' });
+    expect(proposeRes.status).toBe(202);
+    const proposalId = proposeRes.body.proposal.id;
+
+    // DM edits the quest directly AFTER the proposal was filed.
+    await dmAgent.patch(`/api/v1/quests/${snapshotQuestId}`).send({ title: 'Snapshot Quest (dm edited)' });
+
+    // The proposal still shows the state as it was at propose time.
+    const listRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`);
+    const proposal = listRes.body.find((p: { id: number }) => p.id === proposalId);
+    expect(proposal).toBeDefined();
+    expect(proposal.snapshot.title).toBe('Snapshot Quest');
+    expect(proposal.snapshot.reward).toBe('5gp');
+    expect(proposal.payload.title).toBe('Snapshot Quest (proposed)');
+    expect(proposal.payload.reward).toBe('50gp');
   });
 });

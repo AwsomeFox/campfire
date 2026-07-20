@@ -13,7 +13,7 @@ import type { RequestUser } from '../../common/user.types';
 type SessionCreateInput = z.infer<typeof SessionCreate>;
 type SessionUpdateInput = z.infer<typeof SessionUpdate>;
 
-function toDomain(row: typeof sessions.$inferSelect): Session {
+export function toDomain(row: typeof sessions.$inferSelect): Session {
   return {
     id: row.id,
     campaignId: row.campaignId,
