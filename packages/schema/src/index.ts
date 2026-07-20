@@ -1351,16 +1351,31 @@ export const TreasuryPatch = z.union([
 export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
 
 // ---------- dice rolling ----------
-// Safe, restricted dice expression: NdM optionally followed by +K or -K, e.g. "1d20+3", "2d6-1", "d20".
-export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*([+-]\s*\d{1,3})?\s*$/i;
+// Safe, restricted dice expression: NdM, optionally followed by a keep/drop clause
+// (khN/klN/dhN/dlN) and then +K or -K. Keep/drop lets a single roll express D&D-style
+// advantage/disadvantage and stat-gen: "2d20kh1" (advantage), "2d20kl1" (disadvantage),
+// "4d6kh3" / "4d6dl1" (drop-lowest stat roll). Examples: "1d20+3", "2d6-1", "d20",
+// "4d6dl1+2". Capture groups: 1=count, 2=sides, 3=keep/drop clause, 4=modifier.
+export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*((?:kh|kl|dh|dl)\s*\d{1,2})?\s*([+-]\s*\d{1,3})?\s*$/i;
 export const RollRequest = z.object({
-  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected NdM+K, e.g. "1d20+3"'),
+  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected NdM(kh/kl/dh/dlN)(+/-K), e.g. "1d20+3" or "2d20kh1"'),
+  // Optional check context (issue #130): a human label ("DEX save") and a difficulty
+  // class. When dc is present the server computes success (total >= dc) into the result.
+  label: z.string().max(120).optional(),
+  dc: z.number().int().min(1).max(99).optional(),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
 export const RollResult = z.object({
   expr: z.string(),
-  rolls: z.array(z.number().int()),
+  rolls: z.array(z.number().int()), // every die rolled, in roll order — attestable
+  // The subset of `rolls` that counted toward the total, present ONLY when a keep/drop
+  // clause applied (e.g. advantage keeps 1 of 2 d20s). Absent == all dice counted.
+  kept: z.array(z.number().int()).optional(),
   total: z.number().int(),
+  // Echoed check context (issue #130). success is server-computed (total >= dc).
+  label: z.string().max(120).optional(),
+  dc: z.number().int().optional(),
+  success: z.boolean().optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 
