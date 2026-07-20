@@ -2,11 +2,12 @@ import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { EventsModule } from '../events/events.module';
+import { RollsModule } from '../rolls/rolls.module';
 import { EncountersService } from './encounters.service';
 import { CampaignEncountersController, CampaignRollController, EncountersController } from './encounters.controller';
 
 @Module({
-  imports: [AuditModule, RoleAccessModule, EventsModule],
+  imports: [AuditModule, RoleAccessModule, EventsModule, RollsModule],
   controllers: [CampaignEncountersController, CampaignRollController, EncountersController],
   providers: [EncountersService],
   exports: [EncountersService],

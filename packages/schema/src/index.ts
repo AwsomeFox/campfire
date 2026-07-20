@@ -641,6 +641,20 @@ export const CampaignEvent = z.object({
 });
 export type CampaignEvent = z.infer<typeof CampaignEvent>;
 
+// A persisted, campaign-shared dice roll (issue #35): RollResult plus authorship +
+// timestamp. Rolls are stored server-side so every campaign member sees the same
+// feed — POST /campaigns/:id/roll returns one of these, and GET /campaigns/:id/rolls
+// lists the recent history (polled by the web today; the same payload is what an
+// SSE stream would push later).
+export const DiceRoll = RollResult.extend({
+  id: Id,
+  campaignId: Id,
+  rollerUserId: z.string().max(200), // RequestUser.id — String(users.id) or 'dev:<name>' / 'token:<name>' actors
+  rollerName: z.string().max(200).default(''),
+  createdAt: IsoDate,
+});
+export type DiceRoll = z.infer<typeof DiceRoll>;
+
 // ---------- audit ----------
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
 export type DangerLevel = z.infer<typeof DangerLevel>;
