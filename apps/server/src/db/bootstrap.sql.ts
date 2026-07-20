@@ -385,6 +385,13 @@ CREATE INDEX IF NOT EXISTS idx_session_rsvps_schedule ON session_rsvps(scheduled
 CREATE INDEX IF NOT EXISTS idx_campaigns_ics_token ON campaigns(ics_token);
 CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_audit_campaign ON audit_log(campaign_id);
+-- #74: most-recent-first reads are always scoped by campaign (or by the null-campaign
+-- server-admin bucket) and ordered by id DESC. The plain campaign_id index above can't
+-- serve the ORDER BY, so large logs degrade to a filesort. This composite covers both.
+CREATE INDEX IF NOT EXISTS idx_audit_campaign_id_desc ON audit_log(campaign_id, id DESC);
+-- #74: retention prune deletes by created_at across all campaigns; index it so the
+-- periodic sweep is a range scan rather than a full-table scan.
+CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
