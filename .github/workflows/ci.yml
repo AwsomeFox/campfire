@@ -7,6 +7,24 @@ on:
   pull_request:
 
 jobs:
+  # Lint gate. `npm run lint` fans out per-workspace via `--if-present`, so it
+  # exits cleanly today (no workspace ships a `lint` script yet — there is no
+  # working eslint flat config). Once a workspace adds one, this job enforces it
+  # automatically with no workflow change.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.4.1'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  # Primary gate for PRs — DO NOT weaken. Builds schema + server + web
+  # (`npm run build`) and runs the full server suite: unit (test/unit/*.spec.ts)
+  # + e2e (test/*.e2e-spec.ts) via `npm test`.
   build-test:
     runs-on: ubuntu-latest
     steps:
@@ -18,6 +36,43 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+
+  # Re-runs the server unit + e2e suites with coverage instrumentation and
+  # publishes the report as a build artifact (lcov + HTML). Kept separate from
+  # build-test so the PR gate stays fast and unchanged. The schema package must
+  # be built first because the server compiles against @campfire/schema's dist.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.4.1'
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w packages/schema
+      - run: npm run test:cov
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage
+          path: apps/server/coverage/
+          if-no-files-found: warn
+
+  # Browser E2E (Playwright). Guarded: no Playwright project exists yet (tracked
+  # in #81), so `--if-present` makes this a clean no-op until a root `test:e2e`
+  # script is added — at which point this job runs it with no workflow change.
+  e2e-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.4.1'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:e2e --if-present
 
   # Multi-arch image → GHCR. Only runs on version tags (v1.2.3), and only after
   # build-test passes on that same ref.

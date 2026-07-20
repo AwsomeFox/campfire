@@ -15,6 +15,7 @@ import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { DiceTray } from './DiceTray';
 
 const POLL_MS = 5000;
 
@@ -58,44 +59,64 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     return () => clearInterval(handle);
   }, [load]);
 
-  async function roll(e: FormEvent) {
+  // Single roll-submit path, shared by the tap-to-build tray (issue #38) and the
+  // advanced expression box. Kept intact so the shared-log/animation work (#35, #67)
+  // can hook the same POST -> prepend -> announce flow. Returns the persisted roll so
+  // the tray can surface a per-roll result (e.g. the kept die on an advantage roll).
+  const submitExpr = useCallback(
+    async (raw: string): Promise<DiceRoll | null> => {
+      const cleaned = raw.trim();
+      if (!cleaned) return null;
+      setRolling(true);
+      setError(null);
+      try {
+        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: cleaned });
+        // Prepend own roll immediately (dedupe by id — the next poll returns it too).
+        setRolls((prev) => [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit));
+        // Announce the result — the roll feed is otherwise visual-only (issue #93).
+        announce(`Rolled ${result.expr}: ${result.total} (${result.rolls.join(', ')})`);
+        return result;
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : "Couldn't roll.";
+        setError(message);
+        announce(message, { assertive: true });
+        return null;
+      } finally {
+        setRolling(false);
+      }
+    },
+    [campaignId, limit, announce],
+  );
+
+  async function rollFromInput(e: FormEvent) {
     e.preventDefault();
-    if (!expr.trim()) return;
-    setRolling(true);
-    setError(null);
-    try {
-      const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: expr.trim() });
-      // Prepend own roll immediately (dedupe by id — the next poll returns it too).
-      setRolls((prev) => [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit));
-      // Announce the result — the roll feed is otherwise visual-only (issue #93).
-      announce(`Rolled ${result.expr}: ${result.total} (${result.rolls.join(', ')})`);
-    } catch (err) {
-      const message = err instanceof ApiError ? err.message : "Couldn't roll.";
-      setError(message);
-      announce(message, { assertive: true });
-    } finally {
-      setRolling(false);
-    }
+    await submitExpr(expr);
   }
 
   return (
     <Card className="space-y-2.5">
       <span className="card-kicker">{compact ? 'Dice' : 'Dice log'}</span>
-      <form onSubmit={roll} className="flex gap-2 items-end flex-wrap">
-        <div className="field" style={{ flex: 1, minWidth: compact ? 100 : 120 }}>
-          <label htmlFor={exprId}>Expression</label>
-          <TextInput
-            id={exprId}
-            aria-label="Dice expression"
-            placeholder="1d20+3"
-            value={expr}
-            onChange={(e) => setExpr(e.target.value)}
-          />
-        </div>
-        <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
-          {rolling ? 'Rolling…' : 'Roll'}
-        </Btn>
-      </form>
+      <DiceTray onSubmitExpr={submitExpr} rolling={rolling} campaignId={campaignId} compact={compact} />
+      <details className="dice-advanced">
+        <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
+          Advanced — type an expression
+        </summary>
+        <form onSubmit={rollFromInput} className="flex gap-2 items-end flex-wrap" style={{ marginTop: 8 }}>
+          <div className="field" style={{ flex: 1, minWidth: compact ? 100 : 120 }}>
+            <label htmlFor={exprId}>Expression</label>
+            <TextInput
+              id={exprId}
+              aria-label="Dice expression"
+              placeholder="1d20+3"
+              value={expr}
+              onChange={(e) => setExpr(e.target.value)}
+            />
+          </div>
+          <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
+            {rolling ? 'Rolling…' : 'Roll'}
+          </Btn>
+        </form>
+      </details>
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
       {rolls.length === 0 ? (
         <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, count, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CampaignClone, CampaignCreate, CampaignUpdate } from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
@@ -552,13 +552,17 @@ export class CampaignsService {
     const encounterIds = encounterRows.map((r) => r.id);
 
     this.db.transaction((tx) => {
-      for (const questId of questIds) {
-        tx.delete(questObjectives).where(eq(questObjectives.questId, questId)).run();
+      // Delete all objectives / combatants for this campaign's quests / encounters in
+      // one statement each (#72) via `WHERE quest_id IN (...)` / `encounter_id IN (...)`,
+      // rather than a DELETE per parent row. Guard the empty case: `inArray(col, [])`
+      // would be a degenerate/invalid IN clause, and there's nothing to delete anyway.
+      if (questIds.length > 0) {
+        tx.delete(questObjectives).where(inArray(questObjectives.questId, questIds)).run();
       }
       tx.delete(quests).where(eq(quests.campaignId, id)).run();
 
-      for (const encounterId of encounterIds) {
-        tx.delete(combatants).where(eq(combatants.encounterId, encounterId)).run();
+      if (encounterIds.length > 0) {
+        tx.delete(combatants).where(inArray(combatants.encounterId, encounterIds)).run();
       }
       tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
 
@@ -608,11 +612,12 @@ export class CampaignsService {
       ? (locationList.find((l) => l.id === campaign.currentLocationId) ?? null)
       : null;
 
-    const openInboxRows = await this.db
-      .select()
+    // issue #71: count in SQL instead of loading every note row (incl. bodies) into
+    // JS just to count the open inbox items.
+    const [{ value: openInboxCount }] = await this.db
+      .select({ value: count() })
       .from(notes)
-      .where(eq(notes.campaignId, id));
-    const openInboxCount = openInboxRows.filter((n) => n.kind === 'inbox' && !n.resolved).length;
+      .where(and(eq(notes.campaignId, id), eq(notes.kind, 'inbox'), eq(notes.resolved, false)));
 
     return {
       campaign,

@@ -45,6 +45,7 @@ import { InventoryModule } from './modules/inventory/inventory.module';
 import { ObservabilityModule } from './modules/observability/observability.module';
 import { BackupModule } from './modules/backup/backup.module';
 import { AiDmModule } from './modules/ai-dm/ai-dm.module';
+import { TimelineModule } from './modules/timeline/timeline.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -143,6 +144,7 @@ function serveStaticImports(): DynamicModule[] {
     ObservabilityModule,
     BackupModule,
     AiDmModule,
+    TimelineModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },
