@@ -5,7 +5,12 @@ module.exports = {
   transform: {
     '^.+\\.(t|j)s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.jest.json' }],
   },
-  testRegex: '.*\\.e2e-spec\\.ts$',
+  // Two test layers share this config:
+  //  - `*.e2e-spec.ts` (test/)         — full-app HTTP suites, bootstrap a Nest app + SQLite
+  //  - `*.spec.ts`     (test/unit/…)   — fast, isolated unit tests for pure logic, no bootstrap
+  // `.spec.ts` deliberately does NOT match `.e2e-spec.ts` (the char before `spec`
+  // is `-`, not `.`), so the two patterns never double-count a file.
+  testRegex: ['.*\\.e2e-spec\\.ts$', '.*\\.spec\\.ts$'],
   moduleFileExtensions: ['js', 'json', 'ts'],
   testTimeout: 30000,
   maxWorkers: 1,
