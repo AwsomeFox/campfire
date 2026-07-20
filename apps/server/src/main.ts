@@ -34,6 +34,28 @@ export function resolveCorsOrigin(): string[] | undefined {
 }
 
 /**
+ * Swagger UI / OpenAPI JSON exposure resolution (issue #46):
+ *  - API_DOCS env takes priority whenever set, in any environment:
+ *    '1'/'true' force-enables, '0'/'false' force-disables.
+ *  - Else, outside production: enabled — the docs are part of the everyday dev
+ *    workflow (`just api-docs`, e2e tooling, agent self-discovery).
+ *  - Else (production, no API_DOCS set): disabled. The endpoints leak no data
+ *    (every real route still enforces auth), but the full API surface being
+ *    browsable by anyone who can reach the server is needless attack-surface
+ *    disclosure — operators who want public docs opt back in via API_DOCS=1.
+ */
+export function resolveDocsEnabled(): boolean {
+  const raw = process.env.API_DOCS?.trim().toLowerCase();
+  if (raw === '1' || raw === 'true') {
+    return true;
+  }
+  if (raw === '0' || raw === 'false') {
+    return false;
+  }
+  return process.env.NODE_ENV !== 'production';
+}
+
+/**
  * Prod-hardening middleware + CORS + global prefix, applied to an already-constructed
  * Nest app. Factored out of bootstrap() so test/main-hardening.e2e-spec.ts can exercise
  * the exact same configuration against a Test.createTestingModule()-built app (which,
@@ -76,16 +98,17 @@ export function configureApp(app: INestApplication): void {
   });
 }
 
-async function bootstrap() {
-  // bodyParser: false — Nest's default body-parser registration has no size limit, and
-  // registering our own express.json()/urlencoded() afterward would just double-parse (Nest's
-  // ExpressAdapter skips re-registering a parser it detects by middleware function name, but
-  // relying on that name-sniff felt fragile). Disabling the default and registering explicitly
-  // in configureApp() with a limit is the documented way to override Nest's body-parser options.
-  const app = await NestFactory.create(AppModule, { bodyParser: false });
-  app.enableShutdownHooks(); // graceful SIGTERM as PID 1 (docker stop)
-
-  configureApp(app);
+/**
+ * Swagger UI (/api/docs) + OpenAPI JSON (/api/openapi.json) registration, gated by
+ * resolveDocsEnabled() — a no-op (routes 404) when the docs are disabled. Factored out
+ * of bootstrap() for the same reason as configureApp(): so test/api-docs.e2e-spec.ts
+ * can exercise the exact same registration (and its gating) against a
+ * Test.createTestingModule()-built app.
+ */
+export function setupApiDocs(app: INestApplication): void {
+  if (!resolveDocsEnabled()) {
+    return;
+  }
 
   const config = new DocumentBuilder()
     .setTitle('Campfire API')
@@ -126,6 +149,19 @@ async function bootstrap() {
   SwaggerModule.setup('api/docs', app, document, {
     jsonDocumentUrl: 'api/openapi.json',
   });
+}
+
+async function bootstrap() {
+  // bodyParser: false — Nest's default body-parser registration has no size limit, and
+  // registering our own express.json()/urlencoded() afterward would just double-parse (Nest's
+  // ExpressAdapter skips re-registering a parser it detects by middleware function name, but
+  // relying on that name-sniff felt fragile). Disabling the default and registering explicitly
+  // in configureApp() with a limit is the documented way to override Nest's body-parser options.
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.enableShutdownHooks(); // graceful SIGTERM as PID 1 (docker stop)
+
+  configureApp(app);
+  setupApiDocs(app);
 
   const port = process.env.PORT ? Number(process.env.PORT) : 8080;
   await app.listen(port);
