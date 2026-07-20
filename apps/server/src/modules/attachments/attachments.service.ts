@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
@@ -9,6 +10,7 @@ import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { generatePngThumbnail } from './thumbnail';
 
 /** image/png|jpeg|webp only — matches the multer fileFilter in attachments.controller.ts. */
 export const ALLOWED_MIME_TO_EXT: Record<string, string> = {
@@ -72,6 +74,57 @@ export class AttachmentsService {
   filePath(row: { campaignId: number; id: number; mime: string }): string {
     const ext = ALLOWED_MIME_TO_EXT[row.mime] ?? 'bin';
     return path.join(uploadsRoot(), String(row.campaignId), `${row.id}.${ext}`);
+  }
+
+  /** Absolute path a generated thumbnail (always PNG) is cached at on disk. */
+  private thumbPath(row: { campaignId: number; id: number }): string {
+    return path.join(uploadsRoot(), String(row.campaignId), `${row.id}.thumb.png`);
+  }
+
+  /**
+   * Strong ETag for the bytes at `filePath` — sha256 of the file content, hex,
+   * quoted per RFC 7232. Attachment bytes are immutable for a given path (written
+   * once at create, deleted with the row), so the digest is memoised per path for
+   * the process lifetime rather than re-hashing on every request.
+   */
+  private etagCache = new Map<string, string>();
+  private etagForPath(filePath: string): string {
+    const cached = this.etagCache.get(filePath);
+    if (cached) return cached;
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+    const etag = `"${hash}"`;
+    this.etagCache.set(filePath, etag);
+    return etag;
+  }
+
+  /**
+   * Resolve the file to serve for a GET, honouring the `?size=thumb` variant.
+   * Returns the on-disk path plus the metadata needed to set response headers.
+   *
+   * For `thumb`, a downscaled PNG is generated once and cached on disk next to the
+   * original. When a thumbnail can't be produced (source already small, or a
+   * non-PNG / unsupported PNG — see thumbnail.ts) the original bytes are served
+   * instead: correct, just without the byte savings for those formats.
+   */
+  resolveFile(
+    row: { campaignId: number; id: number; mime: string; filename: string; size: number },
+    variant: 'original' | 'thumb',
+  ): { path: string; mime: string; size: number; etag: string } {
+    const originalPath = this.filePath(row);
+
+    if (variant === 'thumb') {
+      const thumb = this.thumbPath(row);
+      if (!fs.existsSync(thumb)) {
+        const generated = generatePngThumbnail(fs.readFileSync(originalPath));
+        if (generated) fs.writeFileSync(thumb, generated);
+      }
+      if (fs.existsSync(thumb)) {
+        return { path: thumb, mime: 'image/png', size: fs.statSync(thumb).size, etag: this.etagForPath(thumb) };
+      }
+      // Fall through: no thumbnail available, serve the original.
+    }
+
+    return { path: originalPath, mime: row.mime, size: row.size, etag: this.etagForPath(originalPath) };
   }
 
   async getRowOrThrow(id: number) {
@@ -165,9 +218,14 @@ export class AttachmentsService {
     });
 
     const filePath = this.filePath(existing);
-    fs.rm(filePath, { force: true }, () => {
-      /* best-effort — DB row is the source of truth; a stray orphan file is harmless */
-    });
+    const thumbPath = this.thumbPath(existing);
+    this.etagCache.delete(filePath);
+    this.etagCache.delete(thumbPath);
+    for (const p of [filePath, thumbPath]) {
+      fs.rm(p, { force: true }, () => {
+        /* best-effort — DB row is the source of truth; a stray orphan file is harmless */
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
