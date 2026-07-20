@@ -2,12 +2,20 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { desc, eq } from 'drizzle-orm';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { proposals } from '../../db/schema';
+import { proposals, quests, npcs, locations, sessions, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+// Pure row->domain mappers only (NOT the injectable services) — importing these
+// creates no Nest module cycle, and keeps the snapshot shape exactly in sync
+// with what each entity's read endpoints return.
+import { toDomain as questToDomain } from '../quests/quests.service';
+import { toDomain as npcToDomain } from '../npcs/npcs.service';
+import { toDomain as locationToDomain } from '../locations/locations.service';
+import { toDomain as sessionToDomain } from '../sessions/sessions.service';
+import { toDomain as characterToDomain } from '../characters/characters.service';
 
 export type ProposableEntityType = Exclude<EntityType, 'campaign'>;
 
@@ -25,6 +33,7 @@ export function toDomain(row: typeof proposals.$inferSelect): Proposal {
     entityId: row.entityId,
     action: row.action as ProposalAction,
     payload: fromJsonText<Record<string, unknown>>(row.payload, {}),
+    snapshot: row.snapshot == null ? null : fromJsonText<Record<string, unknown> | null>(row.snapshot, null),
     proposer: row.proposer,
     status: row.status as Proposal['status'],
     resolvedBy: row.resolvedBy,
@@ -57,6 +66,10 @@ export class ProposalRecordsService {
     user: RequestUser,
     role: Role,
   ): Promise<Proposal> {
+    // Capture the target's current state so the DM review UI can show a real
+    // before/after diff (issue #3). Creates have no "before"; snapshot stays null.
+    const snapshot = action === 'update' && entityId !== null ? await this.snapshotEntity(entityType, entityId) : null;
+
     const ts = nowIso();
     const [row] = await this.db
       .insert(proposals)
@@ -66,6 +79,7 @@ export class ProposalRecordsService {
         entityId,
         action,
         payload: toJsonText(payload),
+        snapshot: snapshot === null ? null : toJsonText(snapshot),
         proposer: auditActor(user),
         status: 'pending',
         resolvedBy: '',
@@ -86,6 +100,39 @@ export class ProposalRecordsService {
     });
 
     return toDomain(row);
+  }
+
+  /**
+   * Domain-shaped state of the target entity right now, or null if it doesn't
+   * exist (the entity could be deleted between the caller's existence check and
+   * here; approve would 404 later anyway, and a null snapshot just means the UI
+   * shows proposed values without a "before" column). Snapshots are stored
+   * unredacted (dmSecret included) — proposals are only readable via dm-gated
+   * endpoints, matching what the dm sees on the entity itself.
+   */
+  private async snapshotEntity(entityType: ProposableEntityType, entityId: number): Promise<Record<string, unknown> | null> {
+    switch (entityType) {
+      case 'quest': {
+        const [row] = await this.db.select().from(quests).where(eq(quests.id, entityId)).limit(1);
+        return row ? { ...questToDomain(row) } : null;
+      }
+      case 'npc': {
+        const [row] = await this.db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1);
+        return row ? { ...npcToDomain(row) } : null;
+      }
+      case 'location': {
+        const [row] = await this.db.select().from(locations).where(eq(locations.id, entityId)).limit(1);
+        return row ? { ...locationToDomain(row) } : null;
+      }
+      case 'session': {
+        const [row] = await this.db.select().from(sessions).where(eq(sessions.id, entityId)).limit(1);
+        return row ? { ...sessionToDomain(row) } : null;
+      }
+      case 'character': {
+        const [row] = await this.db.select().from(characters).where(eq(characters.id, entityId)).limit(1);
+        return row ? { ...characterToDomain(row) } : null;
+      }
+    }
   }
 
   async listForCampaign(campaignId: number, status: string | undefined): Promise<Proposal[]> {

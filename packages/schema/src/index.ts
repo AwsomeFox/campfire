@@ -502,6 +502,10 @@ export const Proposal = z.object({
   entityId: Id.nullable().default(null), // null for creates
   action: ProposalAction,
   payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
+  // The target entity's state captured at propose time (update proposals only; null for
+  // creates) — lets the DM review UI render a real before/after diff even if the entity
+  // changes between propose and review.
+  snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
   proposer: z.string().max(200), // user id or token name
   status: ProposalStatus.default('pending'),
   resolvedBy: z.string().max(200).default(''),

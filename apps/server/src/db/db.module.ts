@@ -184,6 +184,28 @@ function migrateApiTokensTableForAdminEnabled(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE api_tokens ADD COLUMN admin_enabled INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * Migration for DBs created before proposal before/after diffs:
+ * `proposals.snapshot` didn't exist. Plain nullable ADD COLUMN — no table
+ * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
+ * Pre-existing proposals keep a NULL snapshot (there is no way to reconstruct
+ * the entity's state at their propose time); the review UI falls back to
+ * showing proposed values only for those rows. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateProposalsTableForSnapshot(sqlite: Database.Database): void {
+  const hasProposalsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'")
+    .get();
+  if (!hasProposalsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(proposals)').all() as Array<{ name: string }>;
+  const hasSnapshot = columns.some((c) => c.name === 'snapshot');
+  if (hasSnapshot) return;
+
+  sqlite.exec('ALTER TABLE proposals ADD COLUMN snapshot TEXT');
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -202,6 +224,7 @@ export function createDb(): DrizzleDb {
   migrateUsersTableForTextSize(sqlite);
   migrateCampaignsTableForMapAttachment(sqlite);
   migrateApiTokensTableForAdminEnabled(sqlite);
+  migrateProposalsTableForSnapshot(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.
