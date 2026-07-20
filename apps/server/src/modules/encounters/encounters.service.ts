@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql, type SQL } from 'drizzle-orm';
+import { and, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest, normalizeStats } from '@campfire/schema';
 import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
@@ -146,23 +146,29 @@ export class EncountersService {
       .returning();
 
     const partyRows = await this.db.select().from(characters).where(eq(characters.campaignId, campaignId));
-    let sortOrder = 0;
-    for (const character of partyRows) {
-      const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-      const initMod = typeof stats.DEX === 'number' ? abilityMod(stats.DEX) : 0;
-      await this.db.insert(combatants).values({
-        encounterId: encounterRow.id,
-        kind: 'character',
-        characterId: character.id,
-        name: character.name,
-        initiative: null,
-        initMod,
-        hpCurrent: character.hpCurrent,
-        hpMax: character.hpMax,
-        conditions: '[]',
-        ruleEntryId: null,
-        sortOrder: sortOrder++,
+    // Auto-add the whole party in ONE multi-row INSERT (#72) rather than one INSERT
+    // per character — the row values (including the sequential sortOrder) are computed
+    // in JS and handed to a single `.values([...])`. Behavior is identical to the old
+    // per-row loop; only the round-trip count changes (N -> 1).
+    if (partyRows.length > 0) {
+      const combatantValues = partyRows.map((character, index) => {
+        const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
+        const initMod = typeof stats.DEX === 'number' ? abilityMod(stats.DEX) : 0;
+        return {
+          encounterId: encounterRow.id,
+          kind: 'character' as const,
+          characterId: character.id,
+          name: character.name,
+          initiative: null,
+          initMod,
+          hpCurrent: character.hpCurrent,
+          hpMax: character.hpMax,
+          conditions: '[]',
+          ruleEntryId: null,
+          sortOrder: index,
+        };
       });
+      await this.db.insert(combatants).values(combatantValues);
     }
 
     await this.audit.log({
@@ -459,10 +465,28 @@ export class EncountersService {
     const encounterRow = await this.getRowOrThrow(encounterId);
     const rows = await this.listCombatantRows(encounterId);
 
-    for (const row of rows) {
-      if (row.initiative !== null) continue;
-      const initiative = rollInitiative(row.initMod);
-      await this.db.update(combatants).set({ initiative }).where(eq(combatants.id, row.id));
+    // Roll each un-set combatant's initiative in JS, then apply them all in ONE
+    // CASE-based UPDATE (#72) instead of one UPDATE per combatant. Combatants that
+    // already have an initiative are excluded from the id list, so — exactly as
+    // before — only null initiatives are filled and manually-set values are left
+    // untouched. No write at all when nothing needs rolling.
+    const rolled = rows
+      .filter((row) => row.initiative === null)
+      .map((row) => ({ id: row.id, initiative: rollInitiative(row.initMod) }));
+    if (rolled.length > 0) {
+      const cases = sql.join(
+        rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`),
+        sql` `,
+      );
+      await this.db
+        .update(combatants)
+        .set({ initiative: sql`CASE ${combatants.id} ${cases} END` })
+        .where(
+          inArray(
+            combatants.id,
+            rolled.map((r) => r.id),
+          ),
+        );
     }
 
     // Filling a late joiner's initiative mid-fight (issue #54) re-sorts the order, so
