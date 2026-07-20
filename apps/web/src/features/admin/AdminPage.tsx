@@ -11,6 +11,7 @@ import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../com
 import { TokensCard } from './TokensCard';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { RulePacksCard } from './RulePacksCard';
+import { MetricsCard } from './MetricsCard';
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
@@ -79,6 +80,7 @@ export default function AdminPage() {
       <h1 className="text-xl font-extrabold text-white">⚙️ Server admin</h1>
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      <MetricsCard />
       <UsersCard users={users ?? []} onChange={load} />
       <ResetRequestsCard />
       <SettingsCard settings={settings} onChange={load} />
