@@ -24,6 +24,7 @@ import type {
   EncounterWithCombatants,
   RuleEntry,
 } from '@campfire/schema';
+import { ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
@@ -50,7 +51,9 @@ const STATUS_TAG_CLASS: Record<string, string> = {
   ended: 'tag tag-outline',
 };
 
-const CONDITION_SUGGESTIONS = ['Poisoned', 'Prone', 'Restrained', 'Stunned', 'Grappled', 'Blinded', 'Frightened'];
+// Condition vocabulary comes from the rule-system adapter (issue #70), not a hardcoded
+// array. Default (5e) yields the same run-session chip list this page has always shown.
+const CONDITION_SUGGESTIONS = [...ruleSystemAdapter().conditions];
 
 // 5e difficulty band badge (issue #58) — party XP thresholds vs adjusted monster XP.
 const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {

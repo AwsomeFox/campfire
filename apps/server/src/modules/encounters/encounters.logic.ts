@@ -1,3 +1,4 @@
+import { Dnd5eAdapter } from '@campfire/schema';
 import type { Combatant, CombatantKind, DeathState, DifficultyBand, EncounterDifficulty, EncounterStatus, HpBand } from '@campfire/schema';
 
 /**
@@ -7,9 +8,13 @@ import type { Combatant, CombatantKind, DeathState, DifficultyBand, EncounterDif
  * no `this`, no database, no side effects.
  */
 
-/** D&D 5e ability modifier: floor((score - 10) / 2). */
+/**
+ * D&D 5e ability modifier: floor((score - 10) / 2). Delegates to the 5e RuleSystemAdapter
+ * (issue #70) so there is a single implementation of the formula; kept here as a named
+ * export for the pure difficulty/logic tests.
+ */
 export function abilityMod(score: number): number {
-  return Math.floor((score - 10) / 2);
+  return Dnd5eAdapter.abilityModifier(score);
 }
 
 // ---------------------------------------------------------------------------

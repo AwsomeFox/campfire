@@ -1,10 +1,10 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, RollRequest, normalizeStats } from '@campfire/schema';
-import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
+import { CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
+import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, Role, RuleSystemAdapter } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
+import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
@@ -13,7 +13,7 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { abilityMod, advanceTurn, applyCombatantHp, computeEncounterDifficulty, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
+import { advanceTurn, applyCombatantHp, computeEncounterDifficulty, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
 import type { CombatantHpState } from './encounters.logic';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
@@ -134,6 +134,18 @@ export class EncountersService {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Encounter ${id} not found`);
     return row;
+  }
+
+  /**
+   * Resolve the RuleSystemAdapter for a campaign (issue #70) — the seam the combat math
+   * (ability modifiers, DEX-derived initiative, the initiative die, monster statblock
+   * fields) routes through instead of inlining 5e constants. Reads `campaigns.ruleSystem`
+   * and falls back to the default (5e) adapter, so every existing campaign behaves exactly
+   * as before. Adding a second rule system is a new adapter in the registry, not edits here.
+   */
+  private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
+    const [row] = await this.db.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
+    return ruleSystemAdapter(row?.ruleSystem);
   }
 
   async listCombatantRows(encounterId: number) {
@@ -325,9 +337,10 @@ export class EncountersService {
     // in JS and handed to a single `.values([...])`. Behavior is identical to the old
     // per-row loop; only the round-trip count changes (N -> 1).
     if (partyRows.length > 0) {
+      const adapter = await this.adapterForCampaign(campaignId);
       const combatantValues = partyRows.map((character, index) => {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        const initMod = typeof stats.DEX === 'number' ? abilityMod(stats.DEX) : 0;
+        const initMod = adapter.initiativeModifier(stats);
         return {
           encounterId: encounterRow.id,
           kind: 'character' as const,
@@ -376,7 +389,8 @@ export class EncountersService {
    * runs the pure 5e XP-budget math. No new columns — everything is derived on read.
    */
   async getDifficulty(encounterId: number): Promise<EncounterDifficulty> {
-    await this.getRowOrThrow(encounterId);
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const combatantRows = await this.listCombatantRows(encounterId);
 
     // Party levels: from each character-combatant's linked character sheet.
@@ -406,7 +420,8 @@ export class EncountersService {
         .where(inArray(ruleEntries.id, ruleEntryIds));
       for (const r of entryRows) {
         const data = fromJsonText<Record<string, unknown>>(r.dataJson, {});
-        crById.set(r.id, parseCr(data.challengeRating ?? data.challenge_rating ?? data.cr));
+        // Statblock CR field mapping comes from the adapter (issue #70), not inline field names.
+        crById.set(r.id, parseCr(adapter.mapStatblock(data).challengeRating));
       }
     }
     const monsterCrs = monsterCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
@@ -464,6 +479,7 @@ export class EncountersService {
   async addCombatant(encounterId: number, input: CombatantCreateInput, user: RequestUser, role: Role): Promise<Combatant> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
 
     let name = input.name;
     let hpMax = input.hpMax;
@@ -504,7 +520,7 @@ export class EncountersService {
       hpCurrent = character.hpCurrent;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        initMod = typeof stats.DEX === 'number' ? abilityMod(stats.DEX) : 0;
+        initMod = adapter.initiativeModifier(stats);
       }
     } else if (input.ruleEntryId !== undefined) {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
@@ -517,16 +533,15 @@ export class EncountersService {
       ruleEntryId = entry.id;
       name = name ?? entry.name;
       const data = fromJsonText<Record<string, unknown>>(entry.dataJson, {});
-      const hp = data.hitPoints ?? data.hit_points ?? data.hp;
-      if (hpMax === undefined && typeof hp === 'number' && hp > 0) hpMax = Math.round(hp);
-      // Monster statblocks (open5e-importer.mapCreature) store DEX under
-      // dataJson.abilityScores.dexterity — mirror the character path above and derive
-      // initMod from it when the caller didn't pass one explicitly, instead of silently
-      // leaving every monster combatant at initMod 0 regardless of its actual DEX.
+      // HP + initiative come from the RuleSystemAdapter's statblock mapping (issue #70) —
+      // 5e reads dataJson.hitPoints and derives init from abilityScores.dexterity — rather
+      // than inlining those field names here, so a non-5e monster statblock maps its own way.
+      if (hpMax === undefined) {
+        const hp = adapter.monsterHitPoints(data);
+        if (hp !== null) hpMax = hp;
+      }
       if (input.initMod === undefined) {
-        const abilityScores = data.abilityScores as Record<string, unknown> | undefined;
-        const dex = abilityScores?.dexterity;
-        if (typeof dex === 'number') initMod = abilityMod(dex);
+        initMod = adapter.initiativeModifier(adapter.mapStatblock(data).abilityScores);
       }
     }
 
@@ -852,6 +867,7 @@ export class EncountersService {
   async rollInitiative(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const rows = await this.listCombatantRows(encounterId);
 
     // Roll each un-set combatant's initiative in JS, then apply them all in ONE
@@ -861,7 +877,7 @@ export class EncountersService {
     // untouched. No write at all when nothing needs rolling.
     const rolled = rows
       .filter((row) => row.initiative === null)
-      .map((row) => ({ id: row.id, initiative: rollInitiative(row.initMod) }));
+      .map((row) => ({ id: row.id, initiative: rollInitiative(row.initMod, adapter.initiativeDie) }));
     if (rolled.length > 0) {
       const cases = sql.join(
         rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`),
