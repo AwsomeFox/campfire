@@ -652,6 +652,11 @@ export const ApiToken = z.object({
 export type ApiToken = z.infer<typeof ApiToken>;
 export const ApiTokenCreate = z.object({
   name: z.string().min(1).max(80),
+  // When the caller is itself authenticated via a PAT, both scope and campaignId are
+  // additionally capped to the CALLING token (TokensService.create): scope is silently
+  // downgraded to min(requested, calling token's scope), and a campaign-bound calling
+  // token can only mint tokens bound to that same campaign — a scoped-down token can
+  // never mint a broader sibling.
   scope: TokenScope,
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // requires the caller to currently hold real server-admin power; silently forced false otherwise

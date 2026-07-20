@@ -53,6 +53,11 @@ export function roleAtLeast(role: Role, min: Role): boolean {
   return ROLE_RANK[role] >= ROLE_RANK[min];
 }
 
+/** The lower-privileged of two roles (dm > player > viewer). */
+export function minRole(a: Role, b: Role): Role {
+  return ROLE_RANK[a] <= ROLE_RANK[b] ? a : b;
+}
+
 /** Audit-log / proposer actor string: `token:<name>` when acting via a PAT, else the user id. */
 export function auditActor(user: RequestUser): string {
   return user.tokenContext ? `token:${user.tokenContext.name}` : user.id;
