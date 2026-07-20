@@ -82,8 +82,10 @@ export class EncountersController {
   @ApiResponse({ status: 200, description: 'Encounter with combatants.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
-    return this.encounters.getWithCombatantsOrThrow(id);
+    // The caller's role drives issue #43 redaction: a non-DM viewer gets monster
+    // HP as a coarse band, never exact numbers.
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.getWithCombatantsOrThrow(id, role);
   }
 
   @Delete(':id')

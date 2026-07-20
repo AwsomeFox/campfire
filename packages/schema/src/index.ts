@@ -811,6 +811,15 @@ export const EncounterCreate = z.object({ name: z.string().min(1).max(120) });
 export const CombatantKind = z.enum(['character', 'monster']);
 export type CombatantKind = z.infer<typeof CombatantKind>;
 
+/**
+ * Coarse HP status band shown to non-DM viewers in place of a monster's exact HP
+ * (issue #43). `down` = 0 HP; `critical` <= 25%; `bloodied` <= 50%; `healthy`
+ * above. Null for combatants whose exact HP is visible (characters, or any
+ * combatant when the DM is viewing).
+ */
+export const HpBand = z.enum(['healthy', 'bloodied', 'critical', 'down']);
+export type HpBand = z.infer<typeof HpBand>;
+
 export const Combatant = z.object({
   id: Id,
   encounterId: Id,
@@ -819,8 +828,11 @@ export const Combatant = z.object({
   name: z.string().min(1).max(120),
   initiative: z.number().int().nullable().default(null),
   initMod: z.number().int().default(0),
-  hpCurrent: z.number().int().default(10),
-  hpMax: z.number().int().min(1).default(10),
+  // Nullable so a monster's exact HP can be redacted to `null` for non-DM viewers
+  // (issue #43); `hpBand` then carries the coarse status instead.
+  hpCurrent: z.number().int().nullable().default(10),
+  hpMax: z.number().int().min(1).nullable().default(10),
+  hpBand: HpBand.nullable().default(null),
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
