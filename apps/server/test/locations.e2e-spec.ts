@@ -55,4 +55,42 @@ describe('locations (e2e)', () => {
     const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(dm);
     expect(summary.body.currentLocation.id).toBe(locBId);
   });
+
+  // Issue #96: deleting a location must null out inbound references so nothing dangles —
+  // NPCs pinned here (npcs.locationId) and the campaign's currentLocationId.
+  describe('delete cleanup: location pins (issue #96)', () => {
+    it('deleting a location nulls NPCs.locationId and campaigns.currentLocationId', async () => {
+      const server = ctx.app.getHttpServer();
+      const locRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'Doomed Tavern' });
+      expect(locRes.status).toBe(201);
+      const locId = locRes.body.id;
+
+      const npcRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Barkeep', locationId: locId });
+      expect(npcRes.status).toBe(201);
+      expect(npcRes.body.locationId).toBe(locId);
+      const npcId = npcRes.body.id;
+
+      // Make it the campaign's current location too, so we exercise both inbound refs.
+      const discoverRes = await request(server).post(`/api/v1/locations/${locId}/discover`).set(dm).send({ status: 'current' });
+      expect(discoverRes.status).toBe(201);
+      const campBefore = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+      expect(campBefore.body.currentLocationId).toBe(locId);
+
+      const delRes = await request(server).delete(`/api/v1/locations/${locId}`).set(dm);
+      expect(delRes.status).toBe(200);
+
+      const npcAfter = await request(server).get(`/api/v1/npcs/${npcId}`).set(dm);
+      expect(npcAfter.status).toBe(200);
+      expect(npcAfter.body.locationId).toBeNull();
+
+      const campAfter = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+      expect(campAfter.body.currentLocationId).toBeNull();
+    });
+  });
 });

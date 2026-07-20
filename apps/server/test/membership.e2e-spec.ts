@@ -364,3 +364,60 @@ describe('user delete last-dm guard (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(204);
   });
 });
+
+/**
+ * Issue #96: deleting a character must unlink any member that references it, so
+ * campaignMembers.characterId never dangles on a deleted character (the denormalized
+ * members list would otherwise join against a ghost id). Needs real users (member.userId
+ * is a users.id integer), so this uses cookie-session auth like the suites above.
+ */
+describe('character delete unlinks member (e2e, real cookie sessions, issue #96)', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let playerId: number;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'del-char-admin', password: 'admin-password-1' });
+
+    await adminAgent.post('/api/v1/users').send({ username: 'char-dm', password: 'char-dm-password', serverRole: 'user' });
+    const createPlayer = await adminAgent.post('/api/v1/users').send({ username: 'char-player', password: 'char-player-password', serverRole: 'user' });
+    playerId = createPlayer.body.id;
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/login').send({ username: 'char-dm', password: 'char-dm-password' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Character Unlink Campaign' });
+    campaignId = campRes.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('deleting a linked character nulls the member.characterId link', async () => {
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Linked-then-deleted' });
+    expect(charRes.status).toBe(201);
+    const charId = charRes.body.id;
+
+    const addRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/members`)
+      .send({ userId: playerId, role: 'player', characterId: charId });
+    expect(addRes.status).toBe(201);
+    expect(addRes.body.characterId).toBe(charId);
+    const memberId = addRes.body.id;
+
+    const delRes = await dmAgent.delete(`/api/v1/characters/${charId}`);
+    expect(delRes.status).toBe(200);
+
+    const membersAfter = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
+    const memberAfter = membersAfter.body.find((m: { id: number }) => m.id === memberId);
+    expect(memberAfter).toBeDefined();
+    expect(memberAfter.characterId).toBeNull();
+  });
+});

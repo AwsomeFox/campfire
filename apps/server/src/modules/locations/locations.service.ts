@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { LocationCreate, LocationUpdate } from '@campfire/schema';
 import type { Location, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { locations, campaigns } from '../../db/schema';
+import { locations, campaigns, npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
@@ -101,7 +101,14 @@ export class LocationsService {
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    await this.db.delete(locations).where(eq(locations.id, id));
+    // Null out inbound references in the same transaction as the delete so nothing dangles
+    // on a deleted location: NPCs pinned here (npcs.locationId) and the campaign's
+    // currentLocationId. Mirrors AttachmentsService/QuestsService cascade patterns.
+    this.db.transaction((tx) => {
+      tx.update(npcs).set({ locationId: null, updatedAt: nowIso() }).where(eq(npcs.locationId, id)).run();
+      tx.update(campaigns).set({ currentLocationId: null, updatedAt: nowIso() }).where(eq(campaigns.currentLocationId, id)).run();
+      tx.delete(locations).where(eq(locations.id, id)).run();
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
