@@ -1134,7 +1134,7 @@ export class McpToolsService {
       server,
       'install_rule_pack',
       'Server admin only: install (or incrementally update) the Open5e SRD rule pack — spells, monsters, items, ' +
-        'conditions — so lookup_rule/get_rule_entry and add_combatant\'s ruleEntryId can find them.',
+        'conditions, classes, races, feats — so lookup_rule/get_rule_entry and add_combatant\'s ruleEntryId can find them.',
       { ...RulePackInstall.shape },
       async ({ source, url, sections }) => {
         // hasServerAdminPower(), not a raw serverRole check — a token minted for a server

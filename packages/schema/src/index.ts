@@ -317,7 +317,7 @@ export const RulePack = z.object({
 });
 export type RulePack = z.infer<typeof RulePack>;
 
-export const RuleEntryType = z.enum(['spell', 'monster', 'item', 'class', 'race', 'condition', 'section', 'other']);
+export const RuleEntryType = z.enum(['spell', 'monster', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other']);
 export type RuleEntryType = z.infer<typeof RuleEntryType>;
 
 export const RuleEntry = z.object({
@@ -336,7 +336,7 @@ export type RuleEntry = z.infer<typeof RuleEntry>;
 export const RulePackInstall = z.object({
   source: z.literal('open5e'),
   url: z.string().max(500).optional(), // override API base, mainly for tests (fake server)
-  sections: z.array(z.enum(['spells', 'monsters', 'items', 'conditions'])).optional(), // default: all
+  sections: z.array(z.enum(['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'])).optional(), // default: all
 });
 export type RulePackInstall = z.infer<typeof RulePackInstall>;
 

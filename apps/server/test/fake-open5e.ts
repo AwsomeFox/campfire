@@ -49,6 +49,23 @@ const CONDITIONS = [
   { key: 'srd_poisoned', name: 'Poisoned', descriptions: [{ desc: 'A poisoned creature has disadvantage on attack rolls and ability checks.', document: 'srd-2024' }], document: DOCUMENT },
 ];
 
+// v2 classes usually have an EMPTY `desc` — the prose lives in `features[]`; subclasses
+// share the list with a non-null `subclass_of` sub-object (see open5e-importer.ts header).
+const CLASSES = [
+  { key: 'srd_barbarian', name: 'Barbarian', desc: '', hit_dice: 'D12', caster_type: 'NONE', subclass_of: null, saving_throws: [{ name: 'Strength' }, { name: 'Constitution' }], primary_abilities: [], features: [{ key: 'srd_barbarian_rage', name: 'Rage', desc: 'In battle, you fight with primal ferocity.', feature_type: 'CLASS_LEVEL_FEATURE', gained_at: [{ level: 1, detail: null }] }], document: DOCUMENT },
+  { key: 'srd_berserker', name: 'Path of the Berserker', desc: '', hit_dice: null, caster_type: 'NONE', subclass_of: { key: 'srd_barbarian', name: 'Barbarian' }, saving_throws: [], primary_abilities: [], features: [{ key: 'srd_berserker_frenzy', name: 'Frenzy', desc: 'You can go into a frenzy when you rage.', feature_type: 'CLASS_LEVEL_FEATURE', gained_at: [{ level: 3, detail: null }] }], document: DOCUMENT },
+];
+
+// Served from /v2/species/ — v2 has no /races/ route (mirrors the monsters->creatures quirk).
+const SPECIES = [
+  { key: 'srd_dwarf', name: 'Dwarf', desc: 'Bold and hardy, dwarves are known as skilled warriors and miners.', is_subspecies: false, subspecies_of: null, traits: [{ name: 'Darkvision', desc: 'You can see in dim light within 60 feet.', type: null, order: null }, { name: 'Dwarven Resilience', desc: 'You have advantage on saving throws against poison.', type: null, order: null }], document: DOCUMENT },
+  { key: 'srd_hill-dwarf', name: 'Hill Dwarf', desc: 'As a hill dwarf, you have keen senses and remarkable resilience.', is_subspecies: true, subspecies_of: 'srd_dwarf', traits: [{ name: 'Dwarven Toughness', desc: 'Your hit point maximum increases by 1 per level.', type: null, order: null }], document: DOCUMENT },
+];
+
+const FEATS = [
+  { key: 'srd_grappler', name: 'Grappler', desc: 'You have developed the skills necessary to hold your own in close-quarters grappling.', prerequisite: 'Strength 13 or higher', has_prerequisite: true, benefits: [{ desc: 'You have advantage on attack rolls against a creature you are grappling.' }, { desc: 'You can use your action to try to pin a creature grappled by you.' }], type: 'GENERAL', document: DOCUMENT },
+];
+
 export async function startFakeOpen5e(): Promise<FakeOpen5e> {
   const app = express();
 
@@ -56,6 +73,9 @@ export async function startFakeOpen5e(): Promise<FakeOpen5e> {
   app.get('/v2/creatures/', (_req, res) => res.json(page(CREATURES)));
   app.get('/v2/magicitems/', (_req, res) => res.json(page(MAGIC_ITEMS)));
   app.get('/v2/conditions/', (_req, res) => res.json(page(CONDITIONS)));
+  app.get('/v2/classes/', (_req, res) => res.json(page(CLASSES)));
+  app.get('/v2/species/', (_req, res) => res.json(page(SPECIES)));
+  app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -113,6 +133,9 @@ export async function startFakeOpen5eFlaky(): Promise<FakeOpen5eFlaky> {
   app.get('/v2/creatures/', (_req, res) => res.json(page(CREATURES)));
   app.get('/v2/magicitems/', (_req, res) => res.json(page(MAGIC_ITEMS)));
   app.get('/v2/conditions/', (_req, res) => res.json(page(CONDITIONS)));
+  app.get('/v2/classes/', (_req, res) => res.json(page(CLASSES)));
+  app.get('/v2/species/', (_req, res) => res.json(page(SPECIES)));
+  app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -172,6 +195,9 @@ export async function startFakeOpen5eWithBadPagination(): Promise<FakeOpen5eWith
   app.get('/v2/creatures/', (_req, res) => res.json(page([])));
   app.get('/v2/magicitems/', (_req, res) => res.json(page([])));
   app.get('/v2/conditions/', (_req, res) => res.json(page([])));
+  app.get('/v2/classes/', (_req, res) => res.json(page([])));
+  app.get('/v2/species/', (_req, res) => res.json(page([])));
+  app.get('/v2/feats/', (_req, res) => res.json(page([])));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
