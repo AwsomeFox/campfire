@@ -331,6 +331,74 @@ describe('attachments (e2e)', () => {
     });
   });
 
+  // Issue #97 — per-attachment visibility / staged reveal. A DM-uploaded map/image
+  // is DM-only by default (hidden=true): non-DM members get a 404 on the file GET
+  // and never see it in the campaign attachment list, defeating id enumeration.
+  // The DM reveals it (POST :id/reveal) to share it with the party; hide re-stages.
+  describe('visibility / staged reveal (issue #97)', () => {
+    it("a freshly uploaded map is hidden by default; a portrait is visible", async () => {
+      const server = ctx.app.getHttpServer();
+      const mapRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'prep-map.png', contentType: 'image/png' });
+      expect(mapRes.status).toBe(201);
+      expect(mapRes.body.hidden).toBe(true);
+
+      const portraitRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(player)
+        .field('kind', 'portrait')
+        .attach('file', TINY_PNG, { filename: 'face.png', contentType: 'image/png' });
+      expect(portraitRes.status).toBe(201);
+      expect(portraitRes.body.hidden).toBe(false);
+    });
+
+    it('a DM can read a hidden map file (200); reveal then hide flips visibility', async () => {
+      const server = ctx.app.getHttpServer();
+      const up = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'staged.png', contentType: 'image/png' });
+      const id = up.body.id;
+      expect(up.body.hidden).toBe(true);
+
+      // DM always sees it.
+      const dmGet = await request(server).get(`/api/v1/attachments/${id}/file`).set(dm);
+      expect(dmGet.status).toBe(200);
+
+      // Reveal makes hidden=false (POST => 201 per Nest default).
+      const reveal = await request(server).post(`/api/v1/attachments/${id}/reveal`).set(dm);
+      expect(reveal.status).toBe(201);
+      expect(reveal.body.hidden).toBe(false);
+
+      // Re-hide.
+      const hide = await request(server).post(`/api/v1/attachments/${id}/hide`).set(dm);
+      expect(hide.status).toBe(201);
+      expect(hide.body.hidden).toBe(true);
+    });
+
+    it('the campaign attachment list omits hidden rows for non-DM but shows them to the DM', async () => {
+      const server = ctx.app.getHttpServer();
+      const up = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'listed-hidden.png', contentType: 'image/png' });
+      const hiddenId = up.body.id;
+
+      const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/attachments`).set(dm);
+      expect(dmList.status).toBe(200);
+      expect(dmList.body.some((a: { id: number }) => a.id === hiddenId)).toBe(true);
+
+      // A real (non-admin) member: dev-auth users are always admin/dm, so use a
+      // cookie-session player below — here at least assert the DM list is present.
+      expect(Array.isArray(dmList.body)).toBe(true);
+    });
+  });
+
   describe('delete', () => {
     let attachmentId: number;
 
@@ -592,6 +660,8 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
   let ctx: TestAppContext;
   let dmAgent: ReturnType<typeof request.agent>;
   let outsiderAgent: ReturnType<typeof request.agent>;
+  let playerAgent: ReturnType<typeof request.agent>;
+  let playerId: number;
   let campaignId: number;
   let attachmentId: number;
 
@@ -603,6 +673,10 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
     await adminAgent.post('/api/v1/auth/setup').send({ username: 'root-admin-2', password: 'admin-password-1' });
     await adminAgent.post('/api/v1/users').send({ username: 'dm-real', password: 'password-dm-1', serverRole: 'user' });
     await adminAgent.post('/api/v1/users').send({ username: 'outsider-real', password: 'password-out-1', serverRole: 'user' });
+    const createPlayer = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'player-real', password: 'password-pl-1', serverRole: 'user' });
+    playerId = createPlayer.body.id;
 
     dmAgent = request.agent(server);
     await dmAgent.post('/api/v1/auth/login').send({ username: 'dm-real', password: 'password-dm-1' });
@@ -610,8 +684,14 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
     outsiderAgent = request.agent(server);
     await outsiderAgent.post('/api/v1/auth/login').send({ username: 'outsider-real', password: 'password-out-1' });
 
+    playerAgent = request.agent(server);
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'player-real', password: 'password-pl-1' });
+
     const createRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Private Campaign' });
     campaignId = createRes.body.id;
+
+    // player-real is a member of this campaign (role: player), unlike outsider-real.
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
 
     const uploadRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/attachments`)
@@ -619,6 +699,8 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       .attach('file', TINY_PNG, { filename: 'secret.png', contentType: 'image/png' });
     expect(uploadRes.status).toBe(201);
     attachmentId = uploadRes.body.id;
+    // An 'image' upload is DM-only by default (issue #97).
+    expect(uploadRes.body.hidden).toBe(true);
   });
 
   afterAll(async () => {
@@ -641,5 +723,78 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       .field('kind', 'portrait')
       .attach('file', TINY_PNG, { filename: 'x.png', contentType: 'image/png' });
     expect(res.status).toBe(403);
+  });
+
+  // Issue #97 — the core secrecy guarantee, exercised with a real non-DM MEMBER
+  // (dev-auth users can't express this — they're always treated as dm).
+  describe('hidden handout secrecy (issue #97)', () => {
+    it('a non-DM member gets 404 (not 403 — indistinguishable from nonexistent) on a hidden attachment', async () => {
+      const res = await playerAgent.get(`/api/v1/attachments/${attachmentId}/file`);
+      expect(res.status).toBe(404);
+    });
+
+    it("a non-DM member's campaign attachment list omits the hidden attachment", async () => {
+      const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+      expect(res.status).toBe(200);
+      expect(res.body.some((a: { id: number }) => a.id === attachmentId)).toBe(false);
+    });
+
+    it('the DM sees the hidden attachment in the list', async () => {
+      const res = await dmAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+      expect(res.status).toBe(200);
+      expect(res.body.some((a: { id: number }) => a.id === attachmentId)).toBe(true);
+    });
+
+    it('a non-DM member cannot reveal (403)', async () => {
+      const res = await playerAgent.post(`/api/v1/attachments/${attachmentId}/reveal`);
+      expect(res.status).toBe(403);
+    });
+
+    it('after the DM reveals it, the non-DM member can read the file (200) and see it in the list', async () => {
+      const reveal = await dmAgent.post(`/api/v1/attachments/${attachmentId}/reveal`);
+      expect(reveal.status).toBe(201);
+      expect(reveal.body.hidden).toBe(false);
+
+      const fileRes = await playerAgent.get(`/api/v1/attachments/${attachmentId}/file`);
+      expect(fileRes.status).toBe(200);
+      expect(Buffer.compare(fileRes.body, TINY_PNG)).toBe(0);
+
+      const listRes = await playerAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+      expect(listRes.body.some((a: { id: number }) => a.id === attachmentId)).toBe(true);
+    });
+
+    it('a still-hidden (non-member) outsider is unaffected by the reveal', async () => {
+      const res = await outsiderAgent.get(`/api/v1/attachments/${attachmentId}/file`);
+      expect(res.status).toBe(403);
+    });
+
+    it('the DM can re-hide a revealed attachment, and the non-DM member 404s again', async () => {
+      const hide = await dmAgent.post(`/api/v1/attachments/${attachmentId}/hide`);
+      expect(hide.status).toBe(201);
+      expect(hide.body.hidden).toBe(true);
+
+      const fileRes = await playerAgent.get(`/api/v1/attachments/${attachmentId}/file`);
+      expect(fileRes.status).toBe(404);
+    });
+
+    it('assigning a hidden map as the campaign background auto-reveals it to players', async () => {
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'bg.png', contentType: 'image/png' });
+      expect(upload.body.hidden).toBe(true);
+      const mapId = upload.body.id;
+
+      // Player can't see it yet.
+      const before = await playerAgent.get(`/api/v1/attachments/${mapId}/file`);
+      expect(before.status).toBe(404);
+
+      // Wiring it as the shared campaign map background reveals it.
+      const patch = await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ mapAttachmentId: mapId });
+      expect(patch.status).toBe(200);
+
+      const after = await playerAgent.get(`/api/v1/attachments/${mapId}/file`);
+      expect(after.status).toBe(200);
+    });
   });
 });

@@ -866,6 +866,14 @@ export const Attachment = z.object({
   filename: z.string().max(255), // original client filename, display only
   mime: z.string().max(80),
   size: z.number().int().nonnegative(), // bytes
+  // Per-attachment visibility / staged reveal (issue #97). `hidden` gates the file
+  // bytes AND the row itself: a hidden attachment is DM-only — non-DM members get a
+  // 404 on GET /attachments/:id/file and never see it in the campaign list, so an
+  // uploaded-but-unrevealed handout (next-arc dungeon map, reveal art) can't be
+  // fetched by id enumeration. New 'map'/'image' uploads default hidden=true (DM
+  // prep material); 'portrait' uploads default hidden=false (player-visible). The
+  // DM stages the reveal moment via POST /attachments/:id/reveal (hidden=false).
+  hidden: z.boolean().default(false),
   ...timestamps,
 });
 export type Attachment = z.infer<typeof Attachment>;
