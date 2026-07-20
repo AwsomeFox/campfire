@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Note } from '@campfire/schema';
 import { api, API } from '../lib/api';
 import { Card, Chip, Btn, TextArea, ErrorNote, type ChipVariant } from './ui';
+import { Markdown } from './Markdown';
 
 const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string }> = {
   private: { chip: 'private', label: '🔒 Private' },
@@ -60,9 +61,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
               {n.authorName || n.authorUserId}
             </span>
           </div>
-          <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--color-neutral-300)' }}>
-            {n.body}
-          </p>
+          <Markdown className="!text-xs">{n.body}</Markdown>
         </div>
       ))}
       <div className="space-y-2">

@@ -423,7 +423,7 @@ export function Layout() {
           <nav className="flex flex-col gap-0.5 mt-1">
             {isAdmin && (
               <SidebarNavButton
-                item={{ key: 'admin', label: 'Admin', to: '/admin' }}
+                item={{ key: 'admin', label: 'Server admin', to: '/admin' }}
                 active={location.pathname === '/admin'}
               />
             )}
@@ -675,7 +675,7 @@ function MoreSheet({
             <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
           ))}
           {isAdmin && (
-            <MoreSheetItem item={{ key: 'admin', label: 'Admin', to: '/admin' }} onNavigate={onClose} />
+            <MoreSheetItem item={{ key: 'admin', label: 'Server admin', to: '/admin' }} onNavigate={onClose} />
           )}
           <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={onClose} />
           <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={onClose} />
