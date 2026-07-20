@@ -420,6 +420,8 @@ CREATE TABLE IF NOT EXISTS proposals (
   payload TEXT NOT NULL DEFAULT '{}',
   snapshot TEXT,
   proposer TEXT NOT NULL,
+  proposer_user_id TEXT NOT NULL DEFAULT '',
+  proposer_token TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   resolved_by TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',

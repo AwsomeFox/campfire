@@ -336,6 +336,9 @@ export function Layout() {
         { key: 'encounters', label: 'Encounters', to: `/c/${campaignId}/encounters` },
         { key: 'compendium', label: 'Compendium', to: `/c/${campaignId}/compendium` },
         { key: 'notes', label: 'My Notes', to: `/c/${campaignId}/notes` },
+        // Non-DM members get a self-view of the proposals they've submitted (issue #124);
+        // the DM's full review queue lives under dmNav below.
+        ...(!isDm ? [{ key: 'proposals', label: 'My proposals', to: `/c/${campaignId}/proposals` }] : []),
       ]
     : [];
 
