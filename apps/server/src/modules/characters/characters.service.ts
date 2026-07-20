@@ -1,10 +1,10 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { characters } from '../../db/schema';
+import { characters, combatants, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { redactSecret, redactSecrets } from '../../common/redact';
@@ -80,6 +80,33 @@ export class CharactersService {
     if (role === 'dm') return;
     if (row.ownerUserId && row.ownerUserId === user.id) return;
     throw new ForbiddenException('Only dm or the owning player may modify this character');
+  }
+
+  /**
+   * Mirror a character's HP into the combatant rows that link back to it in any
+   * still-live (not 'ended') encounter (issue #50). Combatant HP and character HP
+   * were previously dual sources of truth with only one-way sync (combatant→character
+   * at edit time and on end()), so a player healing on their sheet mid-fight had that
+   * healing silently reverted when the DM ended the encounter — the stale combatant
+   * row won. This closes the loop the other direction. Ended encounters are left
+   * untouched (their combatant rows are a historical snapshot). hpCurrent is clamped
+   * to the combatant's (possibly just-raised) hpMax, matching every other HP path.
+   */
+  private async syncActiveCombatants(characterId: number, hpCurrent: number, hpMax?: number): Promise<void> {
+    const rows = await this.db
+      .select({ combatant: combatants })
+      .from(combatants)
+      .innerJoin(encounters, eq(combatants.encounterId, encounters.id))
+      .where(and(eq(combatants.characterId, characterId), ne(encounters.status, 'ended')));
+
+    for (const { combatant } of rows) {
+      const nextMax = hpMax ?? combatant.hpMax;
+      const nextCurrent = Math.max(0, Math.min(nextMax, hpCurrent));
+      await this.db
+        .update(combatants)
+        .set({ hpCurrent: nextCurrent, hpMax: nextMax })
+        .where(eq(combatants.id, combatant.id));
+    }
   }
 
   async create(campaignId: number, input: CharacterCreateInput, user: RequestUser, role: Role): Promise<Character> {
@@ -178,6 +205,12 @@ export class CharactersService {
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
 
+    // Mirror HP/hpMax edits (e.g. a mid-session level-up) into any live encounter's
+    // combatant row (issue #50).
+    if (input.hpCurrent !== undefined || input.hpMax !== undefined) {
+      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax);
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -221,6 +254,9 @@ export class CharactersService {
       .set({ hpCurrent, updatedAt: nowIso() })
       .where(eq(characters.id, id))
       .returning();
+
+    // Keep any live encounter's combatant row in sync (issue #50).
+    await this.syncActiveCombatants(id, hpCurrent);
 
     await this.audit.log({
       actor: auditActor(user),
@@ -323,6 +359,11 @@ export class CharactersService {
     }
 
     const [row] = await this.db.update(characters).set(update).where(eq(characters.id, id)).returning();
+
+    // A mid-session level-up that raises hpMax should reflect on the combat tracker too (issue #50).
+    if (input.hpMax !== undefined) {
+      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax);
+    }
 
     await this.audit.log({
       actor: auditActor(user),
