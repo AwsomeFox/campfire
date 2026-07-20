@@ -257,7 +257,8 @@ function MembersCard({
         </div>
       )}
       <p className="text-[11px] text-slate-500">
-        Removing someone keeps their character and notes — the seat just closes.
+        Linking a character makes that player its owner, so they can edit its sheet. Removing someone keeps
+        their character and notes — the seat just closes.
       </p>
     </Card>
   );
