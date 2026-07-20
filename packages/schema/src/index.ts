@@ -380,6 +380,55 @@ export type CampaignMember = z.infer<typeof CampaignMember>;
 export const MemberCreate = z.object({ userId: Id, role: Role, characterId: Id.nullable().optional() });
 export const MemberUpdate = z.object({ role: Role.optional(), characterId: Id.nullable().optional() });
 
+// ---------- campaign invites (DM invite links / join codes) ----------
+// A DM-generated, shareable link that onboards a player without a server admin:
+// whoever opens /join/<code> creates their own account (or joins with an existing
+// one) and lands in the campaign at the role the DM chose. Never grants 'dm' —
+// a leaked link must not hand out DM power. Codes are unguessable (128-bit
+// random), expiring, optionally use-capped, and revocable by the DM.
+export const InviteRole = z.enum(['player', 'viewer']);
+export type InviteRole = z.infer<typeof InviteRole>;
+
+export const CampaignInvite = z.object({
+  id: Id,
+  campaignId: Id,
+  code: z.string(), // join code — the shareable link is <origin>/join/<code>
+  role: InviteRole,
+  createdByUserId: Id.nullable().default(null),
+  expiresAt: IsoDate,
+  maxUses: z.number().int().positive().nullable().default(null), // null = unlimited (until expiry/revocation)
+  useCount: z.number().int().nonnegative().default(0),
+  ...timestamps,
+});
+export type CampaignInvite = z.infer<typeof CampaignInvite>;
+
+export const InviteCreate = z.object({
+  role: InviteRole.default('player'),
+  expiresInDays: z.number().int().min(1).max(365).default(7), // invites always expire — default one week
+  maxUses: z.number().int().min(1).max(1000).nullable().optional(),
+});
+export type InviteCreate = z.infer<typeof InviteCreate>;
+
+// Public preview of a valid invite (GET /invites/:code) — just enough for the
+// join page to say what you're joining and as what. campaignId is included so
+// the web app can navigate to /c/:id after joining.
+export const InvitePreview = z.object({
+  campaignId: Id,
+  campaignName: z.string(),
+  role: InviteRole,
+  expiresAt: IsoDate,
+});
+export type InvitePreview = z.infer<typeof InvitePreview>;
+
+// Accept an invite as a brand-new user (POST /invites/:code/accept, @Public):
+// creates the account AND the membership in one call, then starts a session.
+export const InviteAccept = z.object({
+  username: User.shape.username,
+  password: Password,
+  displayName: z.string().max(120).optional(),
+});
+export type InviteAccept = z.infer<typeof InviteAccept>;
+
 export const Me = z.object({
   user: User,
   memberships: z.array(z.object({ campaignId: Id, role: Role, characterId: Id.nullable() })),

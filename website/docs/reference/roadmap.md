@@ -47,7 +47,7 @@ An AI agent can run an entire campaign over MCP alone — verified end-to-end:
 Requested and being built so the operator and the storyteller stay distinct
 (see [Admin vs DM](../administration/access-model.md)):
 
-- ⬜ **DM invite links / join codes** — let a DM bring players in without the server admin creating each account _(today: the "Invite" card is a disabled placeholder)_
+- ✅ **DM invite links / join codes** — a DM generates a `/join/<code>` link from **Members → Invite** (player/viewer, expiring, revocable); whoever opens it creates their own account and lands in the campaign
 - ⬜ **Optional self-service signup** — a server setting for open registration
 - ⬜ **Admin ≠ auto-DM** — a server admin no longer implicitly sees every campaign's DM secrets; server power ≠ story access
 
@@ -69,7 +69,7 @@ who hits them. Grouped by theme:
 
 **Account lifecycle & self-service**
 
-- ⬜ **DM invites / join codes** and ⬜ **optional self-service signup** (see [Admin vs DM](../administration/access-model.md))
+- ✅ **DM invites / join codes** and ⬜ **optional self-service signup** (see [Admin vs DM](../administration/access-model.md))
 - ⬜ **Forgot-password / self-service reset** — today only an admin can reset a local user's password
 
 **Between-session engagement**
