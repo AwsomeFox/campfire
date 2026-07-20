@@ -68,8 +68,9 @@ documented in [Authentication](../administration/authentication.md).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TRUST_PROXY` | `1` (trust one hop) | Express `trust proxy` setting. Pass a hop count if you sit behind more than one proxy, or `false` to disable. Needed so per-IP rate limiting and `req.ip`/`req.secure` see the real client IP behind a reverse proxy (Traefik in the reference deployment) rather than bucketing every request under the proxy's own address |
+| `TRUST_PROXY` | `1` (trust one hop) | Express `trust proxy` setting. Pass a hop count if you sit behind more than one proxy (`2`, `3`, …), `false` to disable, or an explicit IP/subnet allow-list. Needed so per-IP rate limiting and `req.ip`/`req.secure` see the real client IP behind a reverse proxy (Traefik in the reference deployment) rather than bucketing every request under the proxy's own address |
 | `THROTTLE_DISABLED` | *(unset)* | Set to `1` to fully disable the built-in per-IP rate limiter. Intended for tests; leave unset in production |
+| `ALLOW_INSECURE_HTTP` | *(unset)* | Set to `1` for a **no-TLS LAN/homelab deployment** reached over plain HTTP (e.g. `http://192.168.1.x:8080`). Drops the security headers that assume HTTPS — CSP `upgrade-insecure-requests` and HSTS — and issues the session cookie without the `Secure` attribute so login works. **Leave unset whenever you have TLS**; only enable it if you understand traffic is unencrypted |
 
 **OIDC / SSO** — see [Authentication](../administration/authentication.md) for the full table.
 

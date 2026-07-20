@@ -5,6 +5,7 @@ import { Role } from '@campfire/schema';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import type { RequestUser, TokenContext } from '../user.types';
 import { looksLikeApiToken, looksLikeOAuthAccessToken } from '../crypto';
+import { isDevAuthActive } from '../security-config';
 import { AuthService } from '../../modules/auth/auth.service';
 import { SESSION_COOKIE_NAME } from '../../modules/auth/auth.constants';
 import { TokensService } from '../../modules/tokens/tokens.service';
@@ -18,8 +19,11 @@ import { OAuthService } from '../../modules/oauth/oauth.service';
  *      every effective-role cap applies identically; lets /mcp be added as a
  *      Claude connector via OAuth without a hand-copied PAT, else
  *  (b) the session cookie (real local-auth users), else
- *  (c) if env DEV_AUTH=1: legacy x-dev-user/x-dev-role headers — synthetic
- *      user id `dev:<name>`, keeps all pre-auth e2e tests passing, else
+ *  (c) if DEV_AUTH is active (DEV_AUTH=1 AND NODE_ENV!=='production'): legacy
+ *      x-dev-user/x-dev-role headers — synthetic user id `dev:<name>`, keeps all
+ *      pre-auth e2e tests passing. Hard-disabled in production regardless of the
+ *      flag (issue #119) so a stray DEV_AUTH=1 can't open the server to anonymous
+ *      admin. Else
  *  (d) unauthenticated -> 401, unless the route is @Public().
  *
  * Replaces the old header-only DevAuthGuard. Kept as a single global guard
@@ -75,7 +79,7 @@ export class SessionAuthGuard implements CanActivate {
       // Invalid/expired cookie: fall through to dev-auth (if enabled) or 401.
     }
 
-    if (process.env.DEV_AUTH === '1') {
+    if (isDevAuthActive()) {
       const rawRole = (req.headers['x-dev-role'] as string | undefined)?.toLowerCase();
       const parsedRole = Role.safeParse(rawRole);
       const devRole = parsedRole.success ? parsedRole.data : 'dm';

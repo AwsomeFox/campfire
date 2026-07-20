@@ -89,7 +89,15 @@ COPY --from=build /app/packages/schema/dist packages/schema/dist
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/web/dist web-dist
 
-RUN mkdir -p /data
+# Run as the unprivileged `node` user (uid 1000) the official Node image ships, rather
+# than root (issue #118): the process handles untrusted input (uploads, Open5e imports,
+# the MCP JSON-RPC endpoint), so an RCE/path-traversal must not land as root-in-container,
+# and files written to the /data bind mount should not end up root-owned on the host.
+# chown /data (the VOLUME) and /app so both stay writable / readable as `node`.
+# NOTE for existing deployments: an already-populated /data volume is still root-owned —
+# run a one-time `chown -R 1000:1000 /data` (or `chown -R node:node`) on the host after upgrading.
+RUN mkdir -p /data && chown -R node:node /data /app
+USER node
 
 VOLUME ["/data"]
 EXPOSE 8080

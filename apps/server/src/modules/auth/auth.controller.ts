@@ -24,6 +24,7 @@ import {
 import { PreferencesUpdateDto } from '../users/users.dto';
 import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, VERSION } from './auth.constants';
 import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
+import { resolveCookieSecure } from '../../common/security-config';
 
 /**
  * P2 DoS fix: these three @Public routes each run a full scrypt password
@@ -39,7 +40,10 @@ function cookieOptions() {
     sameSite: 'lax' as const,
     path: '/',
     maxAge: SESSION_MAX_AGE_MS,
-    secure: process.env.NODE_ENV === 'production',
+    // Secure in production, unless the operator opted into plain-HTTP serving
+    // (ALLOW_INSECURE_HTTP) — a Secure cookie is silently dropped over plain HTTP,
+    // causing a login loop on a no-TLS homelab deployment (issue #117).
+    secure: resolveCookieSecure(),
   };
 }
 
