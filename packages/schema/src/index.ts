@@ -165,6 +165,35 @@ export type Session = z.infer<typeof Session>;
 export const SessionCreate = Session.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ number: true });
 export const SessionUpdate = SessionCreate.partial();
 
+// ---------- session share links (public read-only recap access) ----------
+// A DM-minted, unguessable capability URL for one session recap — viewable
+// without an account (absent players). The raw token is returned ONCE at
+// creation and stored hashed (sha256), same policy as PATs; deleting the row
+// revokes the link.
+export const SessionShare = z.object({
+  id: Id,
+  sessionId: Id,
+  campaignId: Id,
+  createdBy: z.string().max(200).default(''), // user id or token name, display/audit only
+  tokenPrefix: z.string().max(16), // display only, e.g. cf_share_9f2a
+  ...timestamps,
+});
+export type SessionShare = z.infer<typeof SessionShare>;
+export const SessionShareCreated = z.object({ token: z.string(), share: SessionShare });
+export type SessionShareCreated = z.infer<typeof SessionShareCreated>;
+
+// Payload served by the UNauthenticated GET /shared/recaps/:token endpoint.
+// Deliberately minimal — no internal ids, no dmSecret-bearing entities, just
+// what an absent player needs to catch up on the session.
+export const SharedRecap = z.object({
+  campaignName: z.string(),
+  sessionNumber: z.number().int().positive(),
+  title: z.string().default(''),
+  playedAt: IsoDate.nullable().default(null),
+  recap: z.string().default(''),
+});
+export type SharedRecap = z.infer<typeof SharedRecap>;
+
 // ---------- notes ----------
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
 export const NoteKind = z.enum(['note', 'inbox']);
