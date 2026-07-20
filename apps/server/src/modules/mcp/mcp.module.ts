@@ -17,6 +17,7 @@ import { AuditModule } from '../audit/audit.module';
 import { ExportModule } from '../export/export.module';
 import { AiDmModule } from '../ai-dm/ai-dm.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
+import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -41,6 +42,7 @@ import { McpController } from './mcp.controller';
     ExportModule,
     AiDmModule,
     AttachmentsModule,
+    SessionZeroModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],
