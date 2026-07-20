@@ -1,0 +1,10 @@
+{
+  "errors": {
+    "_comment": "Server-error i18n seam (issue #94): keys here are matched against ApiError.code via translateApiError(). When the server emits a stable `code`, add its translation here; otherwise the server's human-readable message is shown verbatim. These are illustrative mappings — extend as the server starts emitting codes.",
+    "CAMPAIGN_NOT_FOUND": "Campaign not found.",
+    "FORBIDDEN": "You don't have permission to do that.",
+    "UNAUTHORIZED": "Please sign in to continue.",
+    "RATE_LIMITED": "Too many requests — please slow down and try again.",
+    "NOT_FOUND": "Not found."
+  }
+}

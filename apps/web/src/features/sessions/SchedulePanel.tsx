@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { formatDateTime } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -461,7 +462,7 @@ function FeedCard({
 function formatWhen(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return 'Undated';
-  return d.toLocaleString('en-US', {
+  return formatDateTime(d, {
     weekday: 'short',
     month: 'short',
     day: 'numeric',

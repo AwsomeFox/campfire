@@ -17,6 +17,7 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { formatDate as formatLocaleDate } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -826,7 +827,7 @@ function formatDate(iso: string | null): string {
   if (!iso) return 'Undated';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return 'Undated';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return formatLocaleDate(d, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function toDateInputValue(iso: string | null): string {

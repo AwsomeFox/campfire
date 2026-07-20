@@ -8,6 +8,7 @@
  * Data: GET /api/v1/campaigns/:campaignId/quests
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import type { Quest, QuestChanges } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -67,13 +68,14 @@ const STATUS_TAG_CLASS: Record<Quest['status'], string> = {
 // NEW / CHANGED marker for a quest touched since the last session (#66), plus the
 // "updated Xd ago" relative time. Renders nothing when the quest hasn't changed.
 function ChangeBadge({ quest, kind }: { quest: Quest; kind: ChangeKind | undefined }) {
+  const { t } = useTranslation();
   if (!kind) return null;
-  const label = kind === 'new' ? 'NEW' : 'CHANGED';
+  const label = kind === 'new' ? t('quests.new') : t('quests.changed');
   return (
     <span
       className="tag tag-accent"
       style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.3 }}
-      title={`${label} since your last session — updated ${timeAgo(quest.updatedAt)}`}
+      title={t('quests.changeBadgeTitle', { label, time: timeAgo(quest.updatedAt) })}
     >
       {label} · {timeAgo(quest.updatedAt)}
     </span>
@@ -86,6 +88,7 @@ function ChangeBadge({ quest, kind }: { quest: Quest; kind: ChangeKind | undefin
 // objective ticking still lives on the Quest detail screen. See report deviations.
 
 export default function QuestListPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { roleIn } = useAuth();
@@ -118,7 +121,7 @@ export default function QuestListPage() {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
       } else {
-        setError("Couldn't load quests.");
+        setError(t('quests.loadFailed'));
       }
     } finally {
       setLoading(false);
@@ -135,7 +138,7 @@ export default function QuestListPage() {
   if (!Number.isFinite(cid)) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('quests.noCampaign')} />
       </div>
     );
   }
@@ -143,7 +146,7 @@ export default function QuestListPage() {
   if (forbidden) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <EmptyState icon="🔒" title="You don't have access to this campaign" />
+        <EmptyState icon="🔒" title={t('quests.noAccess')} />
       </div>
     );
   }
@@ -173,18 +176,21 @@ export default function QuestListPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h3 style={{ margin: '4px 0 0' }}>Quests</h3>
+        <h3 style={{ margin: '4px 0 0' }}>{t('quests.title')}</h3>
         <div style={{ flex: 1 }} />
         {isDm && (
           <Link to={`/c/${cid}/quests/new`} className="btn btn-primary" style={{ fontSize: 13 }}>
-            + New quest
+            {t('quests.newQuest')}
           </Link>
         )}
       </div>
 
       {changesSince && changes.size > 0 && (
         <p className="text-muted" style={{ margin: '-6px 0 0', fontSize: 12 }}>
-          {changes.size === 1 ? '1 quest' : `${changes.size} quests`} changed since your last session ({timeAgo(changesSince)}).
+          {t('quests.changedSummary', {
+            countLabel: changes.size === 1 ? t('quests.oneQuest') : t('quests.nQuests', { n: changes.size }),
+            time: timeAgo(changesSince),
+          })}
         </p>
       )}
 
@@ -195,7 +201,7 @@ export default function QuestListPage() {
           <Skeleton lines={5} />
         </div>
       ) : roots.length === 0 ? (
-        <EmptyState icon="📜" title="No quests yet" hint={isDm ? 'Start one with "+ New quest".' : 'Check back after the next session.'} />
+        <EmptyState icon="📜" title={t('quests.empty.title')} hint={isDm ? t('quests.empty.hintDm') : t('quests.empty.hintPlayer')} />
       ) : (
         roots.map((q) => {
           const kids = childrenOf(q.id);
@@ -222,8 +228,8 @@ export default function QuestListPage() {
                 </span>
                 <ChangeBadge quest={q} kind={changes.get(q.id)} />
                 {isDm && q.hidden && (
-                  <span className="tag tag-outline" style={{ fontSize: 10 }} title="Hidden from players">
-                    🙈 Hidden
+                  <span className="tag tag-outline" style={{ fontSize: 10 }} title={t('quests.hiddenFromPlayers')}>
+                    {t('quests.hidden')}
                   </span>
                 )}
                 <div style={{ flex: 1 }} />

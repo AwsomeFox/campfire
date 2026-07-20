@@ -6,6 +6,7 @@
  * (private -> shared with DM -> shared with party -> private).
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import type { CampaignMember, Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -61,6 +62,7 @@ const entityIcon: Record<EntityTypeValue, string> = {
 type FilterValue = 'all' | Note['visibility'];
 
 export default function MyNotesPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { me } = useAuth();
@@ -98,12 +100,12 @@ export default function MyNotesPage() {
       } else if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
       } else {
-        setError("Couldn't load notes.");
+        setError(t('notes.couldntLoadNotes'));
       }
     } finally {
       setLoading(false);
     }
-  }, [cid, handleAccessError]);
+  }, [cid, handleAccessError, t]);
 
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
@@ -150,7 +152,7 @@ export default function MyNotesPage() {
       setAttachResetKey((k) => k + 1);
       await load();
     } catch {
-      setError("Couldn't save the note.");
+      setError(t('notes.couldntSaveNote'));
     } finally {
       setSaving(false);
     }
@@ -163,7 +165,7 @@ export default function MyNotesPage() {
       await api.patch(`${API}/notes/${note.id}`, { visibility });
     } catch {
       setNotes(prev);
-      setError("Couldn't update visibility.");
+      setError(t('notes.couldntUpdateVisibility'));
     }
   }
 
@@ -176,7 +178,7 @@ export default function MyNotesPage() {
       setPendingDelete(null);
     } catch {
       setNotes(prev);
-      setError("Couldn't delete the note.");
+      setError(t('notes.couldntDeleteNote'));
     } finally {
       setDeleting(false);
     }
@@ -205,7 +207,7 @@ export default function MyNotesPage() {
   if (!Number.isFinite(cid)) {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('notes.noCampaign')} />
       </div>
     );
   }
@@ -215,9 +217,9 @@ export default function MyNotesPage() {
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card className="text-center space-y-2">
           <p className="text-2xl">🔒</p>
-          <p className="font-bold text-white">You no longer have access to this campaign</p>
+          <p className="font-bold text-white">{t('notes.lostAccessTitle')}</p>
           <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
-            Back to your campaigns
+            {t('notes.backToCampaigns')}
           </Link>
         </Card>
       </div>
@@ -228,7 +230,7 @@ export default function MyNotesPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🔒" title="You don't have access to this campaign" />
+          <EmptyState icon="🔒" title={t('notes.noAccess')} />
         </Card>
       </div>
     );
