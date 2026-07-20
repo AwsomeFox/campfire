@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { ProposalApprove, ProposalBatchResolve, ProposalResolve } from '@campfire/schema';
+import { ProposalApprove, ProposalBatchResolve, ProposalResolve, ProposalRevise } from '@campfire/schema';
 
 // .strict() — an unrecognized body key 400s instead of being silently stripped
 // (see encounters.dto.ts / issue #131). Only the top-level resolve/approve body
@@ -8,3 +8,7 @@ import { ProposalApprove, ProposalBatchResolve, ProposalResolve } from '@campfir
 export class ProposalResolveDto extends createZodDto(ProposalResolve.strict()) {}
 export class ProposalApproveDto extends createZodDto(ProposalApprove.strict()) {}
 export class ProposalBatchResolveDto extends createZodDto(ProposalBatchResolve.strict()) {}
+// Revise carries a required `payload` (the amended create/update body); it is
+// re-validated against the entity schema in ProposalsService, so the top-level
+// stays strict on unknown keys but the payload itself remains an open record.
+export class ProposalReviseDto extends createZodDto(ProposalRevise.strict()) {}

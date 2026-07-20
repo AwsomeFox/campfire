@@ -343,6 +343,10 @@ export class OAuthService {
       tokenId: row.id,
       name: `oauth:${row.clientId}`,
       scope: this.parseRole(row.roleScope),
+      // OAuth connector tokens have no write-mode dimension of their own (the
+      // consent flow only grants a role scope) — 'direct' preserves existing
+      // connector behavior (issue #158 adds write-mode to PATs, not OAuth grants).
+      writeScope: 'direct',
       campaignId: row.campaignId,
       adminEnabled: false, // OAuth connector tokens never carry server-admin power
     };

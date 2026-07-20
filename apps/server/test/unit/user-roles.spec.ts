@@ -23,7 +23,7 @@ function user(over: Partial<RequestUser> = {}): RequestUser {
 }
 
 function tokenCtx(over: Partial<TokenContext> = {}): TokenContext {
-  return { tokenId: 1, name: 'agent', scope: 'viewer', campaignId: null, adminEnabled: false, ...over };
+  return { tokenId: 1, name: 'agent', scope: 'viewer', writeScope: 'direct', campaignId: null, adminEnabled: false, ...over };
 }
 
 describe('roles — ranking', () => {

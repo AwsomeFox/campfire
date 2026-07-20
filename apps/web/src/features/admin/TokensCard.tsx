@@ -11,6 +11,7 @@ import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../com
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 type TokenScope = ApiToken['scope'];
+type WriteScope = ApiToken['writeScope'];
 type ApiTokenCreated = { token: string; apiToken: ApiToken };
 
 const SCOPE_CHIP: Record<TokenScope, string> = {
@@ -20,9 +21,21 @@ const SCOPE_CHIP: Record<TokenScope, string> = {
 };
 const SCOPE_LABEL: Record<TokenScope, string> = { dm: 'DM', player: 'Player', viewer: 'Viewer' };
 const SCOPE_HELP: Record<TokenScope, string> = {
-  dm: 'DM — the AI writes directly (quests, NPCs, encounters, HP…) and can approve proposals.',
-  player: 'Player — writes are scoped to that player and become DM proposals, not direct changes.',
-  viewer: 'Viewer — read-only; writes are rejected outright.',
+  dm: 'DM — reads everything (secrets, hidden context, full export) and can approve proposals.',
+  player: 'Player — scoped to that player; DM secrets are stripped.',
+  viewer: 'Viewer — read-only view; DM secrets are stripped.',
+};
+
+// Server-enforced WRITE authority, independent of read scope (issue #158).
+const WRITE_SCOPE_LABEL: Record<WriteScope, string> = {
+  direct: 'Direct write',
+  propose: 'Propose only',
+  none: 'Read-only',
+};
+const WRITE_SCOPE_HELP: Record<WriteScope, string> = {
+  direct: 'Direct — writes apply immediately (subject to the read scope above). The default, matching older tokens.',
+  propose: 'Propose only — every write (including deletes) is forced into the DM proposal queue server-side, even if the AI omits the flag. Recommended for AI agents.',
+  none: 'Read-only — every write is rejected outright, no proposal path.',
 };
 
 function mcpConnectCommand(origin: string, token?: string): string {
@@ -194,7 +207,8 @@ function TokenRow({ token, onRevoke }: { token: ApiToken; onRevoke: () => void }
       <div>
         <p className="text-sm font-semibold text-white">
           {token.name}{' '}
-          <span className={`cf-chip ${SCOPE_CHIP[token.scope]} ml-1`}>{SCOPE_LABEL[token.scope]} scope</span>{' '}
+          <span className={`cf-chip ${SCOPE_CHIP[token.scope]} ml-1`}>{SCOPE_LABEL[token.scope]} read</span>{' '}
+          <span className="cf-chip cf-chip-private ml-1">{WRITE_SCOPE_LABEL[token.writeScope]}</span>{' '}
           <span className="cf-chip cf-chip-private ml-1">{campaignBadge}</span>
         </p>
         <p className="text-[11px] text-slate-500">
@@ -221,6 +235,7 @@ function NewTokenForm({
 }) {
   const [name, setName] = useState('');
   const [scope, setScope] = useState<TokenScope>('player');
+  const [writeScope, setWriteScope] = useState<WriteScope>('direct');
   const [campaignId, setCampaignId] = useState<string>('');
   const [saving, setSaving] = useState(false);
 
@@ -232,6 +247,7 @@ function NewTokenForm({
       const result = await api.post<ApiTokenCreated>(`${API}/tokens`, {
         name: name.trim(),
         scope,
+        writeScope,
         campaignId: campaignId ? Number(campaignId) : null,
       });
       onCreated(result);
@@ -245,7 +261,7 @@ function NewTokenForm({
   return (
     <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
       <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">New token</p>
-      <div className="grid sm:grid-cols-3 gap-2">
+      <div className="grid sm:grid-cols-2 gap-2">
         <TextInput
           className="!min-h-0 !py-2 text-sm"
           placeholder="Name, e.g. claude-scribe"
@@ -261,15 +277,27 @@ function NewTokenForm({
           className="cf-select !min-h-0 !py-2 text-sm"
           value={scope}
           onChange={(e) => setScope(e.target.value as TokenScope)}
+          aria-label="Read scope"
         >
-          <option value="dm">Scope: DM</option>
-          <option value="player">Scope: Player</option>
-          <option value="viewer">Scope: Viewer</option>
+          <option value="dm">Read: DM</option>
+          <option value="player">Read: Player</option>
+          <option value="viewer">Read: Viewer</option>
+        </select>
+        <select
+          className="cf-select !min-h-0 !py-2 text-sm"
+          value={writeScope}
+          onChange={(e) => setWriteScope(e.target.value as WriteScope)}
+          aria-label="Write mode"
+        >
+          <option value="direct">Write: Direct</option>
+          <option value="propose">Write: Propose only</option>
+          <option value="none">Write: Read-only</option>
         </select>
         <select
           className="cf-select !min-h-0 !py-2 text-sm"
           value={campaignId}
           onChange={(e) => setCampaignId(e.target.value)}
+          aria-label="Campaign binding"
         >
           <option value="">All campaigns</option>
           {campaigns.map((c) => (
@@ -280,6 +308,7 @@ function NewTokenForm({
         </select>
       </div>
       <p className="text-[11px] text-slate-500">{SCOPE_HELP[scope]}</p>
+      <p className="text-[11px] text-slate-500">{WRITE_SCOPE_HELP[writeScope]}</p>
       <div className="flex items-center gap-2 justify-end">
         {!name.trim() && <p className="text-[11px] text-slate-500 mr-auto">Name your token to enable Create.</p>}
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
