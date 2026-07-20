@@ -266,6 +266,39 @@ function migrateCharactersTableForXp(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE characters ADD COLUMN xp INTEGER NOT NULL DEFAULT 0');
 }
 
+/**
+ * Migration for DBs created before entity-level secrecy (issue #42):
+ * `quests.hidden` / `npcs.hidden` didn't exist. Plain NOT NULL DEFAULT 0 ADD
+ * COLUMNs — no table rebuild needed, same as migrateCharactersTableForXp above.
+ * Defaulting to 0 (false = visible) preserves the pre-migration behavior for
+ * existing rows (nothing suddenly disappears from players); the DM opts a given
+ * entity into secrecy by setting hidden=true. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateQuestsTableForHidden(sqlite: Database.Database): void {
+  const hasQuestsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='quests'")
+    .get();
+  if (!hasQuestsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(quests)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'hidden')) return;
+
+  sqlite.exec('ALTER TABLE quests ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+}
+
+function migrateNpcsTableForHidden(sqlite: Database.Database): void {
+  const hasNpcsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='npcs'")
+    .get();
+  if (!hasNpcsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(npcs)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'hidden')) return;
+
+  sqlite.exec('ALTER TABLE npcs ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -288,6 +321,8 @@ export function createDb(): DrizzleDb {
   migrateCharactersTableForSheetDepth(sqlite);
   migrateCampaignsTableForIcsToken(sqlite);
   migrateCharactersTableForXp(sqlite);
+  migrateQuestsTableForHidden(sqlite);
+  migrateNpcsTableForHidden(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.

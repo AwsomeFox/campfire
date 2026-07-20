@@ -212,7 +212,11 @@ export class McpToolsService {
         'NPC/quest/location DM-only text), approve/reject proposals, install rule packs (server admin only), manage ' +
         'members. player: create/update their own character, roll dice, check objectives, post notes/inbox items, ' +
         'act on combatants linked to characters they own. viewer: read-only, plus dice rolls and notes/inbox (any ' +
-        'member may post). Server admins hold NO implicit campaign role (admin != auto-DM): campaign access, ' +
+        'member may post). ENTITY-LEVEL SECRECY — beyond dmSecret (which strips one field), a quest/NPC marked ' +
+        'hidden:true, and any location still status:"unexplored", are DM-only: they are excluded WHOLESALE from ' +
+        'every non-DM list/get/summary/export (a non-DM get 404s). The DM reveals a quest/NPC by setting ' +
+        'hidden=false, and a location via set_location_discovery (status → explored|current). ' +
+        'Server admins hold NO implicit campaign role (admin != auto-DM): campaign access, ' +
         'including DM secrets, comes only from an actual membership row, exactly like any other user. A PAT ' +
         '(personal access token) additionally CAPS the effective role to min(token scope, ' +
         'real membership role) and, if the token is bound to one campaignId, 403s on every other campaign. ' +
@@ -577,8 +581,9 @@ export class McpToolsService {
       server,
       'create_quest',
       'Create a quest in a campaign (DM). With propose:true any member may submit it as a proposal instead. ' +
-        'Supports subquests via parentId (another quest\'s id in the same campaign), an optional giverNpcId, and a ' +
-        'dmSecret field (DM-only text, stripped from non-DM reads).',
+        'Supports subquests via parentId (another quest\'s id in the same campaign), an optional giverNpcId, a ' +
+        'dmSecret field (DM-only text, stripped from non-DM reads), and a hidden flag (true = excluded WHOLESALE ' +
+        'from every non-DM read until the DM reveals it by setting hidden=false — for prepping future content).',
       { campaignId: CampaignIdArg, propose: ProposeArg, ...QuestCreate.shape },
       async ({ campaignId, propose, ...fields }) => {
         const validated = QuestCreate.parse(fields);
@@ -596,7 +601,8 @@ export class McpToolsService {
       server,
       'update_quest',
       'Update a quest (DM). With propose:true any member may submit the change as a proposal instead. Supports ' +
-        'subquests via parentId, an optional giverNpcId, and a dmSecret field (DM-only text).',
+        'subquests via parentId, an optional giverNpcId, a dmSecret field (DM-only text), and a hidden flag ' +
+        '(set hidden=false to reveal a previously-hidden quest to players).',
       { questId: Id.describe('Quest id'), propose: ProposeArg, ...QuestUpdate.shape },
       async ({ questId, propose, ...fields }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
@@ -707,7 +713,8 @@ export class McpToolsService {
       server,
       'upsert_npc',
       'Create an NPC (omit npcId) or update one (pass npcId). DM; with propose:true any member may submit a ' +
-        'proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads) and an optional locationId.',
+        'proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads), an optional ' +
+        'locationId, and a hidden flag (true = excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
       {
         campaignId: CampaignIdArg,
         npcId: Id.optional().describe('Existing NPC id (update); omit to create'),

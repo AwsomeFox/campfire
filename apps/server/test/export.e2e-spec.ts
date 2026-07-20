@@ -30,6 +30,11 @@ describe('export (e2e, real cookie sessions)', () => {
       .send({ title: 'Secret Quest', dmSecret: 'the vault code is 1234' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({ name: 'Mysterious Stranger', dmSecret: 'is a dragon' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/locations`).send({ name: 'Hidden Cave', dmSecret: 'trap inside' });
+
+    // Entity-level secrecy (issue #42): hidden quest/NPC and an unexplored location
+    // must STILL be present in the DM's export (the DM sees everything).
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Unrevealed Quest', hidden: true });
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({ name: 'Unrevealed NPC', hidden: true });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The party arrived.' });
 
     // Round-2 finding #6: export must include encounters (with combatants).
@@ -54,6 +59,13 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.body.quests[0].dmSecret).toBe('the vault code is 1234');
     expect(res.body.npcs[0].dmSecret).toBe('is a dragon');
     expect(res.body.locations[0].dmSecret).toBe('trap inside');
+
+    // Entity-level secrecy (issue #42): the DM's export still contains the hidden
+    // quest/NPC and the unexplored location — secrecy gates NON-DM reads, not the
+    // DM's own complete export.
+    expect(res.body.quests.some((q: { title: string; hidden: boolean }) => q.title === 'Unrevealed Quest' && q.hidden === true)).toBe(true);
+    expect(res.body.npcs.some((n: { name: string; hidden: boolean }) => n.name === 'Unrevealed NPC' && n.hidden === true)).toBe(true);
+    expect(res.body.locations.some((l: { name: string; status: string }) => l.name === 'Hidden Cave' && l.status === 'unexplored')).toBe(true);
     expect(res.body.sessions.length).toBe(1);
     expect(Array.isArray(res.body.members)).toBe(true);
     expect(Array.isArray(res.body.audit)).toBe(true);

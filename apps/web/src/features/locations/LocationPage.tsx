@@ -220,8 +220,16 @@ export default function LocationPage() {
           <div className="flex items-center gap-2.5 flex-wrap">
             <h1 className="text-2xl font-extrabold text-white">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}>{statusLabel[location.status]}</Chip>
+            {isDm && location.status === 'unexplored' && (
+              <Chip variant="failed" className="!ml-0">🙈 Hidden from players</Chip>
+            )}
             {isDm && nextStatus && (
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={statusSaving} onClick={() => setStatus(nextStatus)}>
+              <Btn
+                className="!min-h-0 !py-1.5 text-xs"
+                disabled={statusSaving}
+                onClick={() => setStatus(nextStatus)}
+                title={location.status === 'unexplored' ? 'Reveal to players (mark explored)' : NEXT_STATUS_LABEL[location.status]}
+              >
                 {NEXT_STATUS_LABEL[location.status]}
               </Btn>
             )}
