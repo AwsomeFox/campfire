@@ -36,6 +36,7 @@ import { RulesModule } from './modules/rules/rules.module';
 import { McpModule } from './modules/mcp/mcp.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
+import { EventsModule } from './modules/events/events.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -121,6 +122,7 @@ function serveStaticImports(): DynamicModule[] {
     McpModule,
     AttachmentsModule,
     EncountersModule,
+    EventsModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },
