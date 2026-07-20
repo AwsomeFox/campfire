@@ -14,6 +14,7 @@
  * in-combat statblock (issue #56) if those get imported later.
  */
 import { Fragment, type CSSProperties } from 'react';
+import { ruleSystemAdapter } from '@campfire/schema';
 
 interface NamedEntry {
   name: string;
@@ -46,11 +47,6 @@ const CR_FRACTIONS: Record<string, string> = { '0.125': '1/8', '0.25': '1/4', '0
 
 function signed(n: number): string {
   return n >= 0 ? `+${n}` : `${n}`;
-}
-
-/** D&D ability modifier: floor((score - 10) / 2). */
-function abilityMod(score: number): number {
-  return Math.floor((score - 10) / 2);
 }
 
 function formatCr(cr: unknown): string | null {
@@ -124,26 +120,32 @@ export function parseMonsterStatblock(data: unknown): MonsterStatblock | null {
   const d = normalize(data);
   if (!d) return null;
 
-  const scores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
+  // Statblock field mapping + the ability-modifier formula come from the rule-system
+  // adapter (issue #70), not inline field names/math here. Default (5e) reproduces the
+  // prior behavior exactly for imported/Open5e monsters, which store camelCase fields.
+  const adapter = ruleSystemAdapter();
+  const mapped = adapter.mapStatblock(d);
+
+  const scores = mapped.abilityScores;
   const abilities: MonsterStatblock['abilities'] = [];
   if (scores && typeof scores === 'object') {
     for (const { label, keys } of ABILITIES) {
       const raw = keys.map((k) => scores[k]).find((v) => v !== undefined && v !== null);
       const score = typeof raw === 'number' ? raw : Number(raw);
-      if (Number.isFinite(score)) abilities.push({ label, score, mod: signed(abilityMod(score)) });
+      if (Number.isFinite(score)) abilities.push({ label, score, mod: signed(adapter.abilityModifier(score)) });
     }
   }
 
   const block: MonsterStatblock = {
-    size: toText(d.size),
-    creatureType: toText(d.type ?? d.creatureType),
-    challengeRating: formatCr(d.challengeRating ?? d.challenge_rating),
-    armorClass: toText(d.armorClass ?? d.armor_class),
-    hitPoints: toText(d.hitPoints ?? d.hit_points ?? d.hp),
-    speed: formatSpeed(d.speed),
+    size: toText(mapped.size),
+    creatureType: toText(mapped.creatureType),
+    challengeRating: formatCr(mapped.challengeRating),
+    armorClass: toText(mapped.armorClass),
+    hitPoints: toText(mapped.hitPoints),
+    speed: formatSpeed(mapped.speed),
     abilities,
-    specialAbilities: namedEntries(d.specialAbilities ?? d.special_abilities),
-    actions: namedEntries(d.actions),
+    specialAbilities: namedEntries(mapped.specialAbilities),
+    actions: namedEntries(mapped.actions),
   };
 
   const hasAnything =

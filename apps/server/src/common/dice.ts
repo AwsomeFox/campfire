@@ -139,7 +139,12 @@ export function rollDice(expr: string): RollResult {
   return { expr, rolls, kept, total };
 }
 
-/** Convenience: roll a plain "d20 + mod" initiative check for a given ability modifier. */
-export function rollInitiative(initMod: number): number {
-  return rollOne(20) + initMod;
+/**
+ * Convenience: roll a plain "dN + mod" initiative check for a given initiative modifier.
+ * The die defaults to 20 (D&D 5e). The d20 assumption is NOT baked in here — callers pass
+ * the die from the campaign's RuleSystemAdapter (`adapter.initiativeDie`, issue #70); this
+ * roller stays rule-system-agnostic, and every existing 5e caller gets the same d20 roll.
+ */
+export function rollInitiative(initMod: number, die = 20): number {
+  return rollOne(die) + initMod;
 }
