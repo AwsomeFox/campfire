@@ -31,6 +31,7 @@ import { NpcsModule } from './modules/npcs/npcs.module';
 import { LocationsModule } from './modules/locations/locations.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
 import { NotesModule } from './modules/notes/notes.module';
+import { CommentsModule } from './modules/comments/comments.module';
 import { SearchModule } from './modules/search/search.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { TokensModule } from './modules/tokens/tokens.module';
@@ -49,6 +50,7 @@ import { ObservabilityModule } from './modules/observability/observability.modul
 import { BackupModule } from './modules/backup/backup.module';
 import { AiDmModule } from './modules/ai-dm/ai-dm.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
+import { SessionZeroModule } from './modules/session-zero/session-zero.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -139,6 +141,7 @@ function serveStaticImports(): DynamicModule[] {
     LocationsModule,
     SessionsModule,
     NotesModule,
+    CommentsModule,
     SearchModule,
     ProposalsModule,
     ExportModule,
@@ -155,6 +158,7 @@ function serveStaticImports(): DynamicModule[] {
     BackupModule,
     AiDmModule,
     TimelineModule,
+    SessionZeroModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },

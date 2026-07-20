@@ -1,6 +1,7 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
+import type { SessionAttendee } from '@campfire/schema';
 import { SessionCreate, SessionUpdate } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -10,7 +11,7 @@ import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { parsePageParams } from '../../common/pagination';
 import { SessionsService } from './sessions.service';
-import { SessionCreateDto, SessionUpdateDto } from './sessions.dto';
+import { SessionCreateDto, SessionUpdateDto, SessionAttendanceSetDto } from './sessions.dto';
 
 /** Upper bound for `?limit` on the sessions list (issue #71). */
 const SESSIONS_LIST_MAX_LIMIT = 200;
@@ -138,5 +139,37 @@ export class SessionsController {
     }
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.sessions.remove(id, user, role);
+  }
+
+  @Get(':id/attendance')
+  @ApiOperation({
+    summary: 'Get session attendance',
+    description:
+      'Requires campaign membership. The characters that played this session (issue #121) — the West Marches ' +
+      '"who was there" record. Empty when attendance was never set.',
+  })
+  @ApiResponse({ status: 200, description: 'Attendees (characters) for this session.' })
+  async getAttendance(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<SessionAttendee[]> {
+    const row = await this.sessions.getRowOrThrow(id);
+    await this.access.requireMember(user, row.campaignId);
+    return this.sessions.getAttendance(id);
+  }
+
+  @Put(':id/attendance')
+  @ApiOperation({
+    summary: 'Set session attendance',
+    description:
+      'dm role required. Replaces the session\'s attendance with exactly the given characterIds (empty array clears ' +
+      'it). Every id must be a character in the session\'s own campaign — an id from another campaign 400s.',
+  })
+  @ApiResponse({ status: 200, description: 'The session\'s updated attendee list.' })
+  async setAttendance(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: SessionAttendanceSetDto,
+    @CurrentUser() user: RequestUser,
+  ): Promise<SessionAttendee[]> {
+    const row = await this.sessions.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.sessions.setAttendance(id, body.characterIds, user, role);
   }
 }

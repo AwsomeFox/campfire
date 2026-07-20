@@ -44,6 +44,10 @@ export const characters = sqliteTable('characters', {
   level: integer('level').notNull().default(1),
   xp: integer('xp').notNull().default(0),
   background: text('background').notNull().default(''),
+  // Lifecycle status: active|dead|retired|inactive (issue #115). Only 'active' PCs are
+  // auto-added to a new encounter. Nullable in older DBs pre-migration; see
+  // db/db.module.ts ALTER TABLE note.
+  status: text('status').notNull().default('active'),
   stats: text('stats').notNull().default('{}'),
   ac: integer('ac'),
   hpCurrent: integer('hp_current').notNull().default(10),
@@ -147,6 +151,22 @@ export const timelineCalendars = sqliteTable('timeline_calendars', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Session zero / table charter (safety tools & expectations) — issue #122. One row
+// per campaign (campaignId PK), upserted like timeline_calendars. lines/veils/
+// safetyTools are string arrays stored as JSON text (see common/json.ts); the rest is
+// markdown. Member-readable, DM-authored — no dmSecret (a safety record the whole
+// table must see).
+export const sessionZero = sqliteTable('session_zero', {
+  campaignId: integer('campaign_id').primaryKey(),
+  lines: text('lines').notNull().default('[]'),
+  veils: text('veils').notNull().default('[]'),
+  safetyTools: text('safety_tools').notNull().default('[]'),
+  houseRules: text('house_rules').notNull().default(''),
+  toneAndExpectations: text('tone_and_expectations').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const npcs = sqliteTable('npcs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
@@ -192,6 +212,18 @@ export const sessions = sqliteTable('sessions', {
   dmSecret: text('dm_secret').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+// Per-session attendance (issue #121) — which characters played a given session.
+// West Marches / rotating-cast tables need a "who was there" record instead of the
+// party being all-or-nothing. One row per (session, character); the set is replaced
+// wholesale on write. character_name is denormalized so recaps/cards don't join.
+export const sessionAttendees = sqliteTable('session_attendees', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  sessionId: integer('session_id').notNull(),
+  characterId: integer('character_id').notNull(),
+  characterName: text('character_name').notNull().default(''),
+  createdAt: text('created_at').notNull(),
 });
 
 // Read-only recap share links (see modules/sessions/session-shares.service.ts).
@@ -244,9 +276,30 @@ export const notes = sqliteTable('notes', {
   visibility: text('visibility').notNull().default('private'),
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
+  // Target member for a `whisper` note (issue #127) — String(users.id) or dev:<name>,
+  // same identity space as author_user_id. Null for every other visibility. Nullable/
+  // absent in older DBs pre-migration; see db/db.module.ts migrateNotesTableForRecipient().
+  recipientUserId: text('recipient_user_id'),
   body: text('body').notNull(),
   resolved: integer('resolved', { mode: 'boolean' }).notNull().default(false),
   resolvedNote: text('resolved_note').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Threaded discussion layer (issue #123). Distinct from notes: always anchored
+// to an entity, always visible to all campaign members, one level of threading
+// via parent_id, optional in-character flag.
+export const comments = sqliteTable('comments', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  entityType: text('entity_type').notNull(),
+  entityId: integer('entity_id').notNull(),
+  parentId: integer('parent_id'),
+  authorUserId: text('author_user_id').notNull(),
+  authorName: text('author_name').notNull().default(''),
+  body: text('body').notNull(),
+  inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -607,6 +660,12 @@ export const combatants = sqliteTable('combatants', {
   initMod: integer('init_mod').notNull().default(0),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
+  // Temp HP + death-save subsystem (issue #57). Added by migration on older DBs;
+  // see db/db.module.ts migrateCombatantsTableForHpModel().
+  hpTemp: integer('hp_temp').notNull().default(0),
+  deathState: text('death_state').notNull().default('none'), // 'none' | 'dying' | 'stable' | 'dead'
+  deathSaveSuccesses: integer('death_save_successes').notNull().default(0),
+  deathSaveFailures: integer('death_save_failures').notNull().default(0),
   conditions: text('conditions').notNull().default('[]'),
   ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
   sortOrder: integer('sort_order').notNull().default(0),

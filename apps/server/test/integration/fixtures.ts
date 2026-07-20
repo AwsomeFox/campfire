@@ -190,6 +190,22 @@ export function writeOldSchemaDb(dataDir: string): void {
       updated_at TEXT NOT NULL
     );
 
+    -- combatants: no hp_temp / death_state / death_save_successes / death_save_failures (issue #57).
+    CREATE TABLE combatants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      encounter_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      character_id INTEGER,
+      name TEXT NOT NULL,
+      initiative INTEGER,
+      init_mod INTEGER NOT NULL DEFAULT 0,
+      hp_current INTEGER NOT NULL DEFAULT 10,
+      hp_max INTEGER NOT NULL DEFAULT 10,
+      conditions TEXT NOT NULL DEFAULT '[]',
+      rule_entry_id INTEGER,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
     -- attachments: no hidden.
     CREATE TABLE attachments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,6 +248,9 @@ export function writeOldSchemaDb(dataDir: string): void {
   sqlite.prepare(
     "INSERT INTO encounters (campaign_id, name, created_at, updated_at) VALUES (1, 'Legacy Ambush', ?, ?)",
   ).run(now, now);
+  sqlite.prepare(
+    "INSERT INTO combatants (encounter_id, kind, name, hp_current, hp_max) VALUES (1, 'monster', 'Legacy Goblin', 5, 7)",
+  ).run();
   sqlite.prepare(
     "INSERT INTO attachments (campaign_id, uploader_user_id, kind, filename, mime, size, created_at, updated_at) VALUES (1, 'legacy-dm', 'image', 'map.png', 'image/png', 1234, ?, ?)",
   ).run(now, now);

@@ -14,7 +14,7 @@ export function Inset({ children, className = '' }: { children: ReactNode; class
 
 export type ChipVariant =
   | 'active' | 'available' | 'completed' | 'failed'
-  | 'private' | 'dm' | 'party' | 'proposal';
+  | 'private' | 'dm' | 'party' | 'proposal' | 'whisper';
 
 const chipClass: Record<ChipVariant, string> = {
   active: 'cf-chip-active',
@@ -25,6 +25,7 @@ const chipClass: Record<ChipVariant, string> = {
   dm: 'cf-chip-dm',
   party: 'cf-chip-party',
   proposal: 'cf-chip-proposal',
+  whisper: 'cf-chip-whisper',
 };
 
 export function Chip({ variant, children, className = '' }: { variant: ChipVariant; children: ReactNode; className?: string }) {

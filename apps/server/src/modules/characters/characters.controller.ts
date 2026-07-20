@@ -9,7 +9,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -55,6 +55,26 @@ export class CampaignCharactersController {
     const role = await this.access.requireRole(user, campaignId, 'player');
     res.status(201);
     return this.characters.create(campaignId, body, user, role);
+  }
+
+  @Post('import-ddb')
+  @ApiOperation({
+    summary: 'Import a character from a public D&D Beyond sheet',
+    description:
+      'player role required. Reads a PUBLIC D&D Beyond character sheet (unofficial, read-only — no auth, no private data) and creates a Campfire character from it. Body is `{ ddbId }` (the numeric character id) or `{ url }` (a character/share link, e.g. https://www.dndbeyond.com/characters/12345678). The sheet must have its privacy set to Public on D&D Beyond. Ownership follows the normal create rules (a player imports for themselves; a dm imports DM-managed).',
+  })
+  @ApiResponse({ status: 201, description: 'Created character imported from D&D Beyond.' })
+  @ApiResponse({ status: 400, description: 'The sheet is private, the id/URL is malformed, or D&D Beyond was unreachable.' })
+  @ApiResponse({ status: 404, description: 'No such D&D Beyond character.' })
+  async importDdb(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: DdbCharacterImportDto,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const role = await this.access.requireRole(user, campaignId, 'player');
+    res.status(201);
+    return this.characters.importFromDdb(campaignId, body, user, role);
   }
 
   @Post('xp')
@@ -122,11 +142,13 @@ export class CharactersController {
   @Delete(':id')
   @ApiOperation({
     summary: 'Delete a character',
-    description: 'dm role required, unless `?proposed=true` — then any member may submit a deletion as a pending proposal.',
+    description:
+      'dm or the owning player may delete (mirrors PATCH) — a player may remove their own character (e.g. a backup PC or companion they created); other players get 403. With `?proposed=true` any member may submit a deletion as a pending proposal instead.',
   })
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending delete proposal instead of deleting directly.' })
   @ApiResponse({ status: 200, description: 'Deleted (direct write).' })
   @ApiResponse({ status: 202, description: 'Pending delete proposal created (proposed=true).' })
+  @ApiResponse({ status: 403, description: 'Not the dm or owning player.' })
   @Proposable()
   async remove(
     @Param('id', ParseIntPipe) id: number,
@@ -141,7 +163,9 @@ export class CharactersController {
       res.status(202);
       return { proposal };
     }
-    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    // Player-level membership gate at the controller; the service's assertCanWrite
+    // narrows to dm-or-owner (same two-step pattern as PATCH / hp / conditions).
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.remove(id, user, role);
   }
 

@@ -71,6 +71,69 @@ function isDown(c: Combatant): boolean {
   return c.hpCurrent != null ? c.hpCurrent <= 0 : c.hpBand === 'down';
 }
 
+const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Stable', dead: 'Dead' };
+
+/**
+ * 5e death-save tracker (issue #57): three success pips + three failure pips for a
+ * character at 0 HP. Clicking a pip sets the count to that position (clicking the
+ * highest-lit pip clears it back down), committing via onSet. Read-only unless canEdit.
+ */
+function DeathSaveTracker({
+  successes,
+  failures,
+  canEdit,
+  busy,
+  onSet,
+}: {
+  successes: number;
+  failures: number;
+  canEdit: boolean;
+  busy: boolean;
+  onSet: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
+}) {
+  function Pips({ kind, count, color }: { kind: 'deathSaveSuccesses' | 'deathSaveFailures'; count: number; color: string }) {
+    return (
+      <span style={{ display: 'inline-flex', gap: 3 }}>
+        {[0, 1, 2].map((i) => {
+          const filled = i < count;
+          const next = count === i + 1 ? i : i + 1; // click the highest-lit pip to clear it
+          return (
+            <button
+              key={i}
+              type="button"
+              aria-label={`${kind === 'deathSaveSuccesses' ? 'Success' : 'Failure'} ${i + 1} of 3${filled ? ' (marked)' : ''}`}
+              aria-pressed={filled}
+              disabled={!canEdit || busy}
+              onClick={() => onSet({ [kind]: next })}
+              style={{
+                width: 13,
+                height: 13,
+                borderRadius: '50%',
+                padding: 0,
+                border: `1.5px solid ${color}`,
+                background: filled ? color : 'transparent',
+                cursor: canEdit && !busy ? 'pointer' : 'default',
+              }}
+            />
+          );
+        })}
+      </span>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 10, flexWrap: 'wrap' }}>
+      <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
+        <span className="text-muted" style={{ letterSpacing: 0.3 }}>Saves</span>
+        <Pips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" />
+      </span>
+      <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
+        <span className="text-muted" style={{ letterSpacing: 0.3 }}>Fails</span>
+        <Pips kind="deathSaveFailures" count={failures} color="#e5484d" />
+      </span>
+    </div>
+  );
+}
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -443,13 +506,18 @@ export default function RunSessionPage() {
               combatant={c}
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
+              canEditIdentity={isDm && encounter.status !== 'ended'}
               canRemove={isDm}
               canSetInitiative={isDm && encounter.status !== 'ended'}
               busy={busy}
               onHpDelta={(delta) => patchCombatant(c.id, { hpDelta: delta })}
+              onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
+              onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
               onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
               onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
               onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
+              onRename={(name) => patchCombatant(c.id, { name })}
+              onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
             />
           ))
@@ -518,28 +586,63 @@ function CombatantRow({
   combatant,
   isCurrentTurn,
   canEdit,
+  canEditIdentity,
   canRemove,
   canSetInitiative,
   busy,
   onHpDelta,
+  onSetTempHp,
+  onSetDeathSaves,
   onSetInitiative,
   onAddCondition,
   onRemoveCondition,
+  onRename,
+  onSetHpMax,
   onRemove,
 }: {
   combatant: Combatant;
   isCurrentTurn: boolean;
   canEdit: boolean;
+  canEditIdentity: boolean;
   canRemove: boolean;
   canSetInitiative: boolean;
   busy: boolean;
   onHpDelta: (delta: number) => void;
+  onSetTempHp: (value: number) => void;
+  onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   onSetInitiative: (value: number) => void;
   onAddCondition: (cond: string) => void;
   onRemoveCondition: (cond: string) => void;
+  onRename: (name: string) => void;
+  onSetHpMax: (value: number) => void;
   onRemove: () => void;
 }) {
   const [addingCondition, setAddingCondition] = useState(false);
+  const [editingIdentity, setEditingIdentity] = useState(false);
+  const [nameDraft, setNameDraft] = useState(combatant.name);
+  const [hpMaxDraft, setHpMaxDraft] = useState(combatant.hpMax?.toString() ?? '');
+  const [tempDraft, setTempDraft] = useState('');
+  useEffect(() => {
+    setNameDraft(combatant.name);
+    setHpMaxDraft(combatant.hpMax?.toString() ?? '');
+  }, [combatant.name, combatant.hpMax]);
+
+  function commitIdentity() {
+    const trimmedName = nameDraft.trim();
+    if (trimmedName && trimmedName !== combatant.name) onRename(trimmedName);
+    const nextHpMax = Number(hpMaxDraft);
+    if (Number.isInteger(nextHpMax) && nextHpMax >= 1 && nextHpMax !== combatant.hpMax) onSetHpMax(nextHpMax);
+    setEditingIdentity(false);
+  }
+
+  function commitTempHp() {
+    const trimmed = tempDraft.trim();
+    if (trimmed === '') return;
+    const value = Number(trimmed);
+    if (!Number.isInteger(value) || value < 0) return;
+    onSetTempHp(value);
+    setTempDraft('');
+  }
   // Draft of the initiative field (DM only). Kept local so typing doesn't fire a
   // PATCH per keystroke — committed on blur / Enter.
   const [initDraft, setInitDraft] = useState<string>(combatant.initiative?.toString() ?? '');
@@ -627,20 +730,89 @@ function CombatantRow({
         </span>
       )}
       <div style={{ flex: 1, minWidth: 160 }}>
-        <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-          <span style={down ? { textDecoration: 'line-through' } : undefined}>
-            {down && <span aria-hidden="true" style={{ marginRight: 5 }}>💀</span>}
-            {combatant.name}
-          </span>
-          <span className={kindTagClass} style={{ fontSize: 9 }}>
-            {combatant.kind}
-          </span>
-          {down && (
-            <span className="tag tag-outline" style={{ fontSize: 9 }}>
-              Down
+        {editingIdentity ? (
+          <div className="flex gap-2 items-end flex-wrap" style={{ marginBottom: 4 }}>
+            <div className="field" style={{ flex: 1, minWidth: 120 }}>
+              <label htmlFor={`rename-${combatant.id}`} style={{ fontSize: 10 }}>Name</label>
+              <TextInput
+                id={`rename-${combatant.id}`}
+                value={nameDraft}
+                disabled={busy}
+                autoFocus
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitIdentity(); }
+                  if (e.key === 'Escape') { setEditingIdentity(false); setNameDraft(combatant.name); }
+                }}
+              />
+            </div>
+            <div className="field" style={{ width: 72 }}>
+              <label htmlFor={`hpmax-${combatant.id}`} style={{ fontSize: 10 }}>Max HP</label>
+              <TextInput
+                id={`hpmax-${combatant.id}`}
+                aria-label={`Max HP for ${combatant.name}`}
+                value={hpMaxDraft}
+                disabled={busy}
+                onChange={(e) => setHpMaxDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitIdentity(); }
+                  if (e.key === 'Escape') { setEditingIdentity(false); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }
+                }}
+              />
+            </div>
+            <Btn onClick={commitIdentity} disabled={busy}>Save</Btn>
+            <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => { setEditingIdentity(false); setNameDraft(combatant.name); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }}>Cancel</button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+            <span style={down ? { textDecoration: 'line-through' } : undefined}>
+              {down && <span aria-hidden="true" style={{ marginRight: 5 }}>💀</span>}
+              {combatant.name}
             </span>
+            <span className={kindTagClass} style={{ fontSize: 9 }}>
+              {combatant.kind}
+            </span>
+            {combatant.deathState !== 'none' && combatant.deathState !== undefined ? (
+              <span className="tag tag-outline" style={{ fontSize: 9 }}>
+                {DEATH_STATE_LABEL[combatant.deathState] ?? 'Down'}
+              </span>
+            ) : (
+              down && (
+                <span className="tag tag-outline" style={{ fontSize: 9 }}>
+                  Down
+                </span>
+              )
+            )}
+            {canEditIdentity && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                aria-label={`Rename ${combatant.name} or edit its max HP`}
+                title="Rename / edit max HP"
+                disabled={busy}
+                onClick={() => setEditingIdentity(true)}
+                style={{ fontSize: 10, minHeight: 20, padding: '1px 6px' }}
+              >
+                ✎
+              </button>
+            )}
+          </div>
+        )}
+        {/* Death-save tracker (issue #57): shown for a character that is dying/stable/dead,
+            or any character sitting at 0 HP. Monsters never roll death saves. */}
+        {combatant.kind === 'character' &&
+          (combatant.deathState === 'dying' ||
+            combatant.deathState === 'stable' ||
+            combatant.deathState === 'dead' ||
+            (combatant.hpCurrent != null && combatant.hpCurrent <= 0)) && (
+            <DeathSaveTracker
+              successes={combatant.deathSaveSuccesses ?? 0}
+              failures={combatant.deathSaveFailures ?? 0}
+              canEdit={canEdit}
+              busy={busy}
+              onSet={onSetDeathSaves}
+            />
           )}
-        </div>
         {combatant.conditions.length > 0 && (
           <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
             {combatant.conditions.map((cond) => (
@@ -709,8 +881,15 @@ function CombatantRow({
       <div style={{ minWidth: 130, flex: 'none' }}>
         {combatant.hpCurrent != null && combatant.hpMax != null ? (
           <>
-            <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3 }}>
-              {combatant.hpCurrent} / {combatant.hpMax}
+            <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3, display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'baseline' }}>
+              {combatant.hpTemp != null && combatant.hpTemp > 0 && (
+                <span className="tag tag-accent" style={{ fontSize: 9 }} title="Temporary HP — absorbs damage first">
+                  🛡 {combatant.hpTemp}
+                </span>
+              )}
+              <span>
+                {combatant.hpCurrent} / {combatant.hpMax}
+              </span>
             </div>
             <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
           </>
@@ -721,6 +900,35 @@ function CombatantRow({
             </div>
             <HpBandBar band={combatant.hpBand} />
           </>
+        )}
+        {/* Temp-HP setter (issue #57) — grant/clear temporary HP. Same edit gate as
+            the HP steppers; hidden for redacted monster rows (hpCurrent null). */}
+        {canEdit && combatant.hpCurrent != null && (
+          <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end', marginTop: 4 }}>
+            <input
+              type="number"
+              min={0}
+              aria-label={`Set temporary HP for ${combatant.name}`}
+              placeholder="temp"
+              value={tempDraft}
+              disabled={busy}
+              onChange={(e) => setTempDraft(e.target.value)}
+              onBlur={commitTempHp}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+              }}
+              style={{
+                width: 60,
+                height: 26,
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--color-divider)',
+                background: 'transparent',
+                textAlign: 'center',
+                fontSize: 11,
+                color: 'var(--color-text)',
+              }}
+            />
+          </div>
         )}
       </div>
       {/* HP steppers — only where a concrete number exists to adjust. A redacted
@@ -807,12 +1015,23 @@ function AddCombatantPanel({
   const [name, setName] = useState('');
   const [hpMax, setHpMax] = useState('');
   const [initMod, setInitMod] = useState('');
+  const [manualCount, setManualCount] = useState('1');
 
   // Compendium
   const [query, setQuery] = useState('');
   const debouncedQuery = useDebounced(query, 300);
   const [results, setResults] = useState<RuleEntry[]>([]);
   const [searching, setSearching] = useState(false);
+  // Quantity + optional name override applied to the next compendium add (issue #114).
+  const [compCount, setCompCount] = useState('1');
+  const [nameOverride, setNameOverride] = useState('');
+
+  /** Clamp a free-text quantity field to a sane 1–50, defaulting to 1. */
+  function parseCount(raw: string): number {
+    const n = Math.floor(Number(raw));
+    if (!Number.isFinite(n) || n < 1) return 1;
+    return Math.min(50, n);
+  }
 
   useEffect(() => {
     if (tab !== 'compendium' || !debouncedQuery.trim()) {
@@ -856,10 +1075,12 @@ function AddCombatantPanel({
         name: name.trim(),
         hpMax: hpMax ? Math.max(1, Number(hpMax)) : undefined,
         initMod: initMod ? Number(initMod) : undefined,
+        count: parseCount(manualCount),
       });
       setName('');
       setHpMax('');
       setInitMod('');
+      setManualCount('1');
       await onAdded();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
@@ -874,9 +1095,14 @@ function AddCombatantPanel({
     try {
       await api.post(`${API}/encounters/${encounterId}/combatants`, {
         kind: 'monster' as CombatantKind,
-        name: entry.name,
+        // Optional override lets the DM rename ("Goblin" -> "Goblin archer") at add time;
+        // otherwise the statblock name is used. count>1 auto-suffixes 1..N server-side.
+        name: nameOverride.trim() || entry.name,
         ruleEntryId: entry.id,
+        count: parseCount(compCount),
       });
+      setNameOverride('');
+      setCompCount('1');
       await onAdded();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
@@ -944,6 +1170,10 @@ function AddCombatantPanel({
             <label htmlFor="add-combatant-init">Init mod</label>
             <TextInput id="add-combatant-init" aria-label="Initiative modifier" placeholder="2" value={initMod} onChange={(e) => setInitMod(e.target.value)} />
           </div>
+          <div className="field" style={{ width: 70 }}>
+            <label htmlFor="add-combatant-count">Qty</label>
+            <TextInput id="add-combatant-count" type="number" min={1} max={50} aria-label="Quantity — adds this many, auto-numbered" value={manualCount} onChange={(e) => setManualCount(e.target.value)} />
+          </div>
           <Btn type="submit" disabled={saving || !name.trim()}>
             {saving ? 'Adding…' : 'Add'}
           </Btn>
@@ -959,6 +1189,18 @@ function AddCombatantPanel({
             onChange={(e) => setQuery(e.target.value)}
             autoFocus
           />
+          {/* Quantity + optional name override for the next pick (issue #114): adding
+              N monsters auto-numbers them "Goblin 1".."Goblin N" so they're distinguishable. */}
+          <div className="flex gap-2 flex-wrap items-end">
+            <div className="field" style={{ width: 70 }}>
+              <label htmlFor="comp-count">Qty</label>
+              <TextInput id="comp-count" type="number" min={1} max={50} aria-label="Quantity to add" value={compCount} onChange={(e) => setCompCount(e.target.value)} />
+            </div>
+            <div className="field" style={{ flex: 1, minWidth: 140 }}>
+              <label htmlFor="comp-name-override">Name override (optional)</label>
+              <TextInput id="comp-name-override" placeholder="Leave blank to use statblock name" value={nameOverride} onChange={(e) => setNameOverride(e.target.value)} />
+            </div>
+          </div>
           {searching ? (
             <Skeleton lines={2} />
           ) : results.length === 0 ? (

@@ -57,6 +57,7 @@ import { EncountersService } from '../encounters/encounters.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
+import { SessionZeroService } from '../session-zero/session-zero.service';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -201,6 +202,7 @@ export class McpToolsService {
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
     private readonly aiDm: AiDmService,
+    private readonly sessionZero: SessionZeroService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
@@ -348,6 +350,20 @@ export class McpToolsService {
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
         return this.campaigns.summary(campaignId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_session_zero',
+      "The campaign's session-zero charter — lines (hard limits: content that never appears), veils (soft limits: " +
+        'kept off-screen), the safety tools the table agreed to use (X-Card, Open Door, …), house rules, and tone/' +
+        'content expectations. Any AI running or assisting at this table MUST respect these boundaries. Read-only over ' +
+        'MCP; a campaign that never ran session zero returns empty fields.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.sessionZero.get(campaignId as number);
       },
     );
 
@@ -629,8 +645,9 @@ export class McpToolsService {
     this.tool(
       server,
       'list_notes',
-      'List notes visible to the caller in a campaign: private (author only), dm_shared (author+dm), or ' +
-        'party_shared (everyone). Optionally filter by the entity the note is linked to, or to just the caller\'s own notes.',
+      'List notes visible to the caller in a campaign: private (author only), dm_shared (author+dm), party_shared ' +
+        '(everyone), or whisper (author + the single targeted recipient + any dm). A whisper the caller is not the ' +
+        'target of is never returned. Optionally filter by the entity the note is linked to, or to just the caller\'s own notes.',
       {
         campaignId: CampaignIdArg,
         entityType: EntityType.optional().describe('Filter to notes linked to this entity type'),
@@ -1279,13 +1296,45 @@ export class McpToolsService {
       },
     );
 
+    this.tool(
+      server,
+      'get_session_attendance',
+      'List the characters that played a session (issue #121) — the West Marches "who was there" record. Ids come ' +
+        'from get_session_recaps / get_session. Empty when attendance was never recorded.',
+      { sessionId: Id.describe('Session id — from get_session_recaps') },
+      async ({ sessionId }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        await this.access.requireMember(user, row.campaignId);
+        return this.sessions.getAttendance(sessionId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'set_session_attendance',
+      'DM only: record who played a session (issue #121). Replaces the session\'s attendance with exactly ' +
+        '`characterIds` — pass the full set each time (an empty array clears it). Every id must be a character in the ' +
+        'session\'s own campaign (character ids come from get_campaign_summary / list). Lets an AI scribe log the ' +
+        'rotating cast of a West Marches outing.',
+      {
+        sessionId: Id.describe('Session id — from get_session_recaps'),
+        characterIds: z.array(Id).max(500).describe('The full set of characters that attended; replaces any prior attendance'),
+      },
+      async ({ sessionId, characterIds }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.sessions.setAttendance(sessionId as number, characterIds as number[], user, role);
+      },
+    );
+
     this.writeTool(
       server,
       user,
       'upsert_character',
       'Create a character (omit characterId) or update one (pass characterId). player may create/update their own ' +
         'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
-        'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise. With propose:true ' +
+        'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise. Set status to ' +
+        "active|dead|retired|inactive to mark a PC's lifecycle — only active PCs are auto-added to new encounters. With propose:true " +
         'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly.',
       {
         campaignId: CampaignIdArg,
@@ -1408,21 +1457,62 @@ export class McpToolsService {
       server,
       user,
       'add_note',
-      'Add a note to a campaign (any member). Visibility: private (default) | dm_shared | party_shared.',
+      'Add a note to a campaign (any member). Visibility: private (default) | dm_shared | party_shared | whisper. ' +
+        'A `whisper` is a per-player secret: pass `recipientUserId` (a campaign member id) and the note is visible ' +
+        'ONLY to that member, the author, and any DM — the way to record "only the rogue notices the trap door" or a ' +
+        'patron speaking to one warlock. Prefer the dedicated whisper_to_player tool for the common case.',
       {
         campaignId: CampaignIdArg,
         body: z.string().min(1).max(20_000).describe('Note body (markdown)'),
-        visibility: NoteVisibility.optional().describe('private | dm_shared | party_shared'),
+        visibility: NoteVisibility.optional().describe('private | dm_shared | party_shared | whisper'),
         entityType: EntityType.optional().describe('Optionally link to an entity type'),
         entityId: Id.optional().describe('Optionally link to an entity id'),
+        recipientUserId: z
+          .string()
+          .max(120)
+          .optional()
+          .describe('Required when visibility is "whisper": the member userId (from list_members) the whisper targets'),
       },
-      async ({ campaignId, body, visibility, entityType, entityId }) => {
+      async ({ campaignId, body, visibility, entityType, entityId, recipientUserId }) => {
         const role = await this.access.requireMember(user, campaignId as number, { write: true });
         return this.notes.create(
           campaignId as number,
           {
             body: body as string,
             ...(visibility !== undefined ? { visibility: visibility as z.infer<typeof NoteVisibility> } : {}),
+            ...(entityType !== undefined ? { entityType: entityType as z.infer<typeof EntityType> } : {}),
+            ...(entityId !== undefined ? { entityId: entityId as number } : {}),
+            ...(recipientUserId !== undefined ? { recipientUserId: recipientUserId as string } : {}),
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.tool(
+      server,
+      'whisper_to_player',
+      'Share a note with ONE specific player — a per-player secret ("whisper"). Visible only to that member, the ' +
+        'author, and any DM; every other member (incl. over MCP) can never see it. Use for asymmetric knowledge the ' +
+        'party does not share: "only the rogue notices the trap door", a patron whispering to one warlock, a traitor ' +
+        'briefing. Optionally anchor it to an entity (entityType/entityId) so the secret lives on that NPC/location/' +
+        'quest page for the recipient. recipientUserId is a member userId — see list_members.',
+      {
+        campaignId: CampaignIdArg,
+        recipientUserId: z.string().max(120).describe('The member userId to whisper to (from list_members)'),
+        body: z.string().min(1).max(20_000).describe('Note body (markdown)'),
+        entityType: EntityType.optional().describe('Optionally anchor the whisper to an entity type'),
+        entityId: Id.optional().describe('Optionally anchor the whisper to an entity id'),
+      },
+      async ({ campaignId, recipientUserId, body, entityType, entityId }) => {
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        return this.notes.create(
+          campaignId as number,
+          {
+            body: body as string,
+            visibility: 'whisper',
+            recipientUserId: recipientUserId as string,
             ...(entityType !== undefined ? { entityType: entityType as z.infer<typeof EntityType> } : {}),
             ...(entityId !== undefined ? { entityId: entityId as number } : {}),
           },
@@ -1436,18 +1526,29 @@ export class McpToolsService {
       server,
       user,
       'update_note',
-      'Edit a note\'s body and/or visibility. Author only — dm may NOT edit another member\'s note.',
+      'Edit a note\'s body and/or visibility. Author only — dm may NOT edit another member\'s note. Set visibility to ' +
+        '"whisper" together with recipientUserId to re-target it at one member; switching away from whisper clears the recipient.',
       {
         noteId: Id.describe('Note id'),
         body: z.string().min(1).max(20_000).optional().describe('Note body (markdown)'),
-        visibility: NoteVisibility.optional().describe('private | dm_shared | party_shared'),
+        visibility: NoteVisibility.optional().describe('private | dm_shared | party_shared | whisper'),
+        recipientUserId: z
+          .string()
+          .max(120)
+          .nullable()
+          .optional()
+          .describe('Whisper target member id — required alongside visibility "whisper"; ignored for other visibilities'),
       },
-      async ({ noteId, body, visibility }) => {
+      async ({ noteId, body, visibility, recipientUserId }) => {
         const row = await this.notes.getRowOrThrow(noteId as number);
         const role = await this.access.requireMember(user, row.campaignId, { write: true });
         return this.notes.update(
           noteId as number,
-          { ...(body !== undefined ? { body: body as string } : {}), ...(visibility !== undefined ? { visibility: visibility as z.infer<typeof NoteVisibility> } : {}) },
+          {
+            ...(body !== undefined ? { body: body as string } : {}),
+            ...(visibility !== undefined ? { visibility: visibility as z.infer<typeof NoteVisibility> } : {}),
+            ...(recipientUserId !== undefined ? { recipientUserId: recipientUserId as string | null } : {}),
+          },
           user,
           role,
         );
@@ -1672,13 +1773,15 @@ export class McpToolsService {
       'add_combatant',
       '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
-        'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted.',
+        'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted. Pass ' +
+        '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N".',
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
         ...CombatantCreate.shape,
         // Same constraints as CombatantCreate (Id, optional) but described for tools/list.
         characterId: Id.optional().describe('Character id — links a party member and pulls name/hp/initMod from their sheet when omitted'),
         ruleEntryId: Id.optional().describe('Monster statblock rule entry id — from lookup_rule/get_rule_entry'),
+        count: z.number().int().min(1).max(50).optional().describe('Add this many copies at once (monsters), names auto-suffixed 1..N so duplicates are distinguishable'),
       },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -1692,9 +1795,11 @@ export class McpToolsService {
       server,
       user,
       'update_combatant',
-      'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), ' +
-        'addConditions/removeConditions, and/or initiative (dm only). DM may modify any combatant; a player may only ' +
-        'touch hp/conditions on a combatant linked to a character they own.',
+      'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
+        '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
+        'successes = stable), addConditions/removeConditions. DM-only fields: initiative, and the identity edits ' +
+        'name / hpMax / initMod (rename a duplicate, fix a mistyped stat). DM may modify any combatant; a player may ' +
+        'only touch hp/temp-hp/death-saves/conditions on a combatant linked to a character they own.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantUpdate.shape },
       async ({ encounterId, combatantId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -1894,6 +1999,21 @@ export class McpToolsService {
       async (campaignId) => {
         const role = await this.access.requireMember(user, campaignId);
         return this.sessions.listForCampaign(campaignId, role);
+      },
+    );
+
+    perCampaign(
+      'campaign-session-zero',
+      'session-zero',
+      {
+        title: 'Session zero charter',
+        description:
+          "The table's safety & expectations charter — lines & veils, safety tools, house rules, tone. Any AI at " +
+          'this table is bound by it. The resource form of get_session_zero.',
+      },
+      async (campaignId) => {
+        await this.access.requireMember(user, campaignId);
+        return this.sessionZero.get(campaignId);
       },
     );
   }

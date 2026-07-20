@@ -315,6 +315,27 @@ function migrateCharactersTableForXp(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before character lifecycle status (issue #115):
+ * `characters.status` didn't exist, so a dead/retired PC couldn't be marked and
+ * was force-added to every new encounter. Plain NOT NULL DEFAULT 'active' ADD
+ * COLUMN — every existing character becomes 'active' (preserving today's auto-add
+ * behavior), no table rebuild needed, same as migrateCharactersTableForXp above.
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCharactersTableForStatus(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  const hasStatus = columns.some((c) => c.name === 'status');
+  if (hasStatus) return;
+
+  sqlite.exec("ALTER TABLE characters ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+}
+
+/**
  * Migration for DBs created before characters/sessions gained DM-only secrets
  * (issue #59): `characters.dm_secret` and `sessions.dm_secret` didn't exist —
  * quests/NPCs/locations had dmSecret from day one, but a DM couldn't attach a
@@ -334,6 +355,27 @@ function migrateCharactersTableForDmSecret(sqlite: Database.Database): void {
   if (hasDmSecret) return;
 
   sqlite.exec("ALTER TABLE characters ADD COLUMN dm_secret TEXT NOT NULL DEFAULT ''");
+}
+
+/**
+ * Migration for DBs created before per-player whisper notes (issue #127):
+ * `notes.recipient_user_id` didn't exist. Plain nullable ADD COLUMN — no table
+ * rebuild needed, same shape as migrateCampaignsTableForMapAttachment above.
+ * Existing notes get NULL (no whisper target), which is correct for every
+ * pre-migration visibility (private/dm_shared/party_shared never carried a
+ * recipient). New DBs never hit this path — BOOTSTRAP_SQL already declares the
+ * column.
+ */
+function migrateNotesTableForRecipient(sqlite: Database.Database): void {
+  const hasNotesTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'")
+    .get();
+  if (!hasNotesTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(notes)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'recipient_user_id')) return;
+
+  sqlite.exec('ALTER TABLE notes ADD COLUMN recipient_user_id TEXT');
 }
 
 /** See migrateCharactersTableForDmSecret above — same migration for the sessions table. */
@@ -449,6 +491,30 @@ function migrateLocationsTableForParentId(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before the richer combat HP model (issue #57):
+ * `combatants.hp_temp` / `death_state` / `death_save_successes` /
+ * `death_save_failures` didn't exist. Plain defaulted ADD COLUMNs — no table
+ * rebuild needed, same shape as migrateCharactersTableForSheetDepth above.
+ * Existing rows backfill to 0 temp HP and death_state 'none' (the pre-migration
+ * behavior — a combatant simply at [0, hpMax] with no death-save tracking). New
+ * DBs never hit this path — BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateCombatantsTableForHpModel(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+
+  if (!has('hp_temp')) sqlite.exec('ALTER TABLE combatants ADD COLUMN hp_temp INTEGER NOT NULL DEFAULT 0');
+  if (!has('death_state')) sqlite.exec("ALTER TABLE combatants ADD COLUMN death_state TEXT NOT NULL DEFAULT 'none'");
+  if (!has('death_save_successes')) sqlite.exec('ALTER TABLE combatants ADD COLUMN death_save_successes INTEGER NOT NULL DEFAULT 0');
+  if (!has('death_save_failures')) sqlite.exec('ALTER TABLE combatants ADD COLUMN death_save_failures INTEGER NOT NULL DEFAULT 0');
+}
+
+/**
  * Migration for DBs created before per-entry source labels + the (pack,type,slug)
  * unique index (issue #143): `rule_entries.source` didn't exist, and a fresh Open5e
  * install could write triplicate same-name rows with no way to tell them apart. This
@@ -538,9 +604,12 @@ export function openDatabase(dataDir: string): {
   migrateCampaignsTableForIcsToken(sqlite);
   migrateCampaignsTableForStorageQuota(sqlite);
   migrateCharactersTableForXp(sqlite);
+  migrateCharactersTableForStatus(sqlite);
   migrateCharactersTableForDmSecret(sqlite);
+  migrateNotesTableForRecipient(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
+  migrateCombatantsTableForHpModel(sqlite);
   migrateQuestsTableForHidden(sqlite);
   migrateNpcsTableForHidden(sqlite);
   migrateAttachmentsTableForHidden(sqlite);

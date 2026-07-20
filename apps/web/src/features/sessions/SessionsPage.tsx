@@ -14,7 +14,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import type { Session, SessionListItem, SessionShare, SessionShareCreated } from '@campfire/schema';
+import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -22,6 +22,7 @@ import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from 
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { SchedulePanel } from './SchedulePanel';
+import { CommentsThread } from '../comments/CommentsThread';
 
 export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -254,7 +255,7 @@ export default function SessionsPage() {
         {/* Recap detail */}
         <main className={`lg:col-span-2 space-y-4 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
           {selected ? (
-            <SessionDetail session={selected} isDm={isDm} onBack={backToList} onChange={load} />
+            <SessionDetail session={selected} campaignId={cid} isDm={isDm} onBack={backToList} onChange={load} />
           ) : (
             <Card>
               {sessions.length > 0 ? (
@@ -288,11 +289,13 @@ export default function SessionsPage() {
 
 function SessionDetail({
   session,
+  campaignId,
   isDm,
   onBack,
   onChange,
 }: {
   session: SessionListItem;
+  campaignId: number;
   isDm: boolean;
   onBack: () => void;
   onChange: () => void;
@@ -423,6 +426,8 @@ function SessionDetail({
         </Card>
       )}
 
+      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} isDm={isDm} />}
+
       {isDm && !editing && (
         <div className="flex gap-2">
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
@@ -449,7 +454,149 @@ function SessionDetail({
           onCancel={() => setConfirmingDelete(false)}
         />
       )}
+
+      {/* Discussion thread on the recap (issue #123) — the shared, between-sessions
+          surface: react to the recap, ask the DM, or post an in-character scene. */}
+      <Card>
+        <CommentsThread campaignId={campaignId} entityType="session" entityId={session.id} />
+      </Card>
     </div>
+  );
+}
+
+/**
+ * Session attendance (issue #121) — the "who was there" record for a session.
+ * Everyone sees the attendee chips; a DM gets a roster picker to toggle which
+ * characters played (replace-set PUT). West Marches / rotating-cast tables need
+ * this because the party is otherwise all-or-nothing.
+ */
+function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+  const [attendees, setAttendees] = useState<SessionAttendee[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [roster, setRoster] = useState<Character[]>([]);
+  const [rosterLoaded, setRosterLoaded] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setAttendees(await api.get<SessionAttendee[]>(`${API}/sessions/${sessionId}/attendance`));
+    } catch {
+      // Attendance is a non-critical embellishment on the recap — stay quiet on read failure.
+    } finally {
+      setLoading(false);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    setEditing(false);
+    void load();
+  }, [load]);
+
+  async function startEditing() {
+    setError(null);
+    if (!rosterLoaded) {
+      try {
+        setRoster(await api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`));
+        setRosterLoaded(true);
+      } catch {
+        setError("Couldn't load the character roster.");
+        return;
+      }
+    }
+    setSelected(new Set(attendees.map((a) => a.characterId)));
+    setEditing(true);
+  }
+
+  function toggle(id: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api.put<SessionAttendee[]>(`${API}/sessions/${sessionId}/attendance`, {
+        characterIds: [...selected],
+      });
+      setAttendees(updated);
+      setEditing(false);
+    } catch {
+      setError("Couldn't save attendance.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return null;
+
+  return (
+    <Card className="space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Who played</span>
+        <div className="flex-1" />
+        {isDm && !editing && (
+          <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={startEditing}>
+            {attendees.length ? 'Edit' : 'Set attendance'}
+          </Btn>
+        )}
+      </div>
+
+      {error && <ErrorNote message={error} />}
+
+      {editing ? (
+        <div className="space-y-2">
+          {roster.length === 0 ? (
+            <p className="text-sm text-slate-600">No characters in this campaign yet.</p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {roster.map((c) => {
+                const on = selected.has(c.id);
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => toggle(c.id)}
+                    className={on ? 'tag tag-accent' : 'tag'}
+                    style={{ cursor: 'pointer', opacity: on ? 1 : 0.6 }}
+                    aria-pressed={on}
+                  >
+                    {on ? '✓ ' : ''}
+                    {c.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className="flex gap-2 justify-end">
+            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)} disabled={saving}>
+              Cancel
+            </Btn>
+            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Btn>
+          </div>
+        </div>
+      ) : attendees.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {attendees.map((a) => (
+            <span key={a.id} className="tag">
+              {a.characterName || `Character ${a.characterId}`}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-slate-600">Attendance not recorded.</p>
+      )}
+    </Card>
   );
 }
 

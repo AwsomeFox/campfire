@@ -70,6 +70,31 @@ export const CampaignClone = z.object({
   mode: CampaignCloneMode.default('full'),
 });
 
+// Import input — POST /campaigns/import (issue #120). The body is a Campfire JSON
+// export (the shape ExportService.buildExport produces): make the one-way export
+// round-trippable by re-creating the campaign from it. Validated permissively —
+// only `campaign.name` is truly required, and unknown/extra keys (attachmentsNote,
+// members, audit, proposals, …) are tolerated via .passthrough() so a real export
+// document is accepted verbatim. All entity ids in the document are treated as
+// source ids and remapped to fresh ids on import; the entities themselves are read
+// defensively field-by-field in the service, so a loose object[] is enough here.
+const ImportedEntity = z.object({}).passthrough();
+export const CampaignImport = z
+  .object({
+    // Optional override for the imported campaign's name (defaults to the export's own).
+    name: z.string().min(1).max(120).optional(),
+    campaign: z.object({ name: z.string().min(1).max(120) }).passthrough(),
+    locations: z.array(ImportedEntity).optional(),
+    npcs: z.array(ImportedEntity).optional(),
+    quests: z.array(ImportedEntity).optional(),
+    characters: z.array(ImportedEntity).optional(),
+    sessions: z.array(ImportedEntity).optional(),
+    notes: z.array(ImportedEntity).optional(),
+    encounters: z.array(ImportedEntity).optional(),
+  })
+  .passthrough();
+export type CampaignImport = z.infer<typeof CampaignImport>;
+
 // ---------- character ----------
 // characters.ownerUserId is stored as TEXT (it must also hold 'dev:<name>' dev-auth ids)
 // while users.id / CampaignMember.userId are integers — the historical type mismatch of
@@ -106,6 +131,17 @@ export function normalizeStats(stats: Record<string, number> | null | undefined)
 export const SkillRank = z.enum(['proficient', 'expertise']);
 export type SkillRank = z.infer<typeof SkillRank>;
 
+/**
+ * Character lifecycle (issue #115). Only `active` PCs are auto-conscripted into a
+ * new encounter's combatant list; dead/retired/inactive characters stay on the
+ * roster (viewable, full sheet + history intact) but are skipped by the auto-add
+ * so a long campaign's graveyard of fallen and replaced PCs stops being force-added
+ * to every fight. Deleting a character remains the destructive alternative — this
+ * is the non-destructive shelf.
+ */
+export const CharacterStatus = z.enum(['active', 'dead', 'retired', 'inactive']);
+export type CharacterStatus = z.infer<typeof CharacterStatus>;
+
 /** One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5", "1d8+3 slashing") so non-attack actions stay valid. */
 export const CharacterAction = z.object({
   name: z.string().min(1).max(120),
@@ -136,6 +172,12 @@ export const Character = z.object({
   level: z.number().int().min(1).max(20).default(1),
   xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
+  // Lifecycle state (issue #115). `active` is the only status auto-added as a combatant
+  // on encounter create; dead/retired/inactive PCs are kept but skipped. Editable by the
+  // owning player or DM through the normal update path (and upsert_character over MCP).
+  status: CharacterStatus.default('active').describe(
+    "Lifecycle status: 'active' (default; auto-added to new encounters), 'dead', 'retired', or 'inactive'. Non-active PCs stay on the roster but are skipped by encounter auto-add.",
+  ),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),
@@ -154,6 +196,28 @@ export const Character = z.object({
 export type Character = z.infer<typeof Character>;
 export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
 export const CharacterUpdate = CharacterCreate.partial();
+
+/**
+ * Request body for importing a character from a PUBLIC D&D Beyond sheet (issue #18).
+ * The importer is unofficial and read-only — it reads the public character-service
+ * JSON that D&D Beyond exposes for characters whose privacy is set to Public. Callers
+ * pass either the raw numeric character id (`ddbId`) or a share/character URL (`url`,
+ * e.g. https://www.dndbeyond.com/characters/12345678); at least one is required. `url`
+ * (base-URL override, mainly for tests pointing at a fake server) is separate from the
+ * `url` that carries a character link — the server derives the id from whichever of
+ * ddbId/url is present.
+ */
+export const DdbCharacterImport = z
+  .object({
+    ddbId: z.string().max(200).optional(),
+    url: z.string().max(500).optional(),
+  })
+  .strict()
+  .refine((v) => Boolean(v.ddbId?.trim() || v.url?.trim()), {
+    message: 'Provide a D&D Beyond character id (ddbId) or a character URL (url)',
+  });
+export type DdbCharacterImport = z.infer<typeof DdbCharacterImport>;
+
 export const HpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
@@ -443,6 +507,29 @@ export type SessionListItem = z.infer<typeof SessionListItem>;
 export const RECAP_HEADINGS = ['Recap', 'Loot', 'NPCs met', 'Cliffhanger'] as const;
 export const RECAP_TEMPLATE = RECAP_HEADINGS.map((h) => `## ${h}\n\n`).join('').trimEnd() + '\n';
 
+// ---------- session attendance (issue #121) ----------
+// Which characters played a given session. A session is otherwise all-or-nothing:
+// West Marches / rotating-cast tables (a big rostered party, only 4-6 of whom show
+// up each outing) need a per-session "who was there" record so recaps, per-attendee
+// context and "you weren't there" all become possible. One row per (session,
+// character); the set is REPLACED on write (PUT /sessions/:id/attendance), not
+// accumulated. characterName is denormalized for display.
+export const SessionAttendee = z.object({
+  id: Id,
+  sessionId: Id,
+  characterId: Id,
+  characterName: z.string().max(200).default(''),
+  createdAt: IsoDate,
+});
+export type SessionAttendee = z.infer<typeof SessionAttendee>;
+// Replace a session's attendance with exactly this set of characters. Each id must
+// be a character in the session's own campaign (else 400) — the honest analogue of
+// "only campaign members are valid attendees". Empty array clears attendance.
+export const SessionAttendanceSet = z.object({
+  characterIds: z.array(Id).max(500),
+});
+export type SessionAttendanceSet = z.infer<typeof SessionAttendanceSet>;
+
 // ---------- session share links (public read-only recap access) ----------
 // A DM-minted, unguessable capability URL for one session recap — viewable
 // without an account (absent players). The raw token is returned ONCE at
@@ -576,8 +663,50 @@ export const TimelineCalendarUpdate = z.object({
 });
 export type TimelineCalendarUpdate = z.infer<typeof TimelineCalendarUpdate>;
 
+// ---------- session zero / table charter (safety tools & expectations) — issue #122 ----------
+// Session zero is where a table agrees on the content it will and won't play through
+// and the tools it will use to steer in the moment. Before this, none of that had a
+// home — a campaign carried only name/description/status/danger/ruleSystem, so lines &
+// veils lived (if anywhere) in a markdown blob players might never open. This is a
+// first-class, structured, per-campaign record: ONE row per campaign, DM-authored,
+// readable by the whole table (no dmSecret — a safety charter everyone must see). It's
+// also exposed read-only over MCP so a connected AI (and the roadmap's AI DM) is bound
+// by the same lines & veils the humans agreed to.
+export const SessionZero = z.object({
+  campaignId: Id,
+  // Hard limits ("lines") — content that never appears at the table, full stop.
+  lines: z.array(z.string().min(1).max(500)).max(200).default([]),
+  // Soft limits ("veils") — content that may exist in the fiction but stays off-screen
+  // (fade to black), never described in detail.
+  veils: z.array(z.string().min(1).max(500)).max(200).default([]),
+  // Safety tools this table has agreed to use — X-Card, Open Door, Script Change, etc.
+  // Free text (every table names them differently), one agreed tool per entry.
+  safetyTools: z.array(z.string().min(1).max(200)).max(50).default([]),
+  // House rules — table conventions and rules-as-written deviations (markdown).
+  houseRules: z.string().max(20_000).default(''),
+  // Tone & content expectations — the register the table is playing in: gritty vs.
+  // heroic, comedic vs. serious, expected spotlight/PvP norms, etc. (markdown).
+  toneAndExpectations: z.string().max(20_000).default(''),
+  ...timestamps,
+});
+export type SessionZero = z.infer<typeof SessionZero>;
+// Update is a partial patch: every field optional so the DM can revise one section
+// without resending the whole charter (the single-row-per-campaign upsert convention).
+export const SessionZeroUpdate = z.object({
+  lines: z.array(z.string().min(1).max(500)).max(200).optional(),
+  veils: z.array(z.string().min(1).max(500)).max(200).optional(),
+  safetyTools: z.array(z.string().min(1).max(200)).max(50).optional(),
+  houseRules: z.string().max(20_000).optional(),
+  toneAndExpectations: z.string().max(20_000).optional(),
+});
+export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
+
 // ---------- notes ----------
-export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared']);
+// `whisper` is a per-player secret channel (issue #127): the note is visible ONLY to
+// its author, the single targeted recipient (recipientUserId), and any DM. This is the
+// player-vs-player asymmetry the other visibilities can't express — private is
+// author-only, dm_shared flows up to the DM, party_shared broadcasts to everyone.
+export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared', 'whisper']);
 export const NoteKind = z.enum(['note', 'inbox']);
 export const EntityType = z.enum(['quest', 'npc', 'location', 'session', 'character', 'campaign']);
 
@@ -594,18 +723,27 @@ export const Note = z.object({
   // name, session title), resolved server-side at read time — not stored. Null when
   // the note is unanchored or the entity no longer exists.
   entityName: z.string().max(300).nullable().default(null),
+  // The single member a `whisper` note is targeted at — same identity space as
+  // authorUserId (String(users.id), or dev:<name> under DEV_AUTH). Null for every
+  // other visibility. Set only when visibility === 'whisper'.
+  recipientUserId: z.string().max(120).nullable().default(null),
+  // Display name of the whisper recipient, resolved server-side at read time (like
+  // entityName) — not stored. Null when the note isn't a whisper or the recipient is
+  // no longer a member.
+  recipientName: z.string().max(120).nullable().default(null),
   body: z.string().min(1).max(20_000),
   resolved: z.boolean().default(false), // inbox items only
   resolvedNote: z.string().max(1000).default(''),
   ...timestamps,
 });
 export type Note = z.infer<typeof Note>;
-export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, entityName: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
+export const NoteCreate = Note.omit({ id: true, campaignId: true, authorUserId: true, entityName: true, recipientName: true, createdAt: true, updatedAt: true, resolved: true, resolvedNote: true }).partial().required({ body: true });
 export const NoteUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
   visibility: NoteVisibility.optional(),
   entityType: EntityType.nullable().optional(),
   entityId: Id.nullable().optional(),
+  recipientUserId: z.string().max(120).nullable().optional(),
 });
 export const InboxCreate = z.object({
   authorName: z.string().max(120).default('someone'),
@@ -628,15 +766,57 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
+// ---------- comments (threaded discussion / play-by-post — issue #123) ----------
+// A first-class DISCUSSION layer, distinct from private-or-shared `notes`: every
+// comment is anchored to a campaign entity (session/recap, quest, npc, location,
+// character, campaign — the same entityType/entityId convention notes use) and is
+// visible to ALL campaign members. Unlike notes there is no per-comment visibility;
+// discussion is inherently shared. `parentId` gives one level of threading (a reply
+// to a comment). `inCharacter` flags an in-character post (a play-by-post scene) vs
+// out-of-character table chatter. Author-or-DM may edit/delete.
+export const Comment = z.object({
+  id: Id,
+  campaignId: Id,
+  // A comment ALWAYS anchors to an entity (no unanchored discussion) — required,
+  // unlike Note.entityType which is nullable.
+  entityType: EntityType,
+  entityId: Id,
+  // One level of threading: null = a top-level comment; set = a reply to that
+  // comment. Replies to replies still hang off the same top-level ancestor (the
+  // web thread renders two visual levels), so this is a soft parent pointer.
+  parentId: Id.nullable().default(null),
+  authorUserId: z.string().max(120), // String(users.id) or dev:<name>
+  authorName: z.string().max(120).default(''),
+  body: z.string().min(1).max(20_000), // markdown
+  inCharacter: z.boolean().default(false),
+  ...timestamps,
+});
+export type Comment = z.infer<typeof Comment>;
+export const CommentCreate = Comment.omit({
+  id: true,
+  campaignId: true,
+  authorUserId: true,
+  authorName: true,
+  createdAt: true,
+  updatedAt: true,
+})
+  .partial()
+  .required({ entityType: true, entityId: true, body: true });
+export const CommentUpdate = z.object({
+  body: z.string().min(1).max(20_000).optional(),
+  inCharacter: z.boolean().optional(),
+});
+
 // ---------- notifications (in-app) ----------
 // Per-user notification rows written by the server when something a member cares
 // about happens while they're not looking: a session recap is posted, someone
 // replies on a shared note thread (or the DM answers an inbox item), a player
-// shares a note up to the DM (note_shared), they're added to a campaign, or the
+// shares a note up to the DM (note_shared), someone posts on a discussion thread
+// they're part of (comment_reply), they're added to a campaign, or the
 // next session gets scheduled. Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
-export const NotificationType = z.enum(['recap_posted', 'note_reply', 'note_shared', 'added_to_campaign', 'session_scheduled']);
+export const NotificationType = z.enum(['recap_posted', 'note_reply', 'note_shared', 'comment_reply', 'added_to_campaign', 'session_scheduled']);
 export type NotificationType = z.infer<typeof NotificationType>;
 
 export const Notification = z.object({
@@ -1315,6 +1495,19 @@ export type CombatantKind = z.infer<typeof CombatantKind>;
 export const HpBand = z.enum(['healthy', 'bloodied', 'critical', 'down']);
 export type HpBand = z.infer<typeof HpBand>;
 
+/**
+ * 5e death-save lifecycle for a combatant at 0 HP (issue #57).
+ * - `none`: alive (hp > 0), or a monster (monsters don't roll death saves — 0 HP
+ *   is simply "down"); death-save counters are held at 0.
+ * - `dying`: a character at 0 HP, rolling death saves (successes/failures 0–2).
+ * - `stable`: a character at 0 HP that reached 3 successes (or was stabilized) —
+ *   unconscious but no longer rolling. Any further damage flips back to `dying`.
+ * - `dead`: 3 death-save failures, OR instant death from massive damage
+ *   (a single hit whose overflow past 0 HP is >= hpMax).
+ */
+export const DeathState = z.enum(['none', 'dying', 'stable', 'dead']);
+export type DeathState = z.infer<typeof DeathState>;
+
 export const Combatant = z.object({
   id: Id,
   encounterId: Id,
@@ -1327,7 +1520,17 @@ export const Combatant = z.object({
   // (issue #43); `hpBand` then carries the coarse status instead.
   hpCurrent: z.number().int().nullable().default(10),
   hpMax: z.number().int().min(1).nullable().default(10),
+  // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
+  // does not stack (taking the higher of the two), and is not bounded by hpMax.
+  // Nullable so it's redacted alongside exact HP for non-DM monster viewers (#43).
+  hpTemp: z.number().int().min(0).nullable().default(0),
   hpBand: HpBand.nullable().default(null),
+  // Death-save subsystem (issue #57). successes/failures are 0–3; `deathState`
+  // is the derived lifecycle band (see DeathState). Monsters keep these at
+  // none/0/0 — they simply go "down" at 0 HP.
+  deathState: DeathState.default('none'),
+  deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
+  deathSaveFailures: z.number().int().min(0).max(3).default(0),
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
@@ -1341,13 +1544,29 @@ export const CombatantCreate = z.object({
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  // Add N identical combatants in one call (issue #114). When >1 the names are
+  // auto-suffixed "Goblin 1".."Goblin N" so duplicate monsters are distinguishable.
+  // Ignored (single add, no suffix) for character/characterId adds — a PC is unique.
+  count: z.number().int().min(1).max(50).optional(),
 });
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
   hpSet: z.number().int().nonnegative().optional(),
+  // Temp HP absolute set (issue #57). 0 clears it.
+  hpTemp: z.number().int().min(0).optional(),
+  // Death-save counters, absolute set 0–3 (issue #57). Reaching 3 failures -> dead;
+  // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
+  deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
+  deathSaveFailures: z.number().int().min(0).max(3).optional(),
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   initiative: z.number().int().optional(), // dm only, enforced server-side
+  // Combatant identity edits (issue #114) — dm only, enforced server-side. Let a DM
+  // rename a duplicate ("Goblin" -> "Goblin (archer)") or fix a mistyped hpMax/initMod
+  // at add-time without a delete + re-add.
+  name: z.string().min(1).max(120).optional(),
+  hpMax: z.number().int().min(1).optional(),
+  initMod: z.number().int().optional(),
 });
 
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
