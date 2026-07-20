@@ -45,6 +45,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { ObservabilityModule } from './modules/observability/observability.module';
 import { BackupModule } from './modules/backup/backup.module';
+import { AiDmModule } from './modules/ai-dm/ai-dm.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 
 /**
@@ -144,6 +145,7 @@ function serveStaticImports(): DynamicModule[] {
     InventoryModule,
     ObservabilityModule,
     BackupModule,
+    AiDmModule,
     TimelineModule,
   ],
   providers: [

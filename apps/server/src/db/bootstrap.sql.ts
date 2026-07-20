@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER,
   ics_token TEXT,
+  storage_quota_bytes INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -139,6 +140,7 @@ CREATE TABLE IF NOT EXISTS npcs (
 CREATE TABLE IF NOT EXISTS locations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL,
+  parent_id INTEGER,
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'unexplored',
@@ -415,6 +417,19 @@ CREATE TABLE IF NOT EXISTS party_treasury (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ai_dm_seats (
+  campaign_id INTEGER PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  model TEXT NOT NULL DEFAULT '',
+  instructions TEXT NOT NULL DEFAULT '',
+  token_budget INTEGER NOT NULL DEFAULT 0,
+  tokens_used INTEGER NOT NULL DEFAULT 0,
+  turn_count INTEGER NOT NULL DEFAULT 0,
+  last_turn_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL,
@@ -441,6 +456,7 @@ CREATE INDEX IF NOT EXISTS idx_story_branches_beat ON story_branches(beat_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_events_campaign ON timeline_events(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_npcs_campaign ON npcs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_campaign ON locations(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_locations_parent ON locations(parent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_campaign ON sessions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_session ON session_shares(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaign_id);

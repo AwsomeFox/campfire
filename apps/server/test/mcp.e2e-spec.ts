@@ -43,6 +43,7 @@ const ALL_TOOLS = [
   'list_notes',
   'read_audit_log',
   'export_campaign',
+  'get_ai_dm_seat',
   // write
   'create_campaign',
   'delete_campaign',
@@ -97,6 +98,7 @@ const ALL_TOOLS = [
   'begin_encounter',
   'next_turn',
   'end_encounter',
+  'ai_dm_narrate',
 ];
 
 describe('mcp endpoint (e2e, real sessions + PATs)', () => {
@@ -159,7 +161,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(80);
+    expect(tools).toHaveLength(82);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool

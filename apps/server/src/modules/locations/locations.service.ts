@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { LocationCreate, LocationUpdate } from '@campfire/schema';
@@ -18,6 +18,7 @@ export function toDomain(row: typeof locations.$inferSelect): Location {
   return {
     id: row.id,
     campaignId: row.campaignId,
+    parentId: row.parentId,
     name: row.name,
     kind: row.kind,
     status: row.status as Location['status'],
@@ -47,6 +48,57 @@ export class LocationsService {
     return role !== 'dm' && status === 'unexplored';
   }
 
+  /**
+   * Validate a location's parentId (self-referencing locations.id) for nesting (#99):
+   * it must reference an existing location in the SAME campaign, a location cannot be
+   * its own parent, and reparenting must not create a cycle. Mirrors the quest parent
+   * guard (#95). `excludeLocationId` (update only) rejects self-parenting and cycles;
+   * create has no id yet so it can never close a loop.
+   */
+  private async validateParentRef(
+    parentId: number | null | undefined,
+    campaignId: number,
+    excludeLocationId?: number,
+  ): Promise<void> {
+    if (parentId == null) return;
+    if (excludeLocationId != null && parentId === excludeLocationId) {
+      throw new BadRequestException('A location cannot be its own parent');
+    }
+    const [row] = await this.db
+      .select({ id: locations.id })
+      .from(locations)
+      .where(and(eq(locations.id, parentId), eq(locations.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`parentId ${parentId} does not exist in this campaign`);
+    if (excludeLocationId != null) {
+      await this.assertNoAncestorCycle(parentId, excludeLocationId, campaignId);
+    }
+  }
+
+  /**
+   * Walk the parent chain starting at `startParentId`. Throws 400 if it reaches
+   * `locationId` (the location being reparented) — that would create a cycle where
+   * a location becomes its own ancestor. A local `seen` set guards against looping
+   * forever on pre-existing cyclic legacy rows that don't involve `locationId`.
+   */
+  private async assertNoAncestorCycle(startParentId: number, locationId: number, campaignId: number): Promise<void> {
+    let cursor: number | null = startParentId;
+    const seen = new Set<number>();
+    while (cursor != null) {
+      if (cursor === locationId) {
+        throw new BadRequestException('parentId would create a cycle: a location cannot be its own ancestor');
+      }
+      if (seen.has(cursor)) break;
+      seen.add(cursor);
+      const [row]: { parentId: number | null }[] = await this.db
+        .select({ parentId: locations.parentId })
+        .from(locations)
+        .where(and(eq(locations.id, cursor), eq(locations.campaignId, campaignId)))
+        .limit(1);
+      cursor = row?.parentId ?? null;
+    }
+  }
+
   async listForCampaign(campaignId: number, role: Role): Promise<Location[]> {
     const rows = await this.db.select().from(locations).where(eq(locations.campaignId, campaignId));
     const visible = rows.filter((r) => !this.isHiddenFrom(r.status, role));
@@ -67,11 +119,13 @@ export class LocationsService {
   }
 
   async create(campaignId: number, input: LocationCreateInput, user: RequestUser, role: Role): Promise<Location> {
+    await this.validateParentRef(input.parentId, campaignId);
     const ts = nowIso();
     const [row] = await this.db
       .insert(locations)
       .values({
         campaignId,
+        parentId: input.parentId ?? null,
         name: input.name,
         kind: input.kind ?? '',
         status: input.status ?? 'unexplored',
@@ -96,6 +150,7 @@ export class LocationsService {
 
   async update(id: number, input: LocationUpdateInput, user: RequestUser, role: Role): Promise<Location> {
     const existing = await this.getRowOrThrow(id);
+    await this.validateParentRef(input.parentId, existing.campaignId, id);
     const [row] = await this.db
       .update(locations)
       .set({ ...input, updatedAt: nowIso() })
@@ -115,11 +170,14 @@ export class LocationsService {
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     // Null out inbound references in the same transaction as the delete so nothing dangles
-    // on a deleted location: NPCs pinned here (npcs.locationId) and the campaign's
-    // currentLocationId. Mirrors AttachmentsService/QuestsService cascade patterns.
+    // on a deleted location: NPCs pinned here (npcs.locationId), the campaign's
+    // currentLocationId, and any child locations (locations.parentId → promoted to
+    // top-level, #99, mirroring how QuestsService reparents subquests to root rather
+    // than cascading the delete). Mirrors AttachmentsService/QuestsService cascade patterns.
     this.db.transaction((tx) => {
       tx.update(npcs).set({ locationId: null, updatedAt: nowIso() }).where(eq(npcs.locationId, id)).run();
       tx.update(campaigns).set({ currentLocationId: null, updatedAt: nowIso() }).where(eq(campaigns.currentLocationId, id)).run();
+      tx.update(locations).set({ parentId: null, updatedAt: nowIso() }).where(eq(locations.parentId, id)).run();
       tx.delete(locations).where(eq(locations.id, id)).run();
     });
     await this.audit.log({

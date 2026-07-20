@@ -56,6 +56,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
+    storageQuotaBytes: row.storageQuotaBytes ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -294,12 +295,15 @@ export class CampaignsService {
       const cloneId = campaignRow.id;
 
       // Locations first — npcs, quests-via-npcs and currentLocationId all point at them.
+      // Two passes like quests below: insert all (parentId deferred), then remap the
+      // nesting parentId (#99) — a child's parent may appear after it in insert order.
       const locMap = new Map<number, number>();
       for (const l of locationRows) {
         const [row] = tx
           .insert(locations)
           .values({
             campaignId: cloneId,
+            parentId: null,
             name: l.name,
             kind: l.kind,
             status: template ? 'unexplored' : l.status,
@@ -313,6 +317,13 @@ export class CampaignsService {
           .returning()
           .all();
         locMap.set(l.id, row.id);
+      }
+      for (const l of locationRows) {
+        if (l.parentId == null) continue;
+        const parentId = locMap.get(l.parentId);
+        if (parentId != null) {
+          tx.update(locations).set({ parentId }).where(eq(locations.id, locMap.get(l.id)!)).run();
+        }
       }
 
       const npcMap = new Map<number, number>();
