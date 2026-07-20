@@ -592,6 +592,12 @@ export const combatants = sqliteTable('combatants', {
   initMod: integer('init_mod').notNull().default(0),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
+  // Temp HP + death-save subsystem (issue #57). Added by migration on older DBs;
+  // see db/db.module.ts migrateCombatantsTableForHpModel().
+  hpTemp: integer('hp_temp').notNull().default(0),
+  deathState: text('death_state').notNull().default('none'), // 'none' | 'dying' | 'stable' | 'dead'
+  deathSaveSuccesses: integer('death_save_successes').notNull().default(0),
+  deathSaveFailures: integer('death_save_failures').notNull().default(0),
   conditions: text('conditions').notNull().default('[]'),
   ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
   sortOrder: integer('sort_order').notNull().default(0),

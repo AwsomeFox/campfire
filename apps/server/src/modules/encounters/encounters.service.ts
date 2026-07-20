@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, inArray, sql, type SQL } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest, normalizeStats } from '@campfire/schema';
 import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
@@ -13,7 +13,8 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { abilityMod, advanceTurn, hpBandFor, sortCombatants, turnIndexFor } from './encounters.logic';
+import { abilityMod, advanceTurn, applyCombatantHp, hpBandFor, sortCombatants, turnIndexFor } from './encounters.logic';
+import type { CombatantHpState } from './encounters.logic';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
@@ -46,7 +47,11 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     initMod: row.initMod,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
+    hpTemp: row.hpTemp,
     hpBand: null,
+    deathState: row.deathState as Combatant['deathState'],
+    deathSaveSuccesses: row.deathSaveSuccesses,
+    deathSaveFailures: row.deathSaveFailures,
     conditions: fromJsonText<string[]>(row.conditions, []),
     ruleEntryId: row.ruleEntryId,
     sortOrder: row.sortOrder,
@@ -63,7 +68,9 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
  */
 function redactMonsterHp(c: Combatant): Combatant {
   if (c.kind !== 'monster' || c.hpCurrent === null || c.hpMax === null) return c;
-  return { ...c, hpBand: hpBandFor(c.hpCurrent, c.hpMax), hpCurrent: null, hpMax: null };
+  // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
+  // temp-HP buffed monster doesn't leak numbers through the redaction.
+  return { ...c, hpBand: hpBandFor(c.hpCurrent, c.hpMax), hpCurrent: null, hpMax: null, hpTemp: null };
 }
 
 /** floor((score - 10) / 2), the standard 5e ability-modifier formula. */
@@ -288,25 +295,40 @@ export class EncountersService {
     }
     if (hpCurrent === undefined) hpCurrent = hpMax;
 
+    // Issue #114: `count` adds N identical combatants in one call. Auto-suffix the
+    // names "Goblin 1".."Goblin N" so duplicate monsters are distinguishable in the
+    // order (the docs' "three goblins" example). count is meaningless for a
+    // character add (a PC is unique and uniqueness-guarded above), so it's ignored
+    // there — the characterId branch never sets count>1 in practice.
+    const count = input.characterId !== undefined ? 1 : Math.max(1, input.count ?? 1);
+    const names = count > 1 ? Array.from({ length: count }, (_, i) => `${name} ${i + 1}`) : [name];
+
     // Issue #86: derive sortOrder in SQL (MAX(sort_order)+1) instead of from a
     // stale `existing.length` read — two concurrent adds used to read the same
-    // count and insert colliding sortOrders.
-    const [row] = await this.db
-      .insert(combatants)
-      .values({
-        encounterId,
-        kind: input.kind,
-        characterId,
-        name,
-        initiative: null,
-        initMod,
-        hpCurrent,
-        hpMax,
-        conditions: '[]',
-        ruleEntryId,
-        sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
-      })
-      .returning();
+    // count and insert colliding sortOrders. Sequential awaits (not Promise.all) so
+    // each row's MAX(sort_order)+1 subquery observes the prior insert and the batch
+    // gets distinct, contiguous orders.
+    const insertedRows: (typeof combatants.$inferSelect)[] = [];
+    for (const n of names) {
+      const [inserted] = await this.db
+        .insert(combatants)
+        .values({
+          encounterId,
+          kind: input.kind,
+          characterId,
+          name: n,
+          initiative: null,
+          initMod,
+          hpCurrent,
+          hpMax,
+          conditions: '[]',
+          ruleEntryId,
+          sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
+        })
+        .returning();
+      insertedRows.push(inserted);
+    }
+    const row = insertedRows[0];
 
     // Keep the positional turnIndex aligned with the identity pointer after the row
     // count changes (issue #49). A freshly-added combatant has null initiative and so
@@ -328,7 +350,7 @@ export class EncountersService {
       entityType: 'combatant',
       entityId: row.id,
       campaignId: encounterRow.campaignId,
-      detail: name,
+      detail: insertedRows.length > 1 ? `${name} ×${insertedRows.length}` : name,
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
@@ -337,9 +359,10 @@ export class EncountersService {
   }
 
   /**
-   * dm may change anything (including initiative). A player may only touch
-   * hpDelta/hpSet/addConditions/removeConditions, and only on a combatant
-   * whose characterId links to a character THEY own — everything else 403s.
+   * dm may change anything (including initiative, and the combatant identity fields
+   * name/hpMax/initMod — issue #114). A player may only touch HP-ish fields
+   * (hpDelta, hpSet, hpTemp, deathSave counters, add/removeConditions), and only on a
+   * combatant whose characterId links to a character THEY own — everything else 403s.
    */
   async updateCombatant(
     encounterId: number,
@@ -352,9 +375,15 @@ export class EncountersService {
     this.assertMutable(encounterRow);
     const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
 
-    if (role !== 'dm') {
+    const isDm = role === 'dm';
+    if (!isDm) {
+      // Identity + initiative edits are DM-only (issue #114): a player must not be
+      // able to rename a combatant or rewrite its hpMax/initMod, only adjust HP.
       if (patch.initiative !== undefined) {
         throw new ForbiddenException('Only dm may set initiative');
+      }
+      if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined) {
+        throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, or initMod');
       }
       if (!existing.characterId) {
         throw new ForbiddenException('Only dm may modify this combatant');
@@ -365,52 +394,79 @@ export class EncountersService {
       }
     }
 
-    // Issue #86: apply the HP change AS SQL against the row's CURRENT value rather
-    // than reading hpCurrent into JS, recomputing, and writing it back across an
-    // await. Two authorized deltas landing near-simultaneously (DM applies 5 damage
-    // while the owning player applies 8) used to each read the same starting HP and
-    // last-write-win — one delta silently vanished. `hp_current = MAX(0, MIN(hp_max,
-    // hp_current + ?))` is evaluated atomically by SQLite, so concurrent deltas
-    // compose instead of clobbering. hpSet still takes precedence over hpDelta (it's
-    // an absolute set), matching prior behavior.
-    const update: Omit<Partial<typeof combatants.$inferInsert>, 'hpCurrent'> & { hpCurrent?: number | SQL } = {};
-    const hpChanged = patch.hpDelta !== undefined || patch.hpSet !== undefined;
-    if (hpChanged) {
-      update.hpCurrent =
-        patch.hpSet !== undefined
-          ? sql`MAX(0, MIN(${combatants.hpMax}, ${patch.hpSet}))`
-          : sql`MAX(0, MIN(${combatants.hpMax}, ${combatants.hpCurrent} + ${patch.hpDelta}))`;
-    }
+    // Non-HP field writes computed up front (conditions/initiative/identity). The
+    // HP + death-save fields are computed INSIDE the transaction below off a fresh
+    // read, so concurrent damage still composes atomically (issue #86).
+    const staticUpdate: Partial<typeof combatants.$inferInsert> = {};
 
     if (patch.addConditions !== undefined || patch.removeConditions !== undefined) {
       const current = new Set(fromJsonText<string[]>(existing.conditions, []));
       for (const c of patch.removeConditions ?? []) current.delete(c);
       for (const c of patch.addConditions ?? []) current.add(c);
-      update.conditions = toJsonText([...current]);
+      staticUpdate.conditions = toJsonText([...current]);
     }
+    if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
+    if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
+    if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
 
-    if (patch.initiative !== undefined && role === 'dm') {
-      update.initiative = patch.initiative;
-    }
+    const hpMaxChanged = patch.hpMax !== undefined && isDm;
+    // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
+    const hpFieldsTouched =
+      patch.hpDelta !== undefined ||
+      patch.hpSet !== undefined ||
+      patch.hpTemp !== undefined ||
+      patch.deathSaveSuccesses !== undefined ||
+      patch.deathSaveFailures !== undefined;
+    // A recompute is needed if any HP field changed OR hpMax moved (hpCurrent may
+    // need re-clamping to a lowered max, and the death state re-derived).
+    const recomputeHp = hpFieldsTouched || hpMaxChanged;
 
-    if (Object.keys(update).length === 0) {
+    if (Object.keys(staticUpdate).length === 0 && !recomputeHp) {
       return combatantToDomain(existing);
     }
 
     // Combatant write + linked-character HP mirror run in ONE synchronous
-    // better-sqlite3 transaction (issue #86): a failure between them can no longer
-    // leave the two HP copies disagreeing mid-fight, and the mirror reads the
-    // atomically-clamped result (`updated.hpCurrent`) rather than a value computed
-    // from a stale read.
+    // better-sqlite3 transaction (issue #86): the HP math reads the row's CURRENT
+    // committed values inside the transaction (never a stale pre-await read), so two
+    // authorized deltas landing near-simultaneously compose instead of clobbering —
+    // better-sqlite3 serializes the whole synchronous callback. The mirror then reads
+    // the transaction's own result.
     //
     // The character HP mirror is additionally gated on a still-live (non-'ended')
     // encounter (issue #163). assertMutable() above already rejects an ended encounter
     // outright, so this is defense-in-depth: post-combat combatant rows must never leak
     // back onto the live character sheet even if that guard is ever relaxed.
-    const mirrorHp = existing.kind === 'character' && existing.characterId !== null && hpChanged && encounterRow.status !== 'ended';
+    const mirrorHp = existing.kind === 'character' && existing.characterId !== null && recomputeHp && encounterRow.status !== 'ended';
     let row!: typeof combatants.$inferSelect;
     this.db.transaction((tx) => {
-      const [updated] = tx.update(combatants).set(update).where(eq(combatants.id, combatantId)).returning().all();
+      const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+      if (recomputeHp) {
+        const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
+        const state: CombatantHpState = {
+          kind: fresh.kind as CombatantHpState['kind'],
+          hpCurrent: fresh.hpCurrent,
+          hpMax: effectiveHpMax,
+          hpTemp: fresh.hpTemp,
+          deathState: fresh.deathState as CombatantHpState['deathState'],
+          deathSaveSuccesses: fresh.deathSaveSuccesses,
+          deathSaveFailures: fresh.deathSaveFailures,
+        };
+        const result = applyCombatantHp(state, {
+          hpDelta: patch.hpDelta,
+          hpSet: patch.hpSet,
+          hpTemp: patch.hpTemp,
+          deathSaveSuccesses: patch.deathSaveSuccesses,
+          deathSaveFailures: patch.deathSaveFailures,
+        });
+        if (hpMaxChanged) writeSet.hpMax = effectiveHpMax;
+        writeSet.hpCurrent = result.hpCurrent;
+        writeSet.hpTemp = result.hpTemp;
+        writeSet.deathState = result.deathState;
+        writeSet.deathSaveSuccesses = result.deathSaveSuccesses;
+        writeSet.deathSaveFailures = result.deathSaveFailures;
+      }
+      const [updated] = tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).returning().all();
       row = updated;
       if (mirrorHp) {
         tx.update(characters).set({ hpCurrent: updated.hpCurrent, updatedAt: nowIso() }).where(eq(characters.id, existing.characterId!)).run();
@@ -420,10 +476,15 @@ export class EncountersService {
     // #74: don't audit-log pure HP ticks. A single combat generates hundreds of
     // ±1 HP updates (every hit, heal, temp-hp adjust); auditing each one was the
     // dominant source of unbounded audit_log growth for zero forensic value. We
-    // still log the meaningful state changes — conditions applied/removed and
-    // initiative edits — which are rare and worth a trail. An update that ONLY
-    // touched hpCurrent is skipped.
-    const changedNonHp = update.conditions !== undefined || update.initiative !== undefined;
+    // still log the meaningful state changes — conditions, initiative, and the
+    // identity edits (rename / hpMax / initMod, issue #114) — which are rare and
+    // worth a trail. An update that ONLY touched HP/death-save fields is skipped.
+    const changedNonHp =
+      staticUpdate.conditions !== undefined ||
+      staticUpdate.initiative !== undefined ||
+      staticUpdate.name !== undefined ||
+      staticUpdate.initMod !== undefined ||
+      hpMaxChanged;
     if (changedNonHp) {
       await this.audit.log({
         actor: auditActor(user),

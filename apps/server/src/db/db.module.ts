@@ -422,6 +422,30 @@ function migrateLocationsTableForParentId(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE locations ADD COLUMN parent_id INTEGER');
 }
 
+/**
+ * Migration for DBs created before the richer combat HP model (issue #57):
+ * `combatants.hp_temp` / `death_state` / `death_save_successes` /
+ * `death_save_failures` didn't exist. Plain defaulted ADD COLUMNs — no table
+ * rebuild needed, same shape as migrateCharactersTableForSheetDepth above.
+ * Existing rows backfill to 0 temp HP and death_state 'none' (the pre-migration
+ * behavior — a combatant simply at [0, hpMax] with no death-save tracking). New
+ * DBs never hit this path — BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateCombatantsTableForHpModel(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+
+  if (!has('hp_temp')) sqlite.exec('ALTER TABLE combatants ADD COLUMN hp_temp INTEGER NOT NULL DEFAULT 0');
+  if (!has('death_state')) sqlite.exec("ALTER TABLE combatants ADD COLUMN death_state TEXT NOT NULL DEFAULT 'none'");
+  if (!has('death_save_successes')) sqlite.exec('ALTER TABLE combatants ADD COLUMN death_save_successes INTEGER NOT NULL DEFAULT 0');
+  if (!has('death_save_failures')) sqlite.exec('ALTER TABLE combatants ADD COLUMN death_save_failures INTEGER NOT NULL DEFAULT 0');
+}
+
 /** Absolute path to the SQLite DB file for a given data dir. */
 export function dbFilePath(dataDir: string): string {
   return path.join(dataDir, 'campfire.db');
@@ -460,6 +484,7 @@ export function openDatabase(dataDir: string): {
   migrateCharactersTableForDmSecret(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
+  migrateCombatantsTableForHpModel(sqlite);
   migrateQuestsTableForHidden(sqlite);
   migrateNpcsTableForHidden(sqlite);
   migrateAttachmentsTableForHidden(sqlite);

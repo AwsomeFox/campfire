@@ -1264,6 +1264,19 @@ export type CombatantKind = z.infer<typeof CombatantKind>;
 export const HpBand = z.enum(['healthy', 'bloodied', 'critical', 'down']);
 export type HpBand = z.infer<typeof HpBand>;
 
+/**
+ * 5e death-save lifecycle for a combatant at 0 HP (issue #57).
+ * - `none`: alive (hp > 0), or a monster (monsters don't roll death saves — 0 HP
+ *   is simply "down"); death-save counters are held at 0.
+ * - `dying`: a character at 0 HP, rolling death saves (successes/failures 0–2).
+ * - `stable`: a character at 0 HP that reached 3 successes (or was stabilized) —
+ *   unconscious but no longer rolling. Any further damage flips back to `dying`.
+ * - `dead`: 3 death-save failures, OR instant death from massive damage
+ *   (a single hit whose overflow past 0 HP is >= hpMax).
+ */
+export const DeathState = z.enum(['none', 'dying', 'stable', 'dead']);
+export type DeathState = z.infer<typeof DeathState>;
+
 export const Combatant = z.object({
   id: Id,
   encounterId: Id,
@@ -1276,7 +1289,17 @@ export const Combatant = z.object({
   // (issue #43); `hpBand` then carries the coarse status instead.
   hpCurrent: z.number().int().nullable().default(10),
   hpMax: z.number().int().min(1).nullable().default(10),
+  // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
+  // does not stack (taking the higher of the two), and is not bounded by hpMax.
+  // Nullable so it's redacted alongside exact HP for non-DM monster viewers (#43).
+  hpTemp: z.number().int().min(0).nullable().default(0),
   hpBand: HpBand.nullable().default(null),
+  // Death-save subsystem (issue #57). successes/failures are 0–3; `deathState`
+  // is the derived lifecycle band (see DeathState). Monsters keep these at
+  // none/0/0 — they simply go "down" at 0 HP.
+  deathState: DeathState.default('none'),
+  deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
+  deathSaveFailures: z.number().int().min(0).max(3).default(0),
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
@@ -1290,13 +1313,29 @@ export const CombatantCreate = z.object({
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  // Add N identical combatants in one call (issue #114). When >1 the names are
+  // auto-suffixed "Goblin 1".."Goblin N" so duplicate monsters are distinguishable.
+  // Ignored (single add, no suffix) for character/characterId adds — a PC is unique.
+  count: z.number().int().min(1).max(50).optional(),
 });
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
   hpSet: z.number().int().nonnegative().optional(),
+  // Temp HP absolute set (issue #57). 0 clears it.
+  hpTemp: z.number().int().min(0).optional(),
+  // Death-save counters, absolute set 0–3 (issue #57). Reaching 3 failures -> dead;
+  // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
+  deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
+  deathSaveFailures: z.number().int().min(0).max(3).optional(),
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   initiative: z.number().int().optional(), // dm only, enforced server-side
+  // Combatant identity edits (issue #114) — dm only, enforced server-side. Let a DM
+  // rename a duplicate ("Goblin" -> "Goblin (archer)") or fix a mistyped hpMax/initMod
+  // at add-time without a delete + re-add.
+  name: z.string().min(1).max(120).optional(),
+  hpMax: z.number().int().min(1).optional(),
+  initMod: z.number().int().optional(),
 });
 
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
