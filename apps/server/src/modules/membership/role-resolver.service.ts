@@ -69,6 +69,38 @@ export class RoleResolver {
   }
 
   /**
+   * Whether this caller is the dm of at least one campaign — the only
+   * non-admin context that legitimately needs the server-wide user directory
+   * (`GET /users/lookup` powers the DM's add-member picker, which must resolve
+   * usernames of people not yet in any shared campaign). Gating the lookup on
+   * this (issue #88) stops a plain player/viewer from enumerating every account
+   * on the server.
+   *
+   * Token scope is honoured exactly like effectiveRole(): a token scoped below
+   * dm can never act as a dm, so it never qualifies; a campaign-bound token
+   * only qualifies if it is bound to a campaign this user actually dms.
+   */
+  async isDmOfAnyCampaign(user: RequestUser): Promise<boolean> {
+    const tokenContext = user.tokenContext;
+    if (tokenContext && ROLE_RANK[tokenContext.scope] < ROLE_RANK.dm) return false;
+
+    if (user.devRole) return user.devRole === 'dm';
+
+    const numericId = Number(user.id);
+    if (!Number.isInteger(numericId)) return false;
+
+    const rows = await this.db
+      .select({ campaignId: campaignMembers.campaignId })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.userId, numericId), eq(campaignMembers.role, 'dm')));
+
+    if (tokenContext?.campaignId != null) {
+      return rows.some((r) => r.campaignId === tokenContext.campaignId);
+    }
+    return rows.length > 0;
+  }
+
+  /**
    * Campaign ids this user may access at all (for GET /campaigns scoping).
    *
    * Server admins get no special treatment here either (issue #9): the
