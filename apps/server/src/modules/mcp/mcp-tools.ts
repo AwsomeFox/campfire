@@ -185,6 +185,10 @@ export class McpToolsService {
         'Use this when acting as a player-role agent proposing world changes for a human DM to review. propose is ' +
         'not available on objectives, characters, notes, campaign status, members, or combat tools — those write ' +
         'directly and are already gated by role.\n\n' +
+        'ARCHIVED CAMPAIGNS — a campaign whose status is paused or completed is READ-ONLY: every write tool ' +
+        '(quests, npcs, locations, sessions, characters, notes, inbox, members, encounters, dice rolls, proposal ' +
+        'submission/approval) fails with 403 until a dm sets status back to "active" via update_campaign_status. ' +
+        'Reads, export_campaign, read_audit_log, delete_campaign, and the status flip itself still work.\n\n' +
         'ERRORS — a failed call returns isError:true with JSON text {"error":{"status","code","message"}} (e.g. ' +
         'status 404/code "not_found", status 403/code "forbidden", status 400/code "validation_failed"). Every ' +
         'tool\'s argument object is strict — an unknown/misspelled key is a validation_failed error, not a silent ' +
@@ -354,7 +358,7 @@ export class McpToolsService {
       'DM only: list open (unresolved) player inbox items for a campaign — messages players sent up via submit_inbox_item.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.notes.listInbox(campaignId as number);
       },
     );
@@ -365,7 +369,7 @@ export class McpToolsService {
       'DM only: list proposals for a campaign, optionally filtered by status (pending|approved|rejected).',
       { campaignId: CampaignIdArg, status: z.enum(['pending', 'approved', 'rejected']).optional().describe('Filter by status') },
       async ({ campaignId, status }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.proposals.listForCampaign(campaignId as number, status as string | undefined);
       },
     );
@@ -467,7 +471,7 @@ export class McpToolsService {
       'DM only: read the campaign audit log (newest first) — who did what, incl. `token:<name>` for PAT-driven actions.',
       { campaignId: CampaignIdArg, limit: LimitArg(500, 100) },
       async ({ campaignId, limit }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.audit.listForCampaign(campaignId as number, (limit as number | undefined) ?? 100);
       },
     );
@@ -480,7 +484,7 @@ export class McpToolsService {
         '— the caller may treat it as a JSON string to parse or archive.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.exportService.buildExport(campaignId as number, user);
       },
     );
@@ -507,7 +511,7 @@ export class McpToolsService {
         'notes, sessions, proposals, members, tokens, attachments). Irreversible.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         await this.campaigns.remove(campaignId as number, user);
         return { ok: true, campaignId };
       },
@@ -523,7 +527,7 @@ export class McpToolsService {
       async ({ campaignId, propose, ...fields }) => {
         const validated = QuestCreate.parse(fields);
         if (propose) {
-          const role = await this.access.requireMember(user, campaignId as number);
+          const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'quest', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -542,7 +546,7 @@ export class McpToolsService {
         const row = await this.quests.getRowOrThrow(questId as number);
         const validated = QuestUpdate.parse(fields);
         if (propose) {
-          const role = await this.access.requireMember(user, row.campaignId);
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'update', validated, user, role);
           return { proposal };
         }
@@ -572,7 +576,7 @@ export class McpToolsService {
       async ({ questId, status, propose }) => {
         const row = await this.quests.getRowOrThrow(questId as number);
         if (propose) {
-          const role = await this.access.requireMember(user, row.campaignId);
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const validated = QuestUpdate.parse({ status });
           const proposal = await this.proposalRecords.create(row.campaignId, 'quest', questId as number, 'update', validated, user, role);
           return { proposal };
@@ -662,7 +666,7 @@ export class McpToolsService {
           }
           const validated = NpcUpdate.parse(fields);
           if (propose) {
-            const role = await this.access.requireMember(user, row.campaignId);
+            const role = await this.access.requireMember(user, row.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(row.campaignId, 'npc', npcId as number, 'update', validated, user, role);
             return { proposal };
           }
@@ -671,7 +675,7 @@ export class McpToolsService {
         }
         const validated = NpcCreate.parse(fields); // name required on create
         if (propose) {
-          const role = await this.access.requireMember(user, campaignId as number);
+          const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'npc', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -713,7 +717,7 @@ export class McpToolsService {
           }
           const validated = LocationUpdate.parse(fields);
           if (propose) {
-            const role = await this.access.requireMember(user, row.campaignId);
+            const role = await this.access.requireMember(user, row.campaignId, { write: true });
             const proposal = await this.proposalRecords.create(row.campaignId, 'location', locationId as number, 'update', validated, user, role);
             return { proposal };
           }
@@ -722,7 +726,7 @@ export class McpToolsService {
         }
         const validated = LocationCreate.parse(fields); // name required on create
         if (propose) {
-          const role = await this.access.requireMember(user, campaignId as number);
+          const role = await this.access.requireMember(user, campaignId as number, { write: true });
           const proposal = await this.proposalRecords.create(campaignId as number, 'location', null, 'create', validated, user, role);
           return { proposal };
         }
@@ -771,7 +775,7 @@ export class McpToolsService {
       },
       async ({ campaignId, number, title, recap, playedAt, propose }) => {
         // Membership is required even to compute the default number.
-        const memberRole = await this.access.requireMember(user, campaignId as number);
+        const memberRole = await this.access.requireMember(user, campaignId as number, { write: true });
         let sessionNumber = number as number | undefined;
         if (sessionNumber === undefined) {
           const existing = await this.sessions.listForCampaign(campaignId as number);
@@ -811,7 +815,7 @@ export class McpToolsService {
           ...(playedAt !== undefined ? { playedAt } : {}),
         });
         if (propose) {
-          const role = await this.access.requireMember(user, row.campaignId);
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'session', sessionId as number, 'update', validated, user, role);
           return { proposal };
         }
@@ -899,7 +903,7 @@ export class McpToolsService {
         entityId: Id.optional().describe('Optionally link to an entity id'),
       },
       async ({ campaignId, body, visibility, entityType, entityId }) => {
-        const role = await this.access.requireMember(user, campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
         return this.notes.create(
           campaignId as number,
           {
@@ -925,7 +929,7 @@ export class McpToolsService {
       },
       async ({ noteId, body, visibility }) => {
         const row = await this.notes.getRowOrThrow(noteId as number);
-        const role = await this.access.requireMember(user, row.campaignId);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
         return this.notes.update(
           noteId as number,
           { ...(body !== undefined ? { body: body as string } : {}), ...(visibility !== undefined ? { visibility: visibility as z.infer<typeof NoteVisibility> } : {}) },
@@ -942,7 +946,7 @@ export class McpToolsService {
       { noteId: Id.describe('Note id') },
       async ({ noteId }) => {
         const row = await this.notes.getRowOrThrow(noteId as number);
-        const role = await this.access.requireMember(user, row.campaignId);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
         await this.notes.remove(noteId as number, user, role);
         return { ok: true, noteId };
       },
@@ -955,7 +959,7 @@ export class McpToolsService {
         'of character). Appears in read_inbox until a dm calls resolve_inbox_item.',
       { campaignId: CampaignIdArg, body: z.string().min(1).max(20_000).describe('Message body') },
       async ({ campaignId, body }) => {
-        const role = await this.access.requireMember(user, campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
         return this.notes.createInbox(campaignId as number, { authorName: user.name, body: body as string }, user, role);
       },
     );
@@ -985,7 +989,9 @@ export class McpToolsService {
         dangerLevel: DangerLevel.optional().describe('low | moderate | high | deadly'),
       },
       async ({ campaignId, status, currentLocationId, dangerLevel }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm');
+        // allowArchived: this is the un-archive path (status back to 'active') —
+        // CampaignsService.update() restricts archived campaigns to status-only patches.
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         const patch: z.infer<typeof CampaignUpdate> = {};
         if (status !== undefined) patch.status = status as z.infer<typeof CampaignUpdate>['status'];
         if (currentLocationId !== undefined) patch.currentLocationId = currentLocationId as number | null;
@@ -1086,7 +1092,7 @@ export class McpToolsService {
         'this; the roll is audited (action "dice.roll").',
       { campaignId: CampaignIdArg, expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3"') },
       async ({ campaignId, expr }) => {
-        const role = await this.access.requireMember(user, campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
         return this.encounters.rollDiceForCampaign(campaignId as number, { expr: expr as string }, user, role);
       },
     );

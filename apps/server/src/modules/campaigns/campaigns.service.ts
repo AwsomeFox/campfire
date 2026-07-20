@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CampaignCreate, CampaignUpdate } from '@campfire/schema';
@@ -180,7 +180,18 @@ export class CampaignsService {
   }
 
   async update(id: number, input: CampaignUpdateInput, user: RequestUser): Promise<Campaign> {
-    await this.getOrThrow(id);
+    const existing = await this.getOrThrow(id);
+    // Archived (paused/completed) campaigns are read-only (issue #16). The one
+    // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
+    // or paused <-> completed) — any other field requires un-archiving first.
+    if (existing.status !== 'active') {
+      const extraKeys = Object.keys(input).filter((k) => k !== 'status' && input[k as keyof CampaignUpdateInput] !== undefined);
+      if (extraKeys.length > 0) {
+        throw new ForbiddenException(
+          `Campaign is ${existing.status} (read-only) — only 'status' can be changed; set it back to 'active' first (rejected: ${extraKeys.join(', ')})`,
+        );
+      }
+    }
     await this.validateRuleSystem(input.ruleSystem);
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);

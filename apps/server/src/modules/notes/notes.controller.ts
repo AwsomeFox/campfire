@@ -43,7 +43,7 @@ export class CampaignNotesController {
     @Body() body: NoteCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.notes.create(campaignId, body, user, role);
   }
 
@@ -55,7 +55,7 @@ export class CampaignNotesController {
     @Body() body: InboxCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.notes.createInbox(campaignId, body, user, role);
   }
 
@@ -63,7 +63,8 @@ export class CampaignNotesController {
   @ApiOperation({ summary: 'List unresolved inbox items', description: 'dm role required.' })
   @ApiResponse({ status: 200, description: 'Inbox items.' })
   async listInbox(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, campaignId, 'dm');
+    // allowArchived: listing the inbox is a read — fine on an archived campaign.
+    await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
     return this.notes.listInbox(campaignId);
   }
 }
@@ -90,7 +91,7 @@ export class NotesController {
   @ApiResponse({ status: 200, description: 'Updated note.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: NoteUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
     return this.notes.update(id, body, user, role);
   }
 
@@ -99,7 +100,7 @@ export class NotesController {
   @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
     return this.notes.remove(id, user, role);
   }
 

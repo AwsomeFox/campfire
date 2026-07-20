@@ -59,7 +59,8 @@ export class CampaignRollController {
     @Body() body: RollRequestDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMember(user, campaignId);
+    // write: rolls are audited activity — an archived (read-only) campaign takes no new rolls.
+    const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.encounters.rollDiceForCampaign(campaignId, body, user, role);
   }
 }
