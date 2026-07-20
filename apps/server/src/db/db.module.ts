@@ -228,6 +228,25 @@ function migrateCharactersTableForSheetDepth(sqlite: Database.Database): void {
   if (!has('spell_slots')) sqlite.exec("ALTER TABLE characters ADD COLUMN spell_slots TEXT NOT NULL DEFAULT '{}'");
 }
 
+/**
+ * Migration for DBs created before session scheduling (issue #13):
+ * `campaigns.ics_token` didn't exist. Plain nullable ADD COLUMN — no table
+ * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForIcsToken(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  const hasIcsToken = columns.some((c) => c.name === 'ics_token');
+  if (hasIcsToken) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN ics_token TEXT');
+}
+
 // Set by createDb() as a side effect and read by the RULE_ENTRIES_FTS_AVAILABLE
 // provider below — both providers must derive from the same sqlite.exec()
 // probe (asking twice could disagree if it were ever non-deterministic).
@@ -248,6 +267,7 @@ export function createDb(): DrizzleDb {
   migrateApiTokensTableForAdminEnabled(sqlite);
   migrateProposalsTableForSnapshot(sqlite);
   migrateCharactersTableForSheetDepth(sqlite);
+  migrateCampaignsTableForIcsToken(sqlite);
   sqlite.exec(BOOTSTRAP_SQL);
   // Index creation is IF NOT EXISTS in BOOTSTRAP_SQL, so re-running it above
   // after the rebuild is safe and keeps idx_users_oidc_sub in sync.
