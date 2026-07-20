@@ -365,4 +365,136 @@ describe('quests (e2e)', () => {
       expect(patchRes.body.giverNpcId).toBe(npcId);
     });
   });
+
+  // #95 — parent cycles (a quest cannot be its own ancestor) must be rejected with 400.
+  describe('parent cycle rejection (#95)', () => {
+    it('PATCH A parent=B when B parent=A -> 400 (direct 2-cycle)', async () => {
+      const server = ctx.app.getHttpServer();
+      const aRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Cycle A' });
+      const aId = aRes.body.id;
+      const bRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Cycle B', parentId: aId });
+      const bId = bRes.body.id;
+      expect(bRes.body.parentId).toBe(aId);
+
+      // A -> B would close the loop A->B->A
+      const res = await request(server).patch(`/api/v1/quests/${aId}`).set(dm).send({ parentId: bId });
+      expect(res.status).toBe(400);
+
+      // A must be untouched (still a root)
+      const aGet = await request(server).get(`/api/v1/quests/${aId}`).set(dm);
+      expect(aGet.body.parentId).toBeNull();
+    });
+
+    it('PATCH ancestor to descend from its own grandchild -> 400 (deep cycle)', async () => {
+      const server = ctx.app.getHttpServer();
+      const aRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Deep A' });
+      const aId = aRes.body.id;
+      const bRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Deep B', parentId: aId });
+      const bId = bRes.body.id;
+      const cRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Deep C', parentId: bId });
+      const cId = cRes.body.id;
+
+      // A -> C would close A->B->C->A
+      const res = await request(server).patch(`/api/v1/quests/${aId}`).set(dm).send({ parentId: cId });
+      expect(res.status).toBe(400);
+    });
+
+    it('reparenting to an unrelated quest still succeeds (no false positive)', async () => {
+      const server = ctx.app.getHttpServer();
+      const rootRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'New root' });
+      const rootId = rootRes.body.id;
+      const movableRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Movable' });
+      const movableId = movableRes.body.id;
+
+      const res = await request(server).patch(`/api/v1/quests/${movableId}`).set(dm).send({ parentId: rootId });
+      expect(res.status).toBe(200);
+      expect(res.body.parentId).toBe(rootId);
+    });
+  });
+
+  // #100 — quest.sortOrder must actually order reads; objectives get max+1 on create and can be reordered.
+  describe('ordering (#100)', () => {
+    it('quest list is ordered by sortOrder, then id', async () => {
+      const server = ctx.app.getHttpServer();
+      const orderCampRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Order Campaign' });
+      const oc = orderCampRes.body.id;
+
+      // Create in an order that does NOT match desired sortOrder.
+      const first = await request(server).post(`/api/v1/campaigns/${oc}/quests`).set(dm).send({ title: 'Third', sortOrder: 30 });
+      const second = await request(server).post(`/api/v1/campaigns/${oc}/quests`).set(dm).send({ title: 'First', sortOrder: 10 });
+      const third = await request(server).post(`/api/v1/campaigns/${oc}/quests`).set(dm).send({ title: 'Second', sortOrder: 20 });
+
+      const listRes = await request(server).get(`/api/v1/campaigns/${oc}/quests`).set(dm);
+      expect(listRes.status).toBe(200);
+      const ids = listRes.body.map((q: { id: number }) => q.id);
+      expect(ids).toEqual([second.body.id, third.body.id, first.body.id]);
+      expect(listRes.body.map((q: { title: string }) => q.title)).toEqual(['First', 'Second', 'Third']);
+    });
+
+    it('new objectives are appended (max sortOrder + 1), preserving creation order', async () => {
+      const server = ctx.app.getHttpServer();
+      const qRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Objective order quest' });
+      const qId = qRes.body.id;
+
+      await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'Step 1' });
+      await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'Step 2' });
+      await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'Step 3' });
+
+      const get = await request(server).get(`/api/v1/quests/${qId}`).set(dm);
+      expect(get.body.objectives.map((o: { text: string }) => o.text)).toEqual(['Step 1', 'Step 2', 'Step 3']);
+      const sorts = get.body.objectives.map((o: { sortOrder: number }) => o.sortOrder);
+      expect(sorts).toEqual([...sorts].sort((a, b) => a - b));
+      expect(new Set(sorts).size).toBe(3); // no collisions at 0
+    });
+
+    it('reorder endpoint reassigns objective order; honored in reads', async () => {
+      const server = ctx.app.getHttpServer();
+      const qRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Reorder quest' });
+      const qId = qRes.body.id;
+      const o1 = (await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'A' })).body.id;
+      const o2 = (await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'B' })).body.id;
+      const o3 = (await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'C' })).body.id;
+
+      const reorderRes = await request(server)
+        .post(`/api/v1/quests/${qId}/objectives/reorder`)
+        .set(dm)
+        .send({ objectiveIds: [o3, o1, o2] });
+      expect(reorderRes.status).toBe(201);
+      expect(reorderRes.body.map((o: { text: string }) => o.text)).toEqual(['C', 'A', 'B']);
+
+      // Persisted + reflected on the quest read
+      const get = await request(server).get(`/api/v1/quests/${qId}`).set(dm);
+      expect(get.body.objectives.map((o: { text: string }) => o.text)).toEqual(['C', 'A', 'B']);
+    });
+
+    it('reorder with a non-permutation (missing/foreign id) -> 400', async () => {
+      const server = ctx.app.getHttpServer();
+      const qRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Bad reorder quest' });
+      const qId = qRes.body.id;
+      const o1 = (await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'X' })).body.id;
+      const o2 = (await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'Y' })).body.id;
+
+      // partial list
+      expect((await request(server).post(`/api/v1/quests/${qId}/objectives/reorder`).set(dm).send({ objectiveIds: [o1] })).status).toBe(400);
+      // foreign id
+      expect(
+        (await request(server).post(`/api/v1/quests/${qId}/objectives/reorder`).set(dm).send({ objectiveIds: [o1, o2, 999999] })).status,
+      ).toBe(400);
+      // duplicate id
+      expect(
+        (await request(server).post(`/api/v1/quests/${qId}/objectives/reorder`).set(dm).send({ objectiveIds: [o1, o1] })).status,
+      ).toBe(400);
+    });
+
+    it('player cannot reorder objectives (403)', async () => {
+      const server = ctx.app.getHttpServer();
+      const qRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Player reorder quest' });
+      const qId = qRes.body.id;
+      const o1 = (await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'M' })).body.id;
+      const o2 = (await request(server).post(`/api/v1/quests/${qId}/objectives`).set(dm).send({ text: 'N' })).body.id;
+
+      const res = await request(server).post(`/api/v1/quests/${qId}/objectives/reorder`).set(player).send({ objectiveIds: [o2, o1] });
+      expect(res.status).toBe(403);
+    });
+  });
 });

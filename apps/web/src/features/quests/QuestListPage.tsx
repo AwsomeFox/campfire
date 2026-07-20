@@ -90,8 +90,27 @@ export default function QuestListPage() {
     );
   }
 
-  const roots = quests.filter((q) => q.parentId == null);
-  const childrenOf = (parentId: number) => quests.filter((q) => q.parentId === parentId);
+  // Root/child partition that stays robust against legacy cyclic data (#95): the
+  // server now rejects parent cycles, but any pre-existing A↔B loop must still not
+  // make quests vanish. A quest renders as a root when it has no parent, its parent
+  // isn't in this list (orphan), OR walking its ancestor chain loops back to itself
+  // (cycle). Children exclude anything that is itself a root, so a cycle surfaces as
+  // two standalone cards rather than an infinite/duplicated nesting.
+  const byId = new Map(quests.map((q) => [q.id, q]));
+  const isRoot = (q: Quest): boolean => {
+    if (q.parentId == null) return true;
+    const seen = new Set<number>([q.id]);
+    let cur = byId.get(q.parentId);
+    while (cur) {
+      if (seen.has(cur.id)) return true; // cycle back to q (or a loop) → treat as root
+      if (cur.parentId == null) return false; // chain terminates cleanly → genuine child
+      seen.add(cur.id);
+      cur = byId.get(cur.parentId);
+    }
+    return true; // parent missing from list → orphan, show as root
+  };
+  const roots = quests.filter(isRoot);
+  const childrenOf = (parentId: number) => quests.filter((q) => q.parentId === parentId && !isRoot(q));
 
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
