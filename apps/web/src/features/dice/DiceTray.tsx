@@ -5,20 +5,19 @@
  * type "2d6+3" mid-combat anymore — but the advanced expression box still lives in
  * SharedDiceLog for power users.
  *
- * Scope note: this is a UI-only change (issue #38). The server roll endpoint is
- * unchanged and only understands a single die group per expression ("NdM+K", sides
- * limited to the standard polyhedrals). So:
+ * Scope note: the server roll endpoint understands a single die group per expression
+ * ("NdM", optional keep/drop khN/klN/dhN/dlN, optional +K). So:
  *  - A mixed pool (e.g. 2d6 + 1d8) submits one roll per die group; each lands as its
  *    own shared-log entry. The common single-group case (2d6+3, 1d20+5) is one clean
  *    roll with a server-computed total.
- *  - Advantage/disadvantage rolls 2d20 server-side (both dice show in the shared
- *    feed) and the tray surfaces the kept die locally — "roll two, keep high/low" —
- *    since a keep-highest total isn't expressible in the server's NdM+K grammar
- *    without a server change (out of scope here).
+ *  - Advantage/disadvantage submit a real keep/drop expression — "2d20kh1" / "2d20kl1"
+ *    (issue #130) — so the server rolls both d20s AND computes the kept total that
+ *    everyone in the shared feed sees; the tray just surfaces the same kept die.
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { DiceRoll } from '@campfire/schema';
 import { Btn } from '../../components/ui';
+import { RolledDice } from './RolledDice';
 
 // Standard polyhedral faces the server accepts (see apps/server/src/common/dice.ts).
 const DICE_FACES = [4, 6, 8, 10, 12, 20, 100] as const;
@@ -57,11 +56,13 @@ function poolEntries(pool: Pool): [number, number][] {
 }
 
 /**
- * Build the expression(s) to submit. Advantage/disadvantage -> a single "2d20{mod}".
+ * Build the expression(s) to submit. Advantage -> "2d20kh1{mod}", disadvantage ->
+ * "2d20kl1{mod}" (server keeps the high/low die and computes the total, issue #130).
  * Otherwise one expression per die group, with the modifier folded onto the first.
  */
 function buildExprs(pool: Pool, modifier: number, advMode: AdvMode): string[] {
-  if (advMode !== 'flat') return [`2d20${formatMod(modifier)}`];
+  if (advMode === 'adv') return [`2d20kh1${formatMod(modifier)}`];
+  if (advMode === 'dis') return [`2d20kl1${formatMod(modifier)}`];
   const entries = poolEntries(pool);
   if (entries.length === 0) return [];
   return entries.map(([sides, count], i) => `${count}d${sides}${i === 0 ? formatMod(modifier) : ''}`);
@@ -104,9 +105,11 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
   const [modifier, setModifier] = useState(0);
   const [advMode, setAdvMode] = useState<AdvMode>('flat');
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>(() => loadPresets(campaignId));
-  // Local "big result" feedback — for advantage this is the *kept* die (server total
-  // reflects the sum of both d20s, which the shared feed shows separately).
-  const [feedback, setFeedback] = useState<{ label: string; total: number; rolls: number[] } | null>(null);
+  // Local "big result" feedback. For advantage/disadvantage the server now returns the
+  // kept die (result.kept) and a total that already reflects the keep + modifier.
+  const [feedback, setFeedback] = useState<{ label: string; total: number; rolls: number[]; kept?: number[] } | null>(
+    null,
+  );
 
   useEffect(() => {
     setSavedPresets(loadPresets(campaignId));
@@ -199,13 +202,13 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
     if (toSubmit.length === 0) return;
     if (advMode !== 'flat') {
       const result = await onSubmitExpr(toSubmit[0]);
-      if (result && result.rolls.length >= 2) {
-        const [a, b] = result.rolls;
-        const kept = advMode === 'adv' ? Math.max(a, b) : Math.min(a, b);
+      if (result) {
+        // Server keeps the high/low die (2d20kh1 / kl1) and returns the kept total.
         setFeedback({
           label: advMode === 'adv' ? 'Advantage — kept high' : 'Disadvantage — kept low',
-          total: kept + modifier,
+          total: result.total,
           rolls: result.rolls,
+          kept: result.kept,
         });
       }
       return;
@@ -215,7 +218,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
       // Sequential so multi-group rolls land in a stable order in the shared feed.
       last = await onSubmitExpr(expr);
     }
-    if (last) setFeedback({ label: last.expr, total: last.total, rolls: last.rolls });
+    if (last) setFeedback({ label: last.expr, total: last.total, rolls: last.rolls, kept: last.kept });
   }, [pool, modifier, advMode, onSubmitExpr]);
 
   const dieBtnSize = compact ? 40 : 48;
@@ -400,8 +403,9 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
             >
               {feedback.total}
             </div>
-            <div className="text-muted" style={{ fontSize: 10 }}>
-              {feedback.label} [{feedback.rolls.join(', ')}]
+            <div className="text-muted" style={{ fontSize: 10, display: 'flex', gap: 4, justifyContent: 'flex-end', alignItems: 'baseline' }}>
+              <span>{feedback.label}</span>
+              <RolledDice rolls={feedback.rolls} kept={feedback.kept} fontSize={10} />
             </div>
           </div>
         )}

@@ -423,7 +423,10 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   roller_name TEXT NOT NULL DEFAULT '',
   expr TEXT NOT NULL,
   rolls TEXT NOT NULL DEFAULT '[]',
+  kept TEXT,
   total INTEGER NOT NULL,
+  label TEXT,
+  dc INTEGER,
   created_at TEXT NOT NULL
 );
 

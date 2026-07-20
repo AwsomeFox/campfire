@@ -36,20 +36,26 @@ export type BatchResolveResult =
 
 export { isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 
-/** Zod input schema per entity type/action — used to validate a proposal payload before applying it. */
+// Zod input schema per entity type/action — used to validate a proposal payload
+// before applying it. `.strict()` here mirrors the server DTO layer (issue #131):
+// the proposal path is where silent key-stripping was WORST (an invisible drop
+// until a DM approves an emptier-than-intended entity), so an amended
+// edit-before-approve payload (ProposalApprove.payload) with an unknown/misnamed
+// key 400s instead of being quietly discarded. The shared @campfire/schema exports
+// stay lenient (reused elsewhere); strictness is applied at this use site only.
 const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
-  quest: QuestCreate,
-  npc: NpcCreate,
-  location: LocationCreate,
-  session: SessionCreate,
-  character: CharacterCreate,
+  quest: QuestCreate.strict(),
+  npc: NpcCreate.strict(),
+  location: LocationCreate.strict(),
+  session: SessionCreate.strict(),
+  character: CharacterCreate.strict(),
 };
 const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
-  quest: QuestUpdate,
-  npc: NpcUpdate,
-  location: LocationUpdate,
-  session: SessionUpdate,
-  character: CharacterUpdate,
+  quest: QuestUpdate.strict(),
+  npc: NpcUpdate.strict(),
+  location: LocationUpdate.strict(),
+  session: SessionUpdate.strict(),
+  character: CharacterUpdate.strict(),
 };
 
 @Injectable()
