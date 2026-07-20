@@ -1,7 +1,7 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters } from '../../db/schema';
@@ -32,7 +32,9 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     level: row.level,
     xp: row.xp,
     background: row.background,
-    stats: fromJsonText<Record<string, number>>(row.stats, {}),
+    // Fold to canonical uppercase keys so existing rows written with lowercase keys
+    // (schema permits any case) still resolve on the sheet / initiative engine (issue #48).
+    stats: normalizeStats(fromJsonText<Record<string, number>>(row.stats, {})),
     ac: row.ac,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
@@ -96,7 +98,7 @@ export class CharactersService {
         level: input.level ?? 1,
         xp: input.xp ?? 0,
         background: input.background ?? '',
-        stats: toJsonText(input.stats ?? {}),
+        stats: toJsonText(normalizeStats(input.stats ?? {})),
         ac: input.ac ?? null,
         hpCurrent: input.hpCurrent ?? 10,
         hpMax: input.hpMax ?? 10,
@@ -138,7 +140,7 @@ export class CharactersService {
     if (input.level !== undefined) update.level = input.level;
     if (input.xp !== undefined) update.xp = input.xp;
     if (input.background !== undefined) update.background = input.background;
-    if (input.stats !== undefined) update.stats = toJsonText(input.stats);
+    if (input.stats !== undefined) update.stats = toJsonText(normalizeStats(input.stats));
     if (input.ac !== undefined) update.ac = input.ac;
     if (input.hpMax !== undefined) update.hpMax = input.hpMax;
     // Clamp to [0, finalHpMax] whenever either hp field is touched — mirrors patchHp's

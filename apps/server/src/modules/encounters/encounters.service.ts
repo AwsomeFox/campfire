@@ -1,7 +1,7 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest } from '@campfire/schema';
+import { CombatantCreate, CombatantUpdate, EncounterCreate, RollRequest, normalizeStats } from '@campfire/schema';
 import type { Combatant, DiceRoll, Encounter, EncounterStatus, EncounterWithCombatants, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { characters, combatants, encounters, ruleEntries } from '../../db/schema';
@@ -142,7 +142,7 @@ export class EncountersService {
     const partyRows = await this.db.select().from(characters).where(eq(characters.campaignId, campaignId));
     let sortOrder = 0;
     for (const character of partyRows) {
-      const stats = fromJsonText<Record<string, number>>(character.stats, {});
+      const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
       const initMod = typeof stats.DEX === 'number' ? abilityMod(stats.DEX) : 0;
       await this.db.insert(combatants).values({
         encounterId: encounterRow.id,
@@ -210,7 +210,7 @@ export class EncountersService {
       hpMax = hpMax ?? character.hpMax;
       hpCurrent = character.hpCurrent;
       if (input.initMod === undefined) {
-        const stats = fromJsonText<Record<string, number>>(character.stats, {});
+        const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
         initMod = typeof stats.DEX === 'number' ? abilityMod(stats.DEX) : 0;
       }
     } else if (input.ruleEntryId !== undefined) {
