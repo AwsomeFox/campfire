@@ -310,6 +310,27 @@ function migrateCharactersTableForDmSecret(sqlite: Database.Database): void {
   sqlite.exec("ALTER TABLE characters ADD COLUMN dm_secret TEXT NOT NULL DEFAULT ''");
 }
 
+/**
+ * Migration for DBs created before per-player whisper notes (issue #127):
+ * `notes.recipient_user_id` didn't exist. Plain nullable ADD COLUMN — no table
+ * rebuild needed, same shape as migrateCampaignsTableForMapAttachment above.
+ * Existing notes get NULL (no whisper target), which is correct for every
+ * pre-migration visibility (private/dm_shared/party_shared never carried a
+ * recipient). New DBs never hit this path — BOOTSTRAP_SQL already declares the
+ * column.
+ */
+function migrateNotesTableForRecipient(sqlite: Database.Database): void {
+  const hasNotesTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'")
+    .get();
+  if (!hasNotesTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(notes)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'recipient_user_id')) return;
+
+  sqlite.exec('ALTER TABLE notes ADD COLUMN recipient_user_id TEXT');
+}
+
 /** See migrateCharactersTableForDmSecret above — same migration for the sessions table. */
 function migrateSessionsTableForDmSecret(sqlite: Database.Database): void {
   const hasSessionsTable = sqlite
@@ -512,6 +533,7 @@ export function openDatabase(dataDir: string): {
   migrateCampaignsTableForStorageQuota(sqlite);
   migrateCharactersTableForXp(sqlite);
   migrateCharactersTableForDmSecret(sqlite);
+  migrateNotesTableForRecipient(sqlite);
   migrateSessionsTableForDmSecret(sqlite);
   migrateEncountersTableForCurrentCombatant(sqlite);
   migrateQuestsTableForHidden(sqlite);

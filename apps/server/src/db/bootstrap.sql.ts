@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS notes (
   visibility TEXT NOT NULL DEFAULT 'private',
   entity_type TEXT,
   entity_id INTEGER,
+  recipient_user_id TEXT,
   body TEXT NOT NULL,
   resolved INTEGER NOT NULL DEFAULT 0,
   resolved_note TEXT NOT NULL DEFAULT '',
