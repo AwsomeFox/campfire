@@ -3,16 +3,17 @@ import { createTestApp, closeTestApp, type TestAppContext } from '../test-app';
 import { dm, openRawDb, countRows, seedFullCampaign } from './fixtures';
 
 /**
- * Integration coverage for the hand-rolled campaign-delete cascade (issue #96,
- * per issue #80). CampaignsService.remove deletes ~13 child tables by hand inside
- * one transaction — exactly the kind of list that silently rots when a new child
- * table is added and forgotten. Rather than trust the HTTP 204, we open the real
- * SQLite file afterwards and assert there are literally zero rows left referencing
- * the deleted campaign, in every table — including the two-hop children
- * (quest_objectives off quests, combatants off encounters) that don't carry a
- * campaign_id of their own.
+ * Integration coverage for the hand-rolled campaign PURGE cascade (issue #96, per
+ * issue #80; now the deliberate 2nd step under issue #116). CampaignsService.purge
+ * deletes ~13 child tables by hand inside one transaction — exactly the kind of list
+ * that silently rots when a new child table is added and forgotten. Rather than trust
+ * the HTTP 200, we open the real SQLite file afterwards and assert there are literally
+ * zero rows left referencing the purged campaign, in every table — including the
+ * two-hop children (quest_objectives off quests, combatants off encounters) that don't
+ * carry a campaign_id of their own. The default DELETE is now a soft-delete; only PURGE
+ * runs this cascade.
  */
-describe('campaign delete cascade (real SQLite, no orphan rows)', () => {
+describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
   let ctx: TestAppContext;
 
   beforeAll(async () => {
@@ -23,7 +24,7 @@ describe('campaign delete cascade (real SQLite, no orphan rows)', () => {
     await closeTestApp(ctx);
   });
 
-  it('leaves no orphan rows in any child table after deleting a campaign', async () => {
+  it('leaves no orphan rows in any child table after purging a campaign', async () => {
     const server = ctx.app.getHttpServer();
     const { campaignId, questId, encounterId } = await seedFullCampaign(server, 'Doomed Campaign');
 
@@ -38,7 +39,19 @@ describe('campaign delete cascade (real SQLite, no orphan rows)', () => {
       before.close();
     }
 
-    const del = await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
+    // Soft-delete first (the default DELETE, issue #116) — rows must all still be present.
+    const soft = await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(soft.status).toBe(200);
+    const midway = openRawDb(ctx.dataDir);
+    try {
+      expect(countRows(midway, 'characters', `campaign_id = ${campaignId}`)).toBe(1);
+      expect(countRows(midway, 'campaigns', `id = ${campaignId} AND deleted_at IS NOT NULL`)).toBe(1);
+    } finally {
+      midway.close();
+    }
+
+    // Now the deliberate purge runs the real hard cascade.
+    const del = await request(server).delete(`/api/v1/campaigns/${campaignId}/purge`).set(dm);
     expect(del.status).toBe(200);
 
     // The DB is the source of truth — inspect it directly for orphans.
@@ -70,12 +83,11 @@ describe('campaign delete cascade (real SQLite, no orphan rows)', () => {
     }
   });
 
-  it('nulls a deleted character\'s soft refs (combatant + member) rather than dangling them', async () => {
+  it('soft-deletes a character (issue #116) — the row survives (deleted_at set) and its refs are preserved', async () => {
     const server = ctx.app.getHttpServer();
-    const { campaignId, encounterId, characterId } = await seedFullCampaign(server, 'Character Delete Campaign');
+    const { encounterId, characterId } = await seedFullCampaign(server, 'Character Delete Campaign');
 
-    // Link the character into the fight (a combatant) and give the DM a member row
-    // whose characterId points at it, so both inbound soft refs exist before delete.
+    // Link the character into the fight (a combatant) so an inbound soft ref exists.
     await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants`)
       .set(dm)
@@ -93,24 +105,28 @@ describe('campaign delete cascade (real SQLite, no orphan rows)', () => {
 
     const after = openRawDb(ctx.dataDir);
     try {
-      // Character gone...
-      expect(countRows(after, 'characters', `id = ${characterId}`)).toBe(0);
-      // ...but the combatant row SURVIVES with a nulled character_id — no dangling ref
-      // to a ghost id (issue #69: this was the reported bug). Same for any member row.
-      expect(countRows(after, 'combatants', `character_id = ${characterId}`)).toBe(0);
-      expect(countRows(after, 'combatants', `character_id IS NULL`)).toBeGreaterThanOrEqual(1);
-      expect(countRows(after, 'campaign_members', `character_id = ${characterId}`)).toBe(0);
+      // The character row SURVIVES — it's trashed (deleted_at set), not destroyed, so it
+      // stays fully restorable and no inbound FK ever dangles (the ref points at a real,
+      // if hidden, row). This is the reversible replacement for the old hard delete.
+      expect(countRows(after, 'characters', `id = ${characterId} AND deleted_at IS NOT NULL`)).toBe(1);
+      expect(countRows(after, 'combatants', `character_id = ${characterId}`)).toBe(1);
     } finally {
       after.close();
     }
+
+    // And the GET/list reads hide it while it's trashed; restore brings it straight back.
+    const gone = await request(server).get(`/api/v1/characters/${characterId}`).set(dm);
+    expect(gone.status).toBe(404);
+    const restored = await request(server).post(`/api/v1/characters/${characterId}/restore`).set(dm);
+    expect(restored.status).toBe(201);
   });
 
-  it('deletes only the target campaign — a sibling campaign is untouched', async () => {
+  it('purges only the target campaign — a sibling campaign is untouched', async () => {
     const server = ctx.app.getHttpServer();
     const doomed = await seedFullCampaign(server, 'Sacrificial Campaign');
     const keeper = await seedFullCampaign(server, 'Surviving Campaign');
 
-    const del = await request(server).delete(`/api/v1/campaigns/${doomed.campaignId}`).set(dm);
+    const del = await request(server).delete(`/api/v1/campaigns/${doomed.campaignId}/purge`).set(dm);
     expect(del.status).toBe(200);
 
     const after = openRawDb(ctx.dataDir);

@@ -40,6 +40,17 @@ export class CampaignsController {
     return this.campaigns.importCampaign(body, user);
   }
 
+  @Get('trash')
+  @ApiOperation({
+    summary: 'List trashed (soft-deleted) campaigns',
+    description:
+      'The caller\'s campaigns currently in the trash (issue #116), newest-trashed first. Same membership scoping as GET /campaigns — a co-DM sees campaigns any co-DM trashed. Restore one with POST /campaigns/:id/restore, or permanently remove it with DELETE /campaigns/:id/purge.',
+  })
+  @ApiResponse({ status: 200, description: 'Trashed campaigns.' })
+  listTrash(@CurrentUser() user: RequestUser) {
+    return this.campaigns.listTrashedForUser(user);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a campaign', description: 'Requires campaign membership.' })
   @ApiResponse({ status: 200, description: 'Campaign.' })
@@ -61,12 +72,40 @@ export class CampaignsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a campaign', description: 'dm role required. Allowed even when the campaign is archived (paused/completed).' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({
+    summary: 'Delete (trash) a campaign',
+    description:
+      'dm role required. Allowed even when the campaign is archived (paused/completed). SOFT-delete (issue #116): the campaign moves to the trash — every row and its on-disk uploads survive and it is restorable via POST /campaigns/:id/restore. The old irreversible hard-cascade + disk wipe is now the deliberate second step DELETE /campaigns/:id/purge.',
+  })
+  @ApiResponse({ status: 200, description: 'Trashed (soft-deleted).' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    // allowArchived: deleting an archived campaign must not require un-archiving it first.
+    // allowArchived: trashing an archived campaign must not require un-archiving it first.
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
     return this.campaigns.remove(id, user);
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({
+    summary: 'Restore a trashed campaign',
+    description: 'dm role required. Clears the trash flag (issue #116) so the campaign returns to normal listings with every child row + upload intact. 404 if it is not actually in the trash.',
+  })
+  @ApiResponse({ status: 201, description: 'Restored campaign.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    // allowArchived: a trashed campaign is not writable in the normal sense; membership is the gate.
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    return this.campaigns.restore(id, user);
+  }
+
+  @Delete(':id/purge')
+  @ApiOperation({
+    summary: 'Permanently purge a campaign',
+    description:
+      'dm role required. The deliberate, IRREVERSIBLE second step (issue #116): hard-cascades every child table AND wipes the campaign\'s on-disk upload directory. Works on a live or already-trashed campaign. This is the ONLY path that destroys data + files.',
+  })
+  @ApiResponse({ status: 200, description: 'Permanently purged (rows + files removed).' })
+  async purge(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    return this.campaigns.purge(id, user);
   }
 
   @Post(':id/clone')

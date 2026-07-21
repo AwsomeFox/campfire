@@ -4,8 +4,9 @@ import type { z } from 'zod';
 import { NpcCreate, NpcUpdate } from '@campfire/schema';
 import type { Npc, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { npcs, locations, quests } from '../../db/schema';
+import { npcs, locations } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -40,14 +41,15 @@ export class NpcsService {
   ) {}
 
   async listForCampaign(campaignId: number, role: Role): Promise<Npc[]> {
-    const rows = await this.db.select().from(npcs).where(eq(npcs.campaignId, campaignId));
+    const rows = await this.db.select().from(npcs).where(and(eq(npcs.campaignId, campaignId), notDeleted(npcs.deletedAt)));
     // Drop hidden NPCs wholesale for non-DM BEFORE redacting dmSecret (issue #42).
     return redactSecrets(filterHidden(rows.map(toDomain), role), role);
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(npcs).where(eq(npcs.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`NPC ${id} not found`);
+    // A trashed NPC (soft-deleted, #116) reads as nonexistent unless includeDeleted (restore).
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`NPC ${id} not found`);
     return row;
   }
 
@@ -63,7 +65,7 @@ export class NpcsService {
     const [row] = await this.db
       .select()
       .from(npcs)
-      .where(and(eq(npcs.campaignId, campaignId), sql`lower(${npcs.name}) = lower(${name})`))
+      .where(and(eq(npcs.campaignId, campaignId), sql`lower(${npcs.name}) = lower(${name})`, notDeleted(npcs.deletedAt)))
       .orderBy(npcs.id)
       .limit(1);
     return row;
@@ -88,7 +90,7 @@ export class NpcsService {
     const [row] = await this.db
       .select({ id: locations.id })
       .from(locations)
-      .where(and(eq(locations.id, locationId), eq(locations.campaignId, campaignId)))
+      .where(and(eq(locations.id, locationId), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)))
       .limit(1);
     if (!row) throw new BadRequestException(`locationId ${locationId} does not exist in this campaign`);
   }
@@ -162,17 +164,16 @@ export class NpcsService {
     return redactSecret(toDomain(row), role);
   }
 
+  /**
+   * Soft-delete (trash) an NPC (issue #116) — reversible. Only stamps `deleted_at`; the
+   * NPC vanishes from normal reads but every row survives for restore(). Unlike the old
+   * hard delete we deliberately DON'T null out quests that credit this NPC as giver —
+   * that mutation would be irreversible. A quest whose giver is trashed simply shows no
+   * giver in the meantime, and re-links on restore.
+   */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    // Null out any quest that credits this NPC as its giver in the same transaction as
-    // the delete, so a quest never dangles on a deleted giverNpcId (the quest UI silently
-    // drops a ghost giver line). Mirrors QuestsService.remove()'s subquest re-parenting.
-    this.db.transaction((tx) => {
-      tx.update(quests).set({ giverNpcId: null, updatedAt: nowIso() }).where(eq(quests.giverNpcId, id)).run();
-      tx.delete(npcs).where(eq(npcs.id, id)).run();
-    });
-    // Drop this NPC's prose revisions (polymorphic soft ref, no FK cascade — #157).
-    await this.revisions.removeForEntity('npc', id);
+    await this.db.update(npcs).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(npcs.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -180,6 +181,27 @@ export class NpcsService {
       entityType: 'npc',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed NPC (issue #116) — clears `deleted_at`. 404 if it isn't trashed. */
+  async restore(id: number, user: RequestUser, role: Role): Promise<Npc> {
+    const existing = await this.getRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`NPC ${id} is not in the trash`);
+    const [row] = await this.db
+      .update(npcs)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(npcs.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'npc.restore',
+      entityType: 'npc',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return redactSecret(toDomain(row), role);
   }
 }

@@ -30,6 +30,11 @@ export const campaigns = sqliteTable('campaigns', {
   // via the storage console; enforced on attachment upload. Nullable in older DBs
   // pre-migration; see db/db.module.ts ALTER TABLE note.
   storageQuotaBytes: integer('storage_quota_bytes'),
+  // Soft-delete / trash timestamp (issue #116). NULL => live; an ISO timestamp => the
+  // campaign is trashed: excluded from normal listings while its rows + on-disk uploads
+  // survive for a grace period, restorable until an explicit purge. Migrated via
+  // migrateSoftDeleteColumns() in db/db.module.ts.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -62,6 +67,8 @@ export const characters = sqliteTable('characters', {
   notes: text('notes').notNull().default(''),
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   dmSecret: text('dm_secret').notNull().default(''),
+  // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -81,6 +88,8 @@ export const quests = sqliteTable('quests', {
   // migrateQuestsTableForHidden().
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   sortOrder: integer('sort_order').notNull().default(0),
+  // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -179,6 +188,8 @@ export const npcs = sqliteTable('npcs', {
   // Entity-level secrecy (issue #42) — see quests.hidden. Migrated via
   // migrateNpcsTableForHidden() in db/db.module.ts.
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -197,6 +208,8 @@ export const locations = sqliteTable('locations', {
   mapY: real('map_y'),
   body: text('body').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
+  // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -210,6 +223,8 @@ export const sessions = sqliteTable('sessions', {
   recap: text('recap').notNull().default(''),
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   dmSecret: text('dm_secret').notNull().default(''),
+  // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -283,6 +298,8 @@ export const notes = sqliteTable('notes', {
   body: text('body').notNull(),
   resolved: integer('resolved', { mode: 'boolean' }).notNull().default(false),
   resolvedNote: text('resolved_note').notNull().default(''),
+  // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

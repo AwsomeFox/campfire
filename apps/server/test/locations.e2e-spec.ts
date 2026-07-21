@@ -58,10 +58,12 @@ describe('locations (e2e)', () => {
     expect(summary.body.currentLocation.id).toBe(locBId);
   });
 
-  // Issue #96: deleting a location must null out inbound references so nothing dangles —
-  // NPCs pinned here (npcs.locationId) and the campaign's currentLocationId.
-  describe('delete cleanup: location pins (issue #96)', () => {
-    it('deleting a location nulls NPCs.locationId and campaigns.currentLocationId', async () => {
+  // Issue #96 + #116: deleting a location is now a reversible SOFT-delete. The location
+  // vanishes from GET/list, but inbound references (npcs.locationId, campaigns.currentLocationId)
+  // are DELIBERATELY preserved — they point at a still-present (just hidden) row, so no FK
+  // dangles and a restore brings everything back intact. A restore relights it everywhere.
+  describe('soft-delete: location pins (issue #96 / #116)', () => {
+    it('deleting a location hides it but preserves inbound refs; restore brings it back', async () => {
       const server = ctx.app.getHttpServer();
       const locRes = await request(server)
         .post(`/api/v1/campaigns/${campaignId}/locations`)
@@ -87,12 +89,24 @@ describe('locations (e2e)', () => {
       const delRes = await request(server).delete(`/api/v1/locations/${locId}`).set(dm);
       expect(delRes.status).toBe(200);
 
+      // The location is hidden from normal reads...
+      const locGone = await request(server).get(`/api/v1/locations/${locId}`).set(dm);
+      expect(locGone.status).toBe(404);
+      const listAfter = await request(server).get(`/api/v1/campaigns/${campaignId}/locations`).set(dm);
+      expect(listAfter.body.some((l: { id: number }) => l.id === locId)).toBe(false);
+
+      // ...but the inbound references survive (reversible — no dangling FK, restorable).
       const npcAfter = await request(server).get(`/api/v1/npcs/${npcId}`).set(dm);
       expect(npcAfter.status).toBe(200);
-      expect(npcAfter.body.locationId).toBeNull();
-
+      expect(npcAfter.body.locationId).toBe(locId);
       const campAfter = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
-      expect(campAfter.body.currentLocationId).toBeNull();
+      expect(campAfter.body.currentLocationId).toBe(locId);
+
+      // Restore relights the location and every reference resolves again.
+      const restoreRes = await request(server).post(`/api/v1/locations/${locId}/restore`).set(dm);
+      expect(restoreRes.status).toBe(201);
+      const locBack = await request(server).get(`/api/v1/locations/${locId}`).set(dm);
+      expect(locBack.status).toBe(200);
     });
   });
 
@@ -231,7 +245,7 @@ describe('locations (e2e)', () => {
       expect(grandAfter.body.parentId).toBeNull();
     });
 
-    it('deleting a parent promotes its children to top level (parentId null)', async () => {
+    it('soft-deleting a parent hides it but keeps children nested (issue #116) — restore re-nests', async () => {
       const server = ctx.app.getHttpServer();
       const parent = await request(server)
         .post(`/api/v1/campaigns/${campaignId}/locations`)
@@ -246,9 +260,16 @@ describe('locations (e2e)', () => {
       const del = await request(server).delete(`/api/v1/locations/${parent.body.id}`).set(dm);
       expect(del.status).toBe(200);
 
+      // Parent hidden; child survives, reversibly keeping its parentId (renders top-level
+      // while the parent is trashed since the board groups by an absent parent).
+      const parentGone = await request(server).get(`/api/v1/locations/${parent.body.id}`).set(dm);
+      expect(parentGone.status).toBe(404);
       const childAfter = await request(server).get(`/api/v1/locations/${child.body.id}`).set(dm);
       expect(childAfter.status).toBe(200);
-      expect(childAfter.body.parentId).toBeNull();
+      expect(childAfter.body.parentId).toBe(parent.body.id);
+
+      const restore = await request(server).post(`/api/v1/locations/${parent.body.id}/restore`).set(dm);
+      expect(restore.status).toBe(201);
     });
 
     it('redaction is preserved on nested locations (unexplored child hidden, dmSecret stripped)', async () => {

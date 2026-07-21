@@ -125,6 +125,15 @@ export class LocationsController {
     return this.locations.remove(id, user, role);
   }
 
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed location', description: 'dm role required. Undo a soft-delete (issue #116) — the location returns exactly as it was.' })
+  @ApiResponse({ status: 201, description: 'Restored location.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.locations.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.locations.restore(id, user, role);
+  }
+
   @Post(':id/discover')
   @ApiOperation({ summary: 'Set a location\'s discovery status', description: "dm role required. status: 'unexplored' | 'explored' | 'current'." })
   @ApiResponse({ status: 201, description: 'Updated location.' })

@@ -24,6 +24,7 @@ import { Markdown } from '../../components/Markdown';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { Toggle } from '../../components/Toggle';
 
 type QuestWithObjectives = Quest & { objectives: QuestObjective[] };
@@ -79,6 +80,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState(false);
   const [togglingHidden, setTogglingHidden] = useState(false);
 
   // Objectives being toggled right now (keyed by objective id). Guards against the
@@ -276,21 +278,31 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     }
   }
 
-  // NOTE ON DELETE BEHAVIOR: QuestsService.remove() (apps/server/src/modules/quests/
-  // quests.service.ts) promotes any subquests to top-level (parentId=null) and deletes
-  // this quest's own objectives, all in a single transaction — subquests are never
-  // orphaned or cascade-deleted. The confirm copy below reflects that.
+  // NOTE ON DELETE BEHAVIOR (issue #116): QuestsService.remove() now SOFT-deletes — it
+  // stamps deleted_at (the quest + its objectives vanish from reads but survive, its
+  // subquests keep their parentId), so the delete is reversible. We surface that with an
+  // Undo snackbar: instead of navigating away immediately we keep the page and offer a
+  // one-click restore; only on expiry/dismiss do we return to the quest list.
   async function deleteQuest() {
     if (!quest) return;
     setDeleting(true);
     setError(null);
     try {
       await api.delete(`${API}/quests/${quest.id}`);
-      navigate(`/c/${campaignId}/quests`);
+      setConfirmingDelete(false);
+      setPendingUndo(true);
     } catch {
       setError(t('quests.deleteFailed'));
+    } finally {
       setDeleting(false);
     }
+  }
+
+  async function undoDelete() {
+    if (!quest) return;
+    await api.post(`${API}/quests/${quest.id}/restore`);
+    setPendingUndo(false);
+    await load();
   }
 
   if (forbidden) {
@@ -651,6 +663,13 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
           busy={deleting}
           onConfirm={deleteQuest}
           onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
+      {pendingUndo && quest && (
+        <UndoSnackbar
+          message={t('quests.deletedUndo', { defaultValue: 'Quest moved to Trash.' })}
+          onUndo={undoDelete}
+          onExpire={() => navigate(`/c/${campaignId}/quests`)}
         />
       )}
     </div>
