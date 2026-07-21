@@ -226,7 +226,7 @@ describe('downstream AI flows (harness ready; behavior lands with its issue)', (
     try {
       await sec.enableExperimental();
       const campaignId = await sec.createCampaign('Injection Target');
-      await sec.configureSeat(campaignId, { instructions: 'secret: the innkeeper is the villain', tokenBudget: 100_000 });
+      await sec.configureSeat(campaignId, { mode: 'driver', instructions: 'secret: the innkeeper is the villain', tokenBudget: 100_000 });
 
       // A player message crafted to hijack the AI: override instructions AND trigger a destructive
       // tool. The model (mock) "obeys" by trying delete_campaign — the server-side guard must block it.

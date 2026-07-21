@@ -171,8 +171,8 @@ export class AiDriverController {
   })
   @ApiResponse({ status: 201, description: 'The replayed turn summary.' })
   async nudge(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmNudgeDto, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'player');
-    return this.driver.nudge(id, user, body.hint);
+    const role = await this.access.requireRole(user, id, 'player');
+    return this.driver.nudge(id, user, body.hint, role);
   }
 
   @Post('flag')
@@ -182,8 +182,8 @@ export class AiDriverController {
   })
   @ApiResponse({ status: 201, description: 'The re-decided turn summary.' })
   async flag(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmFlagDto, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'player');
-    return this.driver.flag(id, user, body.objection);
+    const role = await this.access.requireRole(user, id, 'player');
+    return this.driver.flag(id, user, body.objection, role);
   }
 
   @Post('vote')
@@ -196,9 +196,9 @@ export class AiDriverController {
   @ApiResponse({ status: 201, description: 'The session state after the vote action.' })
   @ApiResponse({ status: 409, description: 'A vote is already open, or none is open to cast on.' })
   async vote(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmVoteDto, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'player');
-    if (body.action === 'open') return this.driver.openVote(id, user, body.kind!);
-    return this.driver.castVote(id, user, body.choice!);
+    const role = await this.access.requireRole(user, id, 'player');
+    if (body.action === 'open') return this.driver.openVote(id, user, body.kind!, role);
+    return this.driver.castVote(id, user, body.choice!, role);
   }
 
   @Post('rules-lookup')
@@ -208,8 +208,8 @@ export class AiDriverController {
   })
   @ApiResponse({ status: 201, description: 'The compendium lookup result.' })
   async rulesLookup(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmRulesLookupDto, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'player');
-    return this.driver.rulesLookup(id, user, body.query);
+    const role = await this.access.requireRole(user, id, 'player');
+    return this.driver.rulesLookup(id, user, body.query, role);
   }
 
   @Post('request-takeover')
@@ -219,8 +219,8 @@ export class AiDriverController {
   })
   @ApiResponse({ status: 201, description: 'The session state after the request.' })
   async requestTakeover(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'player');
-    return this.driver.requestTakeover(id, user);
+    const role = await this.access.requireRole(user, id, 'player');
+    return this.driver.requestTakeover(id, user, role);
   }
 
   @Post('grant-takeover')
@@ -234,8 +234,8 @@ export class AiDriverController {
     @Body() body: AiDmGrantTakeoverDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireRole(user, id, 'dm');
-    return this.driver.grantTakeover(id, user, body.memberId, body.note);
+    const role = await this.access.requireRole(user, id, 'dm');
+    return this.driver.grantTakeover(id, user, body.memberId, body.note, role);
   }
 
   @Post('handback')
@@ -245,8 +245,10 @@ export class AiDriverController {
   })
   @ApiResponse({ status: 201, description: 'The session state after handback.' })
   async handback(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmHandbackDto, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'player');
-    return this.driver.handback(id, user, body.note);
+    // Route allows player+ so the acting-DM grant holder (often a player) can hand the seat back;
+    // the service then enforces that only the grant holder or a campaign DM may actually do it (#375).
+    const role = await this.access.requireRole(user, id, 'player');
+    return this.driver.handback(id, user, body.note, role);
   }
 
   @Sse('stream')

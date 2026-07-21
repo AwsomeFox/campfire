@@ -34,7 +34,7 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
   it('#312 driver: a scripted tool call executes a real campfire tool and feeds the result back', async () => {
     const campaignId = await h.createCampaign('Driver ToolLoop');
-    await h.configureSeat(campaignId, { instructions: 'Be terse.', tokenBudget: 100_000 });
+    await h.configureSeat(campaignId, { mode: 'driver', instructions: 'Be terse.', tokenBudget: 100_000 });
 
     // Turn 1: the model rolls dice (a REAL direct-write tool). Turn 2: it narrates the outcome.
     h.script(
@@ -70,7 +70,7 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
   it('#312 driver: multi-step tool loop terminates on a stop turn and audits each step', async () => {
     const campaignId = await h.createCampaign('Driver Audit');
-    await h.configureSeat(campaignId, { tokenBudget: 100_000 });
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
     h.script(
       { text: 'rolling', toolCalls: [{ id: 'c1', name: 'roll_dice', arguments: { campaignId, expr: '2d6' } }] },
@@ -91,7 +91,7 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
   it('#312 driver: a canon write it cannot make directly becomes a PROPOSAL', async () => {
     const campaignId = await h.createCampaign('Driver Proposals');
-    await h.configureSeat(campaignId, { tokenBudget: 100_000 });
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
     // The model tries to create a quest (canon). The runtime forces it onto the proposal path.
     h.script(
@@ -118,7 +118,7 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
   it('#312 driver: streams narration token-by-token over the SSE channel', async () => {
     const campaignId = await h.createCampaign('Driver Stream');
-    await h.configureSeat(campaignId, { tokenBudget: 100_000 });
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
     // Subscribe to the in-process narration stream (what GET /ai-dm/stream fans out over SSE).
     const streamSvc = h.ctx.app.get(AiDmStreamService);
@@ -139,7 +139,7 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
   it('#312 driver: budget is a HARD stop — the loop halts and the next turn 403s', async () => {
     const campaignId = await h.createCampaign('Driver Budget');
-    await h.configureSeat(campaignId, { tokenBudget: 200 });
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 200 });
 
     // Step 1 overruns the whole budget AND asks for another tool → the loop must stop before step 2.
     h.script(
@@ -188,7 +188,7 @@ describe('ai-dm driver runtime — gating + access (e2e)', () => {
   });
 
   it('a viewer cannot drive the seat but can watch the session state', async () => {
-    await h.configureSeat(campaignId, { tokenBudget: 10_000 });
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 10_000 });
     const drive = await request(h.server).post(`/api/v1/campaigns/${campaignId}/ai-dm/message`).set(viewer).send({ input: 'go' });
     expect(drive.status).toBe(403);
     const session = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/session`).set(viewer);

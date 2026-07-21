@@ -1,11 +1,11 @@
-import { ConflictException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
-import { auditActor, type RequestUser } from '../../common/user.types';
+import { ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
-import { McpToolsService, type DriverToolset } from '../mcp/mcp-tools';
-import type { AiDmSeat } from '@campfire/schema';
+import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp-tools';
+import type { AiDmSeat, Role } from '@campfire/schema';
 import type {
   AiProvider,
   AiMessage,
@@ -21,6 +21,9 @@ const DEFAULT_STEP_MAX_TOKENS = 1024;
 /** Default / hard ceiling on tool-loop iterations in one turn (stop-condition backstop). */
 const DEFAULT_MAX_STEPS = 6;
 const HARD_MAX_STEPS = 12;
+
+/** How long an unresolved table vote stays open before it lazily fails (#382) — 30 minutes. */
+const VOTE_TTL_MS = 30 * 60_000;
 
 /** Why a driver turn stopped — surfaced on the result + the turn.end SSE event. */
 export type AiDmStopReason =
@@ -91,8 +94,12 @@ export interface AiDmTableVote {
   openedAt: string;
   /** memberId → their yes/no ballot. */
   ballots: Record<string, boolean>;
-  /** Yes-votes needed to pass (majority of current members). */
+  /** Yes-votes needed to pass (majority of VOTE-ELIGIBLE members, role ≥ player) (#382). */
   threshold: number;
+  /** Snapshot of the vote-eligible member count at open time — used to detect an unreachable vote. */
+  eligibleVoters: number;
+  /** ISO deadline after which an unresolved vote lazily fails, so it never blocks forever (#382). */
+  expiresAt: string;
   resolved: boolean;
   outcome: 'passed' | 'failed' | null;
 }
@@ -168,28 +175,71 @@ const UNTRUSTED_INPUT_PREAMBLE = [
 ].join('\n');
 
 /**
- * Tool-scoping policy for the driver seat (#317). The seat operates as a live-play DM: it may
- * read, resolve live play, and PROPOSE canon edits — but it must NEVER call destructive or
- * administrative tools, no matter what the (untrusted-input-driven) model requests. These map to
- * the spec's "delete campaign/entity, member/role changes, provider/settings, budget" and are
- * enforced SERVER-SIDE at execution (executeToolCalls) — withholding them from the offered schema
- * is only a hint, never the boundary.
+ * Tool-scoping policy for the driver seat (#317/#378). The seat operates as a live-play DM: it may
+ * READ anything it is permitted to see, RESOLVE live play (dice/HP/conditions/turns/combat/map
+ * reveals), and PROPOSE canon edits — but it must NEVER call destructive, administrative, economy,
+ * or settings tools, no matter what the (untrusted-input-driven) model requests.
+ *
+ * This is an explicit ALLOW-LIST for direct writes rather than a denylist (#378): a denylist that
+ * merely enumerates the forbidden tools silently re-opens the hole every time a new direct-write
+ * tool is added (that is exactly how `update_campaign` and `adjust_treasury` slipped past the old
+ * `update_campaign_status`/member denylist — one archives the campaign, the other drains the party
+ * treasury, neither routed to review). Default-deny closes that class of regression: anything that
+ * mutates and is neither a proposal-capable canon tool nor on this live-play list is refused.
  */
-const DRIVER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
-  'add_member', // member/role changes
-  'update_member',
-  'remove_member',
-  'install_rule_pack', // server-admin (compendium/provider-adjacent) power
-  'update_campaign_status', // campaign lifecycle (archive/complete) — makes canon read-only
+const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
+  // dice + initiative
+  'roll_dice',
+  'roll_initiative',
+  // encounter / turn flow
+  'begin_encounter',
+  'end_encounter',
+  'next_turn',
+  'add_combatant',
+  'update_combatant',
+  'remove_combatant',
+  // character live state
+  'update_character_hp',
+  'set_character_conditions',
+  'award_xp',
+  'level_up_character',
+  // scene / exploration
+  'reveal_map_region',
+  'check_objective',
+  // table notes the DM jots during play
+  'add_note',
 ]);
 
-/** Tool-name prefixes the driver seat may never call — every hard delete (delete_*). */
+/** Tool-name prefixes the driver seat may never call — every hard delete (delete_*), even proposed. */
 const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
 
-/** Whether the driver seat is permitted to call `name` (server-side tool-scoping, #317). */
-export function isDriverToolAllowed(name: string): boolean {
-  if (DRIVER_FORBIDDEN_TOOLS.has(name)) return false;
-  return !DRIVER_FORBIDDEN_PREFIXES.some((p) => name.startsWith(p));
+/**
+ * Explicit deny — administrative/destructive writes that are (currently) registered via
+ * `McpToolsService.tool()` rather than `writeTool()`, so they carry `mutating:false` and would
+ * otherwise be MISTAKEN FOR READS by the default-deny allow-list below. `update_campaign`
+ * (archives the campaign / rewrites its rule system + settings), `uninstall_rule_pack` (server-
+ * admin compendium power), and `withdraw_proposal` (the DM's review-queue control) must never be
+ * driveable regardless of that registration quirk. Enumerated explicitly so a mis-registered write
+ * can't leak through as a read — belt to the allow-list's braces.
+ */
+const DRIVER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  'update_campaign',
+  'uninstall_rule_pack',
+  'withdraw_proposal',
+]);
+
+/**
+ * Whether the driver seat is permitted to call `tool` (server-side tool-scoping, #317/#378).
+ * Default-deny for writes: reads pass; canon writes (proposal-capable) pass and are forced onto the
+ * proposal path; every other direct write must be on the live-play allow-list. Deletes and the
+ * explicit admin denylist are never allowed, not even as a proposal.
+ */
+export function isDriverToolAllowed(tool: Pick<DriverTool, 'name' | 'mutating' | 'proposalCapable'>): boolean {
+  if (DRIVER_FORBIDDEN_PREFIXES.some((p) => tool.name.startsWith(p))) return false;
+  if (DRIVER_FORBIDDEN_TOOLS.has(tool.name)) return false; // mis-registered admin writes (see above)
+  if (!tool.mutating) return true; // reads are always allowed (permission-checked in the tool)
+  if (tool.proposalCapable) return true; // canon writes → the runtime forces propose:true below
+  return DRIVER_LIVE_PLAY_TOOLS.has(tool.name); // direct writes: explicit live-play allow-list only
 }
 
 /**
@@ -294,6 +344,68 @@ export class AiDriverService {
   }
 
   /**
+   * The seat principal that EXECUTES the model's tool calls: a campaign-scoped DM.
+   *
+   * `devRole:'dm'` grants dm authority for tool access, but on its own a devRole DM is a DM on
+   * EVERY campaign (RoleResolver short-circuits devRole) — so an entity-keyed write naming another
+   * campaign's questId/npcId/characterId would pass that tool's requireRole. The `tokenContext`
+   * binds the seat to THIS campaign (#384): RoleResolver returns null for any other campaignId, so
+   * cross-campaign writes 403 even when they carry no campaignId arg. `writeScope:'direct'` keeps
+   * live-play writes working; the runtime still forces canon writes onto the proposal path (#377).
+   *
+   * `proposalAttribution` normalizes AI provenance (#383): the forced proposals the seat files are
+   * recorded as an AI author with the `ai-dm:` prefix the review-queue badge/filter keys on — not
+   * the seat's raw audit-actor id (`ai-dm-seat:…`, which does not match `ai-dm:`).
+   */
+  private seatPrincipal(campaignId: number): RequestUser {
+    return {
+      id: `ai-dm-seat:${campaignId}`,
+      name: 'AI Dungeon Master',
+      serverRole: 'user',
+      devRole: 'dm',
+      tokenContext: {
+        tokenId: 0,
+        name: `ai-dm-seat:${campaignId}`,
+        scope: 'dm',
+        writeScope: 'direct',
+        campaignId,
+        adminEnabled: false,
+      },
+      proposalAttribution: {
+        proposer: 'AI Dungeon Master (driver)',
+        proposerUserId: `ai-dm:${campaignId}`,
+        proposerToken: null,
+      },
+    };
+  }
+
+  /**
+   * A NON-DM principal used ONLY to assemble the model's campaign-context reads (#387). The driver
+   * narrates to EVERY member — players and viewers — so its context must not contain DM-only
+   * material (hidden entities, dmSecret fields, unexplored locations): a hallucinating or
+   * prompt-injected model can only speak a secret it was actually given, and this principal is
+   * never given one. Live-play tool EXECUTION still runs under the DM seat principal above; only
+   * the context the model reasons from is down-scoped. Session-zero (member-readable safety
+   * charter) is unaffected — every member may read it.
+   */
+  private contextPrincipal(campaignId: number): RequestUser {
+    return {
+      id: `ai-dm-seat:${campaignId}`,
+      name: 'AI Dungeon Master',
+      serverRole: 'user',
+      devRole: 'player',
+      tokenContext: {
+        tokenId: 0,
+        name: `ai-dm-seat:${campaignId}`,
+        scope: 'player',
+        writeScope: 'none',
+        campaignId,
+        adminEnabled: false,
+      },
+    };
+  }
+
+  /**
    * Run one driver turn for `input` (a player action). Streams narration + executes
    * tool calls in a loop until the model stops, the budget is exhausted, a tool errors,
    * or the step ceiling is hit. `triggeredBy` is the member who submitted the input —
@@ -317,6 +429,16 @@ export class AiDriverService {
     if (session.status === 'paused') {
       throw new ServiceUnavailableException('The AI Dungeon Master seat is paused. Resume it before sending input.');
     }
+    // Serialize turns per campaign (#381): reject a concurrent POST /message while a turn is
+    // already streaming. Two interleaved turns would splice their narration.delta events onto the
+    // one un-keyed SSE channel and merge into a single bubble. This check + the synchronous slot
+    // reservation below run with NO await between them, so a second request can never slip past.
+    if (session.status === 'running') {
+      throw new ConflictException('A driver turn is already in progress for this campaign. Wait for it to finish.');
+    }
+    // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
+    // that already cleared assertRunnable sees `running` at the guard above and is rejected.
+    session.status = 'running';
 
     // Remember the input so the retry / nudge / flag levers can replay this turn (#314).
     this.lastInputs.set(campaignId, input);
@@ -324,20 +446,14 @@ export class AiDriverService {
 
     const provider = await this.resolver.resolve(campaignId);
     if (!provider) {
+      // Release the reserved slot (compare-and-set): only if nothing else grabbed the seat meanwhile.
+      if (session.status === 'running') session.status = 'idle';
       throw new ServiceUnavailableException(
         'No AI provider is configured. A server admin or the DM must set one via the AI provider config (issue #310).',
       );
     }
 
-    // The seat principal: a campaign-scoped DM. devRole grants dm authority for tool
-    // access (RoleResolver short-circuit); no tokenContext means direct live-play writes
-    // are allowed, while the runtime forces canon writes onto the proposal path below.
-    const seatPrincipal: RequestUser = {
-      id: `ai-dm-seat:${campaignId}`,
-      name: 'AI Dungeon Master',
-      serverRole: 'user',
-      devRole: 'dm',
-    };
+    const seatPrincipal = this.seatPrincipal(campaignId);
     const actor = `ai-dm-seat:${campaignId}`;
 
     const toolset = this.mcpTools.buildToolset(seatPrincipal);
@@ -345,19 +461,19 @@ export class AiDriverService {
     // admin tools are withheld from the schema. This is a hint only; executeToolCalls still
     // enforces the same allow-list server-side, so a hallucinated forbidden call never runs.
     const toolSchemas: AiToolSchema[] = toolset.tools
-      .filter((t) => isDriverToolAllowed(t.name))
+      .filter((t) => isDriverToolAllowed(t))
       .map((t) => ({
         name: t.name,
         description: t.description,
         parameters: t.inputSchema,
       }));
 
-    const system = await this.assembleSystemPrompt(campaignId, seat, toolset);
+    const system = await this.assembleSystemPrompt(campaignId, seat);
     // Untrusted-input hardening (#317): fence + neutralize the player message so it reads as
     // in-world DATA, not instructions. The system prompt's UNTRUSTED_INPUT_PREAMBLE explains the fence.
     const messages: AiMessage[] = [{ role: 'user', content: wrapUntrustedPlayerInput(input) }];
 
-    session.status = 'running';
+    // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
     this.stream.emit({ type: 'turn.start', campaignId });
 
@@ -423,7 +539,11 @@ export class AiDriverService {
         if (step === maxSteps - 1) stopReason = 'max_steps';
       }
     } finally {
-      session.status = 'idle';
+      // Compare-and-set (#381): only release the seat if THIS turn still owns the `running` status.
+      // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
+      // pause-vote — will have flipped `status` to `paused`; do NOT stomp it back to `idle` and
+      // silently accept new input, defeating the freeze the table just asked for.
+      if (session.status === 'running') session.status = 'idle';
       session.lastNarration = finalNarration || session.lastNarration;
       session.lastTurnAt = nowIso();
       session.turnCount += 1;
@@ -497,11 +617,14 @@ export class AiDriverService {
   ): Promise<{ toolErrored: boolean }> {
     let toolErrored = false;
     for (const call of toolCalls) {
-      // (0) Tool-scoping (#317): the seat physically cannot call destructive/admin tools,
-      // regardless of what the (untrusted-input-driven) model asked for. Enforced HERE at
-      // execution — not merely by withholding the schema — so a hallucinated or injection-
-      // induced forbidden call never reaches a service. Audited + logged as a security anomaly.
-      if (!isDriverToolAllowed(call.name)) {
+      const tool = toolset.get(call.name);
+
+      // (0) Tool-scoping (#317/#378): the seat physically cannot call destructive/admin/economy
+      // tools, regardless of what the (untrusted-input-driven) model asked for. Default-deny at
+      // EXECUTION (not merely by withholding the schema) so a hallucinated or injection-induced
+      // forbidden call never reaches a service. A known tool that fails the allow-list is a
+      // security anomaly (audited + logged); an unknown tool falls through to a plain 404 below.
+      if (tool && !isDriverToolAllowed(tool)) {
         const text = JSON.stringify({
           error: { status: 403, code: 'forbidden_tool', message: `The AI DM seat is not permitted to call ${call.name}.` },
         });
@@ -521,11 +644,13 @@ export class AiDriverService {
         continue;
       }
 
-      const tool = toolset.get(call.name);
       const args: Record<string, unknown> = { ...(call.arguments ?? {}) };
 
-      // (1) Cross-campaign guard: the seat is scoped to ONE campaign even though its
-      // devRole would otherwise grant dm on any campaign.
+      // (1) Cross-campaign guard: the seat is scoped to ONE campaign. The seat principal is also
+      // bound to this campaign via its tokenContext (#384), so entity-keyed tools that carry no
+      // campaignId arg (update_quest{questId}, upsert_npc{npcId}, update_character_hp{characterId})
+      // are rejected at the tool's own requireRole for any other campaign. This arg-level guard is
+      // the belt for tools that DO carry campaignId — an explicit mismatch never even dispatches.
       if ('campaignId' in args && Number(args.campaignId) !== campaignId) {
         const text = JSON.stringify({
           error: { status: 403, code: 'forbidden', message: `This AI DM seat is scoped to campaign ${campaignId}.` },
@@ -537,10 +662,13 @@ export class AiDriverService {
         continue;
       }
 
-      // (2) Guardrail: canon writes can't be made directly — force them to propose.
+      // (2) Guardrail (#377): canon writes can NEVER be made directly by the seat — force EVERY
+      // proposal-capable tool onto the proposal path, ignoring any model-supplied `propose` value.
+      // The old `args.propose === undefined` guard let a prompt-injected model emit `propose:false`
+      // to overwrite campaign canon with no DM review; coercing unconditionally closes that.
       const canPropose = tool?.proposalCapable ?? false;
-      if (canPropose && args.propose === undefined) args.propose = true;
-      const proposed = canPropose && args.propose === true;
+      if (canPropose) args.propose = true;
+      const proposed = canPropose;
 
       const res = await toolset.call(call.name, args);
       messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: res.text });
@@ -579,6 +707,14 @@ export class AiDriverService {
     session: AiDmSessionState,
     ctx: { stopReason: AiDmStopReason; narration: string; prevNarration: string | null; triggeredBy: RequestUser },
   ): Promise<void> {
+    // Compare-and-set guard (#381): if a human-control transition landed DURING this turn — a DM
+    // pause, a granted takeover, or a passed table pause-vote — the session is now `paused` or
+    // `human_control`. Neither the stuck-park nor the clean-recovery path may overwrite that; the
+    // human freeze outranks whatever this turn concluded. Bail without touching state.
+    if (session.state === 'paused' || session.state === 'human_control') {
+      session.levers = this.leversFor(session);
+      return;
+    }
     const reason = classifyStuck(ctx);
     if (reason) {
       const detail = describeStuck(reason);
@@ -628,12 +764,12 @@ export class AiDriverService {
    * it succeeds the turn's own detection clears the stuck state. Budget-aware: assertRunnable
    * inside runTurn 403s a nudge once the budget is gone.
    */
-  async nudge(campaignId: number, user: RequestUser, hint?: string): Promise<AiDmTurnRunResult> {
+  async nudge(campaignId: number, user: RequestUser, hint?: string, role: Role = 'player'): Promise<AiDmTurnRunResult> {
     const base = this.requireReplayInput(campaignId);
     const input = hint ? `${base}\n\n[Table hint for the DM — steer the scene using this: ${hint}]` : base;
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: role,
       action: 'ai-dm.driver.nudge',
       entityType: 'ai-dm',
       campaignId,
@@ -647,14 +783,14 @@ export class AiDriverService {
    * back into context and the turn is re-run so the AI must RE-DECIDE with the dispute in view.
    * The dispute itself is audited and notified regardless of the re-decision's outcome.
    */
-  async flag(campaignId: number, user: RequestUser, objection: string): Promise<AiDmTurnRunResult> {
+  async flag(campaignId: number, user: RequestUser, objection: string, role: Role = 'player'): Promise<AiDmTurnRunResult> {
     const base = this.requireReplayInput(campaignId);
     const session = this.ensureSession(campaignId);
     const lastRuling = session.lastNarration ? `\n\nYour last ruling was: "${excerpt(session.lastNarration, 400)}"` : '';
     const input = `${base}${lastRuling}\n\n[A player DISPUTES that ruling as wrong or unfair: ${objection}. Reconsider it, cite the rule or fact you rely on, and re-decide.]`;
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: role,
       action: 'ai-dm.driver.flag',
       entityType: 'ai-dm',
       campaignId,
@@ -669,13 +805,12 @@ export class AiDriverService {
    * generative model — cheaper and authoritative. Reads through the SAME permission-checked
    * tool layer (lookup_rule) the AI itself uses, so nothing the seat can't see leaks.
    */
-  async rulesLookup(campaignId: number, user: RequestUser, query: string): Promise<{ query: string; result: string }> {
-    const seatPrincipal: RequestUser = { id: `ai-dm-seat:${campaignId}`, name: 'AI Dungeon Master', serverRole: 'user', devRole: 'dm' };
-    const toolset = this.mcpTools.buildToolset(seatPrincipal);
+  async rulesLookup(campaignId: number, user: RequestUser, query: string, role: Role = 'player'): Promise<{ query: string; result: string }> {
+    const toolset = this.mcpTools.buildToolset(this.seatPrincipal(campaignId));
     const res = await toolset.call('lookup_rule', { query });
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: role,
       action: 'ai-dm.driver.rules_lookup',
       entityType: 'ai-dm',
       campaignId,
@@ -685,16 +820,24 @@ export class AiDriverService {
   }
 
   /**
-   * Open a table vote (#314) to override the AI's last ruling or pause the seat. Majority of
-   * current members carries it. Only one vote may be open at a time.
+   * Open a table vote (#314/#382) to override the AI's last ruling or pause the seat. Only one vote
+   * may be open at a time — but a RESOLVED vote (passed OR failed, OR one that has expired) never
+   * blocks a new one, so the vote lever can't permanently disable itself.
+   *
+   * The threshold is a majority of VOTE-ELIGIBLE members (role ≥ player) — the only members the
+   * controller lets cast — NOT of all members. Counting viewers + the DM (who cannot vote) inflated
+   * the bar above the number of eligible ballots, so a vote could be arithmetically unpassable
+   * (3 viewers + DM + 1 player → threshold 3, max 2 eligible voters) and, with no failure path,
+   * stay open forever, permanently blocking every future vote (#382).
    */
-  async openVote(campaignId: number, user: RequestUser, kind: 'override' | 'pause'): Promise<AiDmSessionState> {
+  async openVote(campaignId: number, user: RequestUser, kind: 'override' | 'pause', role: Role = 'player'): Promise<AiDmSessionState> {
     const session = this.ensureSession(campaignId);
+    this.expireStaleVote(session);
     if (session.vote && !session.vote.resolved) {
       throw new ConflictException('A table vote is already open. Resolve it before opening another.');
     }
-    const memberCount = (await this.notifications.memberRoles(campaignId)).size;
-    const threshold = Math.max(1, Math.floor(memberCount / 2) + 1);
+    const eligible = this.eligibleVoterCount(await this.notifications.memberRoles(campaignId));
+    const threshold = Math.max(1, Math.floor(eligible / 2) + 1);
     session.vote = {
       id: `vote-${++this.voteSeq}`,
       kind,
@@ -704,15 +847,17 @@ export class AiDriverService {
       threshold,
       resolved: false,
       outcome: null,
+      eligibleVoters: eligible,
+      expiresAt: new Date(Date.now() + VOTE_TTL_MS).toISOString(),
     };
     session.levers = this.leversFor(session);
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: role,
       action: 'ai-dm.driver.vote.open',
       entityType: 'ai-dm',
       campaignId,
-      detail: `${kind} vote opened by ${user.id} (threshold ${threshold})`,
+      detail: `${kind} vote opened by ${user.id} (threshold ${threshold}/${eligible} eligible)`,
     });
     this.stream.emit({ type: 'vote', campaignId, action: 'opened', kind });
     await this.notify(campaignId, user, 'A table vote was called', `Vote to ${kind} the AI DM's last ruling — cast your ballot.`);
@@ -720,18 +865,22 @@ export class AiDriverService {
   }
 
   /**
-   * Cast a ballot on the open vote (#314). Resolves the moment the yes-tally reaches the
-   * majority threshold: a passed `override` clears the stuck state and marks the last ruling
-   * overridden; a passed `pause` freezes the seat. Every ballot + the resolution is audited.
+   * Cast a ballot on the open vote (#314/#382). Resolves as soon as the outcome is decided:
+   *  - PASSED once the yes-tally reaches the majority threshold (a pause freezes the seat; an
+   *    override discards the disputed ruling and lets play resume);
+   *  - FAILED once the remaining un-cast eligible ballots can no longer reach the threshold, or
+   *    every eligible member has voted without passing — so a vote that everyone votes down (or
+   *    abstains on) resolves as failed instead of hanging forever. Every ballot + resolution audited.
    */
-  async castVote(campaignId: number, user: RequestUser, choice: boolean): Promise<AiDmSessionState> {
+  async castVote(campaignId: number, user: RequestUser, choice: boolean, role: Role = 'player'): Promise<AiDmSessionState> {
     const session = this.ensureSession(campaignId);
+    this.expireStaleVote(session);
     const vote = session.vote;
     if (!vote || vote.resolved) throw new ConflictException('No open table vote to cast on.');
     vote.ballots[user.id] = choice;
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: role,
       action: 'ai-dm.driver.vote.cast',
       entityType: 'ai-dm',
       campaignId,
@@ -739,10 +888,36 @@ export class AiDriverService {
     });
     this.stream.emit({ type: 'vote', campaignId, action: 'cast', kind: vote.kind });
 
-    const yes = Object.values(vote.ballots).filter(Boolean).length;
+    const ballots = Object.values(vote.ballots);
+    const yes = ballots.filter(Boolean).length;
+    const cast = ballots.length;
+    // Ballots that could still be cast by an eligible member who hasn't voted yet. The eligible
+    // count is a snapshot from open time; a ballot from outside it (or membership churn) can push
+    // `cast` past it, which just means no further yes votes are pending → clamp at 0.
+    const outstanding = Math.max(0, vote.eligibleVoters - cast);
+
     if (yes >= vote.threshold) {
-      vote.resolved = true;
-      vote.outcome = 'passed';
+      await this.resolveVote(campaignId, session, vote, 'passed', user, role, yes);
+    } else if (yes + outstanding < vote.threshold) {
+      // Even if every remaining eligible voter said yes, the threshold is now unreachable → fail.
+      await this.resolveVote(campaignId, session, vote, 'failed', user, role, yes);
+    }
+    return session;
+  }
+
+  /** Apply a vote's decided outcome to the session + audit + stream (#382). */
+  private async resolveVote(
+    campaignId: number,
+    session: AiDmSessionState,
+    vote: AiDmTableVote,
+    outcome: 'passed' | 'failed',
+    user: RequestUser,
+    role: Role,
+    yes: number,
+  ): Promise<void> {
+    vote.resolved = true;
+    vote.outcome = outcome;
+    if (outcome === 'passed') {
       if (vote.kind === 'pause') {
         session.status = 'paused';
         session.state = 'paused';
@@ -752,29 +927,49 @@ export class AiDriverService {
         session.state = session.status === 'paused' ? 'paused' : 'running';
         session.lastNarration = null;
       }
-      session.levers = this.leversFor(session);
-      await this.audit.log({
-        actor: auditActor(user),
-        actorRole: 'dm',
-        action: 'ai-dm.driver.vote.resolve',
-        entityType: 'ai-dm',
-        campaignId,
-        detail: `${vote.kind} vote PASSED (${yes}/${vote.threshold})`,
-      });
-      this.stream.emit({ type: 'vote', campaignId, action: 'resolved', kind: vote.kind, outcome: 'passed' });
+    }
+    session.levers = this.leversFor(session);
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'ai-dm.driver.vote.resolve',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `${vote.kind} vote ${outcome.toUpperCase()} (${yes}/${vote.threshold})`,
+    });
+    this.stream.emit({ type: 'vote', campaignId, action: 'resolved', kind: vote.kind, outcome });
+    if (outcome === 'passed') {
       await this.notify(campaignId, user, 'Table vote passed', `The table voted to ${vote.kind} the AI DM.`);
     }
-    return session;
+  }
+
+  /** Number of vote-eligible members (role ≥ player) — the only members allowed to cast (#382). */
+  private eligibleVoterCount(roles: Map<number, string>): number {
+    let n = 0;
+    for (const role of roles.values()) if (roleAtLeast(role as Role, 'player')) n++;
+    return n;
+  }
+
+  /** Lazily fail an unresolved vote whose TTL has passed, so an abandoned vote never blocks (#382). */
+  private expireStaleVote(session: AiDmSessionState): void {
+    const vote = session.vote;
+    if (!vote || vote.resolved || !vote.expiresAt) return;
+    if (Date.parse(vote.expiresAt) <= Date.now()) {
+      vote.resolved = true;
+      vote.outcome = 'failed';
+      session.levers = this.leversFor(session);
+      this.stream.emit({ type: 'vote', campaignId: session.campaignId, action: 'resolved', kind: vote.kind, outcome: 'failed' });
+    }
   }
 
   /** Request a human takeover (#314) — advisory: flags the ask + notifies so a DM/owner can grant it. */
-  async requestTakeover(campaignId: number, user: RequestUser): Promise<AiDmSessionState> {
+  async requestTakeover(campaignId: number, user: RequestUser, role: Role = 'player'): Promise<AiDmSessionState> {
     const session = this.ensureSession(campaignId);
     session.takeoverRequestedBy = user.id;
     session.levers = this.leversFor(session);
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: role,
       action: 'ai-dm.driver.takeover.request',
       entityType: 'ai-dm',
       campaignId,
@@ -790,7 +985,7 @@ export class AiDriverService {
    * frozen (status paused, state human_control) so no AI turn can run until handback. `memberId`
    * defaults to whoever last requested the takeover (or the granter).
    */
-  async grantTakeover(campaignId: number, granter: RequestUser, memberId?: string, note?: string): Promise<AiDmSessionState> {
+  async grantTakeover(campaignId: number, granter: RequestUser, memberId?: string, note?: string, role: Role = 'dm'): Promise<AiDmSessionState> {
     const session = this.ensureSession(campaignId);
     const holder = memberId ?? session.takeoverRequestedBy ?? granter.id;
     session.actingDm = { memberId: holder, grantedBy: granter.id, grantedAt: nowIso(), note: note ?? null };
@@ -800,7 +995,7 @@ export class AiDriverService {
     session.levers = this.leversFor(session);
     await this.audit.log({
       actor: auditActor(granter),
-      actorRole: 'dm',
+      actorRole: role,
       action: 'ai-dm.driver.takeover.grant',
       entityType: 'ai-dm',
       campaignId,
@@ -812,12 +1007,30 @@ export class AiDriverService {
   }
 
   /**
-   * Hand the seat back to the AI (#314): revoke the acting-DM grant, unfreeze the seat, and
+   * Hand the seat back to the AI (#314/#375): revoke the acting-DM grant, unfreeze the seat, and
    * clear any stuck state. `note` records the call the human made while in control (audited).
+   *
+   * AUTHORIZATION (#375): a handback is only valid while a human actually holds the seat
+   * (`state === 'human_control'`) and may be performed ONLY by the acting-DM grant holder or a DM
+   * of the campaign. Previously any player could call this unconditionally — revoking a takeover
+   * the DM granted to someone else, or (because it also flipped status→idle/state→running with no
+   * precondition) un-freezing a DM-only PAUSE and resuming paid AI turns. Both bypasses are closed:
+   * a DM pause is `state === 'paused'`, which fails the human_control precondition here.
    */
-  async handback(campaignId: number, user: RequestUser, note?: string): Promise<AiDmSessionState> {
+  async handback(campaignId: number, user: RequestUser, note?: string, role: Role = 'player'): Promise<AiDmSessionState> {
     const session = this.ensureSession(campaignId);
+    if (session.state !== 'human_control' || !session.actingDm) {
+      throw new ConflictException(
+        'The AI DM seat is not under human control, so there is nothing to hand back. (A DM pause is cleared with POST /ai-dm/resume, DM only.)',
+      );
+    }
     const prior = session.actingDm;
+    const isGrantHolder = prior.memberId === user.id || prior.memberId === auditActor(user);
+    if (!isGrantHolder && role !== 'dm') {
+      throw new ForbiddenException(
+        'Only the acting DM who holds the seat, or a campaign DM, can hand the seat back to the AI.',
+      );
+    }
     session.actingDm = null;
     session.stuck = null;
     session.status = 'idle';
@@ -825,7 +1038,7 @@ export class AiDriverService {
     session.levers = this.leversFor(session);
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: role,
       action: 'ai-dm.driver.handback',
       entityType: 'ai-dm',
       campaignId,
@@ -867,14 +1080,21 @@ export class AiDriverService {
    * anything the seat principal isn't allowed to see. Reads are best-effort: a failing
    * read is simply omitted rather than aborting the turn.
    */
-  private async assembleSystemPrompt(campaignId: number, seat: AiDmSeat, toolset: DriverToolset): Promise<string> {
+  private async assembleSystemPrompt(campaignId: number, seat: AiDmSeat): Promise<string> {
     const parts: string[] = [GROUNDING_PREAMBLE, UNTRUSTED_INPUT_PREAMBLE];
     if (seat.instructions) parts.push(`## DM steering\n${seat.instructions}`);
 
-    const summary = await safeRead(toolset, 'get_campaign_summary', { campaignId });
+    // #387: assemble the campaign context through a NON-DM (player-scoped) toolset so DM-only
+    // material (hidden entities, dmSecret fields, unexplored locations) is excluded WHOLESALE from
+    // what the model sees — the narration that streams to every player and viewer therefore cannot
+    // contain a secret the model was never handed. Session-zero is member-readable, so the safety
+    // charter still comes through in full.
+    const contextToolset = this.mcpTools.buildToolset(this.contextPrincipal(campaignId));
+
+    const summary = await safeRead(contextToolset, 'get_campaign_summary', { campaignId });
     if (summary) parts.push(`## Campaign context\n${summary}`);
 
-    const sessionZero = await safeRead(toolset, 'get_session_zero', { campaignId });
+    const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
 
     return parts.join('\n\n');
