@@ -236,6 +236,7 @@ export function Layout() {
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [lostAccess, setLostAccess] = useState(false);
   const [inboxCount, setInboxCount] = useState(0);
+  const [pendingProposals, setPendingProposals] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
   // Track WHICH campaign we've stale-checked, not a bare boolean — so navigating
   // to a different campaign re-checks (and clears a prior lock screen) instead of
@@ -268,6 +269,28 @@ export function Layout() {
         if (!cancelled) setInboxCount(items.length);
       } catch {
         if (!cancelled) setInboxCount(0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, isDm, location.pathname]);
+
+  // Pending-proposals badge on the DM's Proposals nav item (issue #263) — mirrors the
+  // scribe-inbox badge: dm-only, best-effort (a failed/empty fetch just means no badge).
+  // Re-checks on campaign switch and route change so approving/rejecting clears it.
+  useEffect(() => {
+    if (campaignId === undefined || !isDm) {
+      setPendingProposals(0);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const items = await api.get<unknown[]>(`${API}/campaigns/${campaignId}/proposals?status=pending`);
+        if (!cancelled) setPendingProposals(items.length);
+      } catch {
+        if (!cancelled) setPendingProposals(0);
       }
     })();
     return () => {
@@ -359,7 +382,7 @@ export function Layout() {
         { key: 'storylines', label: t('nav.storylines'), to: `/c/${campaignId}/storylines` },
         { key: 'settings', label: t('nav.settings'), to: `/c/${campaignId}/settings` },
         { key: 'inbox', label: t('nav.scribeInbox'), to: `/c/${campaignId}/inbox`, badge: inboxCount },
-        { key: 'proposals', label: t('nav.proposals'), to: `/c/${campaignId}/proposals` },
+        { key: 'proposals', label: t('nav.proposals'), to: `/c/${campaignId}/proposals`, badge: pendingProposals },
         { key: 'members', label: t('nav.members'), to: `/c/${campaignId}/members` },
       ]
     : [];

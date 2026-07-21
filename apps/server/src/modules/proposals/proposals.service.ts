@@ -19,6 +19,7 @@ import { fromJsonText } from '../../common/json';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
 import { LocationsService } from '../locations/locations.service';
@@ -63,6 +64,7 @@ export class ProposalsService {
   constructor(
     private readonly records: ProposalRecordsService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
     private readonly quests: QuestsService,
     private readonly npcs: NpcsService,
     private readonly locations: LocationsService,
@@ -76,6 +78,28 @@ export class ProposalsService {
     opts?: { proposerUserId?: string },
   ): Promise<Proposal[]> {
     return this.records.listForCampaign(campaignId, status, opts);
+  }
+
+  /**
+   * Tell the proposer the DM resolved their submission (issue #263) — previously an
+   * approve/reject was silent, so a member never learned the verdict. Targets the
+   * original proposer (proposerUserId); notifyUser skips the actor, so a DM resolving
+   * their own proposal doesn't ping themselves, and no-ops cleanly for a DEV_AUTH /
+   * empty proposer id. No entity deep-link — the bell routes proposal_* to the queue.
+   * Best-effort, like every notify* emitter.
+   */
+  private async notifyProposerOfResolution(
+    resolved: Proposal,
+    outcome: 'approved' | 'rejected',
+    user: RequestUser,
+  ): Promise<void> {
+    if (!resolved.proposerUserId) return;
+    await this.notifications.notifyUser(resolved.proposerUserId, resolved.campaignId, user, {
+      type: 'proposal_resolved',
+      title: `${user.name || 'The DM'} ${outcome} your ${resolved.action} to a ${resolved.entityType}`,
+      body: resolved.note ? excerpt(resolved.note) : '',
+      actorName: user.name,
+    });
   }
 
   async latestForCampaign(campaignId: number, limit = 500): Promise<Proposal[]> {
@@ -193,6 +217,8 @@ export class ProposalsService {
       campaignId: existing.campaignId,
     });
 
+    await this.notifyProposerOfResolution(resolved, 'approved', user);
+
     // The claimed row was captured before updatePayload/backfillEntityId ran, so reflect
     // both the amended payload (edit-before-approve) and the backfilled entityId in the
     // returned proposal.
@@ -225,6 +251,8 @@ export class ProposalsService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+
+    await this.notifyProposerOfResolution(resolved, 'rejected', user);
 
     return resolved;
   }

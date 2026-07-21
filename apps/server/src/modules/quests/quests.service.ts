@@ -9,6 +9,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -53,8 +54,41 @@ export class QuestsService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
     private readonly revisions: RevisionsService,
   ) {}
+
+  /**
+   * Emit the party-facing notifications for a quest write (issue #263) by diffing the
+   * pre/post rows: a quest becoming `completed`, or a hidden quest becoming visible
+   * (hidden -> not hidden), each pings the whole campaign once. Secrecy is respected —
+   * a quest that is STILL hidden after the write never notifies players (its very
+   * existence is dm-only, #42), so completing a hidden quest stays silent until it's
+   * revealed. `dmSecret` doesn't gate visibility (only that one field is redacted), so
+   * it's irrelevant here. Best-effort, like every other notify* emitter.
+   */
+  private async notifyQuestChange(before: typeof quests.$inferSelect, after: typeof quests.$inferSelect, user: RequestUser): Promise<void> {
+    // Reveal: a quest the party couldn't see is now on the board.
+    if (before.hidden && !after.hidden) {
+      await this.notifications.notifyCampaign(after.campaignId, user, {
+        type: 'quest_updated',
+        title: `New quest revealed: ${after.title}`,
+        entityType: 'quest',
+        entityId: after.id,
+        actorName: user.name,
+      });
+    }
+    // Completion: only announce for a quest the party can actually see.
+    if (!after.hidden && before.status !== 'completed' && after.status === 'completed') {
+      await this.notifications.notifyCampaign(after.campaignId, user, {
+        type: 'quest_updated',
+        title: `Quest completed: ${after.title}`,
+        entityType: 'quest',
+        entityId: after.id,
+        actorName: user.name,
+      });
+    }
+  }
 
   async listForCampaign(campaignId: number, role: Role): Promise<Quest[]> {
     // Order by sortOrder (then id as a stable tiebreaker) so the quest board and
@@ -318,6 +352,9 @@ export class QuestsService {
       // (empty detail before). Matches the characters/encounters/members convention.
       detail: JSON.stringify(input),
     });
+    // A quest edit can both reveal (hidden -> visible) and complete in one PATCH —
+    // notifyQuestChange handles either transition off the pre/post diff (#263).
+    await this.notifyQuestChange(existing, row, user);
     return redactSecret(toDomain(row), role);
   }
 
@@ -380,6 +417,8 @@ export class QuestsService {
       campaignId: existing.campaignId,
       detail: patch.status,
     });
+    // Ping the party if this status change completed the quest (#263).
+    await this.notifyQuestChange(existing, row, user);
     return redactSecret(toDomain(row), role);
   }
 

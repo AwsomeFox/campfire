@@ -6,6 +6,7 @@ import { proposals, quests, npcs, locations, sessions, characters } from '../../
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 // Pure row->domain mappers only (NOT the injectable services) — importing these
@@ -61,6 +62,7 @@ export class ProposalRecordsService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async create(
@@ -111,6 +113,21 @@ export class ProposalRecordsService {
       campaignId,
       detail: `${action} ${entityType}${entityId ? ` #${entityId}` : ''}`,
     });
+
+    // Tell the DM(s) a proposal is waiting (issue #263) — they own the review queue,
+    // and previously a submission gave no signal at all. Fan out to every dm-role
+    // member except the actor (a DM proposing to themselves needn't ping). No entity
+    // deep-link: the target may not exist yet (create proposals) and the bell routes
+    // proposal_* to the proposals queue. Best-effort — never fails the write.
+    const roles = await this.notifications.memberRoles(campaignId);
+    for (const [memberId, memberRole] of roles) {
+      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+      await this.notifications.notifyUser(memberId, campaignId, user, {
+        type: 'proposal_submitted',
+        title: `${user.name || 'A member'} proposed a ${action} to a ${entityType}`,
+        actorName: user.name,
+      });
+    }
 
     return toDomain(row);
   }

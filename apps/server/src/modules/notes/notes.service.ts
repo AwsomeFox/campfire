@@ -159,6 +159,26 @@ export class NotesService {
   }
 
   /**
+   * A note shared to the whole party (party_shared) should reach everyone (issue #263):
+   * previously a fresh party_shared note pinged nobody unless it happened to land on an
+   * entity where others had already written shared notes (notifyThreadAuthors). Broadcast
+   * to every campaign member except the author (notifyCampaign's own skip), so a shared
+   * note surfaces in each member's bell. Uses note_shared (the same "a note was shared"
+   * signal as dm_shared); anchored notes carry the entity link. Best-effort.
+   */
+  private async notifyPartyOfSharedNote(row: typeof notes.$inferSelect, user: RequestUser): Promise<void> {
+    if (row.visibility !== 'party_shared') return;
+    await this.notifications.notifyCampaign(row.campaignId, user, {
+      type: 'note_shared',
+      title: `${user.name || 'Someone'} shared a note with the party`,
+      body: excerpt(row.body),
+      entityType: (row.entityType as EntityTypeValue | null) ?? null,
+      entityId: row.entityId,
+      actorName: user.name,
+    });
+  }
+
+  /**
    * A whisper reaches exactly one member — tell them, so the per-player secret channel
    * actually pings (mirrors notifyDmsOfSharedNote for dm_shared). Best-effort; skipped
    * for DEV_AUTH dev:<name> recipients (no users row) by notifyUser's numeric guard.
@@ -436,6 +456,7 @@ export class NotesService {
     });
     await this.notifyThreadAuthors(row, user);
     await this.notifyDmsOfSharedNote(row, user);
+    await this.notifyPartyOfSharedNote(row, user);
     await this.notifyWhisperRecipient(row, user);
     return this.toDomainWithEntityName(row);
   }
@@ -496,6 +517,11 @@ export class NotesService {
     // author just shared up), not on every body edit of an already-shared note.
     if (row.visibility === 'dm_shared' && existing.visibility !== 'dm_shared') {
       await this.notifyDmsOfSharedNote(row, user);
+    }
+    // Broadcast to the party only on the transition INTO party_shared (#263), not on
+    // every body edit of an already-shared note — mirrors the dm_shared guard above.
+    if (row.visibility === 'party_shared' && existing.visibility !== 'party_shared') {
+      await this.notifyPartyOfSharedNote(row, user);
     }
     // Ping the whisper target on the transition into whisper or a change of recipient
     // (not on every body edit of an already-whispered note). issue #127.
