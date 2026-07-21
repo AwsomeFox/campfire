@@ -1011,6 +1011,11 @@ export const RulePack = z.object({
   sourceUrl: z.string().max(500).default(''),
   installedAt: IsoDate,
   entryCount: z.number().int().nonnegative().default(0),
+  // Authoritative, server-wide count of campaigns whose `ruleSystem` == this pack's slug
+  // (issue #385). Populated by GET /rules/packs; the uninstall-safety gate reads THIS, not a
+  // client-side count of only the caller's visible campaigns. Optional so other RulePack
+  // producers (e.g. an install response) needn't compute it.
+  usageCount: z.number().int().nonnegative().optional(),
 });
 export type RulePack = z.infer<typeof RulePack>;
 
@@ -1102,7 +1107,7 @@ export type OsrInstallSystem = z.infer<typeof OsrInstallSystem>;
 /**
  * The union of every section name any importer accepts (issue #345). The original enum was
  * 5e-shaped (spells/monsters/…); the sibling systems add their own vocabularies — Starfinder
- * adds equipment/starships/vehicles, Open Legend uses creatures/banes/boons. A section name
+ * adds equipment/starships/vehicles, Open Legend uses banes/boons/feats. A section name
  * that parses here is still validated against the CHOSEN source server-side (a foreign
  * section, e.g. 'starships' for an open5e install, is rejected 400 before a job is enqueued),
  * because Zod alone can't express the per-source subset without a discriminated union.
@@ -1408,52 +1413,91 @@ export const OPEN_LEGEND_PACK_SLUG = 'open-legend-srd';
  * bane/boon entries are the searchable long-form reference, this list is the quick-apply chips.
  */
 export const OPEN_LEGEND_BANES_BOONS = [
-  // Banes
+  // Banes (27) — exact names from openlegend/core-rules `banes/banes.yml`.
   'Blinded',
   'Charmed',
-  'Dazed',
   'Deafened',
+  'Death',
+  'Demoralized',
+  'Disarmed',
+  'Dominated',
   'Fatigued',
+  'Fear',
+  'Forced Move',
   'Immobile',
-  'Nauseated',
-  'Prone',
+  'Incapacitated',
+  'Knockdown',
+  'Memory Alteration',
+  'Mind Dredge',
+  'Nullify',
+  'Persistent Damage',
+  'Phantasm',
+  'Polymorph',
   'Provoked',
+  'Spying',
   'Sickened',
+  'Silenced',
   'Slowed',
   'Stunned',
-  'Unconscious',
-  // Boons
+  'Stupefied',
+  'Truthfulness',
+  // Boons (32) — exact names from openlegend/core-rules `boons/boons.yml`.
+  'Absorb Object',
+  'Animation',
   'Aura',
-  'Enhance Attribute',
-  'Flying',
+  'Barrier',
+  'Blindsight',
+  'Bolster',
+  'Concealment',
+  'Darkness',
+  'Detection',
+  'Flight',
+  'Genesis',
   'Haste',
-  'Invisibility',
-  'Mind Reading',
+  'Heal',
+  'Insubstantial',
+  'Invisible',
+  'Life Drain',
+  'Light',
+  'Precognition',
+  'Reading',
   'Regeneration',
-  'Sanctuary',
-  'Shielded',
+  'Resistance',
+  'Restoration',
+  'Seeing',
+  'Shapeshift',
+  'Summon Creature',
+  'Sustenance',
+  'Telekinesis',
+  'Telepathy',
+  'Teleport',
+  'Tongues',
+  'Transmutation',
+  'Truesight',
 ] as const;
 export type BaneOrBoonName = (typeof OPEN_LEGEND_BANES_BOONS)[number];
 
 /**
- * Open Legend action-dice table (Core Rules): an attribute score maps to the dice rolled and
- * summed for any action using that attribute. Score 0 is the d20 rolled at disadvantage
- * (twice, keep lower); 1 is a lone d20; each further point adds/upgrades bonus dice beyond the
- * anchoring d20. Table is authoritative for 0–10 (the PC/NPC range). Above 10 (rare, legendary
- * extraordinary attributes) we extend the score-10 pool by one d10 per extra point, which
- * continues the progression's shape without asserting an official value we can't cite.
+ * Open Legend action-dice table (official Core Rules / SRD — openlegend/core-rules
+ * `core/SRD.md`, "Action Dice"): an attribute score maps to the dice rolled and summed for any
+ * action using that attribute, always alongside the anchoring d20. Score 0 is the d20 rolled at
+ * disadvantage (twice, keep lower); score 1 adds 1d4; each further point upgrades or adds bonus
+ * dice. No official score uses mixed die sizes. Table is authoritative for 0–10 (the PC/NPC
+ * range). Above 10 (rare extraordinary attributes) the progression continues its published
+ * shape: from score 6 up the bonus pool is (⌊score/2⌋ − 1) dice, all d8 on an even score and all
+ * d10 on an odd score (so 11 → 4d10, 12 → 5d8, 13 → 5d10, …).
  */
 const OPEN_LEGEND_ACTION_DICE: Record<number, number[]> = {
-  1: [20],
-  2: [20, 4],
-  3: [20, 6],
-  4: [20, 8],
-  5: [20, 10],
-  6: [20, 6, 6],
-  7: [20, 6, 8],
-  8: [20, 8, 8],
-  9: [20, 8, 10],
-  10: [20, 10, 10],
+  1: [20, 4],
+  2: [20, 6],
+  3: [20, 8],
+  4: [20, 10],
+  5: [20, 6, 6],
+  6: [20, 8, 8],
+  7: [20, 10, 10],
+  8: [20, 8, 8, 8],
+  9: [20, 10, 10, 10],
+  10: [20, 8, 8, 8, 8],
 };
 
 /** The exploding dice pool for an Open Legend attribute score (see OPEN_LEGEND_ACTION_DICE). */
@@ -1461,9 +1505,12 @@ export function openLegendAttributeDicePool(score: number): AttributeDicePool {
   const s = Number.isFinite(score) ? Math.max(0, Math.trunc(score)) : 0;
   if (s === 0) return { score: 0, dice: [20], disadvantage: true };
   if (s <= 10) return { score: s, dice: [...OPEN_LEGEND_ACTION_DICE[s]], disadvantage: false };
-  // >10: extend the 2d10-bonus pool with one further d10 per point over 10.
-  const extra = Array.from({ length: s - 10 }, () => 10);
-  return { score: s, dice: [20, 10, 10, ...extra], disadvantage: false };
+  // >10: continue the official progression — (⌊s/2⌋ − 1) bonus dice, d8 on an even score and
+  // d10 on an odd score (11 → 4d10, 12 → 5d8, 13 → 5d10, …), all beside the anchoring d20.
+  const count = Math.floor(s / 2) - 1;
+  const size = s % 2 === 0 ? 8 : 10;
+  const bonus = Array.from({ length: count }, () => size);
+  return { score: s, dice: [20, ...bonus], disadvantage: false };
 }
 
 /** Read Open Legend's Agility score (governs initiative) from a canonical or raw attribute map. */
@@ -2549,10 +2596,32 @@ export type AiProviderParams = z.infer<typeof AiProviderParams>;
 // it, pass '' to CLEAR it. `allowedModels` is honored only for the SERVER scope —
 // it is the admin model allowlist; when non-empty a campaign override's `model`
 // must be one of the listed values (enforced server-side).
+// Defense-in-depth for issue #373: a `baseUrl` override must be an absolute http(s)
+// URL, not an arbitrary scheme (no `file:`, `javascript:`, credential-in-userinfo, …).
+// The primary exfiltration fix binds the API key to its own scope's endpoint (see
+// AiProviderConfigService.resolveEffectiveConfig); this guard additionally constrains
+// what an override endpoint may even look like. `http` is permitted so self-hosted
+// local model servers (e.g. http://localhost:11434) keep working.
+const AiProviderBaseUrl = z
+  .string()
+  .trim()
+  .max(2048)
+  .refine(
+    (v) => {
+      try {
+        const u = new URL(v);
+        return (u.protocol === 'https:' || u.protocol === 'http:') && !u.username && !u.password;
+      } catch {
+        return false;
+      }
+    },
+    { message: 'baseUrl must be an absolute http(s) URL without embedded credentials.' },
+  );
+
 export const AiProviderConfigUpdate = z.object({
   providerType: AiProviderConfigType,
   model: z.string().min(1).max(120),
-  baseUrl: z.string().trim().max(2048).optional(),
+  baseUrl: AiProviderBaseUrl.optional(),
   params: AiProviderParams.optional(),
   apiKey: z.string().max(4096).optional(),
   allowedModels: z.array(z.string().min(1).max(120)).max(200).optional(),
@@ -3216,7 +3285,10 @@ export const EncounterSuggestion = z.object({
 });
 export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
 
-export const CombatantKind = z.enum(['character', 'monster']);
+// 'npc' combatants are DM-controlled like monsters (exact HP redacted for non-DM
+// viewers, no death saves) but carry an `npcId` link to the campaign NPC for
+// identity, and may optionally borrow a compendium statblock via `ruleEntryId`.
+export const CombatantKind = z.enum(['character', 'monster', 'npc']);
 export type CombatantKind = z.infer<typeof CombatantKind>;
 
 /**
@@ -3246,6 +3318,9 @@ export const Combatant = z.object({
   encounterId: Id,
   kind: CombatantKind,
   characterId: Id.nullable().default(null),
+  // Set for kind==='npc': the campaign NPC this combatant represents (identity/icon;
+  // its NPC page + dmSecret stay DM-gated as usual). Null for characters/monsters.
+  npcId: Id.nullable().default(null),
   name: z.string().min(1).max(120),
   initiative: z.number().int().nullable().default(null),
   initMod: z.number().int().default(0),
@@ -3281,6 +3356,7 @@ export const CombatantCreate = z.object({
   kind: CombatantKind,
   name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId
   characterId: Id.optional(), // link a late-joining party member
+  npcId: Id.optional(), // link a campaign NPC as an 'npc' combatant (identity/icon)
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),

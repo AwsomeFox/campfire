@@ -18,7 +18,7 @@ test.describe('NPC dmSecret visibility across roles', () => {
       await page.goto(`/c/${campaignId}/npcs/${npcId}`);
       await expect(page.getByRole('heading', { name: NPC_NAME })).toBeVisible();
     });
-    await expect(page.getByText('🔒 DM only')).toBeVisible();
+    await expect(page.getByText('DM only')).toBeVisible();
     await expect(page.getByText(NPC_SECRET)).toBeVisible();
   });
 
@@ -32,7 +32,7 @@ test.describe('NPC dmSecret visibility across roles', () => {
 
       // The secret string is absent from the DOM, and no "DM only" panel renders.
       await expect(page.getByText(NPC_SECRET)).toHaveCount(0);
-      await expect(page.getByText('🔒 DM only')).toHaveCount(0);
+      await expect(page.getByText('DM only')).toHaveCount(0);
       await ctx.close();
     });
   }

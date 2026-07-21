@@ -3,14 +3,16 @@ import { Link } from 'react-router-dom';
 import type { Note, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Chip, TextInput, Btn, ErrorNote, EmptyState, type ChipVariant } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
+import { NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
 import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from '../notes/EntityPicker';
 
-const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string }> = {
-  private: { chip: 'private', label: '🔒 Private' },
-  dm_shared: { chip: 'dm', label: '🎩 DM' },
-  party_shared: { chip: 'party', label: '👥 Party' },
-  whisper: { chip: 'whisper', label: '🤫 Whisper' },
+const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; label: string }> = {
+  private: { chip: 'private', slug: NOTE_VISIBILITY_ICON.private, label: 'Private' },
+  dm_shared: { chip: 'dm', slug: NOTE_VISIBILITY_ICON.dm_shared, label: 'DM' },
+  party_shared: { chip: 'party', slug: NOTE_VISIBILITY_ICON.party_shared, label: 'Party' },
+  whisper: { chip: 'whisper', slug: NOTE_VISIBILITY_ICON.whisper, label: 'Whisper' },
 };
 
 function timeAgo(iso: string): string {
@@ -114,7 +116,7 @@ export function NotesQuickRail({
       {error && <ErrorNote message={error} onRetry={load} />}
 
       {notes.length === 0 ? (
-        <EmptyState icon="📝" title="No notes yet" hint="Jot your first thought below." />
+        <EmptyState icon="quill-ink" title="No notes yet" hint="Jot your first thought below." />
       ) : (
         notes.slice(0, 5).map((n) => (
           <div
@@ -127,7 +129,7 @@ export function NotesQuickRail({
           >
             <Markdown className="!text-[13px] !text-[color:var(--color-neutral-200)]">{n.body}</Markdown>
             <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center' }}>
-              <Chip variant={visMeta[n.visibility].chip}>{visMeta[n.visibility].label}</Chip>
+              <Chip variant={visMeta[n.visibility].chip}><span className="inline-flex items-center gap-1"><GameIcon slug={visMeta[n.visibility].slug} size={12} /> {visMeta[n.visibility].label}</span></Chip>
               <span className="text-muted" style={{ fontSize: 10.5 }}>
                 {timeAgo(n.updatedAt)}
               </span>
@@ -139,10 +141,10 @@ export function NotesQuickRail({
       {!isDm && (
         <div className="flex gap-1.5 pt-1">
           <button type="button" onClick={() => setDest('private')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
-            <Chip variant={dest === 'private' ? 'active' : 'private'}>🔒 Private note</Chip>
+            <Chip variant={dest === 'private' ? 'active' : 'private'}><span className="inline-flex items-center gap-1"><GameIcon slug="padlock" size={12} /> Private note</span></Chip>
           </button>
           <button type="button" onClick={() => setDest('inbox')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
-            <Chip variant={dest === 'inbox' ? 'active' : 'dm'}>✉️ To DM inbox</Chip>
+            <Chip variant={dest === 'inbox' ? 'active' : 'dm'}><span className="inline-flex items-center gap-1"><GameIcon slug="envelope" size={12} /> To DM inbox</span></Chip>
           </button>
         </div>
       )}

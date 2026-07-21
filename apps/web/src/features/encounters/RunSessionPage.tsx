@@ -27,6 +27,7 @@ import type {
   FogState,
   GridType,
   MapPing,
+  Npc,
   RuleEntry,
   TokenSize,
 } from '@campfire/schema';
@@ -49,6 +50,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity } from '../ai-dm/toolActivity';
+import { GameIcon } from '../../components/GameIcon';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -96,7 +98,7 @@ function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | nul
     `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
   return (
     <span className="tag" style={{ fontSize: 10, ...DIFFICULTY_STYLE[difficulty.band] }} title={title}>
-      ⚔ {DIFFICULTY_LABEL[difficulty.band]}
+      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />{DIFFICULTY_LABEL[difficulty.band]}
     </span>
   );
 }
@@ -173,17 +175,17 @@ function EncounterLinks({
     <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11 }}>
       {encounter.locationId != null && (
         <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          🗺 {locName ? linkLabel('location', locName) : `Location #${encounter.locationId}`}
+          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />{locName ? linkLabel('location', locName) : `Location #${encounter.locationId}`}
         </span>
       )}
       {encounter.questId != null && (
         <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          📜 {questName ? linkLabel('quest', questName) : `Quest #${encounter.questId}`}
+          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />{questName ? linkLabel('quest', questName) : `Quest #${encounter.questId}`}
         </span>
       )}
       {encounter.sessionId != null && (
         <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          📓 {sessName ? linkLabel('session', sessName) : `Session #${encounter.sessionId}`}
+          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />{sessName ? linkLabel('session', sessName) : `Session #${encounter.sessionId}`}
         </span>
       )}
       {!hasLink && canEdit && !editing && <span className="text-muted">No location / quest / session linked.</span>}
@@ -202,7 +204,7 @@ function EncounterLinks({
             disabled={saving}
             onChange={(e) => void save({ locationId: e.target.value ? Number(e.target.value) : null })}
           >
-            <option value="">🗺 — no location —</option>
+            <option value="">— no location —</option>
             {locations.map((l) => (
               <option key={l.id} value={l.id}>
                 {linkLabel('location', l)}
@@ -216,7 +218,7 @@ function EncounterLinks({
             disabled={saving}
             onChange={(e) => void save({ questId: e.target.value ? Number(e.target.value) : null })}
           >
-            <option value="">📜 — no quest —</option>
+            <option value="">— no quest —</option>
             {quests.map((q) => (
               <option key={q.id} value={q.id}>
                 {linkLabel('quest', q)}
@@ -230,7 +232,7 @@ function EncounterLinks({
             disabled={saving}
             onChange={(e) => void save({ sessionId: e.target.value ? Number(e.target.value) : null })}
           >
-            <option value="">📓 — no session —</option>
+            <option value="">— no session —</option>
             {sessions.map((s) => (
               <option key={s.id} value={s.id}>
                 {linkLabel('session', s)}
@@ -807,7 +809,7 @@ export default function RunSessionPage() {
               onClick={() => navigate(`/c/${cid}/screen`)}
               title="Open the player display — initiative + revealed info, no secrets"
             >
-              📺 Cast
+              <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
             </Btn>
             {encounter.status === 'preparing' && (
               <>
@@ -919,7 +921,7 @@ export default function RunSessionPage() {
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
-            <EmptyState icon="⚔️" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
+            <EmptyState icon="crossed-swords" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
           </div>
         ) : (
           orderedCombatants.map((c) => (
@@ -2177,7 +2179,8 @@ function CombatantRow({
   }
 
   const edgeColor = isCurrentTurn ? 'var(--color-accent)' : 'transparent';
-  const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : 'tag tag-neutral';
+  const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : combatant.kind === 'npc' ? 'tag tag-outline' : 'tag tag-neutral';
+  const kindLabel = combatant.kind === 'npc' ? 'NPC' : combatant.kind;
   // Issue #107: a combatant at 0 HP got no visual treatment mid-fight — the row
   // looked identical bar an empty HP bar, so a "dead" creature was invisible in the
   // order (the end-of-combat summary already counted it as Fallen). Dim + desaturate
@@ -2299,11 +2302,11 @@ function CombatantRow({
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
-              {down && <span aria-hidden="true" style={{ marginRight: 5 }}>💀</span>}
+              {down && <GameIcon slug="death-skull" size={14} className="inline align-text-bottom mr-1.5" />}
               {combatant.name}
             </span>
             <span className={kindTagClass} style={{ fontSize: 9 }}>
-              {combatant.kind}
+              {kindLabel}
             </span>
             {combatant.deathState !== 'none' && combatant.deathState !== undefined ? (
               <span className="tag tag-outline" style={{ fontSize: 9 }}>
@@ -2439,7 +2442,7 @@ function CombatantRow({
             <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3, display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'baseline' }}>
               {combatant.hpTemp != null && combatant.hpTemp > 0 && (
                 <span className="tag tag-accent" style={{ fontSize: 9 }} title="Temporary HP — absorbs damage first">
-                  🛡 {combatant.hpTemp}
+                  <GameIcon slug="shield" size={10} className="inline align-text-bottom mr-1" />{combatant.hpTemp}
                 </span>
               )}
               <span>
@@ -2594,13 +2597,13 @@ function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; 
 }
 
 const EVENT_ICON: Record<string, string> = {
-  damage: '⚔️',
-  heal: '✨',
-  condition: '🌀',
-  death: '💀',
-  turn: '⏱️',
-  roll: '🎲',
-  note: '📝',
+  damage: 'crossed-swords',
+  heal: 'sparkles',
+  condition: 'whirlwind',
+  death: 'death-skull',
+  turn: 'stopwatch',
+  roll: 'rolling-dices',
+  note: 'quill-ink',
 };
 
 /**
@@ -2622,7 +2625,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
           {events.map((ev) => (
             <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5, lineHeight: 1.4 }}>
               <span aria-hidden="true" style={{ flex: 'none' }}>
-                {EVENT_ICON[ev.type] ?? '•'}
+                {EVENT_ICON[ev.type] ? <GameIcon slug={EVENT_ICON[ev.type]} size={13} /> : '•'}
               </span>
               {ev.round > 0 && (
                 <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>
@@ -2673,7 +2676,7 @@ function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
 
 // ---------------------------------------------------------------------------
 
-type AddTab = 'manual' | 'compendium' | 'party';
+type AddTab = 'manual' | 'compendium' | 'party' | 'npc';
 
 function AddCombatantPanel({
   encounterId,
@@ -2709,6 +2712,13 @@ function AddCombatantPanel({
   const [compCount, setCompCount] = useState('1');
   const [nameOverride, setNameOverride] = useState('');
 
+  // NPC (issue: NPCs as combatants) — pick a campaign NPC for identity, then give it
+  // HP manually or by linking a compendium statblock (the compendium search below).
+  const [npcs, setNpcs] = useState<Npc[]>([]);
+  const [selectedNpcId, setSelectedNpcId] = useState('');
+  const [npcHp, setNpcHp] = useState('');
+  const [npcInit, setNpcInit] = useState('');
+
   /** Clamp a free-text quantity field to a sane 1–50, defaulting to 1. */
   function parseCount(raw: string): number {
     const n = Math.floor(Number(raw));
@@ -2716,8 +2726,24 @@ function AddCombatantPanel({
     return Math.min(50, n);
   }
 
+  // Campaign NPCs for the NPC tab's picker. Low-churn, fetched once.
   useEffect(() => {
-    if (tab !== 'compendium' || !debouncedQuery.trim()) {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.get<Npc[]>(`${API}/campaigns/${cid}/npcs`);
+        if (!cancelled) setNpcs(list);
+      } catch {
+        /* leave empty — the tab shows an empty-state hint */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cid]);
+
+  useEffect(() => {
+    if ((tab !== 'compendium' && tab !== 'npc') || !debouncedQuery.trim()) {
       setResults([]);
       return;
     }
@@ -2812,11 +2838,45 @@ function AddCombatantPanel({
     }
   }
 
+  // Add the selected NPC as a combatant. With a statblock `entry` it borrows that
+  // statblock's HP (like a compendium add); otherwise it uses the manual HP field.
+  async function addFromNpc(entry?: RuleEntry) {
+    const npcIdNum = Number(selectedNpcId);
+    if (!selectedNpcId || !Number.isFinite(npcIdNum)) {
+      setError('Pick an NPC to add.');
+      return;
+    }
+    if (!entry && (!npcHp.trim() || !Number.isFinite(Number(npcHp)) || Number(npcHp) < 1)) {
+      setError('Enter max HP (1 or more), or pick a statblock, for this NPC.');
+      return;
+    }
+    const npc = npcs.find((n) => n.id === npcIdNum);
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/encounters/${encounterId}/combatants`, {
+        kind: 'npc' as CombatantKind,
+        npcId: npcIdNum,
+        name: npc?.name,
+        ruleEntryId: entry?.id,
+        hpMax: entry ? undefined : Math.max(1, Number(npcHp)),
+        initMod: npcInit ? Number(npcInit) : undefined,
+      });
+      setNpcHp('');
+      setNpcInit('');
+      await onAdded();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Card className="space-y-3">
       <span className="card-kicker">Add combatant</span>
       <div className="seg self-start inline-flex">
-        {(['manual', 'compendium', 'party'] as AddTab[]).map((t) => (
+        {(['manual', 'compendium', 'party', 'npc'] as AddTab[]).map((t) => (
           <button
             key={t}
             style={{
@@ -2832,7 +2892,7 @@ function AddCombatantPanel({
             }}
             onClick={() => setTab(t)}
           >
-            {t === 'manual' ? 'Manual' : t === 'compendium' ? 'Compendium' : 'Party'}
+            {t === 'manual' ? 'Manual' : t === 'compendium' ? 'Compendium' : t === 'party' ? 'Party' : 'NPC'}
           </button>
         ))}
       </div>
@@ -2965,6 +3025,94 @@ function AddCombatantPanel({
               </button>
             ));
           })()}
+        </div>
+      )}
+
+      {tab === 'npc' && (
+        <div className="space-y-2">
+          {npcs.length === 0 ? (
+            <p className="text-muted" style={{ fontSize: 12 }}>
+              No NPCs in this campaign yet — create one on the NPCs page.
+            </p>
+          ) : (
+            <>
+              <div className="field">
+                <label htmlFor="npc-select">NPC</label>
+                <select
+                  id="npc-select"
+                  className="cf-select"
+                  value={selectedNpcId}
+                  onChange={(e) => setSelectedNpcId(e.target.value)}
+                >
+                  <option value="">Choose an NPC…</option>
+                  {npcs.map((n) => (
+                    <option key={n.id} value={String(n.id)}>
+                      {n.name}
+                      {n.role ? ` — ${n.role}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <form onSubmit={(e) => { e.preventDefault(); void addFromNpc(); }} className="flex gap-2 flex-wrap items-end">
+                <div className="field" style={{ width: 80 }}>
+                  <label htmlFor="npc-hp">HP</label>
+                  <TextInput id="npc-hp" aria-label="Max HP" placeholder="22" value={npcHp} onChange={(e) => setNpcHp(e.target.value)} />
+                </div>
+                <div className="field" style={{ width: 80 }}>
+                  <label htmlFor="npc-init">Init mod</label>
+                  <TextInput id="npc-init" aria-label="Initiative modifier" placeholder="2" value={npcInit} onChange={(e) => setNpcInit(e.target.value)} />
+                </div>
+                <Btn type="submit" disabled={saving || !selectedNpcId}>
+                  {saving ? 'Adding…' : 'Add NPC'}
+                </Btn>
+              </form>
+              <div className="hr" style={{ margin: '4px 0' }} />
+              <p className="text-muted" style={{ fontSize: 11.5 }}>
+                …or give it a statblock — search the compendium and pick one (its HP is used):
+              </p>
+              <TextInput
+                aria-label="Search monster statblocks for this NPC"
+                placeholder="Search statblocks…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              {searching ? (
+                <Skeleton lines={2} />
+              ) : results.length === 0 ? (
+                <p className="text-muted" style={{ fontSize: 12 }}>
+                  {query.trim() ? 'No matches.' : 'Optional — leave blank to add with manual HP above.'}
+                </p>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {results.map((entry) => (
+                    <button
+                      key={entry.id}
+                      className="card elev-sm"
+                      style={{
+                        border: 0,
+                        font: 'inherit',
+                        color: 'var(--color-text)',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '8px 12px',
+                      }}
+                      disabled={saving || !selectedNpcId}
+                      title={!selectedNpcId ? 'Choose an NPC first' : `Add ${entry.name}'s statblock to the selected NPC`}
+                      onClick={() => void addFromNpc(entry)}
+                    >
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
+                      <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>
+                        statblock
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
     </Card>

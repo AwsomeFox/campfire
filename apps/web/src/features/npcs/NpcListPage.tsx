@@ -120,7 +120,7 @@ export default function NpcListPage() {
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
         <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2">🤝 NPCs</h1>
+          <h1 className="font-bold text-white text-lg flex items-center gap-2"><GameIcon slug="hooded-figure" size={18} /> NPCs</h1>
           <div className="flex items-center gap-2">
             <DraftWithAiButton campaignId={id} target="npc" />
             {isDm && !creating && (
@@ -157,7 +157,7 @@ export default function NpcListPage() {
         )}
 
         {npcs.length === 0 ? (
-          <EmptyState icon="🤝" title="No NPCs yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any NPCs yet.'} />
+          <EmptyState icon="hooded-figure" title="No NPCs yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any NPCs yet.'} />
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {npcs.map((npc) => (
@@ -187,7 +187,7 @@ export default function NpcListPage() {
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
-                  {isDm && npc.hidden && <Chip variant="failed">🙈 Hidden</Chip>}
+                  {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
                   {isDm && npc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   {locationName(npc.locationId) && (
                     <span className="text-[11px] text-slate-500 ml-auto">{locationName(npc.locationId)}</span>

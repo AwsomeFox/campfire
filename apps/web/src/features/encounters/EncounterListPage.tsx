@@ -12,6 +12,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { GameIcon } from '../../components/GameIcon';
 
 const STATUS_LABEL: Record<EncounterStatus, string> = {
   preparing: 'Preparing',
@@ -86,7 +87,7 @@ export default function EncounterListPage() {
         </Card>
       ) : encounters.length === 0 ? (
         <EmptyState
-          icon="⚔️"
+          icon="crossed-swords"
           title="No encounters yet"
           hint={isDm ? 'Start one when combat kicks off.' : 'The DM hasn’t started one yet.'}
         />
@@ -195,7 +196,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
         />
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
           <label className="text-xs text-slate-400 space-y-1">
-            <span>🗺 Location</span>
+            <span className="inline-flex items-center gap-1"><GameIcon slug="treasure-map" size={12} /> Location</span>
             <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={locationId} onChange={(e) => setLocationId(e.target.value)}>
               <option value="">— none —</option>
               {locations.map((l) => (
@@ -206,7 +207,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
             </select>
           </label>
           <label className="text-xs text-slate-400 space-y-1">
-            <span>📜 Quest</span>
+            <span className="inline-flex items-center gap-1"><GameIcon slug="scroll-unfurled" size={12} /> Quest</span>
             <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={questId} onChange={(e) => setQuestId(e.target.value)}>
               <option value="">— none —</option>
               {quests.map((q) => (
@@ -217,7 +218,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
             </select>
           </label>
           <label className="text-xs text-slate-400 space-y-1">
-            <span>📓 Session</span>
+            <span className="inline-flex items-center gap-1"><GameIcon slug="book-cover" size={12} /> Session</span>
             <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
               <option value="">— none —</option>
               {sessions.map((s) => (

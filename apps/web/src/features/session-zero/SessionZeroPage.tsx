@@ -132,7 +132,7 @@ export default function SessionZeroPage() {
   if (forbidden) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <EmptyState icon="🔒" title="You don't have access to this campaign" />
+        <EmptyState icon="padlock" title="You don't have access to this campaign" />
       </div>
     );
   }
@@ -165,7 +165,7 @@ export default function SessionZeroPage() {
         <CharterForm draft={draft} setDraft={setDraft} />
       ) : charter && isEmptyCharter(charter) ? (
         <EmptyState
-          icon="🛟"
+          icon="life-buoy"
           title="No session-zero charter yet"
           hint={isDm ? 'Record your table’s lines & veils, safety tools, and house rules with "Edit charter".' : "The DM hasn’t recorded the table's charter yet."}
         />

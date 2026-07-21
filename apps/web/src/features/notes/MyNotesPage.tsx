@@ -18,14 +18,16 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from './EntityPicker';
+import { GameIcon } from '../../components/GameIcon';
+import { ENTITY_ICON, NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 
-const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string; short: string }> = {
-  private: { chip: 'private', label: '🔒 Private', short: '🔒 Private' },
-  dm_shared: { chip: 'dm', label: '🎩 Shared with DM', short: '🎩 DM' },
-  party_shared: { chip: 'party', label: '👥 Shared with party', short: '👥 Party' },
-  whisper: { chip: 'whisper', label: '🤫 Whisper', short: '🤫 Whisper' },
+const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; label: string; short: string }> = {
+  private: { chip: 'private', slug: NOTE_VISIBILITY_ICON.private, label: 'Private', short: 'Private' },
+  dm_shared: { chip: 'dm', slug: NOTE_VISIBILITY_ICON.dm_shared, label: 'Shared with DM', short: 'DM' },
+  party_shared: { chip: 'party', slug: NOTE_VISIBILITY_ICON.party_shared, label: 'Shared with party', short: 'Party' },
+  whisper: { chip: 'whisper', slug: NOTE_VISIBILITY_ICON.whisper, label: 'Whisper', short: 'Whisper' },
 };
 
 /**
@@ -52,14 +54,14 @@ const entityRoute: Record<EntityTypeValue, string | null> = {
 };
 
 const entityIcon: Record<EntityTypeValue, string> = {
-  quest: '📜',
-  npc: '🤝',
-  faction: '🏴',
-  location: '🗺',
-  character: '🛡',
-  session: '📓',
-  encounter: '⚔️',
-  campaign: '🔥',
+  quest: ENTITY_ICON.quest,
+  npc: ENTITY_ICON.npc,
+  faction: ENTITY_ICON.faction,
+  location: ENTITY_ICON.location,
+  character: ENTITY_ICON.character,
+  session: ENTITY_ICON.session,
+  encounter: ENTITY_ICON.encounter,
+  campaign: ENTITY_ICON.campaign,
 };
 
 type FilterValue = 'all' | Note['visibility'];
@@ -229,7 +231,7 @@ export default function MyNotesPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card className="text-center space-y-2">
-          <p className="text-2xl">🔒</p>
+          <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
           <p className="font-bold text-white">{t('notes.lostAccessTitle')}</p>
           <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
             {t('notes.backToCampaigns')}
@@ -243,7 +245,7 @@ export default function MyNotesPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🔒" title={t('notes.noAccess')} />
+          <EmptyState icon="padlock" title={t('notes.noAccess')} />
         </Card>
       </div>
     );
@@ -270,16 +272,16 @@ export default function MyNotesPage() {
           All
         </FilterChip>
         <FilterChip active={filter === 'private'} variant="private" onClick={() => setFilter('private')}>
-          🔒 Private
+          <span className="inline-flex items-center gap-1"><GameIcon slug="padlock" size={12} /> Private</span>
         </FilterChip>
         <FilterChip active={filter === 'dm_shared'} variant="dm" onClick={() => setFilter('dm_shared')}>
-          🎩 → DM
+          <span className="inline-flex items-center gap-1"><GameIcon slug="top-hat" size={12} /> DM</span>
         </FilterChip>
         <FilterChip active={filter === 'party_shared'} variant="party" onClick={() => setFilter('party_shared')}>
-          👥 → Party
+          <span className="inline-flex items-center gap-1"><GameIcon slug="meeple" size={12} /> Party</span>
         </FilterChip>
         <FilterChip active={filter === 'whisper'} variant="whisper" onClick={() => setFilter('whisper')}>
-          🤫 Whisper
+          <span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper</span>
         </FilterChip>
       </div>
 
@@ -288,7 +290,7 @@ export default function MyNotesPage() {
         <TextInput
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="🔍 Search your notes…"
+          placeholder="Search your notes…"
           aria-label="Search notes"
         />
         {search && (
@@ -320,7 +322,7 @@ export default function MyNotesPage() {
             <EntityPicker campaignId={cid} onChange={setAttach} resetKey={attachResetKey} disabled={saving} />
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[11px] text-slate-500">🤫 Whisper to:</span>
+            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper to:</span>
             <select
               value={whisperTo}
               onChange={(e) => setWhisperTo(e.target.value)}
@@ -385,12 +387,12 @@ export default function MyNotesPage() {
           {filtered.length === 0 &&
             (search.trim() ? (
               <EmptyState
-                icon="🔍"
+                icon="magnifying-glass"
                 title="No notes match your search"
                 hint={`Nothing found for "${search.trim()}". Try a different word.`}
               />
             ) : (
-              <EmptyState icon="🕯️" title="No notes yet" hint="Jot your first thought above." />
+              <EmptyState icon="candle-flame" title="No notes yet" hint="Jot your first thought above." />
             ))}
         </div>
       )}
@@ -398,7 +400,7 @@ export default function MyNotesPage() {
       <p className="text-[11px] text-slate-600">
         Notes are per-user: the DM cannot read private notes (API-enforced). Sharing a note with the DM notifies them
         (it shows in their notification bell) and lands under their &quot;Shared with me&quot;; shared-with-party notes
-        appear on entity pages for everyone. A 🤫 whisper reaches exactly one player (plus the DM) — the per-player
+        appear on entity pages for everyone. A <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} className="inline align-text-bottom" /> whisper reaches exactly one player (plus the DM) — the per-player
         secret channel for &quot;only the rogue notices the trap door&quot;.
       </p>
 
@@ -470,10 +472,10 @@ function NoteCard({
   const recipientLabel = note.recipientName || note.recipientUserId || 'a player';
   const whisperLabel = isWhisper
     ? myUserId && note.recipientUserId === myUserId
-      ? `🤫 Whispered to you by ${note.authorName || note.authorUserId}`
+      ? `Whispered to you by ${note.authorName || note.authorUserId}`
       : editable
-        ? `🤫 Whispered to ${recipientLabel}`
-        : `🤫 Whisper: ${note.authorName || note.authorUserId} → ${recipientLabel}`
+        ? `Whispered to ${recipientLabel}`
+        : `Whisper: ${note.authorName || note.authorUserId} → ${recipientLabel}`
     : '';
 
   return (
@@ -483,21 +485,21 @@ function NoteCard({
         {isWhisper ? (
           // No tap-to-cycle: a whisper is bound to its recipient, so the badge is a
           // static indicator (re-targeting happens in compose, not by cycling).
-          <Chip variant="whisper">{whisperLabel}</Chip>
+          <Chip variant="whisper"><span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> {whisperLabel}</span></Chip>
         ) : editable ? (
           <button onClick={onCycleVisibility} className="cf-chip" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
-            <Chip variant={meta.chip}>{meta.label} · tap to change</Chip>
+            <Chip variant={meta.chip}><span className="inline-flex items-center gap-1"><GameIcon slug={meta.slug} size={12} /> {meta.label} · tap to change</span></Chip>
           </button>
         ) : (
           <>
-            <Chip variant={meta.chip}>{meta.label}</Chip>
+            <Chip variant={meta.chip}><span className="inline-flex items-center gap-1"><GameIcon slug={meta.slug} size={12} /> {meta.label}</span></Chip>
             <span className="text-[11px] text-slate-500">from {note.authorName || note.authorUserId}</span>
           </>
         )}
         <div className="ml-auto flex items-center gap-2">
           {note.entityType && anchorHref && (
-            <Link to={anchorHref} className="text-[11px] text-amber-400 hover:underline">
-              {entityIcon[note.entityType]} {entityLabel(note)}
+            <Link to={anchorHref} className="inline-flex items-center gap-1 text-[11px] text-amber-400 hover:underline">
+              <GameIcon slug={entityIcon[note.entityType]} size={12} /> {entityLabel(note)}
             </Link>
           )}
           <span className="text-[11px] text-slate-600">{timeAgo(note.createdAt)}</span>

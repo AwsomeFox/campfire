@@ -10,6 +10,7 @@ import type { Faction, FactionStanding } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -114,7 +115,7 @@ export default function FactionListPage() {
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
         <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2">🏴 Factions</h1>
+          <h1 className="font-bold text-white text-lg flex items-center gap-2"><GameIcon slug="black-flag" size={18} /> Factions</h1>
           {isDm && !creating && (
             <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
               + New faction
@@ -148,7 +149,7 @@ export default function FactionListPage() {
         )}
 
         {factions.length === 0 ? (
-          <EmptyState icon="🏴" title="No factions yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any factions yet.'} />
+          <EmptyState icon="black-flag" title="No factions yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any factions yet.'} />
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {factions.map((faction) => (
@@ -174,7 +175,7 @@ export default function FactionListPage() {
                   <Chip variant={standingVariant(faction.standing)}>
                     {faction.standing} · {faction.reputation > 0 ? `+${faction.reputation}` : faction.reputation}
                   </Chip>
-                  {isDm && faction.hidden && <Chip variant="failed">🙈 Hidden</Chip>}
+                  {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
                   {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                 </div>
               </a>

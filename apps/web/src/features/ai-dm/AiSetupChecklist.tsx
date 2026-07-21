@@ -25,6 +25,7 @@ import type { AiConsoleOverview, AiProviderConfigView } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
+import { GameIcon } from '../../components/GameIcon';
 
 /** One computed checklist step. `done: null` = state is unknown (e.g. flag, for a non-admin). */
 interface Step {
@@ -328,8 +329,8 @@ export function AiDmDashboardOnboarding({
     <section className="cf-card p-4">
       {!expanded ? (
         <div className="flex items-start gap-3 flex-wrap">
-          <span className="text-xl" aria-hidden>
-            ✨
+          <span className="flex text-[var(--color-accent)]" aria-hidden>
+            <GameIcon slug="sparkles" size={20} />
           </span>
           <div className="min-w-0 flex-1">
             <p className="font-bold text-[var(--color-text)]">{t('aiOnboarding.dashboard.hintTitle')}</p>

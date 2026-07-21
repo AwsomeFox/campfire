@@ -16,6 +16,7 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAiDmSeat } from '../../lib/query';
 import { AiTransparencyNote } from './AiSetupChecklist';
+import { GameIcon } from '../../components/GameIcon';
 
 export function AiModeBadge({ campaignId }: { campaignId: number }) {
   const { t } = useTranslation();
@@ -33,7 +34,7 @@ export function AiModeBadge({ campaignId }: { campaignId: number }) {
         style={{ whiteSpace: 'nowrap', cursor: 'pointer', textDecoration: 'none' }}
         aria-label={t('aiOnboarding.badge.driverAria')}
       >
-        ✨ {t('aiOnboarding.badge.driver')}
+        <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.driver')}
       </Link>
     );
   }
@@ -49,7 +50,7 @@ export function AiModeBadge({ campaignId }: { campaignId: number }) {
         aria-label={t('aiOnboarding.badge.coDmAria')}
         onClick={() => setOpen((v) => !v)}
       >
-        ✨ {t('aiOnboarding.badge.coDm')}
+        <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.coDm')}
       </button>
       {open && (
         <div
