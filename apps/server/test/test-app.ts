@@ -12,6 +12,24 @@ export interface TestAppContext {
 }
 
 /**
+ * A single provider binding to swap in the AppModule before the app boots.
+ * Used by the AI eval harness (#318) to override AI_DM_PROVIDER with a
+ * deterministic mock-backed provider so AI flows are testable offline. Kept
+ * generic so any suite can inject a deterministic double for an injectable.
+ */
+export interface TestAppOverride {
+  /** The DI token (class or symbol) to override. */
+  token: Parameters<ReturnType<typeof Test.createTestingModule>['overrideProvider']>[0];
+  /** The value to bind in its place. */
+  useValue: unknown;
+}
+
+export interface CreateTestAppOptions {
+  /** Provider bindings to override in the AppModule before it compiles. */
+  overrides?: TestAppOverride[];
+}
+
+/**
  * Spins up a full Nest app against a unique temp SQLite dir per suite.
  * DATA_DIR must be set before the DbModule provider factory runs (module init).
  *
@@ -19,7 +37,7 @@ export interface TestAppContext {
  * the pre-existing e2e suites; new auth-flow suites use a real cookie-session
  * supertest agent instead, which SessionAuthGuard prefers over headers.
  */
-export async function createTestApp(): Promise<TestAppContext> {
+export async function createTestApp(options: CreateTestAppOptions = {}): Promise<TestAppContext> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
   process.env.DATA_DIR = dataDir;
   process.env.DEV_AUTH = '1';
@@ -27,9 +45,11 @@ export async function createTestApp(): Promise<TestAppContext> {
   // Suites that specifically exercise throttling (throttle.e2e-spec.ts) unset this themselves.
   process.env.THROTTLE_DISABLED = '1';
 
-  const moduleRef = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
+  let builder = Test.createTestingModule({ imports: [AppModule] });
+  for (const { token, useValue } of options.overrides ?? []) {
+    builder = builder.overrideProvider(token).useValue(useValue);
+  }
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication();
   app.use(cookieParser());
