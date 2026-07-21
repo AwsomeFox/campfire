@@ -39,6 +39,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(columnNames(sqlite, 'quests')).toContain('hidden');
       expect(columnNames(sqlite, 'npcs')).toContain('hidden');
+      expect(columnNames(sqlite, 'npcs')).toContain('icon_slug'); // 0037 (issue #302)
       expect(columnNames(sqlite, 'sessions')).toContain('dm_secret');
       expect(columnNames(sqlite, 'api_tokens')).toContain('admin_enabled');
       expect(columnNames(sqlite, 'proposals')).toContain('snapshot');

@@ -9,6 +9,8 @@ import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
+import { getIcon } from '../../lib/icons';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -166,8 +168,12 @@ export default function NpcListPage() {
                 className="cf-card p-3.5 space-y-2 hover:border-amber-500/50"
               >
                 <div className="flex items-center gap-2.5">
-                  <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)]">
-                    {initials(npc.name)}
+                  <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)] overflow-hidden">
+                    {getIcon(npc.iconSlug) ? (
+                      <GameIcon slug={npc.iconSlug} size={22} title={npc.name} className="text-[var(--color-accent)]" />
+                    ) : (
+                      initials(npc.name)
+                    )}
                   </span>
                   <div className="flex-1 min-w-0">
                     <p className="font-bold text-slate-200 text-sm truncate">{npc.name}</p>

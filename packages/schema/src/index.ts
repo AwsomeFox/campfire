@@ -507,6 +507,13 @@ export const Npc = z.object({
   factionId: Id.nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
+  // Optional on-theme icon (issue #302): the slug of a bundled game-icons.net
+  // entity icon (see apps/web/src/lib/icons) shown in place of the initials
+  // avatar. '' means "no icon — fall back to initials". The web app validates
+  // the slug against its bundled catalog; the server stores it opaquely (an
+  // unknown slug simply renders as no icon), so the field stays forward-compatible
+  // as the curated set grows. Shared mechanism reused by #305/#307.
+  iconSlug: z.string().max(80).default(''),
   // Entity-level secrecy (issue #42) — see Quest.hidden. A hidden NPC is dropped
   // wholesale from every non-DM read until the DM reveals it (hidden=false).
   hidden: z.boolean().default(false),
