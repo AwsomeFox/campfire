@@ -9,6 +9,41 @@ import * as schema from './schema';
 export const DB = Symbol('DB');
 export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 
+/** Module-scoped logger for the free functions (openDatabase et al.) that run outside a Nest provider. */
+const dbLog = new Logger('Database');
+
+/**
+ * Startup diagnostic (issue #235): run `PRAGMA foreign_key_check` once enforcement is on
+ * and log a warning for any pre-existing referential violation. This is a READ-ONLY probe —
+ * it never mutates data (an automatic "repair" that silently deleted dangling rows could
+ * destroy real records), it just surfaces the problem so an operator can act. On a fresh DB
+ * (constraints enforced from the first write) this is always clean; on a pre-#69 DB — which
+ * carries no FK constraints and so cannot report violations against them — it is also a
+ * no-op. It only ever fires if a DB somehow accumulated a genuine dangling reference.
+ */
+function logForeignKeyViolations(sqlite: Database.Database): void {
+  try {
+    const violations = sqlite.pragma('foreign_key_check') as Array<{
+      table: string;
+      rowid: number;
+      parent: string;
+      fkid: number;
+    }>;
+    if (violations.length === 0) return;
+    const byTable = new Map<string, number>();
+    for (const v of violations) byTable.set(v.table, (byTable.get(v.table) ?? 0) + 1);
+    const summary = [...byTable.entries()].map(([t, n]) => `${t}(${n})`).join(', ');
+    dbLog.warn(
+      `foreign_key_check found ${violations.length} dangling reference(s) across: ${summary}. ` +
+        `These are orphaned rows referencing a missing parent; no data was changed. ` +
+        `Purging the owning campaign (CampaignsService.purge) clears campaign-scoped orphans (issue #235).`,
+    );
+  } catch (err) {
+    // A diagnostic must never block boot.
+    dbLog.warn(`foreign_key_check probe failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Injection token for the DbHolder (raw better-sqlite3 handle + reopen()), used by the backup/restore module. */
 export const DB_HOLDER = Symbol('DB_HOLDER');
 
@@ -860,6 +895,9 @@ export function openDatabase(dataDir: string): {
   // there are no constraints to enforce. Per-connection, so DbHolder.reopen /
   // withDatabaseClosed re-applies it through this same openDatabase path.
   sqlite.pragma('foreign_keys = ON');
+
+  // Startup diagnostic (issue #235): surface any pre-existing dangling references. Read-only.
+  logForeignKeyViolations(sqlite);
 
   return { sqlite, orm: drizzle(sqlite, { schema }), ftsAvailable };
 }
