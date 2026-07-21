@@ -34,17 +34,20 @@ function scriptedRoller(faces: number[]): (sides: number) => number {
 }
 
 describe('OpenLegendAdapter — attribute action-dice table', () => {
+  // Official Open Legend Core Rules / SRD action-dice table (openlegend/core-rules
+  // core/SRD.md, "Action Dice"): d20 + the listed bonus dice; no mixed die sizes; score 1
+  // adds 1d4 (issue #379 — the old table was shifted one score down and invented mixed pools).
   it.each([
-    [1, [20]],
-    [2, [20, 4]],
-    [3, [20, 6]],
-    [4, [20, 8]],
-    [5, [20, 10]],
-    [6, [20, 6, 6]],
-    [7, [20, 6, 8]],
-    [8, [20, 8, 8]],
-    [9, [20, 8, 10]],
-    [10, [20, 10, 10]],
+    [1, [20, 4]],
+    [2, [20, 6]],
+    [3, [20, 8]],
+    [4, [20, 10]],
+    [5, [20, 6, 6]],
+    [6, [20, 8, 8]],
+    [7, [20, 10, 10]],
+    [8, [20, 8, 8, 8]],
+    [9, [20, 10, 10, 10]],
+    [10, [20, 8, 8, 8, 8]],
   ])('score %i -> dice %p', (score, dice) => {
     const pool = openLegendAttributeDicePool(score);
     expect(pool.dice).toEqual(dice);
@@ -57,19 +60,20 @@ describe('OpenLegendAdapter — attribute action-dice table', () => {
     expect(pool.disadvantage).toBe(true);
   });
 
-  it('scores above 10 extend the 2d10 bonus pool by one d10 per extra point', () => {
-    expect(openLegendAttributeDicePool(11).dice).toEqual([20, 10, 10, 10]);
+  it('scores above 10 continue the official progression (11 -> 4d10, 12 -> 5d8, 13 -> 5d10)', () => {
+    expect(openLegendAttributeDicePool(11).dice).toEqual([20, 10, 10, 10, 10]);
+    expect(openLegendAttributeDicePool(12).dice).toEqual([20, 8, 8, 8, 8, 8]);
     expect(openLegendAttributeDicePool(13).dice).toEqual([20, 10, 10, 10, 10, 10]);
   });
 
   it('clamps/truncates non-integer and negative scores', () => {
     expect(openLegendAttributeDicePool(-3).disadvantage).toBe(true);
-    expect(openLegendAttributeDicePool(4.9).dice).toEqual([20, 8]);
+    expect(openLegendAttributeDicePool(4.9).dice).toEqual([20, 10]); // truncates to score 4
     expect(openLegendAttributeDicePool(NaN).disadvantage).toBe(true);
   });
 
   it('exposes the table through the optional adapter member (5e leaves it undefined)', () => {
-    expect(OpenLegendAdapter.attributeDicePool?.(5).dice).toEqual([20, 10]);
+    expect(OpenLegendAdapter.attributeDicePool?.(5).dice).toEqual([20, 6, 6]);
     expect(Dnd5eAdapter.attributeDicePool).toBeUndefined();
   });
 });
@@ -95,11 +99,11 @@ describe('OpenLegendAdapter — exploding-dice math', () => {
   });
 
   it('rolls a full pool and sums every die, each exploding independently', () => {
-    // score 4 -> [20, 8]. d20: 20 (explode) -> 5 = 25; d8: 8 (explode) -> 2 = 10. total 35.
-    const roll = rollActionDice(4, scriptedRoller([20, 5, 8, 2]));
-    expect(roll.pool).toEqual([20, 8]);
-    expect(roll.dice.map((d) => d.total)).toEqual([25, 10]);
-    expect(roll.total).toBe(35);
+    // score 4 -> [20, 10]. d20: 20 (explode) -> 5 = 25; d10: 10 (explode) -> 2 = 12. total 37.
+    const roll = rollActionDice(4, scriptedRoller([20, 5, 10, 2]));
+    expect(roll.pool).toEqual([20, 10]);
+    expect(roll.dice.map((d) => d.total)).toEqual([25, 12]);
+    expect(roll.total).toBe(37);
     expect(roll.disadvantage).toBe(false);
   });
 
@@ -142,6 +146,25 @@ describe('OpenLegendAdapter — banes/boons condition vocabulary', () => {
     expect(OpenLegendAdapter.conditions).toBe(OPEN_LEGEND_BANES_BOONS);
     expect(OpenLegendAdapter.conditions).toContain('Blinded'); // bane
     expect(OpenLegendAdapter.conditions).toContain('Haste'); // boon
+  });
+
+  // Issue #379/#385: the quick-apply chip list must be the REAL compendium names (27 banes +
+  // 32 boons from openlegend/core-rules banes.yml / boons.yml), so chip↔imported-entry lookup
+  // hits. The old list invented ~10 names (Dazed, Nauseated, Prone, Unconscious, Flying,
+  // Invisibility, Enhance Attribute, Sanctuary, Shielded, Mind Reading) and dropped real ones.
+  it('matches the real imported compendium names (no invented chips, none of the real ones missing)', () => {
+    expect(OPEN_LEGEND_BANES_BOONS).toHaveLength(27 + 32);
+
+    // Real names that must be present (and were wrong/missing before).
+    for (const real of ['Flight', 'Invisible', 'Bolster', 'Demoralized', 'Persistent Damage', 'Death', 'Truesight']) {
+      expect(OPEN_LEGEND_BANES_BOONS).toContain(real);
+    }
+    // Invented names that must NOT appear (they aren't real banes/boons).
+    for (const fake of ['Dazed', 'Nauseated', 'Prone', 'Unconscious', 'Flying', 'Invisibility', 'Enhance Attribute', 'Sanctuary', 'Shielded', 'Mind Reading']) {
+      expect(OPEN_LEGEND_BANES_BOONS).not.toContain(fake);
+    }
+    // No duplicates.
+    expect(new Set(OPEN_LEGEND_BANES_BOONS).size).toBe(OPEN_LEGEND_BANES_BOONS.length);
   });
 });
 

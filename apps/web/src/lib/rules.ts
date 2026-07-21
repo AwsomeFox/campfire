@@ -168,9 +168,12 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     source: 'open-legend',
     label: 'Open Legend',
     license: 'Community codex · OGL',
-    blurb: 'Open Legend — attribute-driven, classless; uses creatures, banes and boons.',
+    blurb: 'Open Legend — attribute-driven, classless; adds banes, boons and feats.',
     mechanics: 'Action rolls are exploding attribute dice pools (not d20+mod) · attribute IS its own modifier · banes & boons instead of conditions.',
-    sections: ['creatures', 'banes', 'boons', 'feats', 'items'],
+    // Mirrors the server's SECTIONS_BY_SOURCE['open-legend'] (ALL_OPEN_LEGEND_SECTIONS) exactly —
+    // the only three sections that exist as open data. Offering creatures/items here made the
+    // one-click install 400 before any job enqueued (issue #380).
+    sections: ['boons', 'banes', 'feats'],
     packSlug: OPEN_LEGEND_PACK_SLUG,
     requiresUrl: SOURCES_REQUIRING_URL.has('open-legend'),
   },

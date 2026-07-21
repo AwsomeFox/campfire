@@ -498,8 +498,8 @@ export class RulesService {
 
   /**
    * Enqueue an Open Legend install (issues #299 + #345). Wraps the already-built
-   * installFromOpenLegend in the background-job machinery. Open Legend's attribute-based
-   * content uses creatures/banes/boons/feats/items sections.
+   * installFromOpenLegend in the background-job machinery. Open Legend's open data exists as
+   * exactly three sections — boons/banes/feats (see ALL_OPEN_LEGEND_SECTIONS / #346).
    */
   enqueueOpenLegendInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
     const sections: OpenLegendSection[] = input.sections?.length
@@ -558,7 +558,28 @@ export class RulesService {
 
   async listPacks(): Promise<RulePack[]> {
     const rows = await this.db.select().from(rulePacks);
-    return rows.map(packToDomain);
+    const usage = await this.countCampaignsByRuleSystem();
+    return rows.map((row) => ({ ...packToDomain(row), usageCount: usage.get(row.slug) ?? 0 }));
+  }
+
+  /**
+   * Authoritative, server-wide count of campaigns per `ruleSystem` slug (issue #385). Uninstall
+   * is a server-admin action that resets `ruleSystem=''` on EVERY campaign using the pack, but
+   * the admin is usually a member of few/no campaigns — so a client-side count from GET
+   * /campaigns (only the caller's visible campaigns) under-reports and the uninstall-safety
+   * acknowledgement silently disengages. This grouped `count(*)` sees all campaigns and feeds
+   * each pack's `usageCount`, so the confirm dialog gates on the real blast radius.
+   */
+  private async countCampaignsByRuleSystem(): Promise<Map<string, number>> {
+    const rows = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem, count: sql<number>`count(*)` })
+      .from(campaigns)
+      .groupBy(campaigns.ruleSystem);
+    const map = new Map<string, number>();
+    for (const r of rows) {
+      if (r.ruleSystem) map.set(r.ruleSystem, Number(r.count));
+    }
+    return map;
   }
 
   async getPackOrThrow(id: number) {
@@ -703,7 +724,8 @@ export class RulesService {
    * adds any not-yet-present entries if "open-legend-srd" is already installed. Mirrors
    * installFromOpen5e exactly — same concurrent-fresh-install race guard, same dedupe-by-
    * (slug,type), same persistence path — but pulls Open Legend's attribute-based content
-   * (creatures/banes/boons/feats/items) instead of Open5e's. Banes and boons both import as
+   * (boons/banes/feats — the three sections that exist as open data) instead of Open5e's.
+   * Banes and boons both import as
    * 'condition' entries, distinguished by dataJson.kind. Bulk ingest runs through the same
    * background install-job machinery as Open5e once a controller enqueues it (the job-source
    * enum widening is left to the #275 ruleset program so sibling systems land theirs together).

@@ -611,6 +611,66 @@ describe('rules / rule packs — uninstall clears campaigns\' ruleSystem (issue 
   });
 });
 
+/**
+ * Issue #385: the uninstall-safety acknowledgement must gate on an AUTHORITATIVE, server-wide
+ * usage count, not a client-side count of only the caller's visible campaigns. GET /campaigns
+ * returns only campaigns the caller is a member of, and uninstall is server-admin-only — an
+ * admin who belongs to few/no campaigns would otherwise see usageCount===0 and skip the gate,
+ * even though uninstall resets ruleSystem on EVERY campaign using the pack. GET /rules/packs
+ * therefore reports each pack's usageCount from a `count(*)` over ALL campaigns.
+ */
+describe('rules / rule packs — authoritative server-wide usage count (issue #385)', () => {
+  let ctx: TestAppContext;
+  let fake: FakeOpen5e;
+  const dmA = { 'x-dev-role': 'dm', 'x-dev-user': 'usage-count-dm-a' };
+  const dmB = { 'x-dev-role': 'dm', 'x-dev-user': 'usage-count-dm-b' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    fake = await startFakeOpen5e();
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+  });
+
+  it('GET /rules/packs reports usageCount from a server-wide count over ALL campaigns', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const job = await installOpen5e(server, dmA, { source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
+    expect(job.pack.slug).toBe('open5e-srd');
+    const packId = job.pack.id;
+
+    // Freshly installed: no campaign references it yet.
+    const initial = await request(server).get('/api/v1/rules/packs').set(dmA);
+    expect(initial.body.find((p: { id: number }) => p.id === packId).usageCount).toBe(0);
+
+    // Two DIFFERENT users each point a campaign at the pack. The authoritative count is a
+    // `count(*)` over EVERY campaign row (not a client-side sum of the caller's visible ones),
+    // so it must see both — the property the old client-side count failed for a server admin
+    // who belongs to few/no campaigns (issue #385).
+    const campA = await request(server).post('/api/v1/campaigns').set(dmA).send({ name: 'Usage A' });
+    await request(server).patch(`/api/v1/campaigns/${campA.body.id}`).set(dmA).send({ ruleSystem: 'open5e-srd' });
+    const campB = await request(server).post('/api/v1/campaigns').set(dmB).send({ name: 'Usage B' });
+    await request(server).patch(`/api/v1/campaigns/${campB.body.id}`).set(dmB).send({ ruleSystem: 'open5e-srd' });
+
+    // Reported identically to every caller — the count doesn't depend on who asks.
+    for (const who of [dmA, dmB]) {
+      const packs = await request(server).get('/api/v1/rules/packs').set(who);
+      expect(packs.status).toBe(200);
+      expect(packs.body.find((p: { id: number }) => p.id === packId).usageCount).toBe(2);
+    }
+
+    // Clearing one campaign's ruleSystem drops the authoritative count to 1.
+    await request(server).patch(`/api/v1/campaigns/${campB.body.id}`).set(dmB).send({ ruleSystem: '' });
+    const after = await request(server).get('/api/v1/rules/packs').set(dmA);
+    expect(after.body.find((p: { id: number }) => p.id === packId).usageCount).toBe(1);
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmA);
+  });
+});
+
 describe('rules / rule packs — install permission gating (e2e, real sessions)', () => {
   let ctx: TestAppContext;
   let fake: FakeOpen5e;
@@ -1107,11 +1167,27 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       const feat = await request(server).get('/api/v1/rules/search').query({ q: 'combat momentum', type: 'feat' }).set(dm);
       expect(feat.body.some((e: { name: string }) => e.name === 'Combat Momentum')).toBe(true);
 
-      // Open Legend has no creatures/items as open data — 'monsters' is foreign -> 400.
-      const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'open-legend', url: fake.baseUrl, sections: ['monsters'] });
-      expect(bad.status).toBe(400);
-
+      // Issue #380 regression: the admin picker offers exactly these three sections for
+      // open-legend (apps/web src/lib/rules.ts RULE_SYSTEMS). The default install above checks
+      // ALL sections, so POSTing that exact set must be accepted (202), NOT 400 — the whole bug
+      // was the picker offering creatures/items the server rejects, so the one-click install
+      // always 400'd before any job enqueued.
       await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+      const pickerSections = await installSource({ source: 'open-legend', url: fake.baseUrl, sections: ['boons', 'banes', 'feats'] });
+      expect(pickerSections.status).toBe('completed');
+      expect(pickerSections.pack.slug).toBe('open-legend-srd');
+
+      // The sections the OLD (buggy) picker also offered are correctly rejected 400 — they have
+      // no open data. 'monsters' too (a 5e name that was never Open Legend).
+      for (const foreign of [['creatures'], ['items'], ['monsters'], ['creatures', 'items']]) {
+        const bad = await request(server)
+          .post('/api/v1/rules/packs/install')
+          .set(dm)
+          .send({ source: 'open-legend', url: fake.baseUrl, sections: foreign });
+        expect(bad.status).toBe(400);
+      }
+
+      await request(server).delete(`/api/v1/rules/packs/${pickerSections.pack.id}`).set(dm);
     } finally {
       await fake.close();
     }
