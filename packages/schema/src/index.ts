@@ -2549,10 +2549,32 @@ export type AiProviderParams = z.infer<typeof AiProviderParams>;
 // it, pass '' to CLEAR it. `allowedModels` is honored only for the SERVER scope —
 // it is the admin model allowlist; when non-empty a campaign override's `model`
 // must be one of the listed values (enforced server-side).
+// Defense-in-depth for issue #373: a `baseUrl` override must be an absolute http(s)
+// URL, not an arbitrary scheme (no `file:`, `javascript:`, credential-in-userinfo, …).
+// The primary exfiltration fix binds the API key to its own scope's endpoint (see
+// AiProviderConfigService.resolveEffectiveConfig); this guard additionally constrains
+// what an override endpoint may even look like. `http` is permitted so self-hosted
+// local model servers (e.g. http://localhost:11434) keep working.
+const AiProviderBaseUrl = z
+  .string()
+  .trim()
+  .max(2048)
+  .refine(
+    (v) => {
+      try {
+        const u = new URL(v);
+        return (u.protocol === 'https:' || u.protocol === 'http:') && !u.username && !u.password;
+      } catch {
+        return false;
+      }
+    },
+    { message: 'baseUrl must be an absolute http(s) URL without embedded credentials.' },
+  );
+
 export const AiProviderConfigUpdate = z.object({
   providerType: AiProviderConfigType,
   model: z.string().min(1).max(120),
-  baseUrl: z.string().trim().max(2048).optional(),
+  baseUrl: AiProviderBaseUrl.optional(),
   params: AiProviderParams.optional(),
   apiKey: z.string().max(4096).optional(),
   allowedModels: z.array(z.string().min(1).max(120)).max(200).optional(),
