@@ -3,12 +3,15 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from '@nes
 import { and, eq, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
+  PF1E_PACK_SLUG,
+  STARFINDER_ADAPTER_ID,
   isOpenLicense,
   type RuleEntry,
   type RuleEntryType,
   type RulePack,
   type RulePackInstall,
   type RulePackInstallJob,
+  type RulePackInstallSource,
   type RulePackUpload,
 } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
@@ -42,6 +45,38 @@ import {
   fetchPf2eSection,
   type Pf2eSection,
 } from './pf2e-importer';
+import {
+  ALL_PF1E_SECTIONS,
+  MAX_ENTRIES_PER_SECTION as PF1E_MAX_ENTRIES_PER_SECTION,
+  PF1E_DEFAULT_BASE_URL,
+  PF1E_DEFAULT_LICENSE,
+  PF1E_PACK_NAME,
+  fetchPathfinder1eSection,
+  type Pf1eSection,
+} from './pathfinder1e-importer';
+import {
+  ALL_STARFINDER_SECTIONS,
+  MAX_ENTRIES_PER_SECTION as STARFINDER_MAX_ENTRIES_PER_SECTION,
+  STARFINDER_DEFAULT_BASE_URL,
+  fetchStarfinderSection,
+  type StarfinderSection,
+} from './starfinder-importer';
+import {
+  ALL_ARCHMAGE_SECTIONS,
+  ARCHMAGE_DEFAULT_BASE_URL,
+  ARCHMAGE_LICENSE,
+  ARCHMAGE_PACK_SLUG,
+  MAX_ENTRIES_PER_SECTION as ARCHMAGE_MAX_ENTRIES_PER_SECTION,
+  fetchArchmageSection,
+  type ArchmageSection,
+} from './archmage-importer';
+import {
+  ALL_OSR_SECTIONS,
+  OSR_MAX_ENTRIES_PER_SECTION,
+  fetchOsrSection,
+  osrSource,
+  type OsrSection,
+} from './osr-importer';
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -147,7 +182,7 @@ export class RulesService {
     return { ...job, progress: job.progress.map((p) => ({ ...p })) };
   }
 
-  private newJob(source: 'open5e' | 'pf2e' | 'upload', sections: string[]): RulePackInstallJob {
+  private newJob(source: RulePackInstallJob['source'], sections: string[]): RulePackInstallJob {
     this.pruneOldJobs();
     const ts = nowIso();
     const job: RulePackInstallJob = {
@@ -237,6 +272,135 @@ export class RulesService {
     }
   }
 
+  // ---------- open-ruleset install dispatch (issue #345) ----------
+
+  /**
+   * Static local constants for the sibling importers that don't export a pack slug/name of
+   * their own. Starfinder's pack installs under the adapter id `starfinder-1e`, which the
+   * StarfinderAdapter is registered against, so a campaign selecting the pack resolves the
+   * right combat math.
+   */
+  private static readonly STARFINDER_PACK_SLUG = STARFINDER_ADAPTER_ID; // 'starfinder-1e'
+  private static readonly STARFINDER_PACK_NAME = 'Starfinder 1e SRD';
+  private static readonly STARFINDER_DEFAULT_LICENSE = 'Open Game License v1.0a';
+
+  /**
+   * The section vocabulary each `source` accepts (issue #345). A caller-supplied section
+   * that isn't in the chosen source's set is rejected 400 synchronously, before a job is
+   * enqueued (acceptance criteria) — the widened `RulePackInstallSection` enum lets a name
+   * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e keeps the
+   * historical 5e-shaped set (it ignores the filter at import but still rejects foreign
+   * names); 'other' rides the Open5e path for back-compat.
+   */
+  private static readonly SECTIONS_BY_SOURCE: Record<RulePackInstallSource, readonly string[]> = {
+    open5e: ALL_OPEN5E_SECTIONS,
+    pf2e: ALL_OPEN5E_SECTIONS,
+    pf1e: ALL_PF1E_SECTIONS,
+    starfinder: ALL_STARFINDER_SECTIONS,
+    archmage: ALL_ARCHMAGE_SECTIONS,
+    'open-legend': ALL_OPEN_LEGEND_SECTIONS,
+    osr: ALL_OSR_SECTIONS,
+    other: ALL_OPEN5E_SECTIONS,
+  };
+
+  /**
+   * Sources whose importer default base URL is dead or a placeholder (tracked in #346), or —
+   * for OSR — which have no default at all. These require the caller to pass an explicit
+   * `url` (a mirror/self-hosted server, or a test fake) rather than silently failing a job
+   * against a dead default. A clear 400 at enqueue is friendlier than an obscure DNS/HTTP
+   * error surfaced only by polling the job.
+   */
+  private static readonly SOURCES_REQUIRING_URL = new Set<RulePackInstallSource>([
+    'pf1e',
+    'starfinder',
+    'archmage',
+    'osr',
+  ]);
+
+  /** Reject a section that isn't valid for the chosen source (400, before any job is enqueued). */
+  private assertSectionsForSource(source: RulePackInstallSource, sections: string[] | undefined): void {
+    if (!sections?.length) return;
+    const allowed = RulesService.SECTIONS_BY_SOURCE[source];
+    const invalid = sections.filter((s) => !allowed.includes(s));
+    if (invalid.length > 0) {
+      throw new BadRequestException(
+        `Section(s) ${invalid.join(', ')} are not valid for source "${source}". Allowed: ${allowed.join(', ')}.`,
+      );
+    }
+  }
+
+  /** Require an explicit base URL for a source whose default is dead/placeholder (see #346). */
+  private assertUrlForSource(source: RulePackInstallSource, url: string | undefined): void {
+    if (RulesService.SOURCES_REQUIRING_URL.has(source) && !url) {
+      throw new BadRequestException(
+        `Source "${source}" has no verified live default API yet (see #346) — pass an explicit "url" pointing at a mirror or self-hosted server.`,
+      );
+    }
+  }
+
+  /**
+   * Dispatch an install to the right importer by `source` (issue #345). Validates the
+   * source/section combination and any required URL synchronously (400 before enqueue),
+   * then hands off to the matching enqueue* method — each returns a 'pending' job snapshot
+   * the caller polls, running the paginated fetch + persist in runJob(). Existing open5e/
+   * pf2e callers are unaffected (same request shape, same code path).
+   */
+  enqueueInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    this.assertSectionsForSource(input.source, input.sections);
+    this.assertUrlForSource(input.source, input.url);
+    switch (input.source) {
+      case 'pf2e':
+        return this.enqueuePf2eInstall(input, user);
+      case 'pf1e':
+        return this.enqueuePf1eInstall(input, user);
+      case 'starfinder':
+        return this.enqueueStarfinderInstall(input, user);
+      case 'archmage':
+        return this.enqueueArchmageInstall(input, user);
+      case 'open-legend':
+        return this.enqueueOpenLegendInstall(input, user);
+      case 'osr':
+        return this.enqueueOsrInstall(input, user);
+      case 'open5e':
+      case 'other':
+      default:
+        return this.enqueueOpen5eInstall(input, user);
+    }
+  }
+
+  /**
+   * Synchronous install dispatch used by the MCP `install_rule_pack` tool (which awaits the
+   * result rather than polling a job). Same per-source validation as enqueueInstall, routed
+   * to the matching installFrom* method. Keeps the MCP tool honest: `source: 'starfinder'`
+   * runs the Starfinder importer, not a silent Open5e install.
+   */
+  async installFromSource(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    this.assertSectionsForSource(input.source, input.sections);
+    this.assertUrlForSource(input.source, input.url);
+    switch (input.source) {
+      case 'pf2e':
+        return this.installFromPf2e(input, user, onSectionDone);
+      case 'pf1e':
+        return this.installFromPf1e(input, user, onSectionDone);
+      case 'starfinder':
+        return this.installFromStarfinder(input, user, onSectionDone);
+      case 'archmage':
+        return this.installFromArchmage(input, user, onSectionDone);
+      case 'open-legend':
+        return this.installFromOpenLegend(input, user, onSectionDone);
+      case 'osr':
+        return this.installFromOsr(input, user, onSectionDone);
+      case 'open5e':
+      case 'other':
+      default:
+        return this.installFromOpen5e(input, user, onSectionDone);
+    }
+  }
+
   /**
    * Enqueue an Open5e install as a background job (issue #20). Returns immediately
    * with a 'pending' job snapshot; the heavy paginated fetch + insert runs in
@@ -269,6 +433,96 @@ export class RulesService {
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue a Pathfinder 1e install (issues #296 + #345). Mirrors the Open5e enqueue: a
+   * 'pending' snapshot immediately, the paginated fetch + insert in runJob(), installing
+   * under PF1E_PACK_SLUG (which the Pathfinder1eAdapter is registered against). PF1e shares
+   * the 5e-shaped section vocabulary, so the caller's section filter is honoured.
+   */
+  enqueuePf1eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const sections: Pf1eSection[] = input.sections?.length ? (input.sections as Pf1eSection[]) : ALL_PF1E_SECTIONS;
+    const job = this.newJob('pf1e', sections);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromPf1e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue a Starfinder 1e install (issues #297 + #345). Installs under the `starfinder-1e`
+   * pack slug (= STARFINDER_ADAPTER_ID) so a campaign selecting it resolves the Starfinder
+   * adapter. Starfinder adds its own sections (equipment/starships/vehicles) on top of the
+   * 5e-shaped ones, all validated per-source before this runs.
+   */
+  enqueueStarfinderInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const sections: StarfinderSection[] = input.sections?.length
+      ? (input.sections as StarfinderSection[])
+      : ALL_STARFINDER_SECTIONS;
+    const job = this.newJob('starfinder', sections);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromStarfinder(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue a 13th Age (Archmage Engine) install (issues #298 + #345). The importer parses
+   * HTML rather than JSON but returns the same ImportedEntry[] shape, so the background-job
+   * machinery is identical. Installs under ARCHMAGE_PACK_SLUG. 13th Age exposes only
+   * monsters + conditions.
+   */
+  enqueueArchmageInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const sections: ArchmageSection[] = input.sections?.length
+      ? (input.sections as ArchmageSection[])
+      : ALL_ARCHMAGE_SECTIONS;
+    const job = this.newJob('archmage', sections);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromArchmage(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue an Open Legend install (issues #299 + #345). Wraps the already-built
+   * installFromOpenLegend in the background-job machinery. Open Legend's attribute-based
+   * content uses creatures/banes/boons/feats/items sections.
+   */
+  enqueueOpenLegendInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const sections: OpenLegendSection[] = input.sections?.length
+      ? (input.sections as OpenLegendSection[])
+      : ALL_OPEN_LEGEND_SECTIONS;
+    const job = this.newJob('open-legend', sections);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromOpenLegend(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue an OSR install (issues #300 + #345). The single OSR importer serves several
+   * retroclone packs; `input.system` selects which `OsrSource` (slug/license/attribution)
+   * the pack installs under, defaulting to 'basic-fantasy'. The pack installs under that
+   * source's `systemSlug`, which the shared OsrAdapter is registered against.
+   */
+  enqueueOsrInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const sections: OsrSection[] = input.sections?.length ? (input.sections as OsrSection[]) : ALL_OSR_SECTIONS;
+    const job = this.newJob('osr', sections);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromOsr(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
       ),
     );
     return this.getJobOrThrow(job.id);
@@ -452,12 +706,14 @@ export class RulesService {
    * enum widening is left to the #275 ruleset program so sibling systems land theirs together).
    */
   async installFromOpenLegend(
-    input: { url?: string; sections?: OpenLegendSection[] },
+    input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? OPEN_LEGEND_DEFAULT_BASE_URL;
-    const sections: OpenLegendSection[] = input.sections?.length ? input.sections : ALL_OPEN_LEGEND_SECTIONS;
+    const sections: OpenLegendSection[] = input.sections?.length
+      ? (input.sections as OpenLegendSection[])
+      : ALL_OPEN_LEGEND_SECTIONS;
     const slug = OPEN_LEGEND_PACK_SLUG;
 
     const sectionResults = await Promise.all(
@@ -487,6 +743,181 @@ export class RulesService {
       allEntries,
       user,
       `(cap ${OL_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs a Pathfinder 1e rule pack (issue #296), or incrementally adds missing entries
+   * if `pathfinder-1e` already exists. Deliberate mirror of installFromOpen5e — concurrent
+   * fetch, per-section progress, shared persistPack (multi-pack coexistence + incremental
+   * add + race guard). Installs under PF1E_PACK_SLUG, which the Pathfinder1eAdapter is
+   * registered against. NOTE: the default base URL is a `.example` placeholder (#346); the
+   * enqueue path requires an explicit `url` until a live SRD mirror is validated.
+   */
+  async installFromPf1e(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? PF1E_DEFAULT_BASE_URL;
+    const sections: Pf1eSection[] = input.sections?.length ? (input.sections as Pf1eSection[]) : ALL_PF1E_SECTIONS;
+
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchPathfinder1eSection(baseUrl, s);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Pathfinder 1e import returned no entries for the requested sections');
+    }
+
+    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
+    const license = licenses.size > 0 ? [...licenses].join(', ') : PF1E_DEFAULT_LICENSE;
+
+    return this.persistPack(
+      { slug: PF1E_PACK_SLUG, name: PF1E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
+      allEntries,
+      user,
+      `(cap ${PF1E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs a Starfinder 1e rule pack (issue #297), or incrementally adds missing entries
+   * if `starfinder-1e` already exists. Mirror of installFromOpen5e. Installs under the
+   * `starfinder-1e` pack slug (= STARFINDER_ADAPTER_ID) so a campaign selecting it resolves
+   * the Starfinder adapter. NOTE: the default base URL does not resolve (dead DNS, #346); the
+   * enqueue path requires an explicit `url` until a live SRD mirror is validated.
+   */
+  async installFromStarfinder(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? STARFINDER_DEFAULT_BASE_URL;
+    const sections: StarfinderSection[] = input.sections?.length
+      ? (input.sections as StarfinderSection[])
+      : ALL_STARFINDER_SECTIONS;
+
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchStarfinderSection(baseUrl, s);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Starfinder import returned no entries for the requested sections');
+    }
+
+    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
+    const license = licenses.size > 0 ? [...licenses].join(', ') : RulesService.STARFINDER_DEFAULT_LICENSE;
+
+    return this.persistPack(
+      {
+        slug: RulesService.STARFINDER_PACK_SLUG,
+        name: RulesService.STARFINDER_PACK_NAME,
+        version: nowIso().slice(0, 10),
+        license,
+        sourceUrl: baseUrl,
+        sectionLabels: sections,
+      },
+      allEntries,
+      user,
+      `(cap ${STARFINDER_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs a 13th Age (Archmage Engine) rule pack (issue #298), or incrementally adds
+   * missing entries if `archmage-srd` already exists. The importer parses HTML rather than
+   * JSON but returns the same ImportedEntry[] shape, so this mirrors installFromOpen5e down
+   * to the shared persistPack path. NOTE: the default base URL returns HTTP 410 Gone (#346);
+   * the enqueue path requires an explicit `url` until a live mirror is validated.
+   */
+  async installFromArchmage(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? ARCHMAGE_DEFAULT_BASE_URL;
+    const sections: ArchmageSection[] = input.sections?.length
+      ? (input.sections as ArchmageSection[])
+      : ALL_ARCHMAGE_SECTIONS;
+
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchArchmageSection(baseUrl, s);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('13th Age import returned no entries for the requested sections');
+    }
+
+    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
+    const license = licenses.size > 0 ? [...licenses].join(', ') : ARCHMAGE_LICENSE;
+
+    return this.persistPack(
+      { slug: ARCHMAGE_PACK_SLUG, name: '13th Age SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
+      allEntries,
+      user,
+      `(cap ${ARCHMAGE_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs an OSR retroclone rule pack (issue #300), or incrementally adds missing entries
+   * if the selected source's pack already exists. `input.system` selects which `OsrSource`
+   * (slug/license/attribution) the pack installs under — one importer serving several packs —
+   * defaulting to 'basic-fantasy'. The pack installs under that source's `systemSlug`, which
+   * the shared OsrAdapter is registered against, so `ruleSystemAdapter()` resolves OSR combat
+   * for a campaign on that pack. NOTE: OSR has no public paginated JSON API (#346); the
+   * enqueue path requires an explicit `url` pointing at a mirror/self-hosted server.
+   */
+  async installFromOsr(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const source = osrSource(input.system);
+    const baseUrl = input.url ?? source.sourceUrl;
+    const sections: OsrSection[] = input.sections?.length ? (input.sections as OsrSection[]) : ALL_OSR_SECTIONS;
+
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchOsrSection(baseUrl, s, source);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('OSR import returned no entries for the requested sections');
+    }
+
+    return this.persistPack(
+      {
+        slug: source.systemSlug,
+        name: source.name,
+        version: nowIso().slice(0, 10),
+        license: source.license,
+        sourceUrl: baseUrl,
+        sectionLabels: sections,
+      },
+      allEntries,
+      user,
+      `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
     );
   }
 
