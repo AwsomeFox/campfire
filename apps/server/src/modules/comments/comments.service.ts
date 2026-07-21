@@ -4,8 +4,10 @@ import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
 import type { Comment, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { comments } from '../../db/schema';
+import { campaigns, characters, comments, encounters, factions, locations, npcs, quests, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
+import { isVisibleTo } from '../../common/redact';
 import { applyPage } from '../../common/pagination';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
@@ -34,9 +36,16 @@ function toDomain(row: typeof comments.$inferSelect): Comment {
 
 /**
  * Threaded discussion layer (issue #123). Comments are the shared, cross-session
- * surface notes never were: every comment anchors to a campaign entity and is
- * visible to ALL campaign members (no per-comment visibility). One level of
- * threading via `parentId`. Author-or-DM may edit/delete.
+ * surface notes never were: every comment anchors to a campaign entity and — once
+ * you can SEE that entity — is visible to ALL campaign members (no per-comment
+ * visibility). One level of threading via `parentId`. Author-or-DM may edit/delete.
+ *
+ * A thread is only as secret as the entity it hangs off (issue #230, re: #123): a
+ * comment on a HIDDEN quest/npc/faction (or an unexplored location) would otherwise
+ * leak that the secret entity exists — and its discussion — to any member who lists
+ * by (entityType, entityId). So every read/write path first resolves the anchored
+ * entity and applies the entity's OWN visibility rule (issue #42), 404-ing exactly
+ * as the entity's own GET does. See `assertAnchorVisible`.
  */
 @Injectable()
 export class CommentsService {
@@ -45,6 +54,104 @@ export class CommentsService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
   ) {}
+
+  /**
+   * Anchored-entity secrecy gate (issue #230). Before listing/posting on
+   * (entityType, entityId) — and before editing/deleting a comment anchored to one —
+   * the caller must be able to SEE that entity. We resolve it within THIS campaign and
+   * apply the SAME rule the entity's own GET uses (issue #42): a hidden quest/npc/
+   * faction or an unexplored location is 404 for a non-DM, indistinguishable from a
+   * nonexistent one — so a thread can never leak that a secret entity exists (or expose
+   * its comments). Types with no entity-level secrecy (session, character, campaign,
+   * encounter) are visible to any member; a nonexistent, trashed, or foreign-campaign
+   * anchor 404s for everyone (a comment can only hang off a live entity in its own
+   * campaign). The 404 message is uniform so a hidden entity is byte-for-byte a missing one.
+   */
+  private async assertAnchorVisible(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+    role: Role,
+  ): Promise<void> {
+    const notFound = () => new NotFoundException(`${entityType} ${entityId} not found`);
+    switch (entityType) {
+      case 'quest': {
+        const [row] = await this.db
+          .select({ hidden: quests.hidden })
+          .from(quests)
+          .where(and(eq(quests.id, entityId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)))
+          .limit(1);
+        if (!row || !isVisibleTo(row, role)) throw notFound();
+        return;
+      }
+      case 'npc': {
+        const [row] = await this.db
+          .select({ hidden: npcs.hidden })
+          .from(npcs)
+          .where(and(eq(npcs.id, entityId), eq(npcs.campaignId, campaignId), notDeleted(npcs.deletedAt)))
+          .limit(1);
+        if (!row || !isVisibleTo(row, role)) throw notFound();
+        return;
+      }
+      case 'faction': {
+        const [row] = await this.db
+          .select({ hidden: factions.hidden })
+          .from(factions)
+          .where(and(eq(factions.id, entityId), eq(factions.campaignId, campaignId)))
+          .limit(1);
+        if (!row || !isVisibleTo(row, role)) throw notFound();
+        return;
+      }
+      case 'location': {
+        const [row] = await this.db
+          .select({ status: locations.status })
+          .from(locations)
+          .where(and(eq(locations.id, entityId), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)))
+          .limit(1);
+        // Unexplored → hidden from non-DM (mirrors LocationsService.isHiddenFrom, issue #42).
+        if (!row || (role !== 'dm' && row.status === 'unexplored')) throw notFound();
+        return;
+      }
+      case 'session': {
+        const [row] = await this.db
+          .select({ id: sessions.id })
+          .from(sessions)
+          .where(and(eq(sessions.id, entityId), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
+          .limit(1);
+        if (!row) throw notFound();
+        return;
+      }
+      case 'character': {
+        const [row] = await this.db
+          .select({ id: characters.id })
+          .from(characters)
+          .where(and(eq(characters.id, entityId), eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)))
+          .limit(1);
+        if (!row) throw notFound();
+        return;
+      }
+      case 'encounter': {
+        const [row] = await this.db
+          .select({ id: encounters.id })
+          .from(encounters)
+          .where(and(eq(encounters.id, entityId), eq(encounters.campaignId, campaignId)))
+          .limit(1);
+        if (!row) throw notFound();
+        return;
+      }
+      case 'campaign': {
+        // A comment can only anchor to its OWN campaign; a foreign campaign id 404s.
+        if (entityId !== campaignId) throw notFound();
+        const [row] = await this.db
+          .select({ id: campaigns.id })
+          .from(campaigns)
+          .where(and(eq(campaigns.id, campaignId), notDeleted(campaigns.deletedAt)))
+          .limit(1);
+        if (!row) throw notFound();
+        return;
+      }
+    }
+  }
 
   /**
    * List a thread: every comment on one (entityType, entityId) within the
@@ -56,8 +163,11 @@ export class CommentsService {
     campaignId: number,
     entityType: EntityTypeValue,
     entityId: number,
+    role: Role,
     page?: PageParams,
   ): Promise<Comment[]> {
+    // A non-DM must not even learn a hidden entity's thread exists (issue #230).
+    await this.assertAnchorVisible(campaignId, entityType, entityId, role);
     let query = this.db
       .select()
       .from(comments)
@@ -81,8 +191,11 @@ export class CommentsService {
     return row;
   }
 
-  async getOrThrow(id: number): Promise<Comment> {
-    return toDomain(await this.getRowOrThrow(id));
+  /** GET by id 404s (not 403) for a comment on an entity the caller can't see (issue #230). */
+  async getOrThrow(id: number, role: Role): Promise<Comment> {
+    const row = await this.getRowOrThrow(id);
+    await this.assertAnchorVisible(row.campaignId, row.entityType as EntityTypeValue, row.entityId, role);
+    return toDomain(row);
   }
 
   /**
@@ -111,6 +224,8 @@ export class CommentsService {
   async create(campaignId: number, input: CommentCreateInput, user: RequestUser, role: Role): Promise<Comment> {
     const entityType = input.entityType as EntityTypeValue;
     const entityId = input.entityId;
+    // Can't post on a thread you can't see — hidden/secret entities 404 (issue #230).
+    await this.assertAnchorVisible(campaignId, entityType, entityId, role);
     let parentId: number | null = null;
     if (input.parentId != null) {
       parentId = await this.resolveParent(campaignId, entityType, entityId, input.parentId);
@@ -148,6 +263,8 @@ export class CommentsService {
   /** author-or-DM */
   async update(id: number, input: CommentUpdateInput, user: RequestUser, role: Role): Promise<Comment> {
     const existing = await this.getRowOrThrow(id);
+    // A comment on an entity the caller can no longer see is, to them, nonexistent (issue #230).
+    await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may edit this comment');
     }
@@ -170,6 +287,8 @@ export class CommentsService {
   /** author-or-DM; deleting a top-level comment cascades to its direct replies */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
+    // A comment on an entity the caller can no longer see is, to them, nonexistent (issue #230).
+    await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may delete this comment');
     }
