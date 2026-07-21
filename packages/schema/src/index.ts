@@ -1036,11 +1036,12 @@ export type RuleEntry = z.infer<typeof RuleEntry>;
  * Importer registry for the /rules/packs/install endpoint (issue #70). Was a bare
  * `z.literal('open5e')`, welding the install path to a single importer. Widened to a
  * small enum so a second importer can be added without rewriting the schema — 'open5e'
- * stays the built-in API importer, 'other' is a placeholder for a future/generic
- * importer. The existing Open5e path is unchanged: callers still pass `source: 'open5e'`.
- * (Generic JSON uploads take the separate RulePackUpload path, `source: 'upload'`.)
+ * stays the built-in API importer, 'pf2e' is the Pathfinder 2e importer (issue #295), and
+ * 'other' is a placeholder for a future/generic importer. The existing Open5e path is
+ * unchanged: callers still pass `source: 'open5e'`. (Generic JSON uploads take the separate
+ * RulePackUpload path, `source: 'upload'`.)
  */
-export const RulePackInstallSource = z.enum(['open5e', 'other']);
+export const RulePackInstallSource = z.enum(['open5e', 'pf2e', 'other']);
 export type RulePackInstallSource = z.infer<typeof RulePackInstallSource>;
 
 export const RulePackInstall = z.object({
@@ -1145,13 +1146,248 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   },
 };
 
+// ---------- Pathfinder 2e adapter (issue #295) ----------
+// PF2e is the flagship non-5e rule system and the pattern the other Tier-1 systems
+// (#296-300) follow: a system-specific adapter object that (a) satisfies the shared
+// RuleSystemAdapter seam so the combat/statblock code routes through it unchanged, and
+// (b) exposes the system's own pure math (degrees of success, level-based DCs,
+// proficiency) as extra members that callers holding the PF2e adapter can reach for.
+// Everything here is pure and unit-tested — it has no data-source dependency, so it is
+// the durable, correct core even before any PF2e content is imported.
+
+/** Stable family id of the Pathfinder 2e adapter (not a pack slug). */
+export const PF2E_ADAPTER_ID = 'pf2e';
 /**
- * Registry of rule-system adapters, keyed by family id. Only 5e exists today; a second
- * system is added here (not by editing the combat/statblock code).
+ * Pack slug the PF2e importer installs under. Registered in ADAPTERS so a campaign whose
+ * `ruleSystem` is this slug routes its combat math through Pf2eAdapter (the importer and
+ * the adapter share this one constant rather than hardcoding the string in two places).
+ */
+export const PF2E_PACK_SLUG = 'pf2e-srd';
+
+/** PF2e proficiency ranks, lowest to highest. */
+export const PF2E_PROFICIENCY_RANKS = ['untrained', 'trained', 'expert', 'master', 'legendary'] as const;
+export type Pf2eProficiencyRank = (typeof PF2E_PROFICIENCY_RANKS)[number];
+
+/** Rank bonus added on top of level when trained or better. */
+const PF2E_RANK_BONUS: Record<Pf2eProficiencyRank, number> = {
+  untrained: 0,
+  trained: 2,
+  expert: 4,
+  master: 6,
+  legendary: 8,
+};
+
+/**
+ * PF2e proficiency bonus: your level plus a rank bonus (trained +2 … legendary +8) — this
+ * "add your level" scaling is the core mechanical departure from 5e's fixed proficiency.
+ * Untrained is a flat +0: you do NOT add your level (Player Core, "Proficiency").
+ */
+export function pf2eProficiencyBonus(level: number, rank: Pf2eProficiencyRank): number {
+  if (rank === 'untrained') return 0;
+  return Math.max(0, Math.trunc(level)) + PF2E_RANK_BONUS[rank];
+}
+
+/**
+ * Level-based DC (GM Core, "DCs by Level") — the DC to set for a task of a given level.
+ * The table isn't a clean linear formula (it steps by an extra +1 roughly every third
+ * level and by +2 above 20th), so it is encoded exactly for levels 0–25 and clamped
+ * outside that range rather than approximated.
+ */
+const PF2E_LEVEL_DC = [
+  14, 15, 16, 18, 19, 20, 22, 23, 24, 26, 27, 28, 30, 31, 32, 34, 35, 36, 38, 39, 40, 42, 44, 46, 48, 50,
+];
+export function pf2eLevelBasedDC(level: number): number {
+  const l = Math.trunc(level);
+  if (l <= 0) return PF2E_LEVEL_DC[0];
+  if (l >= PF2E_LEVEL_DC.length) return PF2E_LEVEL_DC[PF2E_LEVEL_DC.length - 1];
+  return PF2E_LEVEL_DC[l];
+}
+
+/** Simple DCs keyed by the required proficiency rank (GM Core): untrained 10 … legendary 40. */
+const PF2E_SIMPLE_DC: Record<Pf2eProficiencyRank, number> = {
+  untrained: 10,
+  trained: 15,
+  expert: 20,
+  master: 30,
+  legendary: 40,
+};
+export function pf2eSimpleDC(rank: Pf2eProficiencyRank): number {
+  return PF2E_SIMPLE_DC[rank];
+}
+
+/** The four PF2e degrees of success, worst to best. */
+export const PF2E_DEGREES = ['criticalFailure', 'failure', 'success', 'criticalSuccess'] as const;
+export type Pf2eDegreeOfSuccess = (typeof PF2E_DEGREES)[number];
+
+/**
+ * PF2e degree of success (Player Core, "Checks"). Compare the check total to the DC:
+ *   ≥ DC+10 → critical success; ≥ DC → success; ≤ DC−10 → critical failure; else failure.
+ * Then a natural 20 shifts the result one degree BETTER and a natural 1 one degree WORSE
+ * (a critical success can't improve further, a critical failure can't worsen further).
+ * Pass `naturalRoll` (the raw d20 face) to apply that step; omit it to compare totals only.
+ */
+export function pf2eDegreeOfSuccess(total: number, dc: number, naturalRoll?: number): Pf2eDegreeOfSuccess {
+  let step: number;
+  if (total >= dc + 10) step = 3;
+  else if (total >= dc) step = 2;
+  else if (total <= dc - 10) step = 0;
+  else step = 1;
+  if (naturalRoll === 20) step = Math.min(3, step + 1);
+  else if (naturalRoll === 1) step = Math.max(0, step - 1);
+  return PF2E_DEGREES[step];
+}
+
+/**
+ * PF2e condition vocabulary (remaster / ORC). A distinct vocabulary from the 5e list —
+ * e.g. clumsy, enfeebled, frightened, off-guard (the remaster's name for legacy
+ * "flat-footed"). Condition names are open game content, not Product Identity. Offered as
+ * the combat-UI condition chips for a PF2e campaign.
+ */
+export const PF2E_CONDITIONS = [
+  'Blinded',
+  'Clumsy',
+  'Concealed',
+  'Confused',
+  'Controlled',
+  'Dazzled',
+  'Deafened',
+  'Doomed',
+  'Drained',
+  'Dying',
+  'Encumbered',
+  'Enfeebled',
+  'Fascinated',
+  'Fatigued',
+  'Fleeing',
+  'Frightened',
+  'Grabbed',
+  'Hidden',
+  'Immobilized',
+  'Invisible',
+  'Observed',
+  'Off-Guard',
+  'Paralyzed',
+  'Persistent Damage',
+  'Petrified',
+  'Prone',
+  'Quickened',
+  'Restrained',
+  'Sickened',
+  'Slowed',
+  'Stunned',
+  'Stupefied',
+  'Unconscious',
+  'Undetected',
+  'Unnoticed',
+  'Wounded',
+] as const;
+export type Pf2eConditionName = (typeof PF2E_CONDITIONS)[number];
+
+/**
+ * PF2e adapter surface — the shared RuleSystemAdapter seam plus the PF2e-only pure math a
+ * caller that knows it holds the PF2e adapter can use directly. The extra members live
+ * here (not on the shared interface) so 5e stays clean; systems #296-300 follow the same
+ * "conform to the seam, extend with your own math" shape.
+ */
+export interface Pf2eRuleSystemAdapter extends RuleSystemAdapter {
+  proficiencyBonus(level: number, rank: Pf2eProficiencyRank): number;
+  levelBasedDC(level: number): number;
+  simpleDC(rank: Pf2eProficiencyRank): number;
+  degreeOfSuccess(total: number, dc: number, naturalRoll?: number): Pf2eDegreeOfSuccess;
+}
+
+export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
+  id: PF2E_ADAPTER_ID,
+  label: 'Pathfinder 2e',
+  // PF2e ability modifiers use the same floor((score-10)/2) mapping as 5e.
+  abilityModifier(score: number): number {
+    return Math.floor((score - 10) / 2);
+  },
+  initiativeDie: 20,
+  // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
+  // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
+  // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
+  // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
+  // back to the WIS modifier. Returns 0 when neither is present/numeric.
+  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+    if (!abilities) return 0;
+    const perception = abilities.perception ?? abilities.Perception;
+    if (typeof perception === 'number') return perception;
+    const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
+    if (typeof wisScore === 'number') return this.abilityModifier(wisScore);
+    return 0;
+  },
+  conditions: PF2E_CONDITIONS,
+  mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
+    // PF2e statblocks list ability MODIFIERS (Str +4), not scores; the importer stores them
+    // under `abilityMods`. Surface those under the seam's `abilityScores` field, and fold in
+    // the flat Perception modifier so initiativeModifier (above) can read it back out.
+    const mods = (d.abilityMods ?? d.ability_mods ?? d.abilityScores ?? d.abilities) as
+      | Record<string, unknown>
+      | undefined;
+    const perception = d.perception ?? d.perceptionMod;
+    const abilityScores =
+      mods && typeof mods === 'object'
+        ? typeof perception === 'number'
+          ? { ...mods, perception }
+          : { ...mods }
+        : typeof perception === 'number'
+          ? { perception }
+          : undefined;
+    return {
+      size: d.size,
+      // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits).
+      creatureType: d.creatureType ?? d.type ?? (Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits),
+      // PF2e has no CR — a creature's LEVEL is its difficulty rating; surface it in the CR slot.
+      challengeRating: d.level ?? d.challengeRating ?? d.cr,
+      armorClass: d.ac ?? d.armorClass ?? d.armor_class,
+      hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
+      speed: d.speed ?? d.speeds,
+      abilityScores,
+      specialAbilities: d.specialAbilities ?? d.special ?? d.abilities_special,
+      actions: d.actions ?? d.attacks,
+    };
+  },
+  monsterHitPoints(d: Record<string, unknown>): number | null {
+    const hp = d.hp ?? d.hitPoints ?? d.hit_points;
+    return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
+  },
+  proficiencyBonus: pf2eProficiencyBonus,
+  levelBasedDC: pf2eLevelBasedDC,
+  simpleDC: pf2eSimpleDC,
+  degreeOfSuccess: pf2eDegreeOfSuccess,
+};
+
+// Sibling ruleset adapters (issues #296-300) live in their own files (type-only imports
+// from here, so no runtime cycle) and register below. Adding a system is one import + one
+// ADAPTERS entry, never a sweep across the combat code.
+import { Pathfinder1eAdapter, PF1E_PACK_SLUG } from './pathfinder1e';
+export * from './pathfinder1e';
+import { StarfinderAdapter, STARFINDER_ADAPTER_ID } from './starfinder-adapter';
+export * from './starfinder-adapter';
+import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
+export * from './adapters/archmage';
+import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS } from './osr-adapter';
+export * from './osr-adapter';
+
+/**
+ * Registry of rule-system adapters, keyed by family id (and, for a system with its own
+ * importer, its pack slug too — so `campaign.ruleSystem`, which stores the pack slug,
+ * resolves straight to the adapter). 5e is the default; PF2e (issue #295) is the first
+ * registered second system. A further system is added here, not by editing combat code.
  */
 const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [DND5E_ADAPTER_ID]: Dnd5eAdapter,
+  [PF2E_ADAPTER_ID]: Pf2eAdapter,
+  // Pack slug the PF2e importer installs under — campaigns store the slug in `ruleSystem`.
+  [PF2E_PACK_SLUG]: Pf2eAdapter,
+  [PF1E_PACK_SLUG]: Pathfinder1eAdapter, // Pathfinder 1e (issue #296)
+  [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
+  [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
+  'archmage-srd': Archmage13aAdapter, // …and its installed rule-pack slug
 };
+// OSR pack (issue #300): one shared adapter resolves several retroclone slugs.
+for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
 
 /**
  * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
@@ -1244,7 +1480,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),
