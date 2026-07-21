@@ -123,6 +123,7 @@ const ALL_TOOLS = [
   'create_encounter',
   'update_encounter',
   'reveal_map_region',
+  'generate_map',
   'add_combatant',
   'update_combatant',
   'remove_combatant',
@@ -225,7 +226,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(131);
+    expect(tools).toHaveLength(132);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -388,6 +389,38 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       name: 'add_inventory_item',
       arguments: { campaignId, name: 'Contraband' },
     });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('403');
+  });
+
+  it('generate_map (issue #306): dm generates a deterministic hidden map; viewer is denied', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    const genRes = await dmClient.callTool({
+      name: 'generate_map',
+      arguments: { campaignId, kind: 'dungeon', size: 'small', seed: 'mcp-seed' },
+    });
+    expect(genRes.isError).toBeFalsy();
+    const gen = parseResult(genRes) as {
+      attachmentId: number;
+      seed: string;
+      kind: string;
+      widthCells: number;
+      gridConfig: { gridSize: number; gridType: string };
+    };
+    expect(gen.attachmentId).toBeGreaterThan(0);
+    expect(gen.seed).toBe('mcp-seed');
+    expect(gen.kind).toBe('dungeon');
+    expect(gen.widthCells).toBe(20);
+    expect(gen.gridConfig.gridType).toBe('square');
+
+    // Default hidden (#97/#259): a viewer PAT's get_attachment 404s the generated map.
+    const hidden = await viewerClient.callTool({ name: 'get_attachment', arguments: { attachmentId: gen.attachmentId } });
+    expect(hidden.isError).toBe(true);
+
+    // A viewer-scoped PAT cannot generate (dm role required).
+    const denied = await viewerClient.callTool({ name: 'generate_map', arguments: { campaignId, kind: 'cave' } });
     expect(denied.isError).toBe(true);
     expect((denied.content as TextContent[])[0].text).toContain('403');
   });

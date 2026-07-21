@@ -1967,6 +1967,73 @@ export const EncounterUpdate = z.object({
   hidden: z.boolean().optional(),
 });
 
+// ---------- procedural battle-map generation (issue #306) ----------
+
+/**
+ * First-party procedural battle-map generator (issue #306). Because there is no
+ * bundle-able, license-clean open battle-map dataset (#303), Campfire generates its
+ * OWN maps server-side — deterministic (seeded), offline, no external calls — and saves
+ * the result as a normal attachment (kind='map') that flows through the existing VTT
+ * grid/fog (#40) and handout-visibility (#97/#259) machinery.
+ *
+ * `kind` selects the generator:
+ *  - 'dungeon'    — classic room-and-corridor dungeon (v1 primary).
+ *  - 'cave'       — organic cellular-automata cavern.
+ *  - 'wilderness' — open ground scattered with terrain blobs (light).
+ * ('building' is deferred to a later phase — see the issue.)
+ */
+export const MapKind = z.enum(['dungeon', 'cave', 'wilderness']);
+export type MapKind = z.infer<typeof MapKind>;
+
+/** Overall map footprint. Bounded cell dimensions (guardrail against huge blobs). */
+export const MapSize = z.enum(['small', 'medium', 'large']);
+export type MapSize = z.infer<typeof MapSize>;
+
+/** Palette theme for the rendered SVG. Purely cosmetic; does not change layout. */
+export const MapTheme = z.enum(['stone', 'cavern', 'forest', 'crypt']);
+export type MapTheme = z.infer<typeof MapTheme>;
+
+/**
+ * Parameters for a generate-map request. All optional except that the generator
+ * defaults kind='dungeon', size='medium'. `seed` makes generation reproducible — the
+ * same seed + params always yields byte-identical output; omit it and the server picks a
+ * random seed and returns it so the DM can reproduce the map. `complexity` (0..1) scales
+ * room count / carve density. `gridScale`/`gridUnit` describe one cell's real-world size
+ * (default 5 ft) for the VTT ruler; the percent-of-width `gridSize` is DERIVED from the
+ * generated cell dimensions so the overlay lines up exactly.
+ */
+export const GenerateMapParams = z.object({
+  kind: MapKind.default('dungeon'),
+  size: MapSize.default('medium'),
+  complexity: z.number().min(0).max(1).optional(),
+  seed: z.string().min(1).max(64).optional(),
+  theme: MapTheme.optional(),
+  gridScale: z.number().positive().max(1000).optional(),
+  gridUnit: z.string().min(1).max(12).optional(),
+});
+export type GenerateMapParams = z.infer<typeof GenerateMapParams>;
+
+/** The grid geometry a generated map hands back, ready to set on the encounter. */
+export const MapGridConfig = z.object({
+  gridSize: z.number().min(1).max(100), // one cell's edge as a percent of map width
+  gridScale: z.number().positive(), // real-world size of one cell
+  gridUnit: z.string().max(12),
+  gridType: GridType,
+});
+export type MapGridConfig = z.infer<typeof MapGridConfig>;
+
+/** Result of a generate-map call: the created attachment id + reproducibility info. */
+export const GeneratedMapResult = z.object({
+  attachmentId: Id,
+  seed: z.string(),
+  kind: MapKind,
+  widthCells: z.number().int().positive(),
+  heightCells: z.number().int().positive(),
+  roomCount: z.number().int().nonnegative(),
+  gridConfig: MapGridConfig,
+});
+export type GeneratedMapResult = z.infer<typeof GeneratedMapResult>;
+
 // ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
 // Computed (read-only) difficulty band for an encounter: the party's summed 5e XP
 // thresholds vs the total adjusted monster XP (monster CR->XP with the standard
