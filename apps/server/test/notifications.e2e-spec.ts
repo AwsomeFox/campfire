@@ -366,3 +366,173 @@ describe('note_shared notifications (issue #105, e2e)', () => {
     expect((await sharedFor(dm)).length).toBe(before + 1);
   });
 });
+
+/**
+ * Issue #263: notification coverage was incomplete — scheduling, quest changes,
+ * party-shared notes and proposals never notified anyone. Each of those now emits
+ * a best-effort in-app notification to the right recipient. Real cookie sessions
+ * (notifications hang off real users.id, so the DEV_AUTH header path is out).
+ */
+describe('coverage gaps: scheduling / quests / party notes / proposals (issue #263, e2e)', () => {
+  let ctx: TestAppContext;
+  let dm: ReturnType<typeof request.agent>; // campaign creator/dm
+  let player: ReturnType<typeof request.agent>; // a player
+  let playerId: number;
+  let campaignId: number;
+
+  type Notification = { id: number; type: string; title: string; body: string; entityType: string | null; entityId: number | null; actorName: string };
+
+  async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
+    const res = await agent.get('/api/v1/notifications');
+    expect(res.status).toBe(200);
+    return res.body as Notification[];
+  }
+  const ofType = (rows: Notification[], type: string) => rows.filter((n) => n.type === type);
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'cov-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'cov-dm', password: 'password-dm-1', displayName: 'Dana DM' });
+    const createPlayer = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'cov-player', password: 'password-pl-1', displayName: 'Pat Player' });
+    playerId = createPlayer.body.id;
+
+    dm = request.agent(server);
+    await dm.post('/api/v1/auth/login').send({ username: 'cov-dm', password: 'password-dm-1' });
+    player = request.agent(server);
+    await player.post('/api/v1/auth/login').send({ username: 'cov-player', password: 'password-pl-1' });
+
+    const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Coverage Keep' });
+    campaignId = campaign.body.id;
+    await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('scheduling a session notifies the party (not the scheduling DM)', async () => {
+    const future = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    const res = await dm
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: future, title: 'Game night' });
+    expect(res.status).toBe(201);
+
+    const scheduled = ofType(await listFor(player), 'session_scheduled');
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0].title).toContain('Game night');
+    expect(scheduled[0].actorName).toBe('Dana DM');
+    // The scheduling DM does not notify themselves.
+    expect(ofType(await listFor(dm), 'session_scheduled')).toHaveLength(0);
+  });
+
+  it("a player's RSVP notifies the DM (not the RSVPing player)", async () => {
+    const future = new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString();
+    const sched = await dm.post(`/api/v1/campaigns/${campaignId}/schedule`).send({ scheduledAt: future, title: 'RSVP night' });
+    expect(sched.status).toBe(201);
+
+    const rsvp = await player.put(`/api/v1/schedule/${sched.body.id}/rsvp`).send({ status: 'yes' });
+    expect(rsvp.status).toBe(200);
+
+    const dmRsvps = ofType(await listFor(dm), 'session_rsvp');
+    expect(dmRsvps).toHaveLength(1);
+    expect(dmRsvps[0].title).toContain('Pat Player');
+    expect(dmRsvps[0].title).toContain('yes');
+    // The RSVPing player is not notified about their own availability.
+    expect(ofType(await listFor(player), 'session_rsvp')).toHaveLength(0);
+  });
+
+  it('completing a visible quest notifies the party; the acting DM is not notified', async () => {
+    const quest = await dm.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Slay the dragon' });
+    expect(quest.status).toBe(201);
+
+    const done = await dm.post(`/api/v1/quests/${quest.body.id}/status`).send({ status: 'completed' });
+    expect(done.status).toBe(201);
+
+    const questNotifs = ofType(await listFor(player), 'quest_updated');
+    expect(questNotifs).toHaveLength(1);
+    expect(questNotifs[0].title).toContain('Slay the dragon');
+    expect(questNotifs[0].entityType).toBe('quest');
+    expect(questNotifs[0].entityId).toBe(quest.body.id);
+    expect(ofType(await listFor(dm), 'quest_updated')).toHaveLength(0);
+  });
+
+  it('a HIDDEN quest stays silent to players until it is revealed (then notifies)', async () => {
+    const hidden = await dm.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Secret pact', hidden: true });
+    expect(hidden.status).toBe(201);
+
+    // Completing a still-hidden quest must NOT notify players (its existence is dm-only).
+    const complete = await dm.post(`/api/v1/quests/${hidden.body.id}/status`).send({ status: 'completed' });
+    expect(complete.status).toBe(201);
+    const before = ofType(await listFor(player), 'quest_updated').length;
+
+    // Revealing it (hidden -> visible) DOES notify the party.
+    const reveal = await dm.patch(`/api/v1/quests/${hidden.body.id}`).send({ hidden: false });
+    expect(reveal.status).toBe(200);
+    const after = ofType(await listFor(player), 'quest_updated');
+    expect(after.length).toBe(before + 1);
+    expect(after[0].title).toContain('Secret pact');
+  });
+
+  it('sharing a note with the party notifies the party (not the author)', async () => {
+    const res = await player
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'The bridge is trapped, everyone.', visibility: 'party_shared' });
+    expect(res.status).toBe(201);
+
+    const dmShared = ofType(await listFor(dm), 'note_shared').filter((n) => n.body.includes('bridge is trapped'));
+    expect(dmShared).toHaveLength(1);
+    expect(dmShared[0].title).toContain('shared a note with the party');
+    expect(dmShared[0].actorName).toBe('Pat Player');
+    // The author gets nothing from their own party share.
+    expect(ofType(await listFor(player), 'note_shared').filter((n) => n.body.includes('bridge is trapped'))).toHaveLength(0);
+  });
+
+  it('submitting a proposal notifies the DM; approving it notifies the proposer', async () => {
+    // Player proposes a new quest (?proposed=true) — the DM is pinged.
+    const propose = await player
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: 'A player-pitched quest' });
+    expect(propose.status).toBe(202);
+    const proposalId = propose.body.proposal.id;
+
+    const submitted = ofType(await listFor(dm), 'proposal_submitted');
+    expect(submitted.length).toBeGreaterThanOrEqual(1);
+    expect(submitted[0].title).toContain('Pat Player');
+    expect(submitted[0].title).toContain('quest');
+    // The proposing player is not notified of their own submission.
+    expect(ofType(await listFor(player), 'proposal_submitted')).toHaveLength(0);
+
+    // DM approves -> the proposer is told the verdict.
+    const approve = await dm.post(`/api/v1/proposals/${proposalId}/approve`).send({ note: 'love it' });
+    expect(approve.status).toBe(201);
+
+    const resolved = ofType(await listFor(player), 'proposal_resolved');
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].title).toContain('approved');
+    expect(resolved[0].body).toContain('love it');
+    expect(resolved[0].actorName).toBe('Dana DM');
+    // The approving DM does not notify themselves.
+    expect(ofType(await listFor(dm), 'proposal_resolved')).toHaveLength(0);
+  });
+
+  it('rejecting a proposal notifies the proposer', async () => {
+    const propose = await player
+      .post(`/api/v1/campaigns/${campaignId}/quests?proposed=true`)
+      .send({ title: 'A doomed pitch' });
+    expect(propose.status).toBe(202);
+
+    const before = ofType(await listFor(player), 'proposal_resolved').length;
+    const reject = await dm.post(`/api/v1/proposals/${propose.body.proposal.id}/reject`).send({ note: 'not this time' });
+    expect(reject.status).toBe(201);
+
+    const resolved = ofType(await listFor(player), 'proposal_resolved');
+    expect(resolved.length).toBe(before + 1);
+    expect(resolved[0].title).toContain('rejected');
+    expect(resolved[0].body).toContain('not this time');
+  });
+});
