@@ -1119,6 +1119,29 @@ export interface RuleSystemAdapter {
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
   monsterHitPoints(data: Record<string, unknown>): number | null;
+  /**
+   * OPTIONAL — dice-pool systems only (issue #299, Open Legend). A d20-and-modifier
+   * system (5e) leaves this undefined and keeps rolling `initiativeDie + initiativeModifier`
+   * through the generic roller. A system whose action resolution is an *exploding attribute
+   * dice pool* rather than a single die+mod implements this to expose that pool: given an
+   * attribute score it returns the die sizes to roll (summed, each exploding on its max),
+   * and whether the pool is rolled at disadvantage (rolled twice, keep the lower total).
+   * Purely descriptive — no RNG — so it is deterministic and unit-testable; `rollActionDice`
+   * (a free function) applies an injected roller to it.
+   */
+  attributeDicePool?(score: number): AttributeDicePool;
+}
+
+/**
+ * The exploding dice pool for one attribute score (issue #299, Open Legend). `dice` are the
+ * die sizes rolled and SUMMED; every die that shows its maximum face explodes (is rolled
+ * again and added, repeatedly). `disadvantage` (Open Legend attribute score 0) means the
+ * whole pool is rolled twice and the LOWER total is kept.
+ */
+export interface AttributeDicePool {
+  score: number;
+  dice: number[];
+  disadvantage: boolean;
 }
 
 /** Read the governing (DEX) score from either a canonical or raw ability map, if numeric. */
@@ -1165,6 +1188,206 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
   },
 };
+
+// ---------- Open Legend adapter (issue #299) ----------
+// Open Legend (openlegendrpg.com) is a fully-open OGL system with a dice model quite unlike
+// 5e's d20+modifier: it has NO classes — eighteen *attributes* drive everything — and an
+// action roll is an *exploding attribute dice pool*, not a single die plus a flat bonus. An
+// attribute score (0–10+) indexes a fixed table of dice that are rolled and summed, and any
+// die that lands on its maximum face explodes (rolls again, adds, repeatedly). Banes and
+// boons are Open Legend's status-effect vocabulary (≈ 5e conditions).
+//
+// The 5e adapter's method shapes still fit where they can: `abilityModifier` is the identity
+// (an Open Legend attribute IS its own modifier — it isn't halved-and-offset like a 5e score),
+// initiative is an Agility roll so `initiativeModifier` reads Agility and `initiativeDie`
+// stays 20 (the d20 that anchors every Open Legend pool) — so turn order rolled through the
+// generic `rollInitiative(mod, die)` is `d20 + Agility`, monotonic in Agility, which is all
+// initiative ordering needs. The genuinely new behaviour — the exploding attribute pool — is
+// added as the OPTIONAL `attributeDicePool` interface member (5e leaves it undefined and is
+// wholly unaffected); `rollActionDice` applies an injected roller to that pool.
+
+/** Family id of the Open Legend adapter. */
+export const OPEN_LEGEND_ADAPTER_ID = 'open-legend';
+/** Rule-pack slug the Open Legend importer installs under (what a campaign's `ruleSystem` holds). */
+export const OPEN_LEGEND_PACK_SLUG = 'open-legend-srd';
+
+/**
+ * Open Legend's status-effect vocabulary — banes (harmful) and boons (beneficial) — offered
+ * as the combat-UI condition list for an Open Legend campaign, the same seam 5e fills with
+ * CONDITIONS. This is the canonical core-rules set; an installed rule pack's imported
+ * bane/boon entries are the searchable long-form reference, this list is the quick-apply chips.
+ */
+export const OPEN_LEGEND_BANES_BOONS = [
+  // Banes
+  'Blinded',
+  'Charmed',
+  'Dazed',
+  'Deafened',
+  'Fatigued',
+  'Immobile',
+  'Nauseated',
+  'Prone',
+  'Provoked',
+  'Sickened',
+  'Slowed',
+  'Stunned',
+  'Unconscious',
+  // Boons
+  'Aura',
+  'Enhance Attribute',
+  'Flying',
+  'Haste',
+  'Invisibility',
+  'Mind Reading',
+  'Regeneration',
+  'Sanctuary',
+  'Shielded',
+] as const;
+export type BaneOrBoonName = (typeof OPEN_LEGEND_BANES_BOONS)[number];
+
+/**
+ * Open Legend action-dice table (Core Rules): an attribute score maps to the dice rolled and
+ * summed for any action using that attribute. Score 0 is the d20 rolled at disadvantage
+ * (twice, keep lower); 1 is a lone d20; each further point adds/upgrades bonus dice beyond the
+ * anchoring d20. Table is authoritative for 0–10 (the PC/NPC range). Above 10 (rare, legendary
+ * extraordinary attributes) we extend the score-10 pool by one d10 per extra point, which
+ * continues the progression's shape without asserting an official value we can't cite.
+ */
+const OPEN_LEGEND_ACTION_DICE: Record<number, number[]> = {
+  1: [20],
+  2: [20, 4],
+  3: [20, 6],
+  4: [20, 8],
+  5: [20, 10],
+  6: [20, 6, 6],
+  7: [20, 6, 8],
+  8: [20, 8, 8],
+  9: [20, 8, 10],
+  10: [20, 10, 10],
+};
+
+/** The exploding dice pool for an Open Legend attribute score (see OPEN_LEGEND_ACTION_DICE). */
+export function openLegendAttributeDicePool(score: number): AttributeDicePool {
+  const s = Number.isFinite(score) ? Math.max(0, Math.trunc(score)) : 0;
+  if (s === 0) return { score: 0, dice: [20], disadvantage: true };
+  if (s <= 10) return { score: s, dice: [...OPEN_LEGEND_ACTION_DICE[s]], disadvantage: false };
+  // >10: extend the 2d10-bonus pool with one further d10 per point over 10.
+  const extra = Array.from({ length: s - 10 }, () => 10);
+  return { score: s, dice: [20, 10, 10, ...extra], disadvantage: false };
+}
+
+/** Read Open Legend's Agility score (governs initiative) from a canonical or raw attribute map. */
+function openLegendAgility(abilities: Record<string, unknown> | null | undefined): number {
+  if (!abilities) return 0;
+  const raw = abilities.AGILITY ?? abilities.agility ?? abilities.AGI ?? abilities.agi;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
+}
+
+export const OpenLegendAdapter: RuleSystemAdapter = {
+  id: OPEN_LEGEND_ADAPTER_ID,
+  label: 'Open Legend',
+  // Open Legend attributes are used directly (no floor((score-10)/2) offset) — an attribute
+  // both indexes the dice table and, where a flat value is wanted, IS that value.
+  abilityModifier(score: number): number {
+    return Number.isFinite(score) ? Math.trunc(score) : 0;
+  },
+  // The d20 that anchors every Open Legend action pool. Turn order rolled through the generic
+  // roller is d20 + Agility — the full exploding pool is available via attributeDicePool for
+  // action resolution, but initiative only needs an Agility-monotonic ordering.
+  initiativeDie: 20,
+  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+    return openLegendAgility(abilities);
+  },
+  conditions: OPEN_LEGEND_BANES_BOONS,
+  mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
+    const attributes = (d.attributes ?? d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
+    const defenses = (d.defenses ?? d.defense) as Record<string, unknown> | undefined;
+    // Open Legend's Guard defence is the closest analogue to 5e Armor Class (the number an
+    // attack must beat); fall back to an explicit armorClass if the source carried one.
+    const guard = defenses && typeof defenses === 'object' ? defenses.guard ?? defenses.Guard : undefined;
+    return {
+      size: d.size,
+      creatureType: d.descriptor ?? d.type ?? d.creatureType,
+      // Open Legend rates threat by level, not CR — expose it through the same channel.
+      challengeRating: d.level ?? d.challengeRating ?? d.cr,
+      armorClass: guard ?? d.armorClass ?? d.armor_class,
+      hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
+      speed: d.speed,
+      abilityScores: attributes && typeof attributes === 'object' ? attributes : undefined,
+      specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.actions,
+      actions: d.actions,
+    };
+  },
+  monsterHitPoints(d: Record<string, unknown>): number | null {
+    const hp = d.hp ?? d.hitPoints ?? d.hit_points;
+    return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
+  },
+  attributeDicePool(score: number): AttributeDicePool {
+    return openLegendAttributeDicePool(score);
+  },
+};
+
+/** One die's exploding roll: the sequence of faces rolled (each explosion appended) and their sum. */
+export interface ExplodingDieRoll {
+  sides: number;
+  faces: number[];
+  total: number;
+}
+
+/** The full result of rolling an Open Legend attribute dice pool. */
+export interface ActionDiceRoll {
+  score: number;
+  pool: number[];
+  /** Per-die exploding sequences of the kept roll. */
+  dice: ExplodingDieRoll[];
+  /** Present only for a disadvantage (score-0) pool: the discarded higher-total roll's dice. */
+  discarded?: ExplodingDieRoll[];
+  disadvantage: boolean;
+  total: number;
+}
+
+/**
+ * Roll one die that explodes on its maximum face. `roll(sides)` MUST return an integer in
+ * [1, sides]; injecting it keeps this pure and unit-testable. A guard caps the explosion
+ * chain so a roller stuck returning the max face can't loop forever.
+ */
+export function rollExplodingDie(sides: number, roll: (sides: number) => number, maxExplosions = 100): ExplodingDieRoll {
+  const faces: number[] = [];
+  let total = 0;
+  let n = 0;
+  do {
+    const face = roll(sides);
+    faces.push(face);
+    total += face;
+    n += 1;
+    if (face !== sides) break;
+  } while (n < maxExplosions);
+  return { sides, faces, total };
+}
+
+/**
+ * Roll an Open Legend action for an attribute `score` using injected `roll(sides)` → [1,sides].
+ * Every die in the pool explodes on its max face; a score-0 pool is rolled twice and the LOWER
+ * total kept (disadvantage). Pure given `roll` — the server's dice module passes a crypto-backed
+ * roller, tests pass a deterministic one.
+ */
+export function rollActionDice(score: number, roll: (sides: number) => number): ActionDiceRoll {
+  const pool = openLegendAttributeDicePool(score);
+  const rollPool = (): ExplodingDieRoll[] => pool.dice.map((sides) => rollExplodingDie(sides, roll));
+  const sum = (ds: ExplodingDieRoll[]): number => ds.reduce((acc, d) => acc + d.total, 0);
+
+  if (pool.disadvantage) {
+    const a = rollPool();
+    const b = rollPool();
+    const aTotal = sum(a);
+    const bTotal = sum(b);
+    const [kept, discarded] = aTotal <= bTotal ? [a, b] : [b, a];
+    return { score: pool.score, pool: pool.dice, dice: kept, discarded, disadvantage: true, total: sum(kept) };
+  }
+
+  const dice = rollPool();
+  return { score: pool.score, pool: pool.dice, dice, disadvantage: false, total: sum(dice) };
+}
 
 // ---------- Pathfinder 2e adapter (issue #295) ----------
 // PF2e is the flagship non-5e rule system and the pattern the other Tier-1 systems
@@ -1398,6 +1621,11 @@ export * from './osr-adapter';
  */
 const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [DND5E_ADAPTER_ID]: Dnd5eAdapter,
+  // Open Legend (issue #299): registered under BOTH its family id and the pack slug a
+  // campaign's `ruleSystem` actually holds (there is no 5e-style fallback for a non-default
+  // system — an installed Open Legend campaign stores the pack slug, which must resolve here).
+  [OPEN_LEGEND_ADAPTER_ID]: OpenLegendAdapter,
+  [OPEN_LEGEND_PACK_SLUG]: OpenLegendAdapter,
   [PF2E_ADAPTER_ID]: Pf2eAdapter,
   // Pack slug the PF2e importer installs under — campaigns store the slug in `ruleSystem`.
   [PF2E_PACK_SLUG]: Pf2eAdapter,
