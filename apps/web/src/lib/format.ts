@@ -25,8 +25,26 @@ export function activeLocale(): string | undefined {
   }
 }
 
+/** Matches a bare calendar date with no time/zone component, e.g. `2026-07-21`. */
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * Coerce a value to a `Date` for formatting.
+ *
+ * Date-only strings (`YYYY-MM-DD`, e.g. a session's `playedAt`) carry no time or
+ * timezone, so `new Date('2026-07-21')` would parse them as UTC midnight — which,
+ * rendered in a negative-offset local zone, slips back to the previous calendar day
+ * (issue #267). We instead build a *local* midnight from the Y/M/D parts so the date
+ * shown always matches the date stored, regardless of the viewer's timezone. Values
+ * that carry a time component (ISO timestamps, epoch millis, `Date`) are untouched.
+ */
 function toDate(value: Date | string | number): Date {
-  return value instanceof Date ? value : new Date(value);
+  if (value instanceof Date) return value;
+  if (typeof value === 'string') {
+    const m = DATE_ONLY_RE.exec(value);
+    if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  }
+  return new Date(value);
 }
 
 /** Format a date (day granularity). Options default to the browser's locale-native short date. */
