@@ -39,6 +39,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
+import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
@@ -552,6 +553,9 @@ export default function RunSessionPage() {
       ),
     [characters, myUserId],
   );
+  // Precomputed id→character map so the combatant list's per-row card lookup is O(1)
+  // rather than a `.find` over all characters on every render (issue: large encounters).
+  const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
   function canEditCombatant(c: Combatant): boolean {
     if (isDm) return true;
@@ -905,6 +909,8 @@ export default function RunSessionPage() {
               canViewStatblock={isDm}
               canRemove={isDm}
               canSetInitiative={isDm && encounter.status !== 'ended'}
+              character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
+              openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
               ruleSystem={ruleSystem}
@@ -1962,6 +1968,8 @@ function CombatantRow({
   canViewStatblock,
   canRemove,
   canSetInitiative,
+  character,
+  openCardByDefault,
   busy,
   conditionSuggestions,
   ruleSystem,
@@ -1983,6 +1991,10 @@ function CombatantRow({
   canViewStatblock: boolean;
   canRemove: boolean;
   canSetInitiative: boolean;
+  /** The linked player character (kind === 'character'), for the in-encounter stat card; null otherwise. */
+  character: Character | null;
+  /** Start the character card expanded — used for the viewer's own character. */
+  openCardByDefault: boolean;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
@@ -2280,6 +2292,13 @@ function CombatantRow({
             stays scannable; lazily fetched on first expand. */}
         {canViewStatblock && combatant.ruleEntryId != null && (
           <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} />
+        )}
+        {/* Character card (in-encounter sheet): a player sees their own combat stats —
+            abilities, saves, skills, actions, spell slots — without leaving the tracker,
+            and the DM sees the whole party's. Character data is party-visible (dmSecret is
+            stripped server-side and never shown here), so it renders for every viewer. */}
+        {combatant.kind === 'character' && character && (
+          <CharacterStatCard character={character} ruleSystem={ruleSystem} defaultOpen={openCardByDefault} />
         )}
       </div>
       <div style={{ minWidth: 130, flex: 'none' }}>
