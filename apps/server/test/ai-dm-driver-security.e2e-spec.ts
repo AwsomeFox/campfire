@@ -243,7 +243,12 @@ describe('ai-dm driver — #375 pause/takeover levers are properly authorized (e
     const campaignId = await h.createCampaign('Sec Takeover Revoke');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
-    // The DM grants the acting-DM seat to one specific human.
+    // The intended holder first offers to take over (so their id is a known, pending requester —
+    // grantTakeover now validates an explicit memberId against the table, #337).
+    const holder = { 'x-dev-role': 'player', 'x-dev-user': 'the-holder' };
+    await h.lever(campaignId, 'request-takeover', {}, holder);
+
+    // The DM grants the acting-DM seat to that one specific human.
     const grant = await h.lever(campaignId, 'grant-takeover', { memberId: 'dev:the-holder', note: 'you run it' }, dm);
     expect(grant.body.state).toBe('human_control');
 
@@ -261,6 +266,48 @@ describe('ai-dm driver — #375 pause/takeover levers are properly authorized (e
     const dmHandback = await h.lever(campaignId, 'handback', {}, dm);
     expect(dmHandback.status).toBe(201);
     expect(dmHandback.body.state).toBe('running');
+  });
+
+  // ── #337 (takeover polish) ────────────────────────────────────────────────────
+  it('#337 grant-takeover rejects an explicit memberId that belongs to nobody at the table (400)', async () => {
+    const campaignId = await h.createCampaign('Sec Takeover Stranger');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    // A stranger who never requested the seat and is no member of the campaign cannot be named.
+    const bad = await h.lever(campaignId, 'grant-takeover', { memberId: 'dev:stranger', note: 'run it' }, dm);
+    expect(bad.status).toBe(400);
+
+    // The AI seat was NOT frozen by the rejected grant.
+    const session = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/session`).set(dm);
+    expect(session.body.state).not.toBe('human_control');
+    expect(session.body.actingDm).toBeFalsy();
+
+    // The DM may still grant it to THEMSELVES (self-takeover) without naming an outsider.
+    const ok = await h.lever(campaignId, 'grant-takeover', { note: 'I will run it' }, dm);
+    expect(ok.status).toBe(201);
+    expect(ok.body.state).toBe('human_control');
+  });
+
+  it('#337 a pause vote passing during human_control does NOT clobber the takeover', async () => {
+    const campaignId = await h.createCampaign('Sec Vote Vs Takeover');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    // A human takes the seat (defaults the holder to the granting DM) → state human_control.
+    const grant = await h.lever(campaignId, 'grant-takeover', {}, dm);
+    expect(grant.body.state).toBe('human_control');
+
+    // A table pause vote is opened and passes while the human holds the seat.
+    const open = await h.lever(campaignId, 'vote', { action: 'open', kind: 'pause' }, player);
+    expect(open.status).toBe(201);
+    const cast = await h.lever(campaignId, 'vote', { action: 'cast', choice: true }, player);
+    expect(cast.status).toBe(201);
+    expect(cast.body.vote.outcome).toBe('passed');
+
+    // The passed pause must not strand the acting-DM grant by flipping state away from human_control.
+    expect(cast.body.state).toBe('human_control');
+    const session = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/session`).set(dm);
+    expect(session.body.state).toBe('human_control');
+    expect(session.body.actingDm).toBeTruthy();
   });
 });
 

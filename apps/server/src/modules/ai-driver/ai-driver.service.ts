@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
@@ -214,29 +214,20 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
 const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
 
 /**
- * Explicit deny — administrative/destructive writes that are (currently) registered via
- * `McpToolsService.tool()` rather than `writeTool()`, so they carry `mutating:false` and would
- * otherwise be MISTAKEN FOR READS by the default-deny allow-list below. `update_campaign`
- * (archives the campaign / rewrites its rule system + settings), `uninstall_rule_pack` (server-
- * admin compendium power), and `withdraw_proposal` (the DM's review-queue control) must never be
- * driveable regardless of that registration quirk. Enumerated explicitly so a mis-registered write
- * can't leak through as a read — belt to the allow-list's braces.
- */
-const DRIVER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
-  'update_campaign',
-  'uninstall_rule_pack',
-  'withdraw_proposal',
-]);
-
-/**
  * Whether the driver seat is permitted to call `tool` (server-side tool-scoping, #317/#378).
  * Default-deny for writes: reads pass; canon writes (proposal-capable) pass and are forced onto the
- * proposal path; every other direct write must be on the live-play allow-list. Deletes and the
- * explicit admin denylist are never allowed, not even as a proposal.
+ * proposal path; every other direct write must be on the live-play allow-list. Deletes are never
+ * allowed, not even as a proposal.
+ *
+ * There is no separate admin denylist any more (#393): the administrative/destructive writes that
+ * used to need one — `update_campaign`, `uninstall_rule_pack`, `withdraw_proposal` — were only
+ * mis-registered via `McpToolsService.tool()` (so they read as `mutating:false` and looked like
+ * reads). Now that every mutating tool is registered via `writeTool()` they carry `mutating:true`,
+ * are not proposal-capable, and are absent from the live-play list, so the default-deny below
+ * refuses them with no hand-maintained enumeration to drift out of sync.
  */
 export function isDriverToolAllowed(tool: Pick<DriverTool, 'name' | 'mutating' | 'proposalCapable'>): boolean {
   if (DRIVER_FORBIDDEN_PREFIXES.some((p) => tool.name.startsWith(p))) return false;
-  if (DRIVER_FORBIDDEN_TOOLS.has(tool.name)) return false; // mis-registered admin writes (see above)
   if (!tool.mutating) return true; // reads are always allowed (permission-checked in the tool)
   if (tool.proposalCapable) return true; // canon writes → the runtime forces propose:true below
   return DRIVER_LIVE_PLAY_TOOLS.has(tool.name); // direct writes: explicit live-play allow-list only
@@ -918,7 +909,12 @@ export class AiDriverService {
     vote.resolved = true;
     vote.outcome = outcome;
     if (outcome === 'passed') {
-      if (vote.kind === 'pause') {
+      if (session.state === 'human_control') {
+        // A human holds the seat (#337): the AI is already frozen, so a passed table vote — pause
+        // OR override — has nothing to act on and must NOT clobber human_control (which would strand
+        // the acting-DM grant and silently un-freeze the seat on the next state read). The outcome is
+        // still recorded + audited below; releasing the seat is handback's job, not a vote's.
+      } else if (vote.kind === 'pause') {
         session.status = 'paused';
         session.state = 'paused';
       } else {
@@ -981,12 +977,37 @@ export class AiDriverService {
   }
 
   /**
-   * Grant the DM seat to a human (#314): a revocable, audited 'acting DM' grant. The AI seat is
+   * Grant the DM seat to a human (#314/#337): a revocable, audited 'acting DM' grant. The AI seat is
    * frozen (status paused, state human_control) so no AI turn can run until handback. `memberId`
    * defaults to whoever last requested the takeover (or the granter).
+   *
+   * ADVISORY GRANT (#337): this grant does NOT elevate the holder's own permissions. It freezes the
+   * AI seat and records WHO is running the table so the UI and audit log can attribute the handoff;
+   * the holder still acts through their own campaign role/credentials (a player-role holder therefore
+   * still can't perform DM-only actions). Real seat authority stays with the campaign's actual DM(s).
+   *
+   * MEMBER VALIDATION (#337): an explicitly-named `memberId` must identify a real member of this
+   * campaign (or the granter themselves, or whoever currently has a pending takeover request), so a
+   * DM can't hand the advisory seat to an id that belongs to nobody at the table. (Header dev-auth
+   * campaigns have no persisted membership rows, so validation there falls back to the granter /
+   * pending-requester identity — dev auth trusts the header by design.)
    */
   async grantTakeover(campaignId: number, granter: RequestUser, memberId?: string, note?: string, role: Role = 'dm'): Promise<AiDmSessionState> {
     const session = this.ensureSession(campaignId);
+    if (
+      memberId !== undefined &&
+      memberId !== granter.id &&
+      memberId !== auditActor(granter) &&
+      memberId !== session.takeoverRequestedBy
+    ) {
+      const roles = await this.notifications.memberRoles(campaignId);
+      const isMember = [...roles.keys()].some((uid) => String(uid) === memberId);
+      if (!isMember) {
+        throw new BadRequestException(
+          `${memberId} is not a member of this campaign and cannot be granted the acting-DM seat`,
+        );
+      }
+    }
     const holder = memberId ?? session.takeoverRequestedBy ?? granter.id;
     session.actingDm = { memberId: holder, grantedBy: granter.id, grantedAt: nowIso(), note: note ?? null };
     session.status = 'paused'; // freeze the AI seat while a human holds it
