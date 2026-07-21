@@ -1921,15 +1921,16 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_session',
       'Delete a session recap (DM). The campaign\'s denormalized sessionCount is recomputed. With propose:true any ' +
         'member may submit the deletion as a pending proposal for a dm to approve instead.',
       { sessionId: Id.describe('Session id — from get_session_recaps'), propose: ProposeArg },
       async ({ sessionId, propose }) => {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'session', sessionId as number, 'delete', {}, user, role);
           return { proposal };
@@ -1953,8 +1954,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'set_session_attendance',
       'DM only: record who played a session (issue #121). Replaces the session\'s attendance with exactly ' +
         '`characterIds` — pass the full set each time (an empty array clears it). Every id must be a character in the ' +
@@ -2012,15 +2014,16 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_character',
       'Delete a character (DM). With propose:true any member may submit the deletion as a pending proposal for a dm ' +
         'to approve instead.',
       { characterId: Id.describe('Character id'), propose: ProposeArg },
       async ({ characterId, propose }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
-        if (propose) {
+        if (requireWriteMode(user, propose)) {
           const role = await this.access.requireMember(user, row.campaignId, { write: true });
           const proposal = await this.proposalRecords.create(row.campaignId, 'character', characterId as number, 'delete', {}, user, role);
           return { proposal };
@@ -2153,8 +2156,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'whisper_to_player',
       'Share a note with ONE specific player — a per-player secret ("whisper"). Visible only to that member, the ' +
         'author, and any DM; every other member (incl. over MCP) can never see it. Use for asymmetric knowledge the ' +
@@ -2306,8 +2310,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'update_campaign',
       'DM only: general campaign update — name, description, ruleSystem (the installed rule-pack slug this campaign ' +
         'uses, or "" for none/homebrew), mapAttachmentId (a map attachment id, or null to clear), and/or the same ' +
@@ -2353,8 +2358,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'withdraw_proposal',
       'Withdraw YOUR OWN still-pending proposal before a DM reviews it (issue #124). Only the original proposer may ' +
         'withdraw; 403 otherwise, 409 if the DM already resolved it. No entity write is applied.',
@@ -2433,8 +2439,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'uninstall_rule_pack',
       'Server admin only: uninstall a rule pack by id — removes the pack and ALL of its entries, nulls any ' +
         'combatant references to those entries, and resets campaigns that had selected it back to no rule system. ' +
@@ -2698,8 +2705,9 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    this.writeTool(
       server,
+      user,
       'delete_encounter',
       'DM only: permanently delete an encounter (combat tracker) and all of its combatants. Irreversible. Does NOT ' +
         'write combatant hp back to characters — use end_encounter first if you want the fight\'s damage to persist.',
