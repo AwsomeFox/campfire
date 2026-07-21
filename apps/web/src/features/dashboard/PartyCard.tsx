@@ -20,7 +20,7 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
         </Link>
       </div>
       {characters.length === 0 ? (
-        <EmptyState icon="🛡" title="No characters yet" />
+        <EmptyState icon="shield" title="No characters yet" />
       ) : (
         characters.map((c) => {
           const pct = c.hpMax > 0 ? Math.max(0, Math.min(100, (c.hpCurrent / c.hpMax) * 100)) : 0;

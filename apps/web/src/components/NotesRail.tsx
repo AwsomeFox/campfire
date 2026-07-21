@@ -10,13 +10,25 @@ import type { CampaignMember, Note } from '@campfire/schema';
 import { api, API } from '../lib/api';
 import { Card, Chip, Btn, TextArea, ErrorNote, type ChipVariant } from './ui';
 import { Markdown } from './Markdown';
+import { GameIcon } from './GameIcon';
+import { NOTE_VISIBILITY_ICON } from '../lib/uiIcons';
 
-const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string }> = {
-  private: { chip: 'private', label: '🔒 Private' },
-  dm_shared: { chip: 'dm', label: '🎩 DM' },
-  party_shared: { chip: 'party', label: '👥 Party' },
-  whisper: { chip: 'whisper', label: '🤫 Whisper' },
+const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; label: string }> = {
+  private: { chip: 'private', slug: NOTE_VISIBILITY_ICON.private, label: 'Private' },
+  dm_shared: { chip: 'dm', slug: NOTE_VISIBILITY_ICON.dm_shared, label: 'DM' },
+  party_shared: { chip: 'party', slug: NOTE_VISIBILITY_ICON.party_shared, label: 'Party' },
+  whisper: { chip: 'whisper', slug: NOTE_VISIBILITY_ICON.whisper, label: 'Whisper' },
 };
+
+/** Inline visibility label with its icon, for chips and the compose toggle. */
+function VisLabel({ visibility }: { visibility: Note['visibility'] }) {
+  const m = visMeta[visibility];
+  return (
+    <span className="inline-flex items-center gap-1">
+      <GameIcon slug={m.slug} size={12} /> {m.label}
+    </span>
+  );
+}
 
 const VIS_ORDER: Note['visibility'][] = ['private', 'dm_shared', 'party_shared', 'whisper'];
 
@@ -82,15 +94,19 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
 
   return (
     <Card className="space-y-3">
-      <h2 className="font-bold text-white text-sm">📝 Notes</h2>
+      <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="quill-ink" size={16} /> Notes</h2>
       {error && <ErrorNote message={error} onRetry={load} />}
       {notes.map((n) => (
         <div key={n.id} className="cf-inset p-3 space-y-1">
           <div className="flex items-center justify-between">
             <Chip variant={visMeta[n.visibility].chip}>
-              {n.visibility === 'whisper'
-                ? `🤫 Whisper${n.recipientName ? ` → ${n.recipientName}` : ''}`
-                : visMeta[n.visibility].label}
+              {n.visibility === 'whisper' ? (
+                <span className="inline-flex items-center gap-1">
+                  <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper{n.recipientName ? ` → ${n.recipientName}` : ''}
+                </span>
+              ) : (
+                <VisLabel visibility={n.visibility} />
+              )}
             </Chip>
             <span className="text-[10px]" style={{ color: 'var(--color-neutral-600)' }}>
               {n.authorName || n.authorUserId}
@@ -115,7 +131,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
                     : undefined
                 }
               >
-                {visMeta[v].label}
+                <VisLabel visibility={v} />
               </button>
             ))}
           </div>
@@ -125,7 +141,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
         </div>
         {visibility === 'whisper' && (
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[11px] text-slate-500">🤫 To:</span>
+            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> To:</span>
             <select
               value={whisperTo}
               onChange={(e) => setWhisperTo(e.target.value)}

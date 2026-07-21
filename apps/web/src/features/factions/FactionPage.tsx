@@ -15,6 +15,7 @@ import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { standingVariant } from './FactionListPage';
+import { GameIcon } from '../../components/GameIcon';
 
 const STANDINGS: FactionStanding[] = ['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'];
 
@@ -208,7 +209,7 @@ export default function FactionPage() {
             <Chip variant={standingVariant(faction.standing)}>
               {faction.standing} · {faction.reputation > 0 ? `+${faction.reputation}` : faction.reputation}
             </Chip>
-            {isDm && faction.hidden && <Chip variant="failed">🙈 Hidden from players</Chip>}
+            {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {isDm && (
               <div className="flex gap-2 ml-auto">
                 <Btn
@@ -218,7 +219,7 @@ export default function FactionPage() {
                   onClick={toggleHidden}
                   title={faction.hidden ? 'Make this faction visible to players' : 'Hide this faction from players'}
                 >
-                  {togglingHidden ? '…' : faction.hidden ? '👁 Reveal' : '🙈 Hide'}
+                  {togglingHidden ? '…' : faction.hidden ? <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Reveal</> : <><GameIcon slug="sight-disabled" size={12} className="inline align-text-bottom" /> Hide</>}
                 </Btn>
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
@@ -235,7 +236,7 @@ export default function FactionPage() {
 
               {faction.goals && (
                 <Card className="space-y-2">
-                  <h2 className="font-bold text-white text-sm">🎯 Goals</h2>
+                  <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="target-arrows" size={16} /> Goals</h2>
                   <Markdown>{faction.goals}</Markdown>
                 </Card>
               )}
@@ -245,7 +246,7 @@ export default function FactionPage() {
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Members</h2>
                 {faction.members.length === 0 ? (
-                  <EmptyState icon="🤝" title="No members" hint={isDm ? 'Set an NPC\'s faction on its page.' : undefined} />
+                  <EmptyState icon="shaking-hands" title="No members" hint={isDm ? 'Set an NPC\'s faction on its page.' : undefined} />
                 ) : (
                   <div className="grid sm:grid-cols-2 gap-3">
                     {faction.members.map((npc: Npc) => (
@@ -258,7 +259,7 @@ export default function FactionPage() {
                         }}
                         className="cf-inset p-3 hover:border-amber-500/50"
                       >
-                        <p className="text-sm font-bold text-amber-400">🤝 {npc.name}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="hooded-figure" size={13} /> {npc.name}</p>
                         {npc.role && <p className="text-[11.5px] text-slate-500 truncate">{npc.role}</p>}
                       </a>
                     ))}
@@ -346,16 +347,16 @@ export default function FactionPage() {
             <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
           </div>
           <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">🎯 Goals (markdown)</label>
+            <label className="flex items-center gap-1 text-[10px] text-slate-500 font-bold uppercase"><GameIcon slug="target-arrows" size={11} /> Goals (markdown)</label>
             <TextArea style={{ minHeight: 90 }} value={form.goals} onChange={(e) => setForm({ ...form, goals: e.target.value })} />
           </div>
           <div className="space-y-1">
-            <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
+            <label className="flex items-center gap-1 text-[10px] text-amber-500 font-bold uppercase"><GameIcon slug="padlock" size={11} /> DM secret</label>
             <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
           </div>
           <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
             <input type="checkbox" checked={form.hidden} onChange={(e) => setForm({ ...form, hidden: e.target.checked })} />
-            <span>🙈 Hidden from players (whole faction, not just the secret)</span>
+            <span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players (whole faction, not just the secret)</span>
           </label>
           <div className="flex items-center justify-between gap-2">
             <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>

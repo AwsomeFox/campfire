@@ -22,6 +22,7 @@ import type {
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
 import { Markdown } from '../../components/Markdown';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
@@ -143,7 +144,7 @@ export default function StorylinesPage() {
   if (forbidden) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <EmptyState icon="🔒" title="Storylines are DM-only" hint="Only the DM can plan story arcs." />
+        <EmptyState icon="padlock" title="Storylines are DM-only" hint="Only the DM can plan story arcs." />
       </div>
     );
   }
@@ -189,7 +190,7 @@ export default function StorylinesPage() {
           <Skeleton lines={5} />
         </div>
       ) : arcs.length === 0 ? (
-        <EmptyState icon="🌿" title="No storylines yet" hint={isDm ? 'Create an arc to start planning.' : undefined} />
+        <EmptyState icon="oak-leaf" title="No storylines yet" hint={isDm ? 'Create an arc to start planning.' : undefined} />
       ) : (
         arcs.map((arc) => (
           <ArcCard key={arc.id} arc={arc} cid={cid} isDm={isDm} allBeats={allBeats} linkOptions={linkOptions} onChange={load} />
@@ -456,17 +457,17 @@ function BeatRow({
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 22, flexWrap: 'wrap', fontSize: 12 }}>
           {beat.sessionId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/sessions?session=${beat.sessionId}`}>
-              📓 {linkedSession ? sessionLabel(linkedSession) : `Session #${beat.sessionId}`}
+              <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />{linkedSession ? sessionLabel(linkedSession) : `Session #${beat.sessionId}`}
             </Link>
           )}
           {beat.questId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/quests/${beat.questId}`}>
-              📜 {linkedQuest?.title ?? `Quest #${beat.questId}`}
+              <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />{linkedQuest?.title ?? `Quest #${beat.questId}`}
             </Link>
           )}
           {beat.encounterId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/encounters/${beat.encounterId}`}>
-              ⚔ {linkedEncounter?.name ?? `Encounter #${beat.encounterId}`}
+              <GameIcon slug="crossed-swords" size={11} className="inline align-text-bottom mr-1" />{linkedEncounter?.name ?? `Encounter #${beat.encounterId}`}
             </Link>
           )}
         </div>
@@ -483,7 +484,7 @@ function BeatRow({
               style={{ fontSize: 12, width: 'auto' }}
               aria-label="Linked session"
             >
-              <option value="">📓 — no session —</option>
+              <option value="">— no session —</option>
               {linkOptions.sessions.map((s) => (
                 <option key={s.id} value={s.id}>
                   {sessionLabel(s)}
@@ -498,7 +499,7 @@ function BeatRow({
               style={{ fontSize: 12, width: 'auto' }}
               aria-label="Linked quest"
             >
-              <option value="">📜 — no quest —</option>
+              <option value="">— no quest —</option>
               {linkOptions.quests.map((q) => (
                 <option key={q.id} value={q.id}>
                   {q.title ?? `#${q.id}`}
@@ -513,7 +514,7 @@ function BeatRow({
               style={{ fontSize: 12, width: 'auto' }}
               aria-label="Linked encounter"
             >
-              <option value="">⚔ — no encounter —</option>
+              <option value="">— no encounter —</option>
               {linkOptions.encounters.map((en) => (
                 <option key={en.id} value={en.id}>
                   {en.name ?? `#${en.id}`}
@@ -531,7 +532,7 @@ function BeatRow({
             disabled={busy}
             onClick={() => setEditingLinks(true)}
           >
-            🔗 {hasLinks ? 'Edit links' : 'Link to play'}
+            <GameIcon slug="linked-rings" size={11} className="inline align-text-bottom mr-1" />{hasLinks ? 'Edit links' : 'Link to play'}
           </button>
         ))}
 

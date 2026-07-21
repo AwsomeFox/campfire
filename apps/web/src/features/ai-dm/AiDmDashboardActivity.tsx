@@ -13,6 +13,7 @@ import { Link } from 'react-router-dom';
 import { useAiDmLiveActivity } from './useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from './AiDmActivityChip';
 import { resolveToolActivity } from './toolActivity';
+import { GameIcon } from '../../components/GameIcon';
 
 export function AiDmDashboardActivity({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
   const liveActivity = useAiDmLiveActivity();
@@ -49,7 +50,7 @@ export function AiDmDashboardActivity({ campaignId, isDm }: { campaignId: number
             background: 'color-mix(in srgb, var(--color-accent) 10%, transparent)',
           }}
         >
-          <span className="flex-1 min-w-0">📝 The AI drafted something for review.</span>
+          <span className="flex-1 min-w-0"><GameIcon slug="quill-ink" size={12} className="inline align-text-bottom mr-1" />The AI drafted something for review.</span>
           <Link to={`/c/${campaignId}/proposals`} className="btn btn-primary" style={{ fontSize: 11.5, minHeight: 26 }}>
             Review
           </Link>

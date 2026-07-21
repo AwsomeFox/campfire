@@ -21,6 +21,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { MetricsCard } from './MetricsCard';
 import { RequireServerAdmin } from './RequireServerAdmin';
+import { GameIcon } from '../../components/GameIcon';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -35,12 +36,12 @@ function formatBytes(bytes: number): string {
 }
 
 const QUICK_LINKS: Array<{ to: string; icon: string; label: string; hint: string }> = [
-  { to: '/admin/users', icon: '👤', label: 'Users', hint: 'Accounts, password resets, sign-in settings' },
-  { to: '/admin/rules', icon: '📚', label: 'Rule packs', hint: 'Install and manage rule packs' },
-  { to: '/admin/ai', icon: '🤖', label: 'AI console', hint: 'AI provider configuration & usage' },
-  { to: '/admin/auth', icon: '🔐', label: 'Auth', hint: 'OIDC/SSO & API tokens' },
-  { to: '/admin/storage', icon: '💾', label: 'Storage', hint: 'Quotas, cleanup & backup export' },
-  { to: '/admin/audit', icon: '📜', label: 'Audit log', hint: 'Full server-wide admin history' },
+  { to: '/admin/users', icon: 'person', label: 'Users', hint: 'Accounts, password resets, sign-in settings' },
+  { to: '/admin/rules', icon: 'spell-book', label: 'Rule packs', hint: 'Install and manage rule packs' },
+  { to: '/admin/ai', icon: 'robot-golem', label: 'AI console', hint: 'AI provider configuration & usage' },
+  { to: '/admin/auth', icon: 'padlock', label: 'Auth', hint: 'OIDC/SSO & API tokens' },
+  { to: '/admin/storage', icon: 'database', label: 'Storage', hint: 'Quotas, cleanup & backup export' },
+  { to: '/admin/audit', icon: 'scroll-unfurled', label: 'Audit log', hint: 'Full server-wide admin history' },
 ];
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -152,7 +153,7 @@ function QuickLinksCard() {
             to={l.to}
             className="cf-inset p-3 flex items-start gap-2.5 hover:border-amber-500/40"
           >
-            <span className="text-lg leading-none">{l.icon}</span>
+            <span className="leading-none text-[var(--color-accent)]"><GameIcon slug={l.icon} size={20} /></span>
             <span>
               <span className="block text-sm font-semibold text-white">{l.label}</span>
               <span className="block text-[11px] text-slate-500">{l.hint}</span>
@@ -167,7 +168,7 @@ function QuickLinksCard() {
 function AdminOverview() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <h1 className="text-xl font-extrabold text-white">⚙️ Server admin</h1>
+      <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="cog" size={20} /> Server admin</h1>
       <MetricsCard />
       <div className="grid md:grid-cols-2 gap-5">
         <StorageSummaryCard />

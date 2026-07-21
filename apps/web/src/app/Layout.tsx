@@ -16,6 +16,7 @@ import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
 import { NotificationsBell } from '../features/notifications/NotificationsBell';
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
+import { GameIcon } from '../components/GameIcon';
 
 function initials(name: string): string {
   const trimmed = name.trim();
@@ -449,7 +450,7 @@ export function Layout() {
       <div className="min-h-screen flex items-center justify-center px-4" style={{ background: 'var(--color-bg)' }}>
         <div style={{ maxWidth: 380, width: '100%' }}>
           <Card className="text-center space-y-2">
-            <p className="text-2xl">🔒</p>
+            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
             <p className="font-bold text-white">{t('nav.lostAccessTitle')}</p>
             <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
               {t('nav.backToCampaigns')}
@@ -681,16 +682,16 @@ export function Layout() {
       {campaignId !== undefined && (
         <nav className="cf-tabbar">
           <NavLink to={`/c/${campaignId}`} end className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico">🏠</span>Home
+            <span className="ico"><GameIcon slug="campfire" size={20} /></span>Home
           </NavLink>
           <NavLink to={`/c/${campaignId}/quests`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico">📜</span>Quests
+            <span className="ico"><GameIcon slug="scroll-unfurled" size={20} /></span>Quests
           </NavLink>
           <NavLink to={`/c/${campaignId}/party`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico">🛡</span>Party
+            <span className="ico"><GameIcon slug="shield" size={20} /></span>Party
           </NavLink>
           <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico">📝</span>Notes
+            <span className="ico"><GameIcon slug="quill-ink" size={20} /></span>Notes
           </NavLink>
           <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
             <span className="ico">⋯</span>More

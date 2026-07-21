@@ -100,7 +100,7 @@ export default function PartyPage() {
           <Skeleton lines={4} />
         </Card>
       ) : characters.length === 0 && !canCreate ? (
-        <EmptyState icon="🛡️" title="No characters yet" hint="Ask the DM to add the party." />
+        <EmptyState icon="shield" title="No characters yet" hint="Ask the DM to add the party." />
       ) : (
         <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
           {characters.map((c, i) => (

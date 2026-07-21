@@ -12,6 +12,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import type { Notification } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { Btn, EmptyState, Skeleton } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
 
 const POLL_MS = 60_000;
 
@@ -52,29 +53,29 @@ function targetPath(n: Notification): string {
 function typeIcon(type: Notification['type']): string {
   switch (type) {
     case 'recap_posted':
-      return '📖';
+      return 'open-book';
     case 'note_reply':
-      return '💬';
+      return 'chat-bubble';
     case 'comment_reply':
-      return '🗨️';
+      return 'conversation';
     case 'note_shared':
-      return '🎩';
+      return 'top-hat';
     case 'added_to_campaign':
-      return '🏕️';
+      return 'campfire';
     case 'session_scheduled':
-      return '🗓️';
+      return 'calendar';
     case 'session_rsvp':
-      return '✋';
+      return 'hand';
     case 'quest_updated':
-      return '📜';
+      return 'scroll-unfurled';
     case 'proposal_submitted':
-      return '📝';
+      return 'quill-ink';
     case 'proposal_resolved':
-      return '⚖️';
+      return 'scales';
     case 'ai_dm_alert':
-      return '🤖';
+      return 'robot-golem';
     default:
-      return '🔔';
+      return 'ringing-bell';
   }
 }
 
@@ -236,7 +237,7 @@ export function NotificationsBell() {
                 </p>
               )}
               {items !== null && items.length === 0 && (
-                <EmptyState icon="🔔" title="Nothing yet" hint="Recaps, replies, and session plans will land here." />
+                <EmptyState icon="ringing-bell" title="Nothing yet" hint="Recaps, replies, and session plans will land here." />
               )}
               {items?.map((n) => (
                 <button
@@ -248,7 +249,7 @@ export function NotificationsBell() {
                     background: n.readAt ? 'transparent' : 'color-mix(in srgb, var(--color-accent) 8%, transparent)',
                   }}
                 >
-                  <span className="text-base leading-none pt-0.5">{typeIcon(n.type)}</span>
+                  <span className="flex leading-none pt-0.5 text-[var(--color-neutral-300)]"><GameIcon slug={typeIcon(n.type)} size={16} /></span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5 flex-wrap">
                       {n.type === 'ai_dm_alert' && (

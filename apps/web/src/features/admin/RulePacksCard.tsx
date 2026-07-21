@@ -126,7 +126,7 @@ export function RulePacksCard() {
       {loading && !packs ? (
         <Skeleton lines={3} />
       ) : packs && packs.length === 0 ? (
-        <EmptyState icon="📚" title="No rule packs installed" hint="Install one from a source below." />
+        <EmptyState icon="spell-book" title="No rule packs installed" hint="Install one from a source below." />
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">

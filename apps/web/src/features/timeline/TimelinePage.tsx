@@ -21,6 +21,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
 import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea, DmPanel } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
 
 interface EventDraft {
   title: string;
@@ -185,7 +186,7 @@ export default function TimelinePage() {
   if (forbidden) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <EmptyState icon="🔒" title="You don't have access to this campaign" />
+        <EmptyState icon="padlock" title="You don't have access to this campaign" />
       </div>
     );
   }
@@ -292,7 +293,7 @@ export default function TimelinePage() {
         </div>
       ) : events.length === 0 ? (
         <EmptyState
-          icon="🗓️"
+          icon="calendar"
           title="No timeline events yet"
           hint={isDm ? 'Chart your world’s history with "+ New event".' : 'The DM hasn’t charted any history yet.'}
         />
@@ -319,7 +320,7 @@ export default function TimelinePage() {
                       )}
                       {e.era && <span className="tag tag-outline" style={{ fontSize: 10 }}>{e.era}</span>}
                       {isDm && e.hidden && (
-                        <span className="tag tag-outline" style={{ fontSize: 10 }} title="Hidden from players">🙈 Hidden</span>
+                        <span className="tag tag-outline" style={{ fontSize: 10 }} title="Hidden from players"><GameIcon slug="sight-disabled" size={11} className="inline align-text-bottom mr-1" />Hidden</span>
                       )}
                     </div>
                     <div
