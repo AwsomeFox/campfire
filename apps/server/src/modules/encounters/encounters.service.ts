@@ -1,8 +1,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
-import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, Role, RuleSystemAdapter } from '@campfire/schema';
+import { CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
+import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, FogRect, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -27,6 +27,17 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
 
+/**
+ * Parse the stored fog JSON back into a FogState (issue #40). Corrupt/legacy text or a
+ * shape that no longer validates degrades to null (fully visible) rather than throwing —
+ * fog is a display aid, never a reason to fail a whole encounter read.
+ */
+function parseFog(text: string | null): FogState | null {
+  if (text == null) return null;
+  const parsed = FogState.safeParse(fromJsonText<unknown>(text, null));
+  return parsed.success ? parsed.data : null;
+}
+
 function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
   return {
     id: row.id,
@@ -40,6 +51,11 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     questId: row.questId,
     sessionId: row.sessionId,
     mapAttachmentId: row.mapAttachmentId,
+    gridSize: row.gridSize,
+    gridScale: row.gridScale,
+    gridUnit: row.gridUnit,
+    gridSnap: row.gridSnap,
+    fog: parseFog(row.fog),
     endedAt: row.endedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -67,6 +83,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     sortOrder: row.sortOrder,
     tokenX: row.tokenX,
     tokenY: row.tokenY,
+    tokenSize: row.tokenSize as TokenSize,
   };
 }
 
@@ -96,6 +113,27 @@ function redactMonsterHp(c: Combatant): Combatant {
   // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
   // temp-HP buffed monster doesn't leak numbers through the redaction.
   return { ...c, hpBand: hpBandFor(c.hpCurrent, c.hpMax), hpCurrent: null, hpMax: null, hpTemp: null };
+}
+
+/** True if a combatant's token centre lies inside any revealed fog rectangle (issue #40). */
+function tokenInRevealedRegion(c: Combatant, fog: FogState): boolean {
+  if (c.tokenX == null || c.tokenY == null) return true; // unplaced — nothing on the map to hide
+  const x = c.tokenX;
+  const y = c.tokenY;
+  return fog.revealed.some((r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+}
+
+/**
+ * Issue #40 fog-of-war redaction: when fog is enabled, a non-DM viewer must not learn the
+ * position of any token sitting in an unrevealed region — a player polling the run view would
+ * otherwise read exactly where the ambush monster is waiting in the dark. We null tokenX/tokenY
+ * on those combatants server-side (the client never receives the coordinates), the same
+ * server-side-gate approach as the issue #43 monster-HP band. Tokens inside a revealed
+ * rectangle, and unplaced combatants, are returned unchanged.
+ */
+function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
+  if (tokenInRevealedRegion(c, fog)) return c;
+  return { ...c, tokenX: null, tokenY: null };
 }
 
 /** floor((score - 10) / 2), the standard 5e ability-modifier formula. */
@@ -216,6 +254,9 @@ export class EncountersService {
     let list = sortCombatants(combatantRows.map(combatantToDomain), status);
     if (viewerRole !== undefined && viewerRole !== 'dm') {
       list = list.map(redactMonsterHp);
+      // Fog of war (issue #40): withhold the position of any token in an unrevealed region.
+      const fog = parseFog(row.fog);
+      if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
     }
     return { ...encounterToDomain(row), combatants: list };
   }
@@ -279,6 +320,13 @@ export class EncountersService {
       }
       set.mapAttachmentId = input.mapAttachmentId;
     }
+    // VTT grid config (issue #40, phase 2). Each field is independently settable/clearable.
+    if (input.gridSize !== undefined) set.gridSize = input.gridSize;
+    if (input.gridScale !== undefined) set.gridScale = input.gridScale;
+    if (input.gridUnit !== undefined) set.gridUnit = input.gridUnit;
+    if (input.gridSnap !== undefined) set.gridSnap = input.gridSnap;
+    // Fog of war (issue #40, phase 3). Stored as JSON text; null clears it entirely.
+    if (input.fog !== undefined) set.fog = input.fog === null ? null : toJsonText(input.fog);
 
     if (Object.keys(set).length === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
@@ -300,6 +348,21 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
+  }
+
+  /**
+   * DM-only: reveal one rectangular region of the fog-of-war mask (issue #40, phase 3). Reads
+   * the current fog state, enables fog if it wasn't already, appends the rectangle (capped so
+   * the JSON blob stays bounded), and persists via updateEncounter — so the same audit trail,
+   * SSE `encounter.updated` signal (other clients refetch live), and player-side token
+   * redaction all apply. Exposed over MCP as `reveal_map_region` so an AI DM can light the
+   * board a region at a time without round-tripping the whole mask.
+   */
+  async revealFogRegion(encounterId: number, rect: FogRect, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    const row = await this.getRowOrThrow(encounterId);
+    const current = parseFog(row.fog) ?? { enabled: true, revealed: [] };
+    const next: FogState = { enabled: true, revealed: [...current.revealed, rect].slice(-500) };
+    return this.updateEncounter(encounterId, { fog: next }, user, role);
   }
 
   /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
@@ -640,8 +703,8 @@ export class EncountersService {
       if (patch.initiative !== undefined) {
         throw new ForbiddenException('Only dm may set initiative');
       }
-      if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined) {
-        throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, or initMod');
+      if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined || patch.tokenSize !== undefined) {
+        throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, initMod, or tokenSize');
       }
       if (!existing.characterId) {
         throw new ForbiddenException('Only dm may modify this combatant');
@@ -672,6 +735,8 @@ export class EncountersService {
     // campaign map's pin drag). Both coordinates move together.
     if (patch.tokenX !== undefined) staticUpdate.tokenX = clampPercent(patch.tokenX);
     if (patch.tokenY !== undefined) staticUpdate.tokenY = clampPercent(patch.tokenY);
+    // Token footprint size (issue #40) — DM-only (identity-like), same gate as name/hpMax above.
+    if (patch.tokenSize !== undefined && isDm) staticUpdate.tokenSize = patch.tokenSize;
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).

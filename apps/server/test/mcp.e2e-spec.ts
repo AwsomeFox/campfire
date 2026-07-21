@@ -104,6 +104,7 @@ const ALL_TOOLS = [
   'roll_dice',
   'create_encounter',
   'update_encounter',
+  'reveal_map_region',
   'add_combatant',
   'update_combatant',
   'remove_combatant',
@@ -188,7 +189,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(96);
+    expect(tools).toHaveLength(97);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool

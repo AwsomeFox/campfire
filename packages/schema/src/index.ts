@@ -1673,6 +1673,43 @@ export type Attachment = z.infer<typeof Attachment>;
 export const EncounterStatus = z.enum(['preparing', 'running', 'ended']);
 export type EncounterStatus = z.infer<typeof EncounterStatus>;
 
+// ---------- VTT: grid, token size, fog of war (issue #40, phases 2–3) ----------
+
+/**
+ * Token footprint size category (issue #40, phase 2). Scales the rendered token on the
+ * battle map — a Medium creature occupies one grid cell (1×1), Large 2×2, etc. Purely a
+ * display/footprint attribute; it does not affect combat math.
+ */
+export const TokenSize = z.enum(['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan']);
+export type TokenSize = z.infer<typeof TokenSize>;
+
+/**
+ * One DM-revealed rectangle of fog-of-war (issue #40, phase 3). Coordinates are 0–100
+ * percent of the rendered map surface (same convention as combatant tokenX/tokenY): x/y is
+ * the top-left corner, w/h the width/height. Everything OUTSIDE the union of revealed
+ * rectangles is "in the dark".
+ */
+export const FogRect = z.object({
+  x: z.number().min(0).max(100),
+  y: z.number().min(0).max(100),
+  w: z.number().min(0).max(100),
+  h: z.number().min(0).max(100),
+});
+export type FogRect = z.infer<typeof FogRect>;
+
+/**
+ * Fog-of-war state for an encounter's battle map (issue #40, phase 3). When `enabled`, a
+ * non-DM viewer sees only the revealed rectangles; the server additionally WITHHOLDS
+ * (nulls) any combatant token whose position sits in an unrevealed region, so a player
+ * client can't read where monsters lurk in the dark (the redaction is server-side, mirroring
+ * the issue #43 monster-HP band). `revealed` is capped to keep the JSON blob bounded.
+ */
+export const FogState = z.object({
+  enabled: z.boolean().default(false),
+  revealed: z.array(FogRect).max(500).default([]),
+});
+export type FogState = z.infer<typeof FogState>;
+
 export const Encounter = z.object({
   id: Id,
   campaignId: Id,
@@ -1696,6 +1733,16 @@ export const Encounter = z.object({
   // Battle map: a DM-uploaded image (attachment kind='map'|'image') rendered as the
   // run-session background, with combatant tokens overlaid at combatant.tokenX/tokenY (0–100).
   mapAttachmentId: Id.nullable().default(null),
+  // VTT grid overlay (issue #40, phase 2). gridSize = one cell's edge length as a percent of
+  // the map's rendered width (null = no grid drawn). gridScale + gridUnit give the cell's
+  // real-world size (e.g. 5 ft) so the measurement ruler can read out distance; gridSnap
+  // snaps a dropped token to the nearest cell centre. All nullable/absent on older DBs.
+  gridSize: z.number().min(1).max(100).nullable().default(null),
+  gridScale: z.number().positive().nullable().default(null),
+  gridUnit: z.string().max(12).nullable().default(null),
+  gridSnap: z.boolean().default(false),
+  // Fog of war (issue #40, phase 3). null = never configured (map fully visible). See FogState.
+  fog: FogState.nullable().default(null),
   endedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
@@ -1716,6 +1763,16 @@ export const EncounterUpdate = z.object({
   questId: Id.nullable().optional(),
   sessionId: Id.nullable().optional(),
   mapAttachmentId: Id.nullable().optional(),
+  // VTT grid config (issue #40, phase 2) — dm only, enforced server-side. null clears a
+  // field (gridSize: null turns the grid off); omitting leaves it unchanged.
+  gridSize: z.number().min(1).max(100).nullable().optional(),
+  gridScale: z.number().positive().nullable().optional(),
+  gridUnit: z.string().max(12).nullable().optional(),
+  gridSnap: z.boolean().optional(),
+  // Fog of war (issue #40, phase 3) — dm only. Replace the whole fog state (enable/disable +
+  // revealed rectangles); null clears it. The dedicated reveal_map_region MCP tool appends
+  // a single rectangle for an AI DM without round-tripping the full mask.
+  fog: FogState.nullable().optional(),
 });
 
 // ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
@@ -1797,6 +1854,9 @@ export const Combatant = z.object({
   // map image, mirroring location.mapX/mapY. null = not yet placed on the map.
   tokenX: z.number().nullable().default(null),
   tokenY: z.number().nullable().default(null),
+  // Token footprint size category (issue #40, phase 2) — scales the rendered token on the
+  // battle map (tiny→gargantuan). Defaults to 'medium' (a 1×1 cell). No effect on combat math.
+  tokenSize: TokenSize.default('medium'),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -1835,6 +1895,9 @@ export const CombatantUpdate = z.object({
   // server-side (mirrors the campaign map's location-pin drag). Both must be sent together.
   tokenX: z.number().optional(),
   tokenY: z.number().optional(),
+  // Token footprint size category (issue #40) — dm only, enforced server-side (an
+  // identity-like attribute, alongside name/hpMax/initMod above).
+  tokenSize: TokenSize.optional(),
 });
 
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
