@@ -806,6 +806,9 @@ function UserMenu({
       <Link to="/preferences" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
         Preferences
       </Link>
+      <Link to="/credits" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+        Credits
+      </Link>
       <button
         role="menuitem"
         className="w-full text-left px-2 py-1.5 rounded-md"

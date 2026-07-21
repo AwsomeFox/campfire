@@ -197,6 +197,9 @@ export const npcs = sqliteTable('npcs', {
   factionId: integer('faction_id'),
   body: text('body').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
+  // Slug of a bundled game-icons.net entity icon (issue #302), or '' for none.
+  // Nullable/absent in older DBs pre-migration; see migrateNpcsTableForIconSlug().
+  iconSlug: text('icon_slug').notNull().default(''),
   // Entity-level secrecy (issue #42) — see quests.hidden. Migrated via
   // migrateNpcsTableForHidden() in db/db.module.ts.
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
