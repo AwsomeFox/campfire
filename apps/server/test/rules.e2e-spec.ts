@@ -194,6 +194,50 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(afterEntry.status).toBe(404);
   });
 
+  // Manual icon override on a compendium entry (issue #305): imported entries carry an
+  // empty iconSlug (the web app derives a default from type/dataJson); a DM can PATCH a
+  // bundled game-icons.net slug and clear it back. Round-trips create -> set -> clear.
+  it('rule entry iconSlug defaults to empty and round-trips through PATCH set/clear', async () => {
+    const server = ctx.app.getHttpServer();
+    const job = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl, sections: ['spells'] });
+    const packId = job.pack.id;
+
+    try {
+      const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
+      const fireball = searchRes.body.find((e: { name: string }) => e.name === 'Fireball');
+      expect(fireball).toBeDefined();
+
+      // Imported entries have no override — the field is present and empty.
+      const fetched = await request(server).get(`/api/v1/rules/entries/${fireball.id}`).set(dm);
+      expect(fetched.status).toBe(200);
+      expect(fetched.body.iconSlug).toBe('');
+
+      // DM sets an override.
+      const set = await request(server).patch(`/api/v1/rules/entries/${fireball.id}`).set(dm).send({ iconSlug: 'fire' });
+      expect(set.status).toBe(200);
+      expect(set.body.iconSlug).toBe('fire');
+
+      // Persisted for the next reader.
+      const afterSet = await request(server).get(`/api/v1/rules/entries/${fireball.id}`).set(dm);
+      expect(afterSet.body.iconSlug).toBe('fire');
+
+      // Cleared back to the derived default.
+      const cleared = await request(server).patch(`/api/v1/rules/entries/${fireball.id}`).set(dm).send({ iconSlug: '' });
+      expect(cleared.status).toBe(200);
+      expect(cleared.body.iconSlug).toBe('');
+
+      // An unknown entry id 404s.
+      const missing = await request(server).patch('/api/v1/rules/entries/999999').set(dm).send({ iconSlug: 'fire' });
+      expect(missing.status).toBe(404);
+
+      // An unrecognized body key is rejected (strict DTO).
+      const bad = await request(server).patch(`/api/v1/rules/entries/${fireball.id}`).set(dm).send({ bogus: 'x' });
+      expect(bad.status).toBe(400);
+    } finally {
+      await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dm);
+    }
+  });
+
   it('install with a single section only imports that section', async () => {
     const server = ctx.app.getHttpServer();
 
@@ -632,6 +676,11 @@ describe('rules / rule packs — install permission gating (e2e, real sessions)'
 
     const uninstallRes = await userAgent.delete('/api/v1/rules/packs/1');
     expect(uninstallRes.status).toBe(403);
+
+    // The icon override (issue #305) is gated the same as install — a plain player
+    // can read entries but not edit them.
+    const iconRes = await userAgent.patch('/api/v1/rules/entries/1').send({ iconSlug: 'fire' });
+    expect(iconRes.status).toBe(403);
   });
 
   it('admin real user can install (202 + job completes)', async () => {

@@ -859,6 +859,28 @@ function migrateNpcsTableForIconSlug(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before compendium rule entries could carry a manual icon
+ * override (issue #305): `rule_entries.icon_slug` didn't exist. Plain ADD COLUMN with a
+ * '' default — same shape as migrateNpcsTableForIconSlug above. Existing entries get ''
+ * (no override), so the web app keeps deriving a default icon from type/dataJson; a DM
+ * opts an entry into a specific icon by picking one. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column. Adding a plain column to the FTS content
+ * table doesn't touch the indexed columns (name/summary/body), so the triggers are
+ * unaffected.
+ */
+function migrateRuleEntriesTableForIconSlug(sqlite: Database.Database): void {
+  const hasRuleEntriesTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_entries'")
+    .get();
+  if (!hasRuleEntriesTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(rule_entries)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'icon_slug')) return;
+
+  sqlite.exec("ALTER TABLE rule_entries ADD COLUMN icon_slug TEXT NOT NULL DEFAULT ''");
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -909,6 +931,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0035_encounters_hidden', run: migrateEncountersTableForHidden },
   { name: '0036_story_beats_links', run: migrateStoryBeatsTableForLinks },
   { name: '0037_npcs_icon_slug', run: migrateNpcsTableForIconSlug },
+  { name: '0038_rule_entries_icon_slug', run: migrateRuleEntriesTableForIconSlug },
 ];
 
 /**

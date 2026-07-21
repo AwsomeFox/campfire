@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -6,7 +6,7 @@ import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { RulesService } from './rules.service';
-import { RulePackInstallDto, RulePackUploadDto } from './rules.dto';
+import { RulePackInstallDto, RulePackUploadDto, RuleEntryUpdateDto } from './rules.dto';
 
 /**
  * Rule packs (Compendium backend). Reads (list packs, search, entry fetch, install-job
@@ -102,6 +102,24 @@ export class RulesController {
   @ApiResponse({ status: 200, description: 'Rule entry.' })
   getEntry(@Param('id', ParseIntPipe) id: number) {
     return this.rules.getEntryOrThrow(id);
+  }
+
+  /**
+   * Set the manual icon override on a rule entry (issue #305). Same gate as install
+   * (server-admin power OR DM of any campaign): compendium packs are server-wide, and a
+   * DM curating their table's icons shouldn't need a server-admin round-trip. Reads stay
+   * open to everyone; only this edit is gated.
+   */
+  @Patch('entries/:id')
+  @ApiOperation({ summary: 'Update a rule entry', description: 'Server admin, or the DM of any campaign. Sets the manual icon override.' })
+  @ApiResponse({ status: 200, description: 'Updated rule entry.' })
+  async updateEntry(
+    @CurrentUser() user: RequestUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: RuleEntryUpdateDto,
+  ) {
+    await this.assertCanInstall(user);
+    return this.rules.updateEntry(id, body);
   }
 
   /**

@@ -218,6 +218,20 @@ export function writeOldSchemaDb(dataDir: string): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    -- rule_entries: no source (0027) and no icon_slug (0038, issue #305).
+    CREATE TABLE rule_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pack_id INTEGER NOT NULL,
+      slug TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL DEFAULT '',
+      data_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   // Seed one row per table so migrations must preserve real data, not just an empty schema.
@@ -253,6 +267,9 @@ export function writeOldSchemaDb(dataDir: string): void {
   ).run();
   sqlite.prepare(
     "INSERT INTO attachments (campaign_id, uploader_user_id, kind, filename, mime, size, created_at, updated_at) VALUES (1, 'legacy-dm', 'image', 'map.png', 'image/png', 1234, ?, ?)",
+  ).run(now, now);
+  sqlite.prepare(
+    "INSERT INTO rule_entries (pack_id, slug, name, type, summary, body, created_at, updated_at) VALUES (1, 'legacy-fireball', 'Legacy Fireball', 'spell', 'a bright streak', 'boom', ?, ?)",
   ).run(now, now);
 
   sqlite.close();
