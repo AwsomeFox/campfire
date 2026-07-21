@@ -687,6 +687,15 @@ export class CampaignsService {
     const sessionRows = asArr(doc.sessions);
     const noteRows = asArr(doc.notes);
     const encounterRows = asArr(doc.encounters);
+    // Issue #266: entity types the export used to drop wholesale — now recreated with
+    // fresh ids and intra-campaign refs remapped (npc→faction, beat→arc, branch→beat).
+    const factionRows = asArr(doc.factions);
+    const storyArcRows = asArr(doc.storyArcs);
+    const timelineEventRows = asArr(doc.timelineEvents);
+    const inventoryRows = asArr(doc.inventory);
+    const timelineCalendarSrc = asRec(doc.timelineCalendar);
+    const sessionZeroSrc = asRec(doc.sessionZero);
+    const treasurySrc = asRec(doc.treasury);
 
     const importerId = String(user.id);
     const ts = nowIso();
@@ -749,6 +758,31 @@ export class CampaignsService {
         pendingWrites.push({ filePath: path.join(uploadsRoot(), String(cid), `${row.id}.${ext}`), bytes: a.bytes });
       }
 
+      // Factions (issue #266) before npcs — an npc's factionId points at one, so the
+      // faction rows must exist to remap through. No intra-campaign refs of their own.
+      const factionMap = new Map<number, number>();
+      for (const f of factionRows) {
+        const srcId = intOrNull(f.id);
+        const [row] = tx
+          .insert(factions)
+          .values({
+            campaignId: cid,
+            name: str(f.name, 'Unnamed Faction'),
+            kind: str(f.kind),
+            body: str(f.body),
+            goals: str(f.goals),
+            dmSecret: str(f.dmSecret),
+            hidden: boolOf(f.hidden),
+            reputation: intOr(f.reputation, 0),
+            standing: str(f.standing, 'neutral'),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        if (srcId != null) factionMap.set(srcId, row.id);
+      }
+
       // Locations first (npcs, quests-via-npcs and currentLocationId point at them).
       // Two passes: insert all with parentId deferred, then remap the nesting parent —
       // a child's parent may appear after it in the document (#99).
@@ -789,6 +823,7 @@ export class CampaignsService {
       for (const n of npcRows) {
         const srcId = intOrNull(n.id);
         const locSrc = intOrNull(n.locationId);
+        const factionSrc = intOrNull(n.factionId);
         const [row] = tx
           .insert(npcs)
           .values({
@@ -797,6 +832,9 @@ export class CampaignsService {
             role: str(n.role),
             disposition: str(n.disposition, 'neutral'),
             locationId: locSrc != null ? (locMap.get(locSrc) ?? null) : null,
+            // Faction membership (issue #221/#266) remapped to the imported faction; a
+            // dangling ref (faction missing from the doc) drops to null, never a stale id.
+            factionId: factionSrc != null ? (factionMap.get(factionSrc) ?? null) : null,
             body: str(n.body),
             dmSecret: str(n.dmSecret),
             hidden: boolOf(n.hidden),
@@ -885,6 +923,41 @@ export class CampaignsService {
           .returning()
           .all();
         if (srcId != null) charMap.set(srcId, row.id);
+      }
+
+      // Party/character inventory (issue #266) after characters — a character-owned item
+      // remaps its characterId through charMap. If that character is missing (dangling
+      // ref), the item falls back to party-owned rather than pointing at a stale id.
+      for (const item of inventoryRows) {
+        const ownerType = str(item.ownerType, 'party') === 'character' ? 'character' : 'party';
+        const charSrc = intOrNull(item.characterId);
+        const mappedChar = charSrc != null ? (charMap.get(charSrc) ?? null) : null;
+        const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
+        tx.insert(inventoryItems)
+          .values({
+            campaignId: cid,
+            ownerType: resolvedOwner,
+            characterId: resolvedOwner === 'character' ? mappedChar : null,
+            name: str(item.name, 'Item'),
+            qty: intOr(item.qty, 1),
+            notes: str(item.notes),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
+      }
+
+      // Party treasury (issue #266) — one coin-totals row per campaign. Only insert when
+      // the export carried non-empty totals (the module creates it lazily otherwise).
+      const treasuryCoins = {
+        cp: Math.max(0, intOr(treasurySrc.cp, 0)),
+        sp: Math.max(0, intOr(treasurySrc.sp, 0)),
+        ep: Math.max(0, intOr(treasurySrc.ep, 0)),
+        gp: Math.max(0, intOr(treasurySrc.gp, 0)),
+        pp: Math.max(0, intOr(treasurySrc.pp, 0)),
+      };
+      if (treasuryCoins.cp || treasuryCoins.sp || treasuryCoins.ep || treasuryCoins.gp || treasuryCoins.pp) {
+        tx.insert(partyTreasury).values({ campaignId: cid, ...treasuryCoins, updatedAt: ts }).run();
       }
 
       const sessionMap = new Map<number, number>();
@@ -1002,6 +1075,120 @@ export class CampaignsService {
             tx.update(encounters).set({ currentCombatantId }).where(eq(encounters.id, row.id)).run();
           }
         }
+      }
+
+      // Storylines (issue #27/#266): the arc→beat→branch graph. Arcs first (arcMap),
+      // then ALL beats (beatMap, arcId remapped), then branches — a branch's toBeatId
+      // may point at a beat that appears later, so branches run after every beat exists.
+      const arcMap = new Map<number, number>();
+      for (const arc of storyArcRows) {
+        const srcId = intOrNull(arc.id);
+        const [row] = tx
+          .insert(storyArcs)
+          .values({
+            campaignId: cid,
+            title: str(arc.title, 'Untitled Arc'),
+            summary: str(arc.summary),
+            status: str(arc.status, 'planned'),
+            sortOrder: intOr(arc.sortOrder, 0),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        if (srcId != null) arcMap.set(srcId, row.id);
+      }
+      const beatMap = new Map<number, number>();
+      const pendingBranches: Rec[] = [];
+      for (const arc of storyArcRows) {
+        const arcSrcId = intOrNull(arc.id);
+        const newArcId = arcSrcId != null ? arcMap.get(arcSrcId) : undefined;
+        if (newArcId == null) continue; // arc failed to insert — its beats have nowhere to hang
+        for (const beat of asArr(arc.beats)) {
+          const beatSrcId = intOrNull(beat.id);
+          const [row] = tx
+            .insert(storyBeats)
+            .values({
+              campaignId: cid,
+              arcId: newArcId,
+              title: str(beat.title, 'Untitled Beat'),
+              body: str(beat.body),
+              status: str(beat.status, 'planned'),
+              sortOrder: intOr(beat.sortOrder, 0),
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .returning()
+            .all();
+          if (beatSrcId != null) beatMap.set(beatSrcId, row.id);
+          for (const branch of asArr(beat.branches)) pendingBranches.push(branch);
+        }
+      }
+      for (const branch of pendingBranches) {
+        const beatSrc = intOrNull(branch.beatId);
+        const fromBeatId = beatSrc != null ? beatMap.get(beatSrc) : undefined;
+        if (fromBeatId == null) continue; // source beat gone — drop the dangling edge
+        const toSrc = intOrNull(branch.toBeatId);
+        tx.insert(storyBranches)
+          .values({
+            beatId: fromBeatId,
+            toBeatId: toSrc != null ? (beatMap.get(toSrc) ?? null) : null,
+            label: str(branch.label),
+            sortOrder: intOr(branch.sortOrder, 0),
+          })
+          .run();
+      }
+
+      // Timeline events (issue #63/#266) — campaign-scoped, no cross-refs.
+      for (const ev of timelineEventRows) {
+        tx.insert(timelineEvents)
+          .values({
+            campaignId: cid,
+            title: str(ev.title, 'Untitled Event'),
+            inWorldDate: str(ev.inWorldDate),
+            body: str(ev.body),
+            era: str(ev.era),
+            sortIndex: intOr(ev.sortIndex, 0),
+            dmSecret: str(ev.dmSecret),
+            hidden: boolOf(ev.hidden),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
+      }
+
+      // Timeline calendar (issue #63/#266) — one "current in-world date" row per campaign.
+      // Only materialize when the export carried content (the module creates it lazily).
+      const calendarDate = str(timelineCalendarSrc.currentDate);
+      const calendarNote = str(timelineCalendarSrc.note);
+      if (calendarDate || calendarNote) {
+        tx.insert(timelineCalendars)
+          .values({ campaignId: cid, currentDate: calendarDate, note: calendarNote, createdAt: ts, updatedAt: ts })
+          .run();
+      }
+
+      // Session-zero / table charter (issue #122/#266) — one row per campaign. Insert
+      // only when the export carried a non-empty charter (lazily created otherwise).
+      const szLines = Array.isArray(sessionZeroSrc.lines) ? sessionZeroSrc.lines.filter((v): v is string => typeof v === 'string') : [];
+      const szVeils = Array.isArray(sessionZeroSrc.veils) ? sessionZeroSrc.veils.filter((v): v is string => typeof v === 'string') : [];
+      const szTools = Array.isArray(sessionZeroSrc.safetyTools)
+        ? sessionZeroSrc.safetyTools.filter((v): v is string => typeof v === 'string')
+        : [];
+      const szHouseRules = str(sessionZeroSrc.houseRules);
+      const szTone = str(sessionZeroSrc.toneAndExpectations);
+      if (szLines.length || szVeils.length || szTools.length || szHouseRules || szTone) {
+        tx.insert(sessionZero)
+          .values({
+            campaignId: cid,
+            lines: JSON.stringify(szLines),
+            veils: JSON.stringify(szVeils),
+            safetyTools: JSON.stringify(szTools),
+            houseRules: szHouseRules,
+            toneAndExpectations: szTone,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
       }
 
       const currentLocSrc = intOrNull(campaignSrc.currentLocationId);

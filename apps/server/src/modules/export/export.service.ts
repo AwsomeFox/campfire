@@ -13,6 +13,11 @@ import { AuditService } from '../audit/audit.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { AttachmentsService, ALLOWED_MIME_TO_EXT } from '../attachments/attachments.service';
+import { FactionsService } from '../factions/factions.service';
+import { StorylinesService } from '../storylines/storylines.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { SessionZeroService } from '../session-zero/session-zero.service';
+import { InventoryService } from '../inventory/inventory.service';
 import type { RequestUser } from '../../common/user.types';
 
 /** Filesystem/URL-safe slug for filenames — lowercase, alnum + hyphens. */
@@ -40,6 +45,11 @@ export class ExportService {
     private readonly proposals: ProposalsService,
     private readonly encounters: EncountersService,
     private readonly attachments: AttachmentsService,
+    private readonly factions: FactionsService,
+    private readonly storylines: StorylinesService,
+    private readonly timeline: TimelineService,
+    private readonly sessionZero: SessionZeroService,
+    private readonly inventory: InventoryService,
   ) {}
 
   /** Archive-relative path an attachment's bytes live at inside a zip export. */
@@ -57,23 +67,54 @@ export class ExportService {
   async buildExport(campaignId: number, user: RequestUser) {
     const role = 'dm' as const;
 
-    const [campaign, questList, npcList, locationList, sessionList, characterList, noteList, memberList, auditList, proposalList, encounterList, attachmentRows] =
-      await Promise.all([
-        this.campaigns.getOrThrow(campaignId),
-        this.quests.listForCampaignWithObjectives(campaignId, role),
-        this.npcs.listForCampaign(campaignId, role),
-        this.locations.listForCampaign(campaignId, role),
-        // Full recaps — an export must carry the complete session bodies, not the
-        // dashboard's list-shape excerpts (issue #71).
-        this.sessions.listRecapsForCampaign(campaignId, role),
-        this.characters.listForCampaign(campaignId, role),
-        this.notes.listForCampaign(campaignId, user, role, {}),
-        this.members.listForCampaign(campaignId),
-        this.audit.listForCampaign(campaignId, 500),
-        this.proposals.listForCampaign(campaignId, undefined),
-        this.encounters.listForCampaign(campaignId),
-        this.attachments.listRowsForCampaign(campaignId),
-      ]);
+    const [
+      campaign,
+      questList,
+      npcList,
+      locationList,
+      sessionList,
+      characterList,
+      noteList,
+      memberList,
+      auditList,
+      proposalList,
+      encounterList,
+      attachmentRows,
+      // Issue #266: entity types the export previously dropped WHOLESALE. A DM's
+      // backup/migration lost every one of these silently; they now travel with the
+      // export (full DM view — dmSecret fields included, same role='dm' as above).
+      factionList,
+      storyArcList,
+      timelineEventList,
+      timelineCalendar,
+      sessionZero,
+      inventoryList,
+      treasury,
+    ] = await Promise.all([
+      this.campaigns.getOrThrow(campaignId),
+      this.quests.listForCampaignWithObjectives(campaignId, role),
+      this.npcs.listForCampaign(campaignId, role),
+      this.locations.listForCampaign(campaignId, role),
+      // Full recaps — an export must carry the complete session bodies, not the
+      // dashboard's list-shape excerpts (issue #71).
+      this.sessions.listRecapsForCampaign(campaignId, role),
+      this.characters.listForCampaign(campaignId, role),
+      this.notes.listForCampaign(campaignId, user, role, {}),
+      this.members.listForCampaign(campaignId),
+      this.audit.listForCampaign(campaignId, 500),
+      this.proposals.listForCampaign(campaignId, undefined),
+      this.encounters.listForCampaign(campaignId),
+      this.attachments.listRowsForCampaign(campaignId),
+      this.factions.listForCampaign(campaignId, role),
+      // Arcs carry their nested beats and each beat its branches — the whole
+      // storyline graph (issue #27) in one shape so import can rebuild the tree.
+      this.storylines.listArcsWithBeats(campaignId),
+      this.timeline.listEvents(campaignId, role),
+      this.timeline.getCalendar(campaignId),
+      this.sessionZero.get(campaignId),
+      this.inventory.listForCampaign(campaignId),
+      this.inventory.getTreasury(campaignId),
+    ]);
 
     // Attachment manifest (issue #87): the export used to reference attachment ids
     // (campaign.mapAttachmentId) and portrait URLs (character.portraitUrl) that only
@@ -129,6 +170,17 @@ export class ExportService {
       audit: auditList,
       proposals: proposalList,
       encounters: encountersWithCombatants,
+      // Issue #266: these were silently omitted before — a DM's export/backup lost
+      // factions, the storyline graph, the timeline (events + current in-world date),
+      // the session-zero charter, and party inventory/treasury entirely. Now carried
+      // and re-imported (campaigns.service.ts importCampaign) with fresh, remapped ids.
+      factions: factionList,
+      storyArcs: storyArcList,
+      timelineEvents: timelineEventList,
+      timelineCalendar,
+      sessionZero,
+      inventory: inventoryList,
+      treasury,
       attachments,
       attachmentsNote:
         'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl ' +

@@ -352,3 +352,166 @@ describe('campaign ZIP import — attachments round-trip (e2e)', () => {
     expect(res.status).toBe(400);
   });
 });
+
+/**
+ * Issue #266 — export/import previously dropped whole entity types WHOLESALE: factions,
+ * the storyline arc/beat/branch graph, the timeline (events + current in-world date),
+ * the session-zero charter, and party inventory/treasury. A DM's export (backup or
+ * migration) silently lost every one of them. Seed a campaign with all of these plus
+ * their intra-campaign references (npc -> faction, branch -> next beat, character-owned
+ * inventory item), export it, re-import it, and assert each type survives with fresh
+ * ids and every reference remapped to the imported entity — never a stale source id.
+ */
+describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let factionId: number;
+  let npcId: number;
+  let arcId: number;
+  let beat1Id: number;
+  let beat2Id: number;
+  let characterId: number;
+  let exportDoc: Record<string, unknown>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'i266-dm', password: 'dm-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Full World', description: 'Everything the export used to drop.' });
+    campaignId = campRes.body.id;
+
+    // Faction + an NPC that belongs to it (npc.factionId is the cross-ref to remap).
+    const facRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/factions`)
+      .send({ name: 'The Ashen Hand', kind: 'guild', goals: 'Control the docks', dmSecret: 'A demon pulls its strings', reputation: 25 });
+    factionId = facRes.body.id;
+    const npcRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({ name: 'Silas', factionId });
+    npcId = npcRes.body.id;
+
+    // Timeline: an event + the campaign's current in-world date.
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/timeline`)
+      .send({ title: 'The Sundering', inWorldDate: '3rd of Flamerule', body: 'The sky cracked.', dmSecret: 'It was the party’s fault' });
+    await dmAgent.put(`/api/v1/campaigns/${campaignId}/timeline/calendar`).send({ currentDate: '5th of Flamerule, 1492 DR', note: 'Two moons.' });
+
+    // Storyline graph: an arc with two beats and a branch from beat1 -> beat2
+    // (toBeatId is an intra-campaign ref that must remap to the imported beat).
+    const arcRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/arcs`).send({ title: 'Rise of the Hand', summary: 'The guild ascends.' });
+    arcId = arcRes.body.id;
+    const beat1Res = await dmAgent.post(`/api/v1/arcs/${arcId}/beats`).send({ title: 'The Offer', body: 'They approach the party.' });
+    beat1Id = beat1Res.body.id;
+    const beat2Res = await dmAgent.post(`/api/v1/arcs/${arcId}/beats`).send({ title: 'The Betrayal', body: 'They turn.' });
+    beat2Id = beat2Res.body.id;
+    await dmAgent.post(`/api/v1/beats/${beat1Id}/branches`).send({ label: 'If the party accepts', toBeatId: beat2Id });
+
+    // Session-zero charter.
+    await dmAgent
+      .put(`/api/v1/campaigns/${campaignId}/session-zero`)
+      .send({ lines: ['harm to children'], veils: ['on-screen torture'], safetyTools: ['X-Card'], houseRules: 'Crits max the first die.', toneAndExpectations: 'Gritty, heroic.' });
+
+    // Inventory: a party-owned item + a character-owned item (characterId remaps), plus treasury.
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Vesper', className: 'Rogue', level: 4 });
+    characterId = charRes.body.id;
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Guild Signet', qty: 1, ownerType: 'party' });
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Vesper’s Daggers', qty: 2, ownerType: 'character', characterId });
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}/treasury`).send({ set: { gp: 150, sp: 40 } });
+
+    const exportRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
+    exportDoc = exportRes.body;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('export carries every previously-dropped entity type under clear top-level keys', () => {
+    expect(Array.isArray(exportDoc.factions)).toBe(true);
+    expect((exportDoc.factions as unknown[]).length).toBe(1);
+    expect(Array.isArray(exportDoc.storyArcs)).toBe(true);
+    expect((exportDoc.storyArcs as { beats: unknown[] }[])[0].beats.length).toBe(2);
+    expect(Array.isArray(exportDoc.timelineEvents)).toBe(true);
+    expect((exportDoc.timelineEvents as unknown[]).length).toBe(1);
+    expect((exportDoc.timelineCalendar as { currentDate: string }).currentDate).toBe('5th of Flamerule, 1492 DR');
+    expect((exportDoc.sessionZero as { lines: string[] }).lines).toEqual(['harm to children']);
+    expect(Array.isArray(exportDoc.inventory)).toBe(true);
+    expect((exportDoc.inventory as unknown[]).length).toBe(2);
+    expect((exportDoc.treasury as { gp: number }).gp).toBe(150);
+  });
+
+  it('re-imports all of them into a new campaign with fresh ids and remapped references', async () => {
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+    expect(imported.id).not.toBe(campaignId);
+
+    // Factions: copied with a fresh id, reputation + dmSecret preserved.
+    const facs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/factions`);
+    expect(facs.body.length).toBe(1);
+    const fac = facs.body[0];
+    expect(fac.id).not.toBe(factionId);
+    expect(fac.name).toBe('The Ashen Hand');
+    expect(fac.reputation).toBe(25);
+    expect(fac.dmSecret).toBe('A demon pulls its strings');
+
+    // NPC.factionId remapped to the imported faction (not the source id).
+    const npcs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/npcs`);
+    const silas = npcs.body.find((n: { name: string }) => n.name === 'Silas');
+    expect(silas).toBeDefined();
+    expect(silas.id).not.toBe(npcId);
+    expect(silas.factionId).toBe(fac.id);
+
+    // Storyline graph: arc + both beats copied; the branch's toBeatId remapped to the
+    // imported "Betrayal" beat.
+    const arcs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/arcs`);
+    expect(arcs.body.length).toBe(1);
+    const arc = arcs.body[0];
+    expect(arc.id).not.toBe(arcId);
+    expect(arc.beats.length).toBe(2);
+    const offer = arc.beats.find((b: { title: string }) => b.title === 'The Offer');
+    const betrayal = arc.beats.find((b: { title: string }) => b.title === 'The Betrayal');
+    expect(offer.id).not.toBe(beat1Id);
+    expect(betrayal.id).not.toBe(beat2Id);
+    expect(offer.branches.length).toBe(1);
+    expect(offer.branches[0].label).toBe('If the party accepts');
+    expect(offer.branches[0].toBeatId).toBe(betrayal.id);
+
+    // Timeline: event + current in-world date carried over.
+    const events = await dmAgent.get(`/api/v1/campaigns/${imported.id}/timeline`);
+    expect(events.body.length).toBe(1);
+    expect(events.body[0].title).toBe('The Sundering');
+    expect(events.body[0].dmSecret).toBe('It was the party’s fault');
+    const cal = await dmAgent.get(`/api/v1/campaigns/${imported.id}/timeline/calendar`);
+    expect(cal.body.currentDate).toBe('5th of Flamerule, 1492 DR');
+
+    // Session-zero charter preserved.
+    const sz = await dmAgent.get(`/api/v1/campaigns/${imported.id}/session-zero`);
+    expect(sz.body.lines).toEqual(['harm to children']);
+    expect(sz.body.veils).toEqual(['on-screen torture']);
+    expect(sz.body.safetyTools).toEqual(['X-Card']);
+    expect(sz.body.houseRules).toBe('Crits max the first die.');
+
+    // Inventory: both items copied; the character-owned item's characterId remapped to
+    // the imported character. Treasury coins carried over.
+    const importedChars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
+    const vesper = importedChars.body.find((c: { name: string }) => c.name === 'Vesper');
+    expect(vesper.id).not.toBe(characterId);
+    const inv = await dmAgent.get(`/api/v1/campaigns/${imported.id}/inventory`);
+    expect(inv.body.length).toBe(2);
+    const partyItem = inv.body.find((i: { name: string }) => i.name === 'Guild Signet');
+    const charItem = inv.body.find((i: { name: string }) => i.name === 'Vesper’s Daggers');
+    expect(partyItem.ownerType).toBe('party');
+    expect(charItem.ownerType).toBe('character');
+    expect(charItem.characterId).toBe(vesper.id);
+    const treasury = await dmAgent.get(`/api/v1/campaigns/${imported.id}/treasury`);
+    expect(treasury.body.gp).toBe(150);
+    expect(treasury.body.sp).toBe(40);
+
+    // The source campaign is untouched.
+    const sourceFacs = await dmAgent.get(`/api/v1/campaigns/${campaignId}/factions`);
+    expect(sourceFacs.body[0].id).toBe(factionId);
+  });
+});

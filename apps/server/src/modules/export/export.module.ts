@@ -12,6 +12,11 @@ import { NotesModule } from '../notes/notes.module';
 import { ProposalsModule } from '../proposals/proposals.module';
 import { EncountersModule } from '../encounters/encounters.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
+import { FactionsModule } from '../factions/factions.module';
+import { StorylinesModule } from '../storylines/storylines.module';
+import { TimelineModule } from '../timeline/timeline.module';
+import { SessionZeroModule } from '../session-zero/session-zero.module';
+import { InventoryModule } from '../inventory/inventory.module';
 import { ExportService } from './export.service';
 import { ExportController } from './export.controller';
 
@@ -30,6 +35,11 @@ import { ExportController } from './export.controller';
     ProposalsModule,
     EncountersModule,
     AttachmentsModule,
+    FactionsModule,
+    StorylinesModule,
+    TimelineModule,
+    SessionZeroModule,
+    InventoryModule,
   ],
   controllers: [ExportController],
   providers: [ExportService],
