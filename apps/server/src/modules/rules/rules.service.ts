@@ -1015,10 +1015,25 @@ export class RulesService {
    */
   private async persistPack(
     meta: { slug: string; name: string; version: string; license: string; sourceUrl: string; sectionLabels: string[] },
-    entries: ImportedEntry[],
+    rawEntries: ImportedEntry[],
     user: RequestUser,
     detailSuffix: string,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    // De-dupe the incoming entries by (type, slug), keeping the first occurrence. Importers
+    // only de-dupe WITHIN a section, but several sources map two sections onto one entry
+    // type (PF2e feats+backgrounds→feat, OL boons+banes→condition, SF equipment/starships/
+    // vehicles→item). A cross-section name collision would otherwise survive to the INSERT
+    // and trip the (pack_id, type, slug) UNIQUE index mid-transaction — misreported as a
+    // concurrent-install race. Centralizing the de-dupe here covers every caller (importers
+    // and uploads) and both the fresh-install and incremental-add paths. Issues #326/#353.
+    const seenKeys = new Set<string>();
+    const entries = rawEntries.filter((e) => {
+      const key = `${e.type}::${e.slug}`;
+      if (seenKeys.has(key)) return false;
+      seenKeys.add(key);
+      return true;
+    });
+
     const [existing] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
     if (existing) {
       return this.addEntriesToExistingPack(existing, entries, meta.sectionLabels, user);

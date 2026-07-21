@@ -76,15 +76,20 @@ export default defineConfig({
           {
             // Full game-icons.net catalog body shards (issue #349) —
             // apps/web/public/icons/shards/shard-NNN.json, fetched on demand by
-            // lib/icons/index.ts#resolveIcon for any non-curated icon. These are
-            // static/content-addressed by build (regenerated wholesale, not
-            // patched), so cache-as-you-go (CacheFirst) is correct: once a shard
-            // is fetched, every icon in it renders offline from then on, with no
-            // repeat network cost. Deliberately NOT in globPatterns above, so a
-            // fresh install/update never downloads the ~6 MB of shards up front —
-            // only icons a user actually views ever get fetched.
+            // lib/icons/index.ts#resolveIcon for any non-curated icon. The shard
+            // URLs are NOT content-addressed: a shard's contents are position-in-
+            // sorted-slug-list ÷ 100, so regenerating the icon set reshuffles which
+            // icons land in shard-NNN.json while the URL stays the same. Under
+            // CacheFirst + a 365-day TTL an installed PWA would then serve a stale
+            // shard forever and silently show wrong/missing icons (issue #354).
+            // StaleWhileRevalidate keeps the offline-first, no-repeat-cost behaviour
+            // (cached shard served instantly) but revalidates in the background, so
+            // any future icon-set regeneration self-heals on the next view.
+            // Deliberately NOT in globPatterns above, so a fresh install/update
+            // never downloads the ~6 MB of shards up front — only icons a user
+            // actually views ever get fetched.
             urlPattern: ({ url }) => url.pathname.startsWith("/icons/shards/"),
-            handler: "CacheFirst",
+            handler: "StaleWhileRevalidate",
             options: {
               cacheName: "campfire-icon-shards",
               expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 * 24 * 365 },
