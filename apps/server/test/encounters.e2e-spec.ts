@@ -2375,6 +2375,104 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(diff.body.band).toBe('deadly');
   });
 
+  // Issue #304: first-party encounter generator. Reuses the 4×L5 party + CR-10 ogre above,
+  // plus a weaker CR-2 goblin seeded here so a "medium" group build has something to pick.
+  describe('encounter generator (issue #304)', () => {
+    let goblinEntryId: number;
+
+    beforeAll(async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      const [pack] = await db
+        .insert(rulePacks)
+        .values({ slug: 'gen-pack', name: 'Gen Pack', version: '1', license: 'OGL', sourceUrl: '', installedAt: ts, entryCount: 1 })
+        .returning();
+      const [goblin] = await db
+        .insert(ruleEntries)
+        .values({
+          packId: pack.id,
+          slug: 'gen-goblin',
+          name: 'Scrap Goblin',
+          type: 'monster',
+          summary: 'CR 2',
+          body: '',
+          dataJson: JSON.stringify({ challengeRating: 2, hitPoints: 22, type: 'humanoid', environments: ['forest'] }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning();
+      goblinEntryId = goblin.id;
+    });
+
+    it('generates a deadly group (read-only preview) within the target band using compendium monsters', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'deadly', seed: 123 });
+      expect(res.status).toBe(200);
+      expect(res.body.targetBand).toBe('deadly');
+      expect(res.body.matchedBand).toBe(true);
+      expect(res.body.difficulty.band).toBe('deadly');
+      expect(res.body.combatants.length).toBeGreaterThan(0);
+      // Every suggested line references a real compendium statblock and carries CR/XP.
+      for (const c of res.body.combatants) {
+        expect(typeof c.ruleEntryId).toBe('number');
+        expect(c.count).toBeGreaterThanOrEqual(1);
+        expect(c.xp).toBeGreaterThan(0);
+      }
+      // Non-mutating: no encounter was persisted by the preview.
+      const list = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(dm);
+      expect(list.body.every((e: { name: string }) => e.name !== `Generated deadly encounter`)).toBe(true);
+    });
+
+    it('is reproducible by seed', async () => {
+      const server = ctx.app.getHttpServer();
+      const a = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/generate`).set(dm).send({ difficulty: 'medium', seed: 99 });
+      const b = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/generate`).set(dm).send({ difficulty: 'medium', seed: 99 });
+      expect(a.status).toBe(200);
+      expect(b.body.combatants).toEqual(a.body.combatants);
+      expect(b.body.seed).toBe(a.body.seed);
+      expect(b.body.seed).toBe(99);
+    });
+
+    it('honors an explicit party override and CR filters', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', party: [5, 5, 5, 5], filters: { maxCr: 3 }, seed: 7 });
+      expect(res.status).toBe(200);
+      // maxCr:3 excludes the CR-10 ogre, so only the CR-2 goblin can be picked.
+      expect(res.body.combatants.every((c: { ruleEntryId: number }) => c.ruleEntryId === goblinEntryId)).toBe(true);
+    });
+
+    it('commit=true persists a hidden, preparing encounter with the generated monsters (dm only)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate?commit=true`)
+        .set(dm)
+        .send({ difficulty: 'deadly', seed: 5, name: 'Sprung Trap', filters: { maxCr: 3 } });
+      expect(res.status).toBe(200);
+      expect(res.body.encounter).toBeDefined();
+      expect(res.body.encounter.name).toBe('Sprung Trap');
+      expect(res.body.encounter.status).toBe('preparing');
+      expect(res.body.encounter.hidden).toBe(true);
+      // The created encounter carries the 4 auto-added PCs PLUS the generated monster combatants.
+      const monsters = (res.body.encounter.combatants as Array<{ kind: string }>).filter((c) => c.kind === 'monster');
+      expect(monsters.length).toBeGreaterThan(0);
+      expect(res.body.suggestion.combatants.length).toBeGreaterThan(0);
+    });
+
+    it('a non-DM can preview (read-only) but cannot commit', async () => {
+      const server = ctx.app.getHttpServer();
+      const preview = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/generate`).set(player).send({ difficulty: 'easy', seed: 1 });
+      expect(preview.status).toBe(200);
+      const commit = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/generate?commit=true`).set(player).send({ difficulty: 'easy', seed: 1 });
+      expect(commit.status).toBe(403);
+    });
+  });
+
   // Issue #262: a DM's prepared, not-yet-sprung fight must not leak its combatant roster or
   // computed 5e difficulty to players. hidden gates the encounter WHOLESALE for a non-DM.
   describe('hidden encounter secrecy (issue #262)', () => {

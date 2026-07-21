@@ -1,7 +1,10 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterUpdate, CombatantCreate, CombatantUpdate, RollRequest, MapPing } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterUpdate, CombatantCreate, CombatantUpdate, RollRequest, MapPing } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
+// Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
+// rather than being silently dropped, consistent with the other encounter write bodies.
+export class EncounterGenerateDto extends createZodDto(EncounterGenerate.strict()) {}
 // .strict() (see CombatantUpdateDto below): an unknown key in an encounter PATCH body
 // 400s instead of silently no-op'ing.
 export class EncounterUpdateDto extends createZodDto(EncounterUpdate.strict()) {}
