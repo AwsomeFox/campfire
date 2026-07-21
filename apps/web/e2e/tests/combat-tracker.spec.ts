@@ -18,6 +18,11 @@ function encounterUrl(): string {
   return `/c/${campaignId}/encounters/${encounterId}`;
 }
 
+function endedEncounterUrl(): string {
+  const { campaignId, endedEncounterId } = seed();
+  return `/c/${campaignId}/encounters/${endedEncounterId}`;
+}
+
 async function openEncounter(page: Page) {
   await page.goto(encounterUrl());
   await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
@@ -46,6 +51,22 @@ test.describe('combat tracker — DM view', () => {
     await expect(page.getByRole('button', { name: 'Next turn →' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'End', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Cast', exact: true })).toBeVisible();
+
+    // On the RUNNING encounter the DM's per-combatant HP controls are present — this is the
+    // interactive marker the ended-encounter test below asserts is gone (issue #368).
+    await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) }).first()).toBeVisible();
+  });
+
+  test('an ENDED encounter renders read-only: combatant visible but no interactive controls (#368)', async ({ page }) => {
+    await page.goto(endedEncounterUrl());
+    await expect(page.getByRole('heading', { name: 'Aftermath at the Ember Hearth' })).toBeVisible();
+
+    // The encounter is over — the combatant still shows (read-only), but none of the
+    // per-combatant mutation controls that fire a PATCH the server rejects (assertMutable)
+    // are rendered: no HP +/- buttons and no editable initiative input.
+    await expect(page.getByText(boss.name).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) })).toHaveCount(0);
+    await expect(page.getByLabel(`Initiative for ${boss.name}`)).toHaveCount(0);
   });
 });
 

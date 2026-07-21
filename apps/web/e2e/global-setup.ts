@@ -46,6 +46,8 @@ export interface SeedData {
   baseURL: string;
   campaignId: number;
   encounterId: number;
+  /** A second encounter that was started and then ended — must render read-only (#368). */
+  endedEncounterId: number;
   npcId: number;
 }
 
@@ -137,6 +139,29 @@ export default async function globalSetup(config: FullConfig) {
   // Start the fight: status -> running, round 1, current actor = highest initiative.
   await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/start`);
 
+  // A second encounter that gets started then ENDED — used to assert the run screen is
+  // read-only once status is 'ended' (issue #368): no per-combatant HP controls fire a
+  // PATCH the server would reject via assertMutable.
+  const endedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'Aftermath at the Ember Hearth',
+  });
+  const endedEncounterId: number = endedEncounter.id;
+  const endedCombatant = await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/combatants`, {
+    kind: 'monster',
+    name: MONSTERS[0].name,
+    hpMax: MONSTERS[0].hpMax,
+  });
+  {
+    const patched = await dm.patch(`/api/v1/encounters/${endedEncounterId}/combatants/${endedCombatant.id}`, {
+      data: { initiative: MONSTERS[0].initiative },
+    });
+    if (!patched.ok()) {
+      throw new Error(`PATCH ended combatant initiative -> ${patched.status()}: ${await patched.text()}`);
+    }
+  }
+  await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/start`);
+  await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/end`);
+
   // --- capture a real session storageState per role ----------------------------
   await admin.storageState({ path: resolve(AUTH_DIR, 'admin.json') });
   await dm.storageState({ path: resolve(AUTH_DIR, 'dm.json') });
@@ -147,7 +172,7 @@ export default async function globalSetup(config: FullConfig) {
   const viewer = await loginContext(baseURL, 'viewer');
   await viewer.storageState({ path: resolve(AUTH_DIR, 'viewer.json') });
 
-  const seed: SeedData = { baseURL, campaignId, encounterId, npcId };
+  const seed: SeedData = { baseURL, campaignId, encounterId, endedEncounterId, npcId };
   writeFileSync(resolve(AUTH_DIR, 'seed.json'), JSON.stringify(seed, null, 2));
 
   await Promise.all([admin.dispose(), dm.dispose(), player.dispose(), viewer.dispose()]);

@@ -416,7 +416,6 @@ export async function fetchPf2eSection(
   logger: Pf2eImportLogger = consoleLogger,
 ): Promise<Pf2eSectionResult> {
   const aonType = SECTION_TO_AON_TYPE[section];
-  const entryType = SECTION_TO_ENTRY_TYPE[section];
   const mapper = SECTION_MAPPER[section];
   const base = baseUrl.replace(/\/$/, '');
   // De-dupe same-name rows to one canonical entry per (name, type): a section is a single
@@ -460,12 +459,15 @@ export async function fetchPf2eSection(
       try {
         const src = hit?._source;
         if (!src || typeof src !== 'object') throw new Error('missing _source');
-        entry = mapper(src as Record<string, unknown>);
         // Guard the AoN `type` filter: some indices return mixed rows for a broad `q`.
-        if (entry.type !== entryType) {
+        // Compare the SOURCE row's declared type against the section's AoN type — the
+        // mapped entry.type is a per-section constant, so comparing it to the
+        // section's own entry type (also derived from the section) never fires.
+        if (asString((src as Record<string, unknown>).type) !== aonType) {
           skippedCount += 1;
           continue;
         }
+        entry = mapper(src as Record<string, unknown>);
         if (!entry.name) throw new Error('missing name');
       } catch {
         skippedCount += 1;
