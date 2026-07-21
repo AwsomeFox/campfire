@@ -584,6 +584,35 @@ combat — over MCP alone.
   `list_notes`, `read_audit_log`) accept `limit`/`offset` with sane default
   caps.
 
+## AI provider config (encrypted key storage)
+
+`modules/ai-provider-config` stores the AI provider selection + credentials that
+feed the vendor-neutral provider factory (`modules/ai-dm/providers`,
+`createAiProvider`). Config lives at **two scopes**:
+
+- **Server default** — `GET/PUT/DELETE /settings/ai-provider` + `POST
+  /settings/ai-provider/test`. **Server-admin only.**
+- **Per-campaign override** — `GET/PUT/DELETE /campaigns/:id/ai-provider` +
+  `POST .../ai-provider/test`. **DM only.** A campaign that has no override (or
+  an override with no key of its own) **falls back to the server default** — the
+  override can pick its own model on the server's key, or supply its own key.
+
+The **API key is encrypted at rest** (AES-256-GCM, `common/crypto.ts`
+`encryptSecret`/`decryptSecret`) and is **write-only**: `PUT` accepts `apiKey`
+(omit to keep, a value to set/rotate, `""` to clear), but no read/export/audit/log
+ever returns it — a read exposes only `configured: true` + `keyLast4`. The key is
+decrypted **in-process only** by `AiProviderConfigService.resolveEffectiveConfig`
+(the effective-config resolver `#312` consumes) and handed straight to
+`createAiProvider`; it never crosses the wire. Server admins may set
+`allowedModels` on the server default to restrict which models a campaign override
+may select.
+
+### Encryption key env var
+
+| Env var | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `AI_CONFIG_KEY` | no | auto-generated keyfile | The secret protecting stored API keys. A **64-char hex** string is used as raw 32-byte key material; anything else is treated as a **passphrase** and stretched with scrypt. When unset, a random key is generated once and persisted to `DATA_DIR/ai-config.key` (mode `0600`). **Back up whichever you use** — losing it makes stored provider keys unrecoverable (by design). Never hardcoded. |
+
 ## Driving Campfire as an AI agent
 
 Everything below is the "how does an agent get from zero to a working

@@ -619,6 +619,31 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
   updated_at TEXT NOT NULL
 );
 
+-- AI provider config: encrypted API-key + provider storage (issue #310). Two
+-- scopes -- 'server' (one row, the admin-managed default) and 'campaign' (a
+-- per-campaign override, DM-managed, cascading on campaign delete). The API key
+-- is stored ONLY as encrypted_api_key (an aes-256-gcm ciphertext -- see
+-- common/crypto.ts encryptSecret); the plaintext key is NEVER stored, returned,
+-- logged, or exported. Reads expose only key_last4. The partial unique indexes
+-- pin exactly one server row and at most one row per campaign.
+CREATE TABLE IF NOT EXISTS ai_provider_configs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope TEXT NOT NULL,
+  campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+  provider_type TEXT NOT NULL,
+  base_url TEXT,
+  model TEXT NOT NULL DEFAULT '',
+  params TEXT NOT NULL DEFAULT '{}',
+  encrypted_api_key TEXT,
+  key_last4 TEXT,
+  allowed_models TEXT NOT NULL DEFAULT '[]',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server ON ai_provider_configs(scope) WHERE scope = 'server';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign ON ai_provider_configs(campaign_id) WHERE campaign_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
