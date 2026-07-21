@@ -5,6 +5,7 @@ import type { CampaignSummary, Role, Campaign, Encounter } from '@campfire/schem
 type DangerLevel = Campaign['dangerLevel'];
 import { api, API, ApiError } from '../../lib/api';
 import { Btn, TextInput, TextArea } from '../../components/ui';
+import { AiModeBadge } from '../ai-dm/AiModeBadge';
 
 const DANGER_CYCLE: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
 const DANGER_LABEL: Record<DangerLevel, string> = {
@@ -117,6 +118,8 @@ export function StatusHeader({
         <span className="tag tag-accent" style={{ whiteSpace: 'nowrap' }}>
           {DANGER_LABEL[campaign.dangerLevel]} danger
         </span>
+        {/* Mode-aware chrome (#343): tells everyone an AI participates before it speaks. */}
+        <AiModeBadge campaignId={campaignId} />
         <span className="tag tag-outline" style={{ whiteSpace: 'nowrap' }}>
           {currentLocation ? (
             <Link
