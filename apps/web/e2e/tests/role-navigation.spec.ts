@@ -23,7 +23,10 @@ test.describe('DM navigation', () => {
 
   test('DM sees the Dungeon master section and role badge', async ({ page }) => {
     await openCampaign(page);
-    await expect(page.getByText('Dungeon master', { exact: false })).toBeVisible();
+    // Match the sidebar "Dungeon master" section header exactly — a loose match now
+    // also hits the AI-DM onboarding card's "Try the AI Dungeon Master" (issue #360),
+    // which resolves to 2 elements and trips Playwright strict mode.
+    await expect(page.getByText('Dungeon master', { exact: true }).first()).toBeVisible();
     await expect(page.getByRole('link', { name: 'Members' })).toBeVisible();
     await expect(page.getByText('DM', { exact: true }).first()).toBeVisible();
   });
@@ -34,7 +37,7 @@ test.describe('player navigation', () => {
 
   test('player has no DM tools and reads as Player', async ({ page }) => {
     await openCampaign(page);
-    await expect(page.getByText('Dungeon master', { exact: false })).toHaveCount(0);
+    await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Members' })).toHaveCount(0);
     await expect(page.getByText('Player', { exact: true }).first()).toBeVisible();
   });
@@ -45,7 +48,7 @@ test.describe('viewer navigation', () => {
 
   test('viewer has no DM tools and reads as Viewer', async ({ page }) => {
     await openCampaign(page);
-    await expect(page.getByText('Dungeon master', { exact: false })).toHaveCount(0);
+    await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Members' })).toHaveCount(0);
     await expect(page.getByText('Viewer', { exact: true }).first()).toBeVisible();
   });

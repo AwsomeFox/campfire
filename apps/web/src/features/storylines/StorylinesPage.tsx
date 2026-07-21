@@ -447,7 +447,7 @@ function BeatRow({
 
       {beat.body && (
         <div style={{ marginLeft: 22 }}>
-          <Markdown className="!text-[12px] !text-slate-400">{beat.body}</Markdown>
+          <Markdown className="text-muted !text-[12px]">{beat.body}</Markdown>
         </div>
       )}
 
