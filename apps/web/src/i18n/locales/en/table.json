@@ -1,0 +1,62 @@
+{
+  "table": {
+    "title": "Table",
+    "loading": "Loading the table…",
+
+    "seatIdle": "Idle",
+    "seatNarrating": "Narrating…",
+    "seatPaused": "Paused",
+    "seatHumanControl": "Human control",
+
+    "scene": "Scene",
+    "noScene": "No scene set",
+    "turnCount": "{{count}} turns",
+
+    "tokenBudget": "Token budget",
+    "tokensUsedOf": "{{used}} / {{budget}} tokens",
+    "noBudget": "No budget",
+
+    "pause": "Pause",
+    "resume": "Resume",
+    "pauseFailed": "Couldn't change the AI DM's pause state.",
+
+    "emptyTitle": "The table is quiet",
+    "emptyHint": "Type an action below to begin the scene.",
+
+    "composerPlaceholder": "Describe what you do…",
+    "composerPlaceholderCombat": "Combat is live — describe your action…",
+    "composerPlaceholderTurn": "It's {{name}}'s turn — describe your action…",
+    "composerLockedStreaming": "The DM is narrating…",
+    "composerLockedPaused": "The AI DM is paused.",
+    "composerLockedHuman": "A human has taken the DM seat.",
+    "composerLockedAwaiting": "Waiting on the rest of the table…",
+    "sceneFieldPlaceholder": "Set the scene (optional)",
+    "send": "Send",
+    "sending": "Sending…",
+    "viewerHint": "You're watching as a viewer — only players can act.",
+
+    "liveEncounterTitle": "Combat is live",
+    "liveEncounterTurn": "{{name}}'s turn",
+    "openTracker": "Open the tracker",
+
+    "joinedDivider": "Joined mid-session",
+    "you": "You",
+    "playedBy": "played by {{name}}",
+
+    "systemScene": "Scene: {{text}}",
+    "systemPaused": "The AI DM was paused.",
+    "systemResumed": "The AI DM resumed.",
+    "systemStuck": "The AI DM got stuck.",
+    "systemRecovered": "The AI DM recovered.",
+    "systemTakeover": "A human took over the DM seat.",
+    "systemVote": "Table vote: {{action}}",
+    "systemInfo": "State: {{state}}",
+
+    "offTitle": "The AI DM is off",
+    "offHint": "No AI is running this table. The DM can switch on Driver mode in settings.",
+    "coDmTitle": "The AI is co-DMing",
+    "coDmHint": "In co-DM mode the AI only proposes changes for the DM to approve — there's no live table to play at. Switch to Driver mode to seat the AI as the DM.",
+    "gatedTitle": "AI DM unavailable",
+    "openSettings": "Open AI DM settings"
+  }
+}
