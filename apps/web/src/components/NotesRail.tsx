@@ -11,12 +11,13 @@ import { api, API } from '../lib/api';
 import { Card, Chip, Btn, TextArea, ErrorNote, type ChipVariant } from './ui';
 import { Markdown } from './Markdown';
 import { GameIcon } from './GameIcon';
+import { NOTE_VISIBILITY_ICON } from '../lib/uiIcons';
 
 const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; label: string }> = {
-  private: { chip: 'private', slug: 'padlock', label: 'Private' },
-  dm_shared: { chip: 'dm', slug: 'top-hat', label: 'DM' },
-  party_shared: { chip: 'party', slug: 'meeple', label: 'Party' },
-  whisper: { chip: 'whisper', slug: 'secret-book', label: 'Whisper' },
+  private: { chip: 'private', slug: NOTE_VISIBILITY_ICON.private, label: 'Private' },
+  dm_shared: { chip: 'dm', slug: NOTE_VISIBILITY_ICON.dm_shared, label: 'DM' },
+  party_shared: { chip: 'party', slug: NOTE_VISIBILITY_ICON.party_shared, label: 'Party' },
+  whisper: { chip: 'whisper', slug: NOTE_VISIBILITY_ICON.whisper, label: 'Whisper' },
 };
 
 /** Inline visibility label with its icon, for chips and the compose toggle. */

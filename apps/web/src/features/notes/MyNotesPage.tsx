@@ -19,15 +19,15 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from './EntityPicker';
 import { GameIcon } from '../../components/GameIcon';
-import { ENTITY_ICON } from '../../lib/uiIcons';
+import { ENTITY_ICON, NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 
 const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; label: string; short: string }> = {
-  private: { chip: 'private', slug: 'padlock', label: 'Private', short: 'Private' },
-  dm_shared: { chip: 'dm', slug: 'top-hat', label: 'Shared with DM', short: 'DM' },
-  party_shared: { chip: 'party', slug: 'meeple', label: 'Shared with party', short: 'Party' },
-  whisper: { chip: 'whisper', slug: 'secret-book', label: 'Whisper', short: 'Whisper' },
+  private: { chip: 'private', slug: NOTE_VISIBILITY_ICON.private, label: 'Private', short: 'Private' },
+  dm_shared: { chip: 'dm', slug: NOTE_VISIBILITY_ICON.dm_shared, label: 'Shared with DM', short: 'DM' },
+  party_shared: { chip: 'party', slug: NOTE_VISIBILITY_ICON.party_shared, label: 'Shared with party', short: 'Party' },
+  whisper: { chip: 'whisper', slug: NOTE_VISIBILITY_ICON.whisper, label: 'Whisper', short: 'Whisper' },
 };
 
 /**

@@ -2164,7 +2164,7 @@ function CombatantRow({
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
-              {down && <GameIcon slug="death-skull" size={14} className="inline align-text-bottom" title="" />}
+              {down && <GameIcon slug="death-skull" size={14} className="inline align-text-bottom" />}
               {combatant.name}
             </span>
             <span className={kindTagClass} style={{ fontSize: 9 }}>
