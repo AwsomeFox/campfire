@@ -22,6 +22,7 @@ import type {
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Markdown } from '../../components/Markdown';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
@@ -444,7 +445,11 @@ function BeatRow({
         )}
       </div>
 
-      {beat.body && <p className="text-muted" style={{ margin: '0 0 0 22px', fontSize: 12 }}>{beat.body}</p>}
+      {beat.body && (
+        <div style={{ marginLeft: 22 }}>
+          <Markdown className="text-muted !text-[12px]">{beat.body}</Markdown>
+        </div>
+      )}
 
       {/* Play-record links (issue #264): where this planned beat landed in play. */}
       {hasLinks && (

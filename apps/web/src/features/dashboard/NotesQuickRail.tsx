@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import type { Note, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Chip, TextInput, Btn, ErrorNote, EmptyState, type ChipVariant } from '../../components/ui';
+import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from '../notes/EntityPicker';
 
 const visMeta: Record<Note['visibility'], { chip: ChipVariant; label: string }> = {
@@ -124,7 +125,7 @@ export function NotesQuickRail({
                 'linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent) no-repeat top / 100% 1px',
             }}
           >
-            <div style={{ fontSize: 13, color: 'var(--color-neutral-200)' }}>{n.body}</div>
+            <Markdown className="!text-[13px] !text-[color:var(--color-neutral-200)]">{n.body}</Markdown>
             <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center' }}>
               <Chip variant={visMeta[n.visibility].chip}>{visMeta[n.visibility].label}</Chip>
               <span className="text-muted" style={{ fontSize: 10.5 }}>
