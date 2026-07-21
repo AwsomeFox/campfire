@@ -1,0 +1,354 @@
+import {
+  ForbiddenException,
+  Inject,
+  Injectable,
+  UnprocessableEntityException,
+} from '@nestjs/common';
+import crypto from 'node:crypto';
+import { eq, sql } from 'drizzle-orm';
+import type { z } from 'zod';
+import {
+  NpcCreate,
+  LocationCreate,
+  QuestCreate,
+  SessionCreate,
+  EncounterGenerate,
+  GenerateMapParams,
+} from '@campfire/schema';
+import type { CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, Proposal, Role } from '@campfire/schema';
+import { DB, type DrizzleDb } from '../../db/db.module';
+import { aiDmSeats } from '../../db/schema';
+import { nowIso } from '../../common/time';
+import { auditActor, type RequestUser } from '../../common/user.types';
+import { AuditService } from '../audit/audit.service';
+import { SettingsService } from '../settings/settings.service';
+import { ProposalRecordsService, type ProposableEntityType } from '../proposals/proposal-records.service';
+import { AiDmService } from './ai-dm.service';
+import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
+
+type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
+
+/** Upper bound on a draft turn's output, before the remaining-budget clamp. */
+const DRAFT_MAX_TOKENS = 4096;
+
+/** Which proposal entity type each co-DM target files under. */
+const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
+  npc: 'npc',
+  location: 'location',
+  beat: 'quest', // a story beat / next objective is filed as a quest (#27)
+  recap: 'session', // a session recap is filed as a session
+  encounter: 'encounter',
+  map: 'map',
+};
+
+/** Targets that support drafting N items at once; the rest ignore `count`. */
+const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
+
+/**
+ * Co-DM authoring (issue #313) — the AI drafts content for the DM's approval queue.
+ *
+ * Given a DM brief ("make a shady fence NPC", "build a level-3 ambush"), this asks the
+ * configured provider (the injected AI_DM_PROVIDER seam — a real model in production via
+ * #312, the no-op scaffold in a stock install) for STRUCTURED content, then files it as a
+ * PENDING PROPOSAL (#124) — never a direct write. The human DM reviews/approves/rejects it,
+ * and only on approve does it land in canon (through the same write path a manual create
+ * would take). Encounters/maps reuse the deterministic generators (#304/#306): the proposal
+ * carries their seeded params and approval re-runs the generator.
+ *
+ * Gating mirrors the AI DM turn path: the server-wide experimentalAiDm flag AND an enabled
+ * seat with remaining budget. Role gating (dm-only) is enforced by the controller/MCP tool.
+ * The draft's token cost is metered against the seat budget (#272), and the proposer is
+ * attributed to the AI seat + model — not the DM's name or a raw token.
+ */
+@Injectable()
+export class CoDmService {
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    private readonly settings: SettingsService,
+    private readonly aiDm: AiDmService,
+    private readonly records: ProposalRecordsService,
+    private readonly audit: AuditService,
+    @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
+  ) {}
+
+  /** 403 unless the server-wide experimental flag is on — the same choke point as the AI DM seat. */
+  private async assertExperimentalEnabled(): Promise<void> {
+    const all = await this.settings.getAll();
+    if (!all.experimentalAiDm) {
+      throw new ForbiddenException(
+        'Server-side AI Dungeon Master is experimental and disabled. A server admin must enable it via PATCH /settings {experimentalAiDm:true}.',
+      );
+    }
+  }
+
+  /**
+   * Draft content for the given target and file it as pending proposal(s). Returns the
+   * proposal ids (never a direct write). Gated on the experimental flag + an enabled,
+   * budgeted seat; the draft's token cost is metered against the seat.
+   */
+  async draft(campaignId: number, input: CoDmDraftRequestInput, user: RequestUser, role: Role): Promise<CoDmDraftResult> {
+    await this.assertExperimentalEnabled();
+
+    const seat = await this.aiDm.getSeat(campaignId);
+    if (!seat.enabled) {
+      throw new ForbiddenException(
+        'The AI Dungeon Master seat is not enabled for this campaign. Configure it first: PUT /campaigns/:id/ai-dm {enabled:true, tokenBudget:N}.',
+      );
+    }
+    const remaining = seat.tokenBudget - seat.tokensUsed;
+    if (remaining <= 0) {
+      throw new ForbiddenException(
+        `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
+      );
+    }
+
+    const count = MULTI_TARGETS.has(input.target) ? input.count ?? 1 : 1;
+    const maxTokens = Math.min(DRAFT_MAX_TOKENS, remaining);
+
+    // Ask the provider for structured content. The persona (seat.instructions) is combined
+    // with a target-specific "reply as JSON" directive; the DM's brief is the user turn.
+    const result = await this.provider.generate({
+      campaignId,
+      kind: input.target === 'recap' ? 'recap' : 'narrate',
+      prompt: input.prompt,
+      instructions: this.buildInstructions(seat.instructions, input.target, count),
+      model: seat.model,
+      maxTokens,
+    });
+
+    // Turn the provider text into validated proposal payloads for the target's entity type.
+    const entityType = TARGET_ENTITY_TYPE[input.target];
+    const payloads = this.toPayloads(input.target, result.narration, count);
+
+    // Attribute the proposal to the AI seat + model, not the triggering DM (issue #313).
+    const modelLabel = seat.model || 'unconfigured';
+    const attribution = {
+      proposer: `AI DM (${modelLabel})`,
+      proposerUserId: `ai-dm:${campaignId}`,
+      proposerToken: null,
+    };
+
+    const proposals: Proposal[] = [];
+    for (const payload of payloads) {
+      proposals.push(await this.records.create(campaignId, entityType, null, 'create', payload, user, role, attribution));
+    }
+
+    const tokensUsed = Math.max(0, Math.floor(result.tokensUsed));
+    const newTokensUsed = this.meterUsage(campaignId, seat.tokenBudget, tokensUsed);
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.draft',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `${input.target} → ${proposals.length} ${entityType} proposal(s) via ${this.provider.name} (+${tokensUsed} tokens)`,
+    });
+
+    return {
+      target: input.target,
+      provider: this.provider.name,
+      model: seat.model,
+      entityType,
+      proposalIds: proposals.map((p) => p.id),
+      proposals,
+      tokensUsed,
+      tokenBudget: seat.tokenBudget,
+      budgetRemaining: Math.max(0, seat.tokenBudget - newTokensUsed),
+    };
+  }
+
+  /**
+   * Meter the draft's token cost atomically against the seat budget (issue #272 idiom):
+   * increment IN SQL, clamped to the budget, inside a transaction so concurrent drafts/turns
+   * can't clobber each other's read-modify-write. Returns the post-update tokensUsed.
+   */
+  private meterUsage(campaignId: number, tokenBudget: number, tokensUsed: number): number {
+    let total = tokenBudget;
+    this.db.transaction((tx) => {
+      const [updated] = tx
+        .update(aiDmSeats)
+        .set({
+          tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${tokensUsed})`,
+          updatedAt: nowIso(),
+        })
+        .where(eq(aiDmSeats.campaignId, campaignId))
+        .returning()
+        .all();
+      // An enabled seat always has a persisted row (defaultSeat is disabled), so `updated`
+      // exists; fall back to the budget defensively if it somehow doesn't.
+      total = updated ? updated.tokensUsed : tokenBudget;
+    });
+    return total;
+  }
+
+  /** Persona + a target-specific instruction to reply with strict JSON the server can parse. */
+  private buildInstructions(persona: string, target: CoDmDraftTarget, count: number): string {
+    const base = persona ? `${persona}\n\n` : '';
+    const shape = DRAFT_JSON_SHAPE[target];
+    const arrayNote =
+      MULTI_TARGETS.has(target) && count > 1
+        ? `Return a JSON ARRAY of exactly ${count} such objects.`
+        : 'Return a single JSON object.';
+    return (
+      `${base}You are drafting D&D content for the DM to review. Reply with ONLY JSON — no prose, ` +
+      `no markdown fences. ${arrayNote} Each object matches: ${shape}`
+    );
+  }
+
+  /**
+   * Parse the provider text into one or more validated payloads for the target's entity
+   * type. Every payload is validated (and unknown keys stripped) against the target's Create
+   * schema, so what's stored applies cleanly on approve. encounter/map tolerate a missing/
+   * non-JSON reply — they fall back to sensible generator defaults — and always pin a seed so
+   * the approved generation is reproducible. Other targets require a JSON draft (recap falls
+   * back to using the raw text as the recap body).
+   */
+  private toPayloads(target: CoDmDraftTarget, narration: string, count: number): Record<string, unknown>[] {
+    const parsed = extractJson(narration);
+
+    switch (target) {
+      case 'npc':
+      case 'location':
+      case 'beat': {
+        if (parsed === null) {
+          throw new UnprocessableEntityException(
+            `The AI did not return a JSON ${target} draft. Configure a real provider (the default no-op scaffold cannot author content) or retry.`,
+          );
+        }
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        return items
+          .filter((it): it is Record<string, unknown> => it !== null && typeof it === 'object' && !Array.isArray(it))
+          .slice(0, count)
+          .map((raw) => this.validate(target, raw));
+      }
+      case 'recap': {
+        const obj = firstObject(parsed);
+        const recap = typeof obj?.recap === 'string' && obj.recap.trim() ? obj.recap : narration.trim();
+        const title = typeof obj?.title === 'string' ? obj.title : undefined;
+        return [this.validate('recap', { recap, ...(title ? { title } : {}) })];
+      }
+      case 'encounter':
+      case 'map':
+        return [this.validate(target, firstObject(parsed) ?? {})];
+    }
+  }
+
+  /** Normalize + strict-shape a raw draft object into the stored proposal payload. */
+  private validate(target: CoDmDraftTarget, raw: Record<string, unknown>): Record<string, unknown> {
+    try {
+      switch (target) {
+        case 'npc':
+          return NpcCreate.parse(raw) as Record<string, unknown>;
+        case 'location':
+          return LocationCreate.parse(raw) as Record<string, unknown>;
+        case 'beat':
+          // A "beat" is filed as a quest: map common narrative fields onto quest fields.
+          return QuestCreate.parse({
+            title: raw.title ?? raw.name ?? 'Untitled beat',
+            body: raw.body ?? raw.summary ?? raw.description ?? '',
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+          }) as Record<string, unknown>;
+        case 'recap':
+          return SessionCreate.parse(raw) as Record<string, unknown>;
+        case 'encounter':
+          // Seed pinned so approve re-runs the identical generator (#304). Default a band.
+          return EncounterGenerate.parse({
+            difficulty: 'medium',
+            ...raw,
+            seed: typeof raw.seed === 'number' ? raw.seed : mintNumericSeed(),
+          }) as Record<string, unknown>;
+        case 'map':
+          // Seed pinned so approve re-runs the identical generator (#306).
+          return GenerateMapParams.parse({
+            ...raw,
+            seed: typeof raw.seed === 'string' && raw.seed ? raw.seed : mintStringSeed(),
+          }) as Record<string, unknown>;
+      }
+    } catch (err) {
+      throw new UnprocessableEntityException(
+        `The AI draft for ${target} failed validation: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
+/** Per-target JSON hint the model is asked to fill (informational; the server re-validates). */
+const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
+  npc: '{"name": string (required), "role"?: string, "disposition"?: string, "body"?: string, "dmSecret"?: string}',
+  location:
+    '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
+  beat: '{"title": string (required), "body"?: string (markdown), "dmSecret"?: string}',
+  recap: '{"title"?: string, "recap": string (markdown summary of the session)}',
+  encounter:
+    '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}',
+  map: '{"kind"?: "dungeon"|"cave"|"wilderness", "size"?: "small"|"medium"|"large", "theme"?: string}',
+};
+
+/** A fresh uint32 seed for the encounter generator. */
+function mintNumericSeed(): number {
+  return crypto.randomBytes(4).readUInt32BE(0);
+}
+
+/** A fresh hex seed for the map generator. */
+function mintStringSeed(): string {
+  return crypto.randomBytes(8).toString('hex');
+}
+
+/** The first object from a parsed JSON value (unwrapping a single-element array). */
+function firstObject(value: unknown): Record<string, unknown> | null {
+  const v = Array.isArray(value) ? value[0] : value;
+  return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+/**
+ * Best-effort JSON extraction from model text: try a direct parse, then strip ``` fences,
+ * then fall back to the first balanced {...} / [...] span. Returns null when nothing parses,
+ * so the caller can decide whether that target tolerates a non-JSON reply.
+ */
+function extractJson(text: string): unknown {
+  const trimmed = text.trim();
+  const candidates: string[] = [trimmed];
+
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) candidates.push(fence[1].trim());
+
+  const span = sliceBalanced(trimmed);
+  if (span) candidates.push(span);
+
+  for (const c of candidates) {
+    try {
+      return JSON.parse(c);
+    } catch {
+      // try the next candidate
+    }
+  }
+  return null;
+}
+
+/** Extract the substring from the first `{`/`[` to its matching close, ignoring brackets in strings. */
+function sliceBalanced(text: string): string | null {
+  const start = text.search(/[{[]/);
+  if (start < 0) return null;
+  const open = text[start];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}

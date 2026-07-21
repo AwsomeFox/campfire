@@ -11,6 +11,7 @@ const DEFAULTS: z.infer<typeof ServerSettings> = {
   allowLocalLogin: true,
   allowSignup: false,
   experimentalAiDm: false,
+  aiServerTokenCap: 0,
 };
 
 @Injectable()
