@@ -870,3 +870,71 @@ describe('rules / rule packs — concurrent install race (e2e, fake Open5e serve
     await request(server).delete(`/api/v1/rules/packs/${[...packIds][0]}`).set(dmHeaders);
   });
 });
+
+/**
+ * Pathfinder 2e importer + install path (issue #295). Proves the full flagship wiring:
+ * POST /rules/packs/install with `source: 'pf2e'` routes to the PF2e importer, installs
+ * under the `pf2e-srd` pack slug (which the PF2e RuleSystemAdapter is registered against),
+ * and maps AoN sections onto Campfire's rule-entry types with the ORC/OGL license + source
+ * book stamped. Uses the in-process fake AoN Elasticsearch server (test/fake-pf2e.ts).
+ */
+describe('rules / rule packs — Pathfinder 2e install (e2e, fake AoN server)', () => {
+  let ctx: TestAppContext;
+  let pf2e: import('./fake-pf2e').FakePf2e;
+  let server: Server;
+
+  beforeAll(async () => {
+    const { startFakePf2e } = await import('./fake-pf2e');
+    ctx = await createTestApp();
+    pf2e = await startFakePf2e();
+    server = ctx.app.getHttpServer();
+  });
+
+  afterAll(async () => {
+    await pf2e.close();
+    await closeTestApp(ctx);
+  });
+
+  async function installPf2e(headers: Record<string, string>) {
+    const res = await request(server).post('/api/v1/rules/packs/install').set(headers).send({ source: 'pf2e', url: pf2e.baseUrl });
+    expect(res.status).toBe(202);
+    expect(res.body.source).toBe('pf2e');
+    return pollJob(server, headers, res.body.id);
+  }
+
+  it('installs under the pf2e-srd slug and maps sections onto Campfire rule-entry types', async () => {
+    const job = await installPf2e(dm);
+    expect(job.status).toBe('completed');
+    expect(job.pack.slug).toBe('pf2e-srd');
+    expect(job.pack.name).toMatch(/Pathfinder 2e/);
+    // ORC license carried through onto the pack.
+    expect(job.pack.license).toMatch(/ORC/);
+
+    // Creature -> monster, with the PF2e statblock (level as CR, ability MODS) in dataJson.
+    const monsterRes = await request(server).get('/api/v1/rules/search').query({ q: 'Goblin', type: 'monster' }).set(dm);
+    expect(monsterRes.status).toBe(200);
+    const goblin = monsterRes.body.find((e: { name: string }) => e.name === 'Goblin Warrior');
+    expect(goblin).toBeDefined();
+    expect(goblin.source).toBe('Pathfinder Monster Core');
+    const data = JSON.parse(goblin.dataJson);
+    expect(data.level).toBe(-1);
+    expect(data.perception).toBe(2);
+    expect(data.abilityMods.dexterity).toBe(3);
+
+    // Spell -> spell, equipment -> item, ancestry -> race, class -> class, condition -> condition.
+    const typesToProbe: Array<[string, string]> = [
+      ['Fireball', 'spell'],
+      ['Longsword', 'item'],
+      ['Dwarf', 'race'],
+      ['Fighter', 'class'],
+      ['Frightened', 'condition'],
+    ];
+    for (const [name, type] of typesToProbe) {
+      const r = await request(server).get('/api/v1/rules/search').query({ q: name, type }).set(dm);
+      expect(r.status).toBe(200);
+      expect(r.body.some((e: { name: string }) => e.name === name)).toBe(true);
+    }
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+  });
+});
