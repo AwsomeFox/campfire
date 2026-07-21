@@ -1,7 +1,7 @@
 import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import type { AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult } from '@campfire/schema';
+import type { AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -90,6 +90,24 @@ export class AiDmService {
   async getSeat(campaignId: number): Promise<AiDmSeat> {
     const row = await this.findRow(campaignId);
     return row ? toDomain(row) : defaultSeat(campaignId);
+  }
+
+  /**
+   * Redact DM-only fields for non-DM callers (issue #261). `instructions` is
+   * DM-authored steering — the persona/house rules where plot secrets live —
+   * and must not leak to players/viewers, mirroring dmSecret/hidden everywhere
+   * else. DM callers get the full seat; everyone else gets it with
+   * `instructions` omitted entirely.
+   */
+  redactSeatForRole(seat: AiDmSeat, role: Role): AiDmSeat | Omit<AiDmSeat, 'instructions'> {
+    if (role === 'dm') return seat;
+    const { instructions: _instructions, ...rest } = seat;
+    return rest;
+  }
+
+  /** Convenience: read the seat and redact it for the caller's role in one step. */
+  async getSeatForRole(campaignId: number, role: Role): Promise<AiDmSeat | Omit<AiDmSeat, 'instructions'>> {
+    return this.redactSeatForRole(await this.getSeat(campaignId), role);
   }
 
   /** Configure the seat (dm only). Gated on the server experimental flag. Upserts; omitted fields are left unchanged. */

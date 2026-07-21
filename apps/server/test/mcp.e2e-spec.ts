@@ -358,6 +358,40 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     for (const m of matches) expect(m.type).toBe('monster');
   });
 
+  it('get_ai_dm_seat redacts DM instructions (plot secrets) for a non-DM caller (issue #261)', async () => {
+    // Enable the experimental feature (admin) and configure the seat with a private
+    // steering prompt via REST — this is where plot secrets live.
+    const flagRes = await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: true });
+    expect(flagRes.status).toBe(200);
+    const cfgRes = await dmAgent.put(`/api/v1/campaigns/${campaignId}/ai-dm`).send({
+      enabled: true,
+      model: 'connected-agent',
+      instructions: 'Secret: the duke is the true villain.',
+      tokenBudget: 1000,
+    });
+    expect(cfgRes.status).toBe(200);
+
+    // The DM-scoped PAT sees the instructions in full.
+    const dmClient = await mcpClient(dmToken);
+    const dmRes = await dmClient.callTool({ name: 'get_ai_dm_seat', arguments: { campaignId } });
+    expect(dmRes.isError).toBeFalsy();
+    const dmSeat = parseResult(dmRes) as { instructions?: string; model?: string };
+    expect(dmSeat.instructions).toBe('Secret: the duke is the true villain.');
+
+    // A viewer-scoped PAT gets the seat WITHOUT instructions; other fields remain.
+    const viewerClient = await mcpClient(viewerToken);
+    const viewerRes = await viewerClient.callTool({ name: 'get_ai_dm_seat', arguments: { campaignId } });
+    expect(viewerRes.isError).toBeFalsy();
+    const viewerSeat = parseResult(viewerRes) as Record<string, unknown>;
+    expect(viewerSeat).not.toHaveProperty('instructions');
+    expect(viewerSeat.model).toBe('connected-agent');
+    expect(viewerSeat.enabled).toBe(true);
+
+    // Restore the default so later tests see the feature disabled.
+    const restoreRes = await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: false });
+    expect(restoreRes.status).toBe(200);
+  });
+
   it('propose:true returns a proposal; quest applied only after approve_proposal', async () => {
     const viewerClient = await mcpClient(viewerToken);
     const proposeResult = await viewerClient.callTool({

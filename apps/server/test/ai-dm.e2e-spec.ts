@@ -10,6 +10,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
  */
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'aidm-dm' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'aidm-player' };
+const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'aidm-viewer' };
 
 describe('ai-dm (e2e)', () => {
   let ctx: TestAppContext;
@@ -77,6 +78,29 @@ describe('ai-dm (e2e)', () => {
     expect(res.body.model).toBe('connected-agent');
     expect(res.body.instructions).toBe('Be terse and grim.');
     expect(res.body.tokenBudget).toBe(100_000);
+  });
+
+  it('GET seat redacts the DM instructions (plot secrets) for non-DM members (issue #261)', async () => {
+    // The DM sees the private steering prompt in full.
+    const dmView = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm);
+    expect(dmView.status).toBe(200);
+    expect(dmView.body.instructions).toBe('Be terse and grim.');
+
+    // A player member gets the seat WITHOUT instructions — the DM-authored prompt
+    // is where plot secrets live and must not leak (mirrors dmSecret/hidden).
+    const playerView = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(player);
+    expect(playerView.status).toBe(200);
+    expect(playerView.body).not.toHaveProperty('instructions');
+    // Non-secret config is still visible to members.
+    expect(playerView.body.enabled).toBe(true);
+    expect(playerView.body.model).toBe('connected-agent');
+    expect(playerView.body.tokenBudget).toBe(100_000);
+    expect(playerView.body.campaignId).toBe(campaignId);
+
+    // Same redaction for a viewer.
+    const viewerView = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(viewer);
+    expect(viewerView.status).toBe(200);
+    expect(viewerView.body).not.toHaveProperty('instructions');
   });
 
   it('AI DM takes a turn (201): no-op scaffold narration, budget metered, audited', async () => {

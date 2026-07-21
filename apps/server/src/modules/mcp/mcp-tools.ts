@@ -767,11 +767,12 @@ export class McpToolsService {
       'get_ai_dm_seat',
       'EXPERIMENTAL (issue #28): read the AI Dungeon Master seat for a campaign — whether an AI holds the DM seat, its ' +
         'persona/instructions, and the per-campaign token budget/usage. Requires membership. A connected agent that is ' +
-        'meant to run the game reads this first to learn its instructions and remaining budget before ai_dm_narrate.',
+        'meant to run the game reads this first to learn its instructions and remaining budget before ai_dm_narrate. ' +
+        'The DM-authored `instructions` (steering prompt / plot secrets) are omitted for non-DM callers (issue #261).',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.aiDm.getSeat(campaignId as number);
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.aiDm.getSeatForRole(campaignId as number, role);
       },
     );
 
