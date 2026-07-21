@@ -101,8 +101,8 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
       ))}
       <div className="space-y-2">
         <TextArea style={{ minHeight: 70 }} placeholder="Add a note… (private by default)" value={body} onChange={(e) => setBody(e.target.value)} />
-        <div className="flex items-center justify-between gap-2">
-          <div className="seg">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="seg seg-wrap min-w-0 flex-1">
             {VIS_ORDER.map((v) => (
               <button
                 key={v}
