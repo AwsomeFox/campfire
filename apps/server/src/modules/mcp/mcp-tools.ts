@@ -2485,15 +2485,17 @@ export class McpToolsService {
       server,
       user,
       'add_combatant',
-      '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
+      '`kind` ("character"|"monster"|"npc") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
-        'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted. Pass ' +
+        'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted. For kind="npc" ' +
+        'pass npcId to link a campaign NPC (its name is used); give hpMax or a ruleEntryId statblock for its HP. Pass ' +
         '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N".',
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
         ...CombatantCreate.shape,
         // Same constraints as CombatantCreate (Id, optional) but described for tools/list.
         characterId: Id.optional().describe('Character id — links a party member and pulls name/hp/initMod from their sheet when omitted'),
+        npcId: Id.optional().describe('NPC id (kind="npc") — links a campaign NPC as the combatant identity; its name is used when name is omitted'),
         ruleEntryId: Id.optional().describe('Monster statblock rule entry id — from lookup_rule/get_rule_entry'),
         count: z.number().int().min(1).max(50).optional().describe('Add this many copies at once (monsters), names auto-suffixed 1..N so duplicates are distinguishable'),
       },
