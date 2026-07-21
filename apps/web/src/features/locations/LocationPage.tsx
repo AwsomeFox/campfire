@@ -28,6 +28,16 @@ const statusLabel: Record<Location['status'], string> = {
   current: 'Current',
 };
 
+/** Status text with a map-marker glyph on the "current" status (the only one that carries an icon). */
+function StatusLabel({ status }: { status: Location['status'] }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {status === 'current' && <GameIcon slug="position-marker" size={11} />}
+      {statusLabel[status]}
+    </span>
+  );
+}
+
 /** Design's primary "discover" action advances one step: unexplored -> explored -> current. */
 const NEXT_STATUS: Record<Location['status'], Location['status'] | null> = {
   unexplored: 'explored',
@@ -391,7 +401,7 @@ export default function LocationPage() {
           )}
           <div className="flex items-center gap-2.5 flex-wrap">
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
-            <Chip variant={statusVariant(location.status)}>{statusLabel[location.status]}</Chip>
+            <Chip variant={statusVariant(location.status)}><StatusLabel status={location.status} /></Chip>
             {isDm && location.status === 'unexplored' && (
               <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
             )}
@@ -442,7 +452,7 @@ export default function LocationPage() {
                           s === location.status ? 'text-amber-400' : 'text-slate-300'
                         }`}
                       >
-                        {statusLabel[s]}
+                        <StatusLabel status={s} />
                       </button>
                     ))}
                   </div>
@@ -604,7 +614,7 @@ export default function LocationPage() {
                 <p className="card-kicker">Facts</p>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Status</span>
-                  <span>{statusLabel[location.status]}</span>
+                  <StatusLabel status={location.status} />
                 </div>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Kind</span>

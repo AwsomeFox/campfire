@@ -23,6 +23,16 @@ const statusLabel: Record<Location['status'], string> = {
   current: 'Current',
 };
 
+/** Status text with a map-marker glyph on the "current" status (the only one that carries an icon). */
+function StatusLabel({ status }: { status: Location['status'] }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {status === 'current' && <GameIcon slug="position-marker" size={11} />}
+      {statusLabel[status]}
+    </span>
+  );
+}
+
 /**
  * Flatten the location hierarchy (#99) into render order: each root followed by its
  * descendants depth-first, carrying a `depth` for indentation. Locations whose parent
@@ -213,7 +223,7 @@ export default function LocationListPage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
-                    <Chip variant={statusVariant(loc.status)}>{statusLabel[loc.status]}</Chip>
+                    <Chip variant={statusVariant(loc.status)}><StatusLabel status={loc.status} /></Chip>
                     {isDm && loc.status === 'unexplored' && (
                       <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
                     )}
