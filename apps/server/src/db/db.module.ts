@@ -645,13 +645,31 @@ function migrateDiceRollsTableForKeepDrop(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before soft-delete / trash (issue #116): the trashable
+ * entities gained a nullable `deleted_at` timestamp — NULL means live, an ISO string
+ * means the row is in the trash (excluded from normal reads, restorable). Idempotent
+ * per-table PRAGMA-guarded ADD COLUMNs. Existing rows come in with NULL (== live).
+ */
+function migrateSoftDeleteColumns(sqlite: Database.Database): void {
+  const addDeletedAt = (table: string): void => {
+    const exists = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+      .get(table);
+    if (!exists) return; // fresh DB — BOOTSTRAP_SQL creates it with the column.
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((c) => c.name === 'deleted_at')) return;
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
+  };
+  for (const table of ['campaigns', 'quests', 'npcs', 'locations', 'sessions', 'notes', 'characters']) {
+    addDeletedAt(table);
+  }
+}
+
+/**
  * Migration for DBs created before the VTT grid + fog of war (issue #40, phases 2–3):
- * `encounters` gained `grid_size` / `grid_scale` / `grid_unit` (measurement ruler config),
- * `grid_snap` (snap-to-grid flag), and `fog` (JSON FogState mask). Plain nullable/defaulted
- * ADD COLUMNs — no table rebuild needed, same shape as migrateDiceRollsTableForKeepDrop
- * above. Existing encounters get NULL grid config (no grid) and NULL fog (fully visible),
- * exactly preserving the issue-#39 battle-map behaviour. New DBs never hit this path —
- * BOOTSTRAP_SQL already declares the columns.
+ * `encounters` gained `grid_size` / `grid_scale` / `grid_unit` / `grid_snap` / `fog`.
+ * Plain nullable/defaulted ADD COLUMNs. Existing encounters get NULL grid (no grid) and
+ * NULL fog (fully visible), preserving the issue-#39 battle-map behaviour.
  */
 function migrateEncountersTableForVtt(sqlite: Database.Database): void {
   const hasTable = sqlite
@@ -670,10 +688,7 @@ function migrateEncountersTableForVtt(sqlite: Database.Database): void {
 
 /**
  * Migration for DBs created before token size categories (issue #40, phase 2):
- * `combatants.token_size` didn't exist. Plain NOT NULL DEFAULT 'medium' ADD COLUMN — no
- * table rebuild needed, same shape as migrateCharactersTableForStatus above. Existing rows
- * backfill to 'medium' (a 1×1 footprint, the pre-migration default). New DBs never hit this
- * path — BOOTSTRAP_SQL already declares the column.
+ * `combatants.token_size` (NOT NULL DEFAULT 'medium'). Existing rows backfill to 'medium'.
  */
 function migrateCombatantsTableForTokenSize(sqlite: Database.Database): void {
   const hasTable = sqlite
@@ -730,6 +745,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0028_dice_rolls_keep_drop', run: migrateDiceRollsTableForKeepDrop },
   { name: '0029_encounters_vtt_grid_fog', run: migrateEncountersTableForVtt },
   { name: '0030_combatants_token_size', run: migrateCombatantsTableForTokenSize },
+  { name: '0031_soft_delete', run: migrateSoftDeleteColumns },
 ];
 
 /**

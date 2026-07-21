@@ -6,6 +6,7 @@ import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDige
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
@@ -394,7 +395,7 @@ export class EncountersService {
     const partyRows = await this.db
       .select()
       .from(characters)
-      .where(and(eq(characters.campaignId, campaignId), eq(characters.status, 'active')));
+      .where(and(eq(characters.campaignId, campaignId), eq(characters.status, 'active'), notDeleted(characters.deletedAt)));
     // Auto-add the whole party in ONE multi-row INSERT (#72) rather than one INSERT
     // per character — the row values (including the sequential sortOrder) are computed
     // in JS and handed to a single `.values([...])`. Behavior is identical to the old

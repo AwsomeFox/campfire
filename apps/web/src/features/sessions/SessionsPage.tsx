@@ -22,6 +22,7 @@ import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { SchedulePanel } from './SchedulePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 
@@ -312,6 +313,7 @@ function SessionDetail({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The `updatedAt` we last loaded — sent back on save as the optimistic-concurrency
   // guard (#157) so a co-DM's or a connected AI's interleaved edit 409s instead of being
@@ -401,13 +403,23 @@ function SessionDetail({
     setDeleting(true);
     setError(null);
     try {
+      // Soft-delete (issue #116) — reversible. Keep the detail open with an Undo
+      // affordance; defer the list refresh to expiry so the detail (and this Undo bar)
+      // don't unmount mid-window (the list derives `selected` by id).
       await api.delete(`${API}/sessions/${session.id}`);
-      onChange();
-      onBack();
+      setConfirmingDelete(false);
+      setPendingUndo(true);
     } catch {
       setError("Couldn't delete the session.");
+    } finally {
       setDeleting(false);
     }
+  }
+
+  async function undoDelete() {
+    await api.post(`${API}/sessions/${session.id}/restore`);
+    setPendingUndo(false);
+    onChange();
   }
 
   return (
@@ -508,11 +520,21 @@ function SessionDetail({
       {confirmingDelete && (
         <ConfirmDialog
           title={`Delete Session ${session.number}?`}
-          body="This cannot be undone."
+          body="This moves the session (recap, attendance, share links) to the Trash — you can undo it, or restore it from the campaign Trash."
           confirmLabel={deleting ? 'Deleting…' : 'Delete session'}
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
+      {pendingUndo && (
+        <UndoSnackbar
+          message={`Session ${session.number} moved to Trash.`}
+          onUndo={undoDelete}
+          onExpire={() => {
+            onChange();
+            onBack();
+          }}
         />
       )}
 

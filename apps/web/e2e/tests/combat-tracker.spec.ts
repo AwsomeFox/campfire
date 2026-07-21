@@ -34,7 +34,7 @@ test.describe('combat tracker — DM view', () => {
     await expect(page.getByText(/Round\s*1/)).toBeVisible();
 
     // Both monsters present with exact HP "current / max" (issue #81 HP math).
-    await expect(page.getByText(boss.name)).toBeVisible();
+    await expect(page.getByText(boss.name).first()).toBeVisible();
     await expect(page.getByText(`${boss.hpMax} / ${boss.hpMax}`)).toBeVisible();
     await expect(page.getByText(`${skirmisher.hpMax} / ${skirmisher.hpMax}`)).toBeVisible();
 
@@ -58,7 +58,7 @@ test.describe('combat tracker — non-DM views', () => {
         await openEncounter(page);
 
         // The monster is visible in the order...
-        await expect(page.getByText(boss.name)).toBeVisible();
+        await expect(page.getByText(boss.name).first()).toBeVisible();
         // ...but its exact HP number is NOT — the client shows a coarse band label.
         await expect(page.getByText(`${boss.hpMax} / ${boss.hpMax}`)).toHaveCount(0);
         await expect(page.getByText('Healthy').first()).toBeVisible();

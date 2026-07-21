@@ -5,12 +5,13 @@
  * that launches the full NewCampaignWizard overlay (details -> rule system
  * -> POST + PATCH ruleSystem). Any user may create a campaign.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, ApiError, API } from '../../lib/api';
 import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
 import type { Campaign } from '@campfire/schema';
 
@@ -170,6 +171,132 @@ function CampaignTile({
   );
 }
 
+/** Best-effort "how long ago" label from an ISO timestamp, for the Trash list. */
+function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 60) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
+}
+
+/**
+ * Campaign Trash (issue #116) — the recoverable other half of the now-soft DELETE.
+ * Lists the caller's trashed campaigns with Restore (un-delete) and the deliberate
+ * Delete permanently (purge: hard-cascade + on-disk wipe, gated behind a confirm).
+ * Fetches its own list lazily; on restore it calls the parent `onChanged` so the main
+ * hub grid picks the campaign back up.
+ */
+function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) {
+  const [trashed, setTrashed] = useState<Campaign[]>([]);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [purgeTarget, setPurgeTarget] = useState<Campaign | null>(null);
+
+  async function load() {
+    try {
+      setTrashed(await api.get<Campaign[]>(`${API}/campaigns/trash`));
+    } catch {
+      /* trash is a soft feature — a fetch hiccup just hides the section */
+    }
+  }
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function restore(c: Campaign) {
+    setBusyId(c.id);
+    setError(null);
+    try {
+      await api.post(`${API}/campaigns/${c.id}/restore`);
+      setTrashed((prev) => prev.filter((x) => x.id !== c.id));
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't restore campaign.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function purge(c: Campaign) {
+    setBusyId(c.id);
+    setError(null);
+    try {
+      await api.delete(`${API}/campaigns/${c.id}/purge`);
+      setTrashed((prev) => prev.filter((x) => x.id !== c.id));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't permanently delete campaign.");
+    } finally {
+      setBusyId(null);
+      setPurgeTarget(null);
+    }
+  }
+
+  if (trashed.length === 0) return null;
+
+  return (
+    <>
+      <div style={{ marginTop: 10 }}>
+        <h4 style={{ margin: 0, color: 'var(--color-neutral-300)' }}>Trash</h4>
+        <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12.5 }}>
+          Deleted campaigns are kept here — every note, session and uploaded file is intact.
+          Restore one, or delete it permanently to reclaim its space.
+        </p>
+      </div>
+      <div className="flex flex-col gap-2">
+        {trashed.map((c) => (
+          <div key={c.id} className="card elev-sm flex items-center gap-3" style={{ opacity: 0.85 }}>
+            <div className="flex-1 min-w-0">
+              <div className="card-title" style={{ fontSize: 14 }}>{c.name}</div>
+              <div className="text-muted" style={{ fontSize: 11.5 }}>
+                Deleted {timeAgo(c.deletedAt)}
+              </div>
+            </div>
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: 12.5 }}
+              disabled={busyId === c.id}
+              onClick={() => void restore(c)}
+            >
+              {busyId === c.id ? 'Working…' : 'Restore'}
+            </button>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12.5, color: '#f87171' }}
+              disabled={busyId === c.id}
+              onClick={() => setPurgeTarget(c)}
+            >
+              Delete permanently
+            </button>
+          </div>
+        ))}
+      </div>
+      {error && <ErrorNote message={error} />}
+      {purgeTarget && (
+        <ConfirmDialog
+          title={`Permanently delete "${purgeTarget.name}"?`}
+          body={
+            <p style={{ margin: 0 }}>
+              This erases every row and every uploaded file for this campaign from disk.
+              It cannot be undone.
+            </p>
+          }
+          confirmLabel="Delete permanently"
+          busy={busyId === purgeTarget.id}
+          onConfirm={() => void purge(purgeTarget)}
+          onCancel={() => setPurgeTarget(null)}
+        />
+      )}
+    </>
+  );
+}
+
 export function HomePage() {
   const { roleIn, refresh: refreshAuth } = useAuth();
   const { campaigns, loading, error, refresh } = useCampaigns();
@@ -277,6 +404,8 @@ export function HomePage() {
               </div>
             </>
           )}
+
+          <TrashSection onChanged={async () => { await Promise.allSettled([refresh(), refreshAuth()]); }} />
         </>
       )}
     </div>

@@ -169,6 +169,15 @@ export class CharactersController {
     return this.characters.remove(id, user, role);
   }
 
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed character', description: 'dm or the owning player. Undo a soft-delete (issue #116) — the character returns exactly as it was.' })
+  @ApiResponse({ status: 201, description: 'Restored character.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.characters.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.characters.restore(id, user, role);
+  }
+
   @Post(':id/hp')
   @ApiOperation({ summary: 'Adjust character HP', description: 'dm or the owning player. Body is a union: { delta } (relative) or { set } (absolute); result is clamped to [0, hpMax].' })
   @ApiResponse({ status: 201, description: 'Updated character.' })
