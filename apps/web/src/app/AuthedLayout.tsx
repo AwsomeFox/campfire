@@ -7,11 +7,12 @@ import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from './auth';
 import { CampaignProvider } from './CampaignContext';
 import { useAuthStatus } from './AuthStatusGate';
+import { GameIcon } from '../components/GameIcon';
 
 function Splash() {
   return (
     <div className="min-h-screen flex items-center justify-center">
-      <span className="text-5xl animate-pulse">🔥</span>
+      <span className="flex justify-center animate-pulse text-[var(--color-accent)]"><GameIcon slug="campfire" size={52} /></span>
     </div>
   );
 }
@@ -20,7 +21,7 @@ function ConnectionErrorScreen({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="min-h-screen flex items-center justify-center px-4">
       <div className="card elev-sm text-center space-y-2" style={{ maxWidth: 380 }}>
-        <p className="text-2xl">🔥</p>
+        <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="campfire" size={28} /></p>
         <p className="font-bold text-white">Can&apos;t reach the server</p>
         <p className="text-sm text-slate-400">Check your connection and try again.</p>
         <button className="btn btn-primary" style={{ marginTop: 4 }} onClick={onRetry}>

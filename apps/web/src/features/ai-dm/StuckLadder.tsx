@@ -26,6 +26,7 @@ import type { CampaignMember } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateAiDm, type AiDmSession } from '../../lib/query';
 import { Btn, TextArea, TextInput } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
 
 /** Which lever ids the server may offer (mirrors AiDriverService.leversFor). */
 type Lever = 'retry' | 'nudge' | 'flag' | 'vote' | 'rules_lookup' | 'request_takeover' | 'pause';
@@ -144,7 +145,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
           role="status"
         >
           <div className="flex items-center gap-2">
-            <span className="text-lg">🎙️</span>
+            <span className="flex text-lg"><GameIcon slug="microphone" size={18} /></span>
             <p className="text-sm font-semibold text-[var(--color-text)]">
               {t('ladder.humanControlTitle', { name: nameFor(session.actingDm?.memberId) })}
             </p>
@@ -183,7 +184,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
           role="alert"
         >
           <div className="flex items-start gap-2">
-            <span className="text-lg">⚠️</span>
+            <span className="flex text-lg"><GameIcon slug="hazard-sign" size={18} /></span>
             <div className="min-w-0">
               <p className="text-sm font-semibold text-[var(--color-text)]">
                 {t(`ladder.reason.${session.stuck.reason}`, { defaultValue: t('ladder.stuckTitle') })}
@@ -222,7 +223,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
       {/* ---- DM: pending human-takeover request → grant affordance ---- */}
       {isDm && !humanControl && session.takeoverRequestedBy && (
         <div className="cf-inset p-3 flex flex-wrap items-center gap-2">
-          <span className="text-sm">🙋 {t('ladder.takeoverRequested', { name: nameFor(session.takeoverRequestedBy) })}</span>
+          <span className="text-sm"><GameIcon slug="hand" size={12} className="inline align-text-bottom mr-1" />{t('ladder.takeoverRequested', { name: nameFor(session.takeoverRequestedBy) })}</span>
           <div className="ml-auto">
             <Btn onClick={() => openDialog('grant')} disabled={busy !== null}>
               {t('ladder.grantTakeover')}
@@ -374,7 +375,7 @@ function VoteCard({
   return (
     <div className="cf-inset p-4 flex flex-col gap-2" role="group">
       <div className="flex items-center gap-2">
-        <span className="text-lg">🗳️</span>
+        <span className="flex text-lg"><GameIcon slug="vote" size={18} /></span>
         <p className="text-sm font-semibold text-[var(--color-text)]">
           {t(`ladder.voteTitle.${vote.kind}`)}
         </p>

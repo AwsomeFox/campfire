@@ -6,6 +6,7 @@ type DangerLevel = Campaign['dangerLevel'];
 import { api, API, ApiError } from '../../lib/api';
 import { Btn, TextInput, TextArea } from '../../components/ui';
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
+import { GameIcon } from '../../components/GameIcon';
 
 const DANGER_CYCLE: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
 const DANGER_LABEL: Record<DangerLevel, string> = {
@@ -140,7 +141,7 @@ export function StatusHeader({
               style={{ fontSize: 12, textDecoration: 'none' }}
               title="Open the player display — a secret-free view to cast to a TV"
             >
-              📺 Cast
+              <GameIcon slug="tv" size={14} className="inline align-text-bottom mr-1" />Cast
             </Link>
             <Btn ghost style={{ fontSize: 12 }} title="DM only" onClick={startEdit}>
               ✎ Edit

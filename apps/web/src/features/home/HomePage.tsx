@@ -398,7 +398,7 @@ export function HomePage() {
         <ErrorNote message="Couldn't reach the server to load your campaigns." onRetry={() => void refresh()} />
       ) : allCampaigns.length === 0 ? (
         <div className="max-w-md space-y-4">
-          <EmptyState icon="🕯️" title="No campaigns yet — light the first fire." />
+          <EmptyState icon="candle-flame" title="No campaigns yet — light the first fire." />
           <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
             New here as a player? Ask your DM or the server admin to add your account to a campaign — no need to
             create one.

@@ -31,6 +31,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, Encounter, EncounterWithCombatants } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { GameIcon } from '../../components/GameIcon';
 import {
   queryKeys,
   useAiDmSeat,
@@ -56,16 +57,16 @@ import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
 import { Btn, Card, Chip, EmptyState, Skeleton, TextArea, TextInput, type ChipVariant } from '../../components/ui';
 
-/** Emoji for a tool chip's resource family — the shared map returns lucide names, which
- * this app doesn't bundle, so we render an equivalent emoji glyph. */
-const RESOURCE_EMOJI: Record<ToolResource, string> = {
-  dice: '🎲',
-  encounter: '⚔️',
-  party: '🛡️',
-  map: '🗺️',
-  proposals: '📝',
-  rules: '📖',
-  other: '✨',
+/** game-icons slug for a tool chip's resource family — the shared map returns lucide
+ * names, which this app doesn't bundle, so we render an equivalent <GameIcon> glyph. */
+const RESOURCE_ICON: Record<ToolResource, string> = {
+  dice: 'rolling-dices',
+  encounter: 'crossed-swords',
+  party: 'shield',
+  map: 'treasure-map',
+  proposals: 'quill-ink',
+  rules: 'open-book',
+  other: 'sparkles',
 };
 
 /** Seat status → chip variant for the header status pill. */
@@ -305,7 +306,7 @@ export default function AiTablePage() {
         campaignId={campaignId}
         isDm={isDm}
         isAdmin={isAdmin}
-        icon={off ? '🌙' : '🤝'}
+        icon={off ? 'moon' : 'shaking-hands'}
         title={off ? t('table.offTitle') : t('table.coDmTitle')}
         hint={off ? t('table.offHint') : t('table.coDmHint')}
         // Off + DM → the setup checklist. Co-DM → the transparency explainer (the AI
@@ -370,7 +371,7 @@ export default function AiTablePage() {
           className="cf-inset p-3 flex items-center gap-2 text-sm"
           style={{ color: 'var(--color-neutral-200)' }}
         >
-          <span>⚔️</span>
+          <span className="flex text-[var(--color-accent)]"><GameIcon slug="crossed-swords" size={16} /></span>
           <span className="font-semibold">{t('table.liveEncounterTitle')}</span>
           {currentCombatantName && (
             <span className="text-[var(--color-neutral-600)]">· {t('table.liveEncounterTurn', { name: currentCombatantName })}</span>
@@ -403,7 +404,7 @@ export default function AiTablePage() {
       <Card className="!p-0 flex-1 flex flex-col overflow-hidden">
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {transcript.entries.length === 0 ? (
-            <EmptyState icon="🔥" title={t('table.emptyTitle')} hint={t('table.emptyHint')} />
+            <EmptyState icon="campfire" title={t('table.emptyTitle')} hint={t('table.emptyHint')} />
           ) : (
             transcript.entries.map((entry) => (
               <TranscriptRow
@@ -554,7 +555,7 @@ function TranscriptRow({
         className="cf-chip inline-flex items-center gap-1"
         style={{ color: tone, borderColor: 'var(--color-divider)' }}
       >
-        <span>{RESOURCE_EMOJI[chip.resource]}</span>
+        <span className="flex"><GameIcon slug={RESOURCE_ICON[chip.resource]} size={13} /></span>
         <span>{chip.label}</span>
       </span>
     );
@@ -629,7 +630,7 @@ function systemText(entry: SystemEntry, t: (k: string, o?: Record<string, unknow
  *   - `showTransparency` → the player-facing "what the AI sees" note (co-DM state).
  */
 function Gate({
-  icon = '🚫',
+  icon = 'cancel',
   title,
   hint,
   campaignId,
@@ -655,13 +656,13 @@ function Gate({
       <Card className="space-y-3">
         {error !== undefined ? (
           <>
-            <p className="text-3xl text-center">{icon}</p>
+            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug={icon} size={30} reserveSpace /></p>
             {/* Only surface the fix link when the current viewer can act on it. */}
             <AiGateExplainer err={error} campaignId={campaignId} canFix={isDm || isAdmin} />
           </>
         ) : (
           <div className="text-center space-y-2">
-            <p className="text-3xl">{icon}</p>
+            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug={icon} size={30} reserveSpace /></p>
             {title && <p className="font-bold text-[var(--color-text)]">{title}</p>}
             {hint && <p className="text-sm text-[var(--color-neutral-400)]">{hint}</p>}
             {isDm && campaignId !== undefined && !showChecklist && (

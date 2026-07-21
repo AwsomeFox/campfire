@@ -5,6 +5,7 @@
  */
 import { Component, type ReactNode } from 'react';
 import { Card } from '../components/ui';
+import { GameIcon } from '../components/GameIcon';
 
 interface Props {
   children: ReactNode;
@@ -30,7 +31,7 @@ export class RouteErrorBoundary extends Component<Props, State> {
       return (
         <div className="max-w-lg mx-auto mt-10 px-4">
           <Card className="text-center space-y-3">
-            <p className="text-2xl">⚠️</p>
+            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="hazard-sign" size={28} reserveSpace /></p>
             <p className="font-bold text-white">Something went wrong on this screen</p>
             <p className="text-sm text-slate-400">
               You can try reloading, or head back to your campaigns.

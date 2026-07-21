@@ -14,6 +14,7 @@ import type { Attachment, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
+import { GameIcon } from '../../components/GameIcon';
 
 export function HandoutsCard({
   campaignId,
@@ -98,7 +99,7 @@ export function HandoutsCard({
                     {a.filename}
                   </div>
                   <div style={{ marginTop: 2 }}>
-                    <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? '🔒 DM only' : '👁 Revealed'}</Chip>
+                    <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={12} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Revealed</>}</Chip>
                   </div>
                 </div>
                 {isDm && (

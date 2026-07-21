@@ -9,6 +9,7 @@ import type { ApiToken, Campaign } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { GameIcon } from '../../components/GameIcon';
 
 type TokenScope = ApiToken['scope'];
 type WriteScope = ApiToken['writeScope'];
@@ -175,7 +176,7 @@ export function TokensCard() {
       {loading && !tokens ? (
         <Skeleton lines={3} />
       ) : tokens && tokens.length === 0 ? (
-        <EmptyState icon="🔑" title="No tokens yet" hint="Create one above to use the REST API or MCP." />
+        <EmptyState icon="key" title="No tokens yet" hint="Create one above to use the REST API or MCP." />
       ) : (
         <div className="space-y-2">
           {(tokens ?? []).map((t) => (
@@ -344,7 +345,7 @@ function NewTokenReveal({ created, onClose }: { created: ApiTokenCreated; onClos
     <div className="cf-dm-panel p-4 space-y-2">
       <div className="flex items-center justify-between gap-2">
         <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
-          🔑 {created.apiToken.name} — shown once
+          <GameIcon slug="key" size={12} className="inline align-text-bottom mr-1" />{created.apiToken.name} — shown once
         </p>
         <button type="button" className="text-[11px] text-slate-500 hover:text-white" onClick={onClose}>
           dismiss

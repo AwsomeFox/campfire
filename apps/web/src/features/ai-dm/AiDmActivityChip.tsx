@@ -7,7 +7,8 @@
  */
 import { Link } from 'react-router-dom';
 import type { ToolChip } from './toolActivity';
-import { chipEmoji, chipVariantColor } from './chipEmoji';
+import { chipIconSlug, chipVariantColor } from './chipEmoji';
+import { GameIcon } from '../../components/GameIcon';
 
 /** "AI DM is at the table" presence pill — shown wherever the seat is in Driver mode. */
 export function AiDmPresenceTag({ turnActive }: { turnActive: boolean }) {
@@ -46,7 +47,7 @@ export function AiDmToolActivityRow({ chip, at }: { chip: ToolChip; at: number }
   const color = chipVariantColor(chip.variant);
   const content = (
     <span className="flex items-center gap-2" style={{ fontSize: 12, color: color ?? 'var(--color-neutral-300)' }}>
-      <span aria-hidden="true">{chipEmoji(chip.icon)}</span>
+      <span aria-hidden="true" className="flex"><GameIcon slug={chipIconSlug(chip.icon)} size={14} /></span>
       <span className="min-w-0 truncate">The AI DM {chip.label.toLowerCase()}</span>
       <span className="shrink-0" style={{ fontSize: 10.5, color: 'var(--color-neutral-600)' }}>
         {timeAgoShort(at)}

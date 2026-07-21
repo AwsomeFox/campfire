@@ -3,6 +3,7 @@
  * Feature screens compose these; do not restyle them locally.
  */
 import { forwardRef, useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { GameIcon } from './GameIcon';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <section className={`cf-card p-5 ${className}`}>{children}</section>;
@@ -95,16 +96,20 @@ export function HpBar({ current, max }: { current: number; max: number }) {
 export function DmPanel({ children }: { children: ReactNode }) {
   return (
     <div className="cf-dm-panel p-4 space-y-1.5">
-      <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-accent)]">🔒 DM only</p>
+      <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-accent)]">
+        <GameIcon slug="padlock" size={13} reserveSpace /> DM only
+      </p>
       <div className="text-sm text-[var(--color-neutral-300)]">{children}</div>
     </div>
   );
 }
 
-export function EmptyState({ icon = '🕯️', title, hint }: { icon?: string; title: string; hint?: string }) {
+export function EmptyState({ icon = 'candle-flame', title, hint }: { icon?: string; title: string; hint?: string }) {
   return (
     <div className="cf-inset border-dashed p-6 text-center space-y-1">
-      <p className="text-2xl">{icon}</p>
+      <p className="flex justify-center text-[var(--color-neutral-500)]">
+        <GameIcon slug={icon} size={30} reserveSpace />
+      </p>
       <p className="text-sm font-semibold text-[var(--color-neutral-300)]">{title}</p>
       {hint && <p className="text-xs text-[var(--color-neutral-600)]">{hint}</p>}
     </div>

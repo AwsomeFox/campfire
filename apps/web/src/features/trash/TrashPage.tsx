@@ -16,14 +16,16 @@ import { api, API, ApiError } from '../../lib/api';
 import { formatDate as formatLocaleDate } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
+import { ENTITY_ICON } from '../../lib/uiIcons';
 
 /** Restore route base + display label per trashed entity type. Route is `/<base>/:id/restore`. */
 const TYPE_META: Record<TrashedEntityType, { label: string; route: string; icon: string }> = {
-  session: { label: 'Session', route: 'sessions', icon: '📖' },
-  character: { label: 'Character', route: 'characters', icon: '🧝' },
-  quest: { label: 'Quest', route: 'quests', icon: '🗺️' },
-  npc: { label: 'NPC', route: 'npcs', icon: '👤' },
-  location: { label: 'Location', route: 'locations', icon: '📍' },
+  session: { label: 'Session', route: 'sessions', icon: ENTITY_ICON.session },
+  character: { label: 'Character', route: 'characters', icon: ENTITY_ICON.character },
+  quest: { label: 'Quest', route: 'quests', icon: ENTITY_ICON.quest },
+  npc: { label: 'NPC', route: 'npcs', icon: ENTITY_ICON.npc },
+  location: { label: 'Location', route: 'locations', icon: ENTITY_ICON.location },
 };
 
 export default function TrashPage() {
@@ -83,7 +85,7 @@ export default function TrashPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🔒" title="Only the DM can view the campaign Trash" />
+          <EmptyState icon="padlock" title="Only the DM can view the campaign Trash" />
         </Card>
       </div>
     );
@@ -112,7 +114,7 @@ export default function TrashPage() {
         </Card>
       ) : items.length === 0 ? (
         <Card>
-          <EmptyState icon="🗑️" title="The Trash is empty" hint="Deleted entities show up here until you restore them." />
+          <EmptyState icon="trash-can" title="The Trash is empty" hint="Deleted entities show up here until you restore them." />
         </Card>
       ) : (
         <Card>
@@ -126,8 +128,8 @@ export default function TrashPage() {
                   className="flex items-center gap-3 py-2.5"
                   style={{ borderBottom: '1px solid var(--color-accent-900, rgba(255,255,255,0.06))' }}
                 >
-                  <span aria-hidden className="text-lg">
-                    {meta.icon}
+                  <span aria-hidden className="flex text-[var(--color-neutral-400)]">
+                    <GameIcon slug={meta.icon} size={20} />
                   </span>
                   <span className="flex-1 min-w-0">
                     <span className="flex items-baseline gap-2 flex-wrap">

@@ -12,6 +12,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { formatDate as formatLocaleDate } from '../../lib/format';
 import { Card, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { GameIcon } from '../../components/GameIcon';
 
 export default function SharedRecapPage() {
   const { token } = useParams<{ token: string }>();
@@ -50,7 +51,7 @@ export default function SharedRecapPage() {
     <div className="max-w-3xl mx-auto px-4 py-8 space-y-4">
       <header className="flex items-baseline gap-2.5 flex-wrap">
         <span className="font-heading text-lg" style={{ color: 'var(--color-accent)' }}>
-          🔥 Campfire
+          <GameIcon slug="campfire" size={18} className="inline align-text-bottom mr-1" />Campfire
         </span>
         {recap && <span className="text-muted text-sm">{recap.campaignName}</span>}
         <span className="tag ml-auto">Read-only recap</span>
@@ -65,7 +66,7 @@ export default function SharedRecapPage() {
       {!loading && notFound && (
         <Card>
           <EmptyState
-            icon="🕯️"
+            icon="candle-flame"
             title="This share link is no longer active"
             hint="It may have been revoked, or the recap was removed. Ask your DM for a fresh link."
           />

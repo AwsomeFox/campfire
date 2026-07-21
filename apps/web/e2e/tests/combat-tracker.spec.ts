@@ -45,7 +45,7 @@ test.describe('combat tracker — DM view', () => {
     // DM-only run controls exist.
     await expect(page.getByRole('button', { name: 'Next turn →' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'End', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: '📺 Cast' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Cast', exact: true })).toBeVisible();
   });
 });
 
@@ -69,7 +69,7 @@ test.describe('combat tracker — non-DM views', () => {
         // None of the DM-only run controls render.
         await expect(page.getByRole('button', { name: 'Next turn →' })).toHaveCount(0);
         await expect(page.getByRole('button', { name: 'End', exact: true })).toHaveCount(0);
-        await expect(page.getByRole('button', { name: '📺 Cast' })).toHaveCount(0);
+        await expect(page.getByRole('button', { name: 'Cast', exact: true })).toHaveCount(0);
       });
     });
   }
