@@ -56,6 +56,23 @@ export default function SessionsPage() {
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
 
+  // The list/detail auto-open below is a desktop-only nicety: on desktop the list
+  // and detail render side by side (two-pane), so auto-selecting the latest recap
+  // just fills the empty detail pane. On mobile the two are mutually exclusive
+  // (list OR detail), so auto-selecting would trap the user on the latest recap and
+  // defeat "← Back to sessions" (it clears ?session, the effect re-adds it) — making
+  // the full session list/history unreachable. Gate the auto-open on the `lg`
+  // breakpoint (1024px) that the two-pane layout itself uses.
+  const [isDesktop, setIsDesktop] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia('(min-width: 1024px)');
+    const onChange = () => setIsDesktop(mql.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+
   const [showAddForm, setShowAddForm] = useState(false);
   // Soft-delete Undo (issue #116/#269) lifted to the page level: on delete we refresh
   // the list immediately (so the trashed session stops showing without a manual reload)
@@ -93,7 +110,7 @@ export default function SessionsPage() {
   // URL points at a session that's gone) — otherwise the detail pane sat on a
   // misleading "No sessions yet" empty state even with sessions in the list.
   useEffect(() => {
-    if (tab === 'log' && sessions.length > 0 && !selected) {
+    if (isDesktop && tab === 'log' && sessions.length > 0 && !selected) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -103,7 +120,7 @@ export default function SessionsPage() {
         { replace: true },
       );
     }
-  }, [tab, sessions, selected, setSearchParams]);
+  }, [isDesktop, tab, sessions, selected, setSearchParams]);
 
   function selectSession(id: number) {
     setSearchParams((prev) => {

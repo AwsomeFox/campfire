@@ -94,7 +94,7 @@ export function QuestsCard({
             'linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent) no-repeat top / 100% 1px',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 28 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 28, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13, width: 18, textAlign: 'center', color: meta.color }}>{meta.glyph}</span>
           <Link
             to={`/c/${campaignId}/quests/${q.id}`}
@@ -103,6 +103,7 @@ export function QuestsCard({
               fontSize: 14.5,
               textDecoration: 'none',
               opacity: isFaded ? 0.6 : 1,
+              minWidth: 0,
               textDecorationLine: q.status === 'completed' ? 'line-through' : 'none',
             }}
           >
@@ -110,7 +111,11 @@ export function QuestsCard({
           </Link>
           <div style={{ flex: 1 }} />
           {q.reward && (
-            <span className="tag tag-neutral" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>
+            <span
+              className="tag tag-neutral"
+              style={{ fontSize: 10, whiteSpace: 'normal', maxWidth: '100%', overflowWrap: 'anywhere', textAlign: 'left' }}
+              title={q.reward}
+            >
               {q.reward}
             </span>
           )}
