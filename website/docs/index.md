@@ -6,15 +6,18 @@ hide:
 
 # 🔥 Campfire
 
-## The party's shared memory — self-hosted, and runnable by AI.
+## Gather your whole campaign around one fire.
 
-Campfire is an open-source campaign tracker for tabletop RPGs. Quests, NPCs,
-locations on a map, a live combat tracker, session recaps, per-player notes —
-and an **MCP server** so Claude (or any AI agent) can help run your table.
+Campfire is the open-source, self-hosted home for your tabletop game — quests,
+NPCs, a living world and timeline, **battle maps with fog of war**, a full combat
+tracker, and auto-drafted session recaps, all in one place.
 
-You host it. You own the data. One container, one volume.
+Then seat an **AI Dungeon Master** at the table — a co-DM that only proposes, or a
+full driver that runs the session — or drive the whole campaign from an AI agent
+over **MCP**. You host it. You own the data. One container, one volume.
 
 [Get started :material-rocket-launch:](getting-started/installation.md){ .md-button .md-button--primary }
+[Meet the AI DM :material-robot-excited:](ai/capabilities.md){ .md-button }
 [View on GitHub :fontawesome-brands-github:](https://github.com/AwsomeFox/campfire){ .md-button }
 
 ---
@@ -23,45 +26,50 @@ You host it. You own the data. One container, one volume.
 
 <div class="grid cards" markdown>
 
+-   :material-robot-excited: __An AI in the DM seat__
+
+    Optional and experimental — seat an AI as a **co-DM** (it only proposes; every
+    change lands in your approval queue) or a full **driver** that narrates and runs
+    the session. Token budgets, a kill switch and player recovery levers keep you in
+    control; it can never overwrite canon without a nod.
+
 -   :material-sword-cross: __Everything a table needs__
 
-    Campaigns, quests with objectives and subquests, NPCs with secrets, a pin
-    map, character sheets with at-the-table HP and conditions, session recaps,
-    and a full initiative/combat tracker with a dice roller.
+    Campaigns, quests with objectives and subquests, NPCs and factions with secrets,
+    a world map and a living timeline, character sheets with at-the-table HP and
+    conditions, session prep, and auto-drafted recaps.
 
--   :material-robot-happy: __AI-operable from day one__
+-   :material-map-legend: __Run the fight__
 
-    A built-in MCP server exposes your campaign to any MCP client. Ask Claude to
-    write the recap, prep the next session, or run initiative — with a proposal
-    queue so nothing touches your canon without approval.
+    A full initiative/combat tracker with a dice roller and click-to-roll, battle
+    maps with tokens and **fog of war** — monster HP and hidden NPCs stay DM-only —
+    plus a player-display screen for the TV.
 
--   :material-shield-lock: __Real, server-enforced secrecy__
+-   :material-book-open-variant: __Real rule systems__
 
-    DM-only fields and private notes are stripped in the API layer, never merely
-    hidden in the browser. Players see what players should see.
+    Install **D&D 5e, Pathfinder 2e and Open Legend** in one click from open sources
+    (more by mirror URL or open-licensed upload) — statblocks, spells and rules
+    lookups in a searchable compendium, dropped straight into an encounter.
 
--   :material-server-network: __Self-hosted & simple__
+-   :material-robot-happy: __Agent-operable over MCP__
 
-    A single Docker image and one data volume (SQLite + uploads). Login with
-    local accounts or your own SSO (Authentik and any OIDC provider).
+    A built-in **134-tool** MCP server exposes your campaign to any AI agent — read,
+    write, or fully run it — with a DM-approval proposal queue so nothing touches
+    your canon without approval, and every action audit-logged.
 
--   :material-book-open-variant: __Bring your own rules__
+-   :material-shield-lock: __Self-hosted, secret, yours__
 
-    Install the Open5e SRD — or upload any open-licensed dataset — into a searchable
-    compendium, look monsters and spells up mid-combat, and drop them straight into
-    an encounter.
-
--   :material-palette: __Yours to run__
-
-    MIT-licensed. Per-user accent colours, markdown everywhere, one-click export
-    of your whole campaign to JSON or Markdown. No lock-in, ever.
+    DM-only fields, hidden entities and private notes are stripped server-side, never
+    merely hidden in the browser. One Docker image, one SQLite volume; local accounts
+    or your own SSO. MIT-licensed, export anytime — no lock-in.
 
 </div>
 
 ---
 
 !!! note "Project status"
-    Campfire is in active development; the current release is **v0.5.0**. The core
-    play loop is complete and well-tested; see the
+    Campfire is in active development; the current release is **v0.14.0**. The core
+    play loop is complete and well-tested, and the AI Dungeon Master is shipping but
+    still gated as experimental — see the
     [Roadmap & status](reference/roadmap.md) for exactly what's done, what's
-    half-built, and what's planned next.
+    experimental, and what's planned next.

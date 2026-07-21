@@ -12,7 +12,7 @@ This is the "what would I actually need?" pass, grounded in what's really built.
 | Step | State | Notes |
 |---|---|---|
 | Create a campaign | ✅ | Guided wizard, become DM automatically |
-| Choose a rule system | ✅ | A DM (not just an admin) can install a rule pack — Open5e, or an uploaded open-licensed dataset — as a background job |
+| Choose a rule system | ✅ | A DM (not just an admin) can install a rule pack — D&D 5e (Open5e), Pathfinder 2e, or Open Legend live in one click; other systems via mirror URL or an uploaded open-licensed dataset — as a background job |
 | Get my players in | ✅ | Generate an **invite link / join code** from **Members → Invite** (per role, expiring, revocable); the player opens it, creates their own account, and lands in the campaign — no admin needed |
 | Set the table's safety expectations (session zero) | ✅ | A **session-zero charter** — lines & veils, agreed safety tools, house rules, tone — that the whole table reads and the DM edits |
 | Build the world (quests/NPCs/locations/map) | ✅ | Full CRUD, DM secrets, pin map, uploaded map image |
@@ -72,35 +72,38 @@ since landed.)
 | Create player/DM accounts | ✅ | Admin → Users one at a time, **or** let DMs bring their own via invite links, **or** flip on the **self-service signup** toggle. (Still no bulk import) |
 | Turn on SSO | ✅ | Configure OIDC from **Admin → OIDC single sign-on** with a **Test connection** check — no restart — or via env vars; env values win and are badged in the UI |
 | Recover a forgotten password | 🟡 | Users can file a self-service request; since there's no mail transport I approve it and relay a one-time reset code (or still reset directly from Admin → Users) |
-| Install rule content | ✅ | Open5e (D&D 5e SRD) or an uploaded open-licensed dataset, installed as a **non-blocking background job** with per-section progress; a **DM can self-serve** (uninstall stays admin-only) |
+| Install rule content | ✅ | A **per-source picker**: D&D 5e (Open5e), Pathfinder 2e and Open Legend live in one click; Pathfinder 1e, Starfinder, 13th Age and OSR from a mirror URL or upload — installed as a **non-blocking background job** with per-section progress; a **DM can self-serve** (uninstall stays admin-only) |
 | Back up the server | ✅ | Copy `/data`, **or** pull a WAL-safe whole-server archive (DB via `VACUUM INTO` + all uploads) from `GET /api/v1/backup`, restore it with `POST /api/v1/backup/restore`, and optionally schedule on-disk backups (`BACKUP_SCHEDULE_ENABLED`). Per-campaign JSON/Markdown export also exists |
-| See how the server is doing | ❌ | No admin dashboard — no user/campaign counts, storage usage, version, or update-available indicator |
-| Audit admin actions | ❌ | Audit logs are **per-campaign** (DM-visible); there's no server-wide log of account creation, settings changes, or pack installs |
-| Manage storage | ❌ | Uploads accumulate with no size visibility, quota, or orphan cleanup |
+| See how the server is doing | ✅ | The **Admin overview** (`/admin`) shows a metrics snapshot — entity counts, on-disk DB size, uptime, running version, and recent activity |
+| Audit admin actions | ✅ | A **server-wide audit** (**Admin → Audit**, `/admin/audit`) of admin actions not tied to a campaign — account creation, settings changes, pack installs — alongside the per-campaign log |
+| Manage storage | ✅ | A **storage console** (**Admin → Storage**, `/admin/storage`): total upload bytes, per-campaign **quotas** with over-quota flags, the real on-disk total, and an orphan summary for cleanup |
 | Review who has API/AI tokens | ✅ | Users manage their own tokens, and an admin can **list and revoke** another user's tokens (and mint one on their behalf) |
 | Upgrade | ✅ | Bump the image tag; migrations auto-run and are idempotent; `/data` carries across |
 | Keep admin power separate from campaign secrets | ✅ | A server admin holds no implicit campaign role — DM secrets (and the campaign list itself) require an actual membership; server power ≠ story access |
 
-**Biggest admin gaps:** server observability (no admin dashboard / usage counts) and a
-server-wide audit trail. (Backup/restore and self-service account flows —
-invites/signup/reset — have since landed.)
+**Biggest admin gaps:** none of the historical big ones remain — observability (the
+Admin overview metrics), the server-wide audit trail, storage management, and
+backup/restore have all since landed, as have the self-service account flows
+(invites/signup/reset). What's left is polish: no bulk user import, and password
+recovery still needs an admin to relay the reset code (no built-in mail transport).
 
 ---
 
 ## The through-line
 
-One theme still cuts across the three seats and is the highest-leverage thing to
-close before Campfire is a no-caveats "go-to platform":
+The historical themes that once cut across all three seats have now shipped:
+**between-session engagement** (notifications and shareable recap links — the app now
+speaks up when you're not looking at it), **account lifecycle** (invites, optional
+self-signup, self-service password reset — see
+[Admin vs DM](../administration/access-model.md)), the **operator-confidence**
+backup/restore story (see [Backups & upgrades](../administration/operations.md)), and
+**operator observability** (the Admin overview metrics, a server-wide audit trail, and
+the storage console).
 
-1. **Operator observability** — an admin dashboard (usage/version/update indicators)
-   and a server-wide audit trail, so an admin can *see* what the server is doing.
-
-The historical themes have since shipped: **between-session engagement**
-(notifications and shareable recap links — the app now speaks up when you're not
-looking at it), **account lifecycle** (invites, optional self-signup, self-service
-password reset — see [Admin vs DM](../administration/access-model.md)), and the
-**operator-confidence** backup/restore story (see
-[Backups & upgrades](../administration/operations.md)).
+What's left is depth rather than whole missing seats: crunchier combat mechanics,
+smoother mobile live-combat nav, published-adventure import, and maturing the still
+**experimental** AI Dungeon Master seat (co-DM / driver — see
+[What an AI can do](../ai/capabilities.md)).
 
 Everything here feeds the [Roadmap & status](roadmap.md); the items already being
 built are marked 🔨 there.

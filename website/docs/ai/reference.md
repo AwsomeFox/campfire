@@ -9,9 +9,10 @@ one.
 - **Endpoint:** `https://<your-host>/mcp` (stateless streamable HTTP, JSON-RPC).
 - **Auth:** `Authorization: Bearer cf_pat_…` (personal access token), **or** an
   OAuth access token from the connector flow below.
-- **Tools:** ~85 covering campaigns, quests, objectives, story arcs/beats/branches,
-  NPCs, locations, characters, encounters and combatants, dice, sessions, notes, the
-  inbox, proposals, members, rule packs, the session-zero charter, audit, and export.
+- **Tools:** 130+ covering campaigns, quests, objectives, story arcs/beats/branches,
+  NPCs, locations, factions, characters, encounters and combatants, dice, sessions,
+  notes, the inbox, proposals, the AI Dungeon Master seat, members, rule packs, the
+  session-zero charter, audit, and export.
   Call `tools/list` for the live catalogue with full input schemas — every tool's
   arguments are strictly validated and described.
 - **Resources & prompts:** read surfaces (campaigns, campaign summary, party, session
