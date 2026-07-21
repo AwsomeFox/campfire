@@ -1,4 +1,11 @@
-import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
+import {
+  randomBytes,
+  scryptSync,
+  timingSafeEqual,
+  createHash,
+  createCipheriv,
+  createDecipheriv,
+} from 'node:crypto';
 
 /**
  * Password hashing: node:crypto scrypt, no native deps.
@@ -182,6 +189,47 @@ export function looksLikeOAuthAccessToken(token: string): boolean {
 /** Generic sha256(hex) for the OAuth opaque secrets above (same primitive as hashApiToken). */
 export function hashOpaqueToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * Reversible secret encryption (issue #310) for at-rest storage of AI provider
+ * API keys. Unlike every hash above (one-way), these ROUND-TRIP: the ciphertext
+ * is decrypted in-process only at call time to hand the raw key to the provider
+ * factory (#309), and is never returned to a client. AES-256-GCM is authenticated —
+ * a tampered ciphertext (or a wrong key) fails the auth tag on decrypt and throws
+ * rather than silently returning garbage. Self-describing payload, all base64:
+ *   `gcm.v1.<iv(12B)>.<authTag(16B)>.<ciphertext>`
+ * `key` MUST be exactly 32 bytes (see modules/ai-provider-config key resolution).
+ */
+const SECRET_ENC_PREFIX = 'gcm.v1';
+
+export function encryptSecret(plaintext: string, key: Buffer): string {
+  if (key.length !== 32) throw new Error('encryptSecret: key must be 32 bytes (aes-256-gcm)');
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${SECRET_ENC_PREFIX}.${iv.toString('base64')}.${tag.toString('base64')}.${ct.toString('base64')}`;
+}
+
+export function decryptSecret(payload: string, key: Buffer): string {
+  if (key.length !== 32) throw new Error('decryptSecret: key must be 32 bytes (aes-256-gcm)');
+  const parts = payload.split('.');
+  // gcm . v1 . iv . tag . ct  => 5 segments
+  if (parts.length !== 5 || `${parts[0]}.${parts[1]}` !== SECRET_ENC_PREFIX) {
+    throw new Error('decryptSecret: unrecognized ciphertext format');
+  }
+  const iv = Buffer.from(parts[2], 'base64');
+  const tag = Buffer.from(parts[3], 'base64');
+  const ct = Buffer.from(parts[4], 'base64');
+  const decipher = createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+}
+
+/** Masked display indicator: the last 4 chars of a secret (never the whole value). */
+export function secretLast4(secret: string): string {
+  return secret.length <= 4 ? secret : secret.slice(-4);
 }
 
 /**

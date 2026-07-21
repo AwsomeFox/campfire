@@ -52,6 +52,22 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(columnNames(sqlite, 'attachments')).toContain('hidden');
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
+
+      // 0040 (issue #310): the ai_provider_configs table is created as a NEW table
+      // by the migration, with the encrypted-key + scope columns present.
+      expect(columnNames(sqlite, 'ai_provider_configs')).toEqual(
+        expect.arrayContaining([
+          'scope',
+          'campaign_id',
+          'provider_type',
+          'base_url',
+          'model',
+          'params',
+          'encrypted_api_key',
+          'key_last4',
+          'allowed_models',
+        ]),
+      );
     } finally {
       sqlite.close();
     }

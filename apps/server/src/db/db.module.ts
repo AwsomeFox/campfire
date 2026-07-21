@@ -859,6 +859,42 @@ function migrateNpcsTableForIconSlug(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before AI provider config storage (issue #310): the
+ * `ai_provider_configs` table didn't exist. This is a NEW table (not an ADD COLUMN),
+ * so — like the `factions` table (see migrateNpcsTableForFactionId's note) —
+ * BOOTSTRAP_SQL's CREATE TABLE IF NOT EXISTS would create it on the next boot
+ * regardless. It is registered as an explicit, recorded migration (issue #69) for an
+ * auditable schema history and so the table exists BEFORE the bootstrap pass. Fully
+ * idempotent: CREATE TABLE / CREATE INDEX IF NOT EXISTS. The declared FK REFERENCES is
+ * safe to include even on a fresh DB where `campaigns` doesn't exist yet — SQLite
+ * resolves FK targets at write time, not CREATE TABLE time (see bootstrap.sql.ts). This
+ * runs with foreign_keys OFF (openDatabase enables enforcement only afterwards), so the
+ * CREATE never trips a constraint. New DBs record this as applied even though the
+ * subsequent bootstrap owns the canonical DDL.
+ */
+function migrateAiProviderConfigTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_provider_configs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+      provider_type TEXT NOT NULL,
+      base_url TEXT,
+      model TEXT NOT NULL DEFAULT '',
+      params TEXT NOT NULL DEFAULT '{}',
+      encrypted_api_key TEXT,
+      key_last4 TEXT,
+      allowed_models TEXT NOT NULL DEFAULT '[]',
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server ON ai_provider_configs(scope) WHERE scope = 'server';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign ON ai_provider_configs(campaign_id) WHERE campaign_id IS NOT NULL;
+  `);
+}
+
+/**
  * Migration for DBs created before compendium rule entries could carry a manual icon
  * override (issue #305): `rule_entries.icon_slug` didn't exist. Plain ADD COLUMN with a
  * '' default — same shape as migrateNpcsTableForIconSlug above. Existing entries get ''
@@ -953,6 +989,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0037_npcs_icon_slug', run: migrateNpcsTableForIconSlug },
   { name: '0038_rule_entries_icon_slug', run: migrateRuleEntriesTableForIconSlug },
   { name: '0039_inventory_items_icon_slug', run: migrateInventoryItemsTableForIconSlug },
+  { name: '0040_ai_provider_config', run: migrateAiProviderConfigTable },
 ];
 
 /**
