@@ -541,6 +541,8 @@ CREATE TABLE IF NOT EXISTS encounters (
   grid_unit TEXT,
   grid_snap INTEGER NOT NULL DEFAULT 0,
   fog TEXT,
+  grid_type TEXT NOT NULL DEFAULT 'square',
+  aoe TEXT,
   ended_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
