@@ -18,13 +18,16 @@ import { toDomain as locationToDomain } from '../locations/locations.service';
 import { toDomain as sessionToDomain } from '../sessions/sessions.service';
 import { toDomain as characterToDomain } from '../characters/characters.service';
 
-// Encounters (issue #126) join EntityType for note-pinning, but combat state is not a
-// proposable entity — exclude it alongside 'campaign' so the proposal schemas/snapshot
-// maps stay exhaustive over exactly the entity types that CAN be proposed. Factions
-// (issue #221) are likewise note-pinnable but not proposable in v1 (DM-write only).
-export type ProposableEntityType = Exclude<EntityType, 'campaign' | 'encounter' | 'faction'>;
+// The entity types that can be filed as a proposal. Co-DM authoring (issue #313) added
+// `encounter` and `map`: a co-DM draft never writes canon directly, so those two must
+// be proposable for the AI to author them. Both are create-only in v1 and, on approve,
+// run the deterministic generator (#304/#306) from the (seeded) params in the payload —
+// their proposals carry generate params, not a persisted row. `map` is not one of the
+// note-pin EntityTypes (a map is an attachment, not an entity table), so this union is
+// standalone rather than derived from EntityType. Factions (issue #221) stay DM-write-only.
+export type ProposableEntityType = Exclude<EntityType, 'campaign' | 'faction'> | 'map';
 
-const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character'];
+const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map'];
 
 export function isProposableEntityType(value: string): value is ProposableEntityType {
   return (PROPOSABLE_ENTITY_TYPES as string[]).includes(value);
@@ -73,6 +76,11 @@ export class ProposalRecordsService {
     payload: Record<string, unknown>,
     user: RequestUser,
     role: Role,
+    // Override the recorded proposer (issue #313). Co-DM authoring files proposals whose
+    // author is the AI seat + model, NOT the DM who triggered the draft — so the review
+    // queue attributes them to the AI, not a raw token/user name. Omitted ⇒ the write's
+    // actual user (the normal member/PAT propose path).
+    attribution?: { proposer: string; proposerUserId?: string; proposerToken?: string | null },
   ): Promise<Proposal> {
     // Capture the target's current state so the DM review UI can show a real
     // before/after diff (issue #3). Creates have no "before"; snapshot stays null.
@@ -93,9 +101,9 @@ export class ProposalRecordsService {
         // human-readable `proposer`, their stable id for the self-view filter — even
         // when the write arrives over a PAT (RequestUser resolves to the token's owning
         // user). The token name is kept as secondary provenance, never the identity.
-        proposer: user.name,
-        proposerUserId: user.id,
-        proposerToken: user.tokenContext ? user.tokenContext.name : null,
+        proposer: attribution ? attribution.proposer : user.name,
+        proposerUserId: attribution?.proposerUserId ?? user.id,
+        proposerToken: attribution ? (attribution.proposerToken ?? null) : user.tokenContext ? user.tokenContext.name : null,
         status: 'pending',
         resolvedBy: '',
         note: '',
@@ -162,6 +170,13 @@ export class ProposalRecordsService {
         const [row] = await this.db.select().from(characters).where(eq(characters.id, entityId)).limit(1);
         return row ? { ...characterToDomain(row) } : null;
       }
+      // Co-DM (issue #313) files encounter/map proposals as CREATEs only (the payload is
+      // seeded generator params, applied by re-running the generator on approve), so this
+      // update/delete-only snapshot path is never reached for them — there is no prior row
+      // to diff against a fresh generation. Return null explicitly to keep the switch total.
+      case 'encounter':
+      case 'map':
+        return null;
     }
   }
 

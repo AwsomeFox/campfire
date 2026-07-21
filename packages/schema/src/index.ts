@@ -2275,6 +2275,42 @@ export const AiDmTurnResult = z.object({
 });
 export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 
+// ── Co-DM authoring: draft content for the approval queue (issue #313) ────────
+// The AI acts as a co-DM that DRAFTS content the human DM reviews. A `draft`
+// request is turned by the configured provider into structured entity content and
+// filed as a PENDING PROPOSAL (never a direct write) — so nothing lands in canon
+// until the DM approves it. Encounters/maps reuse the deterministic generators
+// (#304/#306); the proposal payload carries their (seeded) params and approval
+// runs the generator. Every draft is metered against the seat budget and the
+// proposer is attributed to the AI seat + model, not a raw token name.
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map']);
+export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
+
+// POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.
+export const CoDmDraftRequest = z.object({
+  target: CoDmDraftTarget,
+  // Free-text brief for the model, e.g. "a shady fence tied to the thieves guild".
+  prompt: z.string().min(1).max(20_000),
+  // How many drafts to produce (npc/location/beat only; ignored for recap/encounter/map).
+  count: z.number().int().min(1).max(10).optional(),
+});
+export type CoDmDraftRequest = z.infer<typeof CoDmDraftRequest>;
+
+export const CoDmDraftResult = z.object({
+  target: CoDmDraftTarget,
+  provider: z.string(), // which provider produced the draft ('noop' by default)
+  model: z.string(), // the seat's model label
+  // The proposal entity type the drafts were filed under (npc/location/quest/session/
+  // encounter/map) — a beat files a quest, a recap files a session.
+  entityType: z.string(),
+  proposalIds: z.array(Id), // the pending proposals awaiting DM review
+  proposals: z.array(Proposal),
+  tokensUsed: z.number().int().nonnegative(), // metered against the seat budget
+  tokenBudget: z.number().int().nonnegative(),
+  budgetRemaining: z.number().int().nonnegative(),
+});
+export type CoDmDraftResult = z.infer<typeof CoDmDraftResult>;
+
 // ── AI provider config: encrypted API-key + provider storage (issue #310) ────
 // Feeds the vendor-neutral provider factory (#309) with the credentials/config it
 // needs, at TWO scopes: a `server` default (admin-managed) and an optional
