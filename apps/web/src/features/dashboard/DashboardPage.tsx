@@ -22,6 +22,7 @@ import { SessionLog } from './SessionLog';
 import { NotesQuickRail } from './NotesQuickRail';
 import { DiceWidget } from './DiceWidget';
 import { HandoutsCard } from './HandoutsCard';
+import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 
 // Slow poll so the summary (quests, party HP, notes, NPCs) picks up other
 // players' edits at the table without a manual reload; SSE only covers combat.
@@ -151,6 +152,11 @@ export default function DashboardPage() {
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <StatusHeader campaignId={id} summary={summary} role={role} onChange={load} liveEncounter={liveEncounter} />
+
+      {/* AI-DM live-state relay (#344) — presence + last-action line for everyone, plus
+          a DM-only "review it" nudge the instant the AI files a proposal. Renders nothing
+          when the seat isn't in Driver mode. */}
+      <AiDmDashboardActivity campaignId={id} isDm={role === 'dm'} />
 
       <InstallHintBanner />
 
