@@ -16,11 +16,12 @@ test.describe('encounter dice — apply rolled damage', () => {
     const { baseURL, campaignId } = seed();
 
     const playerCtx = await request.newContext({ baseURL });
+    const dm = await request.newContext({ baseURL });
+    try {
     await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
     const me = await (await playerCtx.get('/api/v1/me')).json();
     const playerUserId = String(me.user.id);
 
-    const dm = await request.newContext({ baseURL });
     await dm.post('/api/v1/auth/login', { data: CREDS.dm });
     // A player-owned character with a 2d6+4 attack — always rolls >= 6, so a damage
     // total is always positive and the apply bar always appears.
@@ -64,5 +65,10 @@ test.describe('encounter dice — apply rolled damage', () => {
     await applyBar.getByRole('button', { name: 'Brixi Applybar' }).click();
     await expect(applyBar).toHaveCount(0);
     await expect(page.getByText(/Brixi Applybar took \d+ damage/i)).toBeVisible();
+    } finally {
+      // Dispose the API contexts so they don't leak across the worker.
+      await playerCtx.dispose();
+      await dm.dispose();
+    }
   });
 });
