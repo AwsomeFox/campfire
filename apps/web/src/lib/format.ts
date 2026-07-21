@@ -42,7 +42,19 @@ function toDate(value: Date | string | number): Date {
   if (value instanceof Date) return value;
   if (typeof value === 'string') {
     const m = DATE_ONLY_RE.exec(value);
-    if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (m) {
+      const y = Number(m[1]);
+      const mo = Number(m[2]) - 1;
+      const d = Number(m[3]);
+      const local = new Date(y, mo, d);
+      // The regex only checks shape, so a calendar-invalid date (e.g. 2026-02-31)
+      // would silently roll over (→ Mar 3). Only accept the local date when it
+      // round-trips exactly; otherwise fall through so it parses to Invalid Date,
+      // matching the pre-fix behavior rather than showing a wrong-but-plausible day.
+      if (local.getFullYear() === y && local.getMonth() === mo && local.getDate() === d) {
+        return local;
+      }
+    }
   }
   return new Date(value);
 }
