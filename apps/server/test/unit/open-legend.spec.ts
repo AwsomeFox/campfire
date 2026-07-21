@@ -190,13 +190,11 @@ describe('OpenLegendAdapter — registry resolution', () => {
 });
 
 describe('Open Legend importer — section entry types', () => {
-  it('maps sections to Campfire entry types (banes AND boons -> condition)', () => {
-    expect(ALL_OPEN_LEGEND_SECTIONS).toEqual(['creatures', 'banes', 'boons', 'feats', 'items']);
-    expect(entryTypeForOpenLegendSection('creatures')).toBe('monster');
-    expect(entryTypeForOpenLegendSection('banes')).toBe('condition');
+  it('imports the three sections that exist as open data (boons/banes -> condition, feats -> feat)', () => {
+    expect(ALL_OPEN_LEGEND_SECTIONS).toEqual(['boons', 'banes', 'feats']);
     expect(entryTypeForOpenLegendSection('boons')).toBe('condition');
+    expect(entryTypeForOpenLegendSection('banes')).toBe('condition');
     expect(entryTypeForOpenLegendSection('feats')).toBe('feat');
-    expect(entryTypeForOpenLegendSection('items')).toBe('item');
   });
 });
 
@@ -211,44 +209,32 @@ describe('Open Legend importer — mapping against a real-shaped fake codex', ()
     await fake.close();
   });
 
-  it('maps a paginated creature section: descriptor/level/Guard/attributes into dataJson', async () => {
-    const { entries } = await fetchOpenLegendSection(fake.baseUrl, 'creatures', silentLogger);
-    expect(entries.map((e) => e.name).sort()).toEqual(['Goblin', 'Ogre']);
-    const goblin = entries.find((e) => e.name === 'Goblin')!;
-    expect(goblin.type).toBe('monster');
-    expect(goblin.slug).toBe('goblin');
-    expect(goblin.license).toBe('Open Game License v1.0a');
-    const data = JSON.parse(goblin.dataJson!);
-    expect(data.descriptor).toBe('Small humanoid');
-    expect(data.level).toBe(1);
-    expect(data.defenses.guard).toBe(13);
-    expect(data.attributes.agility).toBe(3);
-    expect(data.banes).toEqual(['Prone']);
-  });
-
-  it('maps banes as condition entries tagged kind=bane in dataJson', async () => {
-    const { entries } = await fetchOpenLegendSection(fake.baseUrl, 'banes', silentLogger);
-    const blinded = entries.find((e) => e.name === 'Blinded')!;
-    expect(blinded.type).toBe('condition');
-    expect(JSON.parse(blinded.dataJson!)).toMatchObject({ kind: 'bane', power: 3, attribute: 'Any', resist: 'Fortitude' });
-  });
-
-  it('maps boons served as a BARE JSON ARRAY (single-file export shape) as condition/kind=boon', async () => {
+  it('parses REAL YAML boons (with the `!` tag + list power/attribute) as condition/kind=boon', async () => {
     const { entries } = await fetchOpenLegendSection(fake.baseUrl, 'boons', silentLogger);
     expect(entries.map((e) => e.name).sort()).toEqual(['Flying', 'Haste']);
     const haste = entries.find((e) => e.name === 'Haste')!;
     expect(haste.type).toBe('condition');
-    expect(JSON.parse(haste.dataJson!)).toMatchObject({ kind: 'boon', attribute: 'Movement' });
+    expect(haste.slug).toBe('haste');
+    expect(haste.license).toBe('Open Legend Community License'); // stamped default (files carry no per-row license)
+    expect(haste.body).toContain('additional move action'); // description + effect prose
+    expect(JSON.parse(haste.dataJson!)).toMatchObject({ kind: 'boon', power: ['5'], attribute: ['Movement'] });
   });
 
-  it('maps feats and items with their Open Legend fields', async () => {
+  it('parses banes served as a BARE JSON ARRAY as condition/kind=bane', async () => {
+    const { entries } = await fetchOpenLegendSection(fake.baseUrl, 'banes', silentLogger);
+    expect(entries.map((e) => e.name).sort()).toEqual(['Blinded', 'Stunned']);
+    const blinded = entries.find((e) => e.name === 'Blinded')!;
+    expect(blinded.type).toBe('condition');
+    // banes carry `attackAttributes` (not `attribute`) — the mapper reads either.
+    expect(JSON.parse(blinded.dataJson!)).toMatchObject({ kind: 'bane', power: ['5'], attribute: ['Agility', 'Energy'] });
+  });
+
+  it('parses feats served as a JSON {results} page, preserving cost + structured prerequisites', async () => {
     const feats = (await fetchOpenLegendSection(fake.baseUrl, 'feats', silentLogger)).entries;
     expect(feats[0]).toMatchObject({ name: 'Combat Momentum', type: 'feat' });
-    expect(JSON.parse(feats[0].dataJson!)).toMatchObject({ tier: 'Adept', prerequisite: 'Agility 3' });
-
-    const items = (await fetchOpenLegendSection(fake.baseUrl, 'items', silentLogger)).entries;
-    expect(items[0]).toMatchObject({ name: 'Greatsword', type: 'item' });
-    expect(JSON.parse(items[0].dataJson!)).toMatchObject({ category: 'Weapon', wealthLevel: 2, properties: ['Two-handed', 'Forceful'] });
+    const data = JSON.parse(feats[0].dataJson!);
+    expect(data.cost).toEqual(['3']);
+    expect(data.prerequisites).toMatchObject({ tier1: { Other: ['None'] } });
   });
 });
 
@@ -263,11 +249,11 @@ describe('Open Legend importer — hardening (de-dup + cross-origin pagination g
     await fake.close();
   });
 
-  it('collapses same-name creatures to one canonical (SRD) row and refuses the cross-origin next link', async () => {
-    const { entries, dedupedCount } = await fetchOpenLegendSection(fake.baseUrl, 'creatures', silentLogger);
+  it('collapses same-name boons to one row and refuses the cross-origin next link', async () => {
+    const { entries, dedupedCount } = await fetchOpenLegendSection(fake.baseUrl, 'boons', silentLogger);
     expect(entries).toHaveLength(1);
-    expect(entries[0].name).toBe('Goblin');
-    expect(entries[0].source).toBe('Open Legend SRD'); // canonical source kept over the community book
+    expect(entries[0].name).toBe('Haste');
+    expect(entries[0].source).toBe('Open Legend Core Rules'); // first-seen kept (stable)
     expect(dedupedCount).toBe(1);
     expect(fake.evilWasHit()).toBe(false); // cross-origin pagination link was NOT followed
   });
