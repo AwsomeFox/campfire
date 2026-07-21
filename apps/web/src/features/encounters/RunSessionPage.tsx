@@ -409,6 +409,9 @@ export default function RunSessionPage() {
   }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid]);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  // A damage/heal amount just rolled from a character card, awaiting a one-tap target
+  // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
+  const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
   const [pings, setPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
@@ -562,6 +565,11 @@ export default function RunSessionPage() {
     if (role !== 'player') return false;
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
   }
+
+  // A character card rolled damage — surface the one-tap "apply to target" bar.
+  const onApplyDamageRolled = useCallback((amount: number, label: string) => {
+    if (amount > 0) setPendingApply({ amount, label });
+  }, []);
 
   const reportError = useCallback(
     (err: unknown) => setActionError(err instanceof ApiError ? err.message : 'That action failed.'),
@@ -893,6 +901,19 @@ export default function RunSessionPage() {
         />
       )}
 
+      {pendingApply && (
+        <ApplyDamageBar
+          amount={pendingApply.amount}
+          label={pendingApply.label}
+          targets={orderedCombatants.filter((c) => canEditCombatant(c) && c.hpCurrent != null)}
+          onApply={(combatantId, delta) => {
+            hpDelta.mutate({ combatantId, delta });
+            setPendingApply(null);
+          }}
+          onDismiss={() => setPendingApply(null)}
+        />
+      )}
+
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
@@ -911,6 +932,9 @@ export default function RunSessionPage() {
               canSetInitiative={isDm && encounter.status !== 'ended'}
               character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
               openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
+              campaignId={cid}
+              onRollError={setActionError}
+              onApplyDamage={onApplyDamageRolled}
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
               ruleSystem={ruleSystem}
@@ -1960,6 +1984,97 @@ function BattleMap({
 
 // ---------------------------------------------------------------------------
 
+/**
+ * One-tap "apply rolled damage" bar (issue: wire actions → dice → damage). Appears
+ * when a character card rolls damage; the user picks Damage/Heal and taps a target
+ * combatant to apply it via the same HP path as the ± steppers. Targets are limited
+ * to combatants the viewer can edit (the DM: everyone; a player: their own character),
+ * so it never lets a player edit HP the server would reject anyway.
+ */
+function ApplyDamageBar({
+  amount,
+  label,
+  targets,
+  onApply,
+  onDismiss,
+}: {
+  amount: number;
+  label: string;
+  targets: Combatant[];
+  onApply: (combatantId: number, delta: number) => void;
+  onDismiss: () => void;
+}) {
+  const [mode, setMode] = useState<'damage' | 'heal'>('damage');
+  const delta = mode === 'heal' ? amount : -amount;
+  return (
+    <div
+      className="cf-inset"
+      role="group"
+      aria-label={`Apply ${amount} rolled ${label}`}
+      style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '8px 12px' }}
+    >
+      <span style={{ fontSize: 12.5 }}>
+        <span className="text-muted">Rolled </span>
+        <span style={{ fontWeight: 700, color: 'var(--color-text)' }}>{amount}</span>
+        <span className="text-muted"> — {label}</span>
+      </span>
+      <div className="seg inline-flex" role="tablist" aria-label="Apply as">
+        {(['damage', 'heal'] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={mode === m}
+            onClick={() => setMode(m)}
+            style={{
+              padding: '4px 10px',
+              fontSize: 12,
+              border: 0,
+              background: 'transparent',
+              cursor: 'pointer',
+              color: mode === m ? 'var(--color-accent)' : 'var(--color-neutral-500)',
+              boxShadow: mode === m ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
+              minHeight: 30,
+            }}
+          >
+            {m === 'damage' ? 'Damage' : 'Heal'}
+          </button>
+        ))}
+      </div>
+      <span className="text-muted" style={{ fontSize: 11.5 }}>
+        {mode === 'heal' ? 'Heal' : 'Apply to'}:
+      </span>
+      {targets.length === 0 ? (
+        <span className="text-muted" style={{ fontSize: 11.5 }}>no editable targets</span>
+      ) : (
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+          {targets.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              className="btn btn-secondary"
+              style={{ minHeight: 30, fontSize: 11.5, padding: '3px 10px' }}
+              title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} ${mode === 'heal' ? 'to' : 'to'} ${c.name}`}
+              onClick={() => onApply(c.id, delta)}
+            >
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
+      <button
+        type="button"
+        aria-label="Dismiss"
+        onClick={onDismiss}
+        className="text-slate-500 hover:text-slate-300"
+        style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 14, marginLeft: 'auto' }}
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
 function CombatantRow({
   combatant,
   isCurrentTurn,
@@ -1970,6 +2085,9 @@ function CombatantRow({
   canSetInitiative,
   character,
   openCardByDefault,
+  campaignId,
+  onRollError,
+  onApplyDamage,
   busy,
   conditionSuggestions,
   ruleSystem,
@@ -1995,6 +2113,11 @@ function CombatantRow({
   character: Character | null;
   /** Start the character card expanded — used for the viewer's own character. */
   openCardByDefault: boolean;
+  /** Campaign id — enables click-to-roll on the card for combatants the viewer controls. */
+  campaignId: number;
+  onRollError: (msg: string | null) => void;
+  /** A damage total rolled from the card, to be applied to a target combatant. */
+  onApplyDamage: (amount: number, label: string) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
@@ -2298,7 +2421,15 @@ function CombatantRow({
             and the DM sees the whole party's. Character data is party-visible (dmSecret is
             stripped server-side and never shown here), so it renders for every viewer. */}
         {combatant.kind === 'character' && character && (
-          <CharacterStatCard character={character} ruleSystem={ruleSystem} defaultOpen={openCardByDefault} />
+          <CharacterStatCard
+            character={character}
+            ruleSystem={ruleSystem}
+            defaultOpen={openCardByDefault}
+            /* Click-to-roll only from a card the viewer controls (their own PC, or any for the DM). */
+            campaignId={canEdit ? campaignId : undefined}
+            onError={onRollError}
+            onApplyDamage={onApplyDamage}
+          />
         )}
       </div>
       <div style={{ minWidth: 130, flex: 'none' }}>
