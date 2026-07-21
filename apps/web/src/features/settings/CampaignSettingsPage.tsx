@@ -15,6 +15,7 @@ import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
+import AiDmCard from './AiDmCard';
 
 const DANGER_LEVELS: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
 
@@ -104,6 +105,7 @@ export default function CampaignSettingsPage() {
             isAdmin={isAdmin}
             onSaved={(c) => setCampaign(c)}
           />
+          <AiDmCard campaignId={id} />
           <ExportCard campaignId={id} />
           <CloneCard
             campaign={campaign}

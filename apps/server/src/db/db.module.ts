@@ -937,6 +937,26 @@ function migrateInventoryItemsTableForIconSlug(sqlite: Database.Database): void 
 }
 
 /**
+ * Migration for DBs created before the AI-DM operating mode (issue #311): the
+ * `ai_dm_seats.mode` column didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN —
+ * no table rebuild needed, same shape as the icon_slug migrations above. Existing
+ * seats default to 'off' (no AI participation), preserving pre-migration behavior;
+ * a DM opts into co_dm/driver via the AI-DM settings UI. New DBs never hit this
+ * path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateAiDmSeatsTableForMode(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_seats)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'mode')) return;
+
+  sqlite.exec("ALTER TABLE ai_dm_seats ADD COLUMN mode TEXT NOT NULL DEFAULT 'off'");
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -990,6 +1010,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0038_rule_entries_icon_slug', run: migrateRuleEntriesTableForIconSlug },
   { name: '0039_inventory_items_icon_slug', run: migrateInventoryItemsTableForIconSlug },
   { name: '0040_ai_provider_config', run: migrateAiProviderConfigTable },
+  { name: '0041_ai_dm_seats_mode', run: migrateAiDmSeatsTableForMode },
 ];
 
 /**

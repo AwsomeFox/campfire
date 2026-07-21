@@ -1,13 +1,14 @@
-import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import type { AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, Role } from '@campfire/schema';
+import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
+import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
 
 type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
@@ -19,6 +20,7 @@ const DEFAULT_MAX_TOKENS = 512;
 function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
   return {
     campaignId: row.campaignId,
+    mode: (row.mode as AiDmMode) ?? 'off',
     enabled: row.enabled,
     model: row.model,
     instructions: row.instructions,
@@ -36,6 +38,7 @@ function defaultSeat(campaignId: number): AiDmSeat {
   const ts = nowIso();
   return {
     campaignId,
+    mode: 'off',
     enabled: false,
     model: '',
     instructions: '',
@@ -68,6 +71,7 @@ export class AiDmService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
+    private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
 
@@ -110,16 +114,51 @@ export class AiDmService {
     return this.redactSeatForRole(await this.getSeat(campaignId), role);
   }
 
+  /**
+   * Driver mode (issue #311) hands the DM seat to the AI, so it carries hard
+   * preconditions beyond the server experimental flag (already asserted by every
+   * configure): a POSITIVE token budget AND a configured provider (a campaign
+   * override or the server default — see AiProviderConfigService). Selecting
+   * `driver` without both is a 409 with a clear, actionable reason. `off`/`co_dm`
+   * have no such gate (co_dm only ever proposes into the approval queue).
+   */
+  private async assertDriverAllowed(campaignId: number, resultingTokenBudget: number): Promise<void> {
+    if (resultingTokenBudget <= 0) {
+      throw new ConflictException(
+        'Driver mode requires a positive token budget. Set a budget first, then switch the mode to Driver.',
+      );
+    }
+    const effective = await this.providerConfig.resolveEffectiveConfig(campaignId);
+    if (!effective) {
+      throw new ConflictException(
+        'Driver mode requires a configured AI provider. Set a provider (or a server default) with an API key, then switch the mode to Driver.',
+      );
+    }
+  }
+
   /** Configure the seat (dm only). Gated on the server experimental flag. Upserts; omitted fields are left unchanged. */
   async configure(campaignId: number, input: AiDmSeatUpdateInput, user: RequestUser): Promise<AiDmSeat> {
     await this.assertExperimentalEnabled();
     const ts = nowIso();
     const existing = await this.findRow(campaignId);
+    const current = existing ? toDomain(existing) : defaultSeat(campaignId);
+
+    // The mode/budget that WILL be in effect after this update (omitted => unchanged).
+    const resultingMode: AiDmMode = input.mode ?? current.mode;
+    const resultingTokenBudget = input.tokenBudget ?? current.tokenBudget;
+    // Re-validate the driver preconditions only when this write actually touches the
+    // mode or the budget — so editing e.g. `instructions` on an already-driver seat is
+    // never blocked by a later provider/budget change, but selecting Driver (or lowering
+    // the budget while in Driver) is.
+    if (resultingMode === 'driver' && (input.mode !== undefined || input.tokenBudget !== undefined)) {
+      await this.assertDriverAllowed(campaignId, resultingTokenBudget);
+    }
 
     if (!existing) {
       const base = defaultSeat(campaignId);
       await this.db.insert(aiDmSeats).values({
         campaignId,
+        mode: input.mode ?? base.mode,
         enabled: input.enabled ?? base.enabled,
         model: input.model ?? base.model,
         instructions: input.instructions ?? base.instructions,
@@ -134,6 +173,7 @@ export class AiDmService {
       await this.db
         .update(aiDmSeats)
         .set({
+          ...(input.mode !== undefined ? { mode: input.mode } : {}),
           ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
           ...(input.model !== undefined ? { model: input.model } : {}),
           ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),

@@ -68,6 +68,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           'allowed_models',
         ]),
       );
+
+      // 0041 (issue #311): ai_dm_seats gains the operating-mode column.
+      expect(columnNames(sqlite, 'ai_dm_seats')).toContain('mode');
     } finally {
       sqlite.close();
     }

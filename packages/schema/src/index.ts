@@ -2228,9 +2228,23 @@ export type ProposalBatchResolve = z.infer<typeof ProposalBatchResolve>;
 export const AiDmTurnKind = z.enum(['narrate', 'combat', 'recap']);
 export type AiDmTurnKind = z.infer<typeof AiDmTurnKind>;
 
+// How the AI participates in a campaign (issue #311). This is the first-class
+// "operating mode" of the seat, orthogonal to the metering/`enabled` turn gate:
+//   - off    : no AI participation (default).
+//   - co_dm  : AI only PROPOSES — every write flows through the approval queue
+//              (#124); the human DM runs the table. The safe, recommended mode.
+//   - driver : the AI HOLDS the DM seat and runs the game (#312). Requires the
+//              server experimental flag, a positive token budget, AND a configured
+//              provider — configuring it otherwise is a 409 (enforced server-side).
+// Non-secret, so players can see it: it is the honest indicator of whether an AI
+// is co-DMing or driving (unlike `instructions`, which is redacted per #261).
+export const AiDmMode = z.enum(['off', 'co_dm', 'driver']);
+export type AiDmMode = z.infer<typeof AiDmMode>;
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,
+  mode: AiDmMode.default('off'), // operating mode: off / co_dm / driver (issue #311)
   enabled: z.boolean().default(false), // per-campaign on/off (in addition to the server flag)
   model: z.string().max(120).default(''), // informational label of the model/agent occupying the seat
   instructions: z.string().max(20_000).default(''), // the DM persona / house rules the connected agent should follow
@@ -2248,6 +2262,7 @@ export type AiDmSeat = z.infer<typeof AiDmSeat>;
 // Configure the seat (PUT /campaigns/:id/ai-dm, dm only). All fields optional;
 // an omitted field is left unchanged.
 export const AiDmSeatUpdate = z.object({
+  mode: AiDmMode.optional(), // operating mode (issue #311); driver has server-side preconditions
   enabled: z.boolean().optional(),
   model: z.string().max(120).optional(),
   instructions: z.string().max(20_000).optional(),

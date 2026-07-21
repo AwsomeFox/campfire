@@ -739,6 +739,7 @@ export const partyTreasury = sqliteTable('party_treasury', {
 // budget; the server never calls an LLM vendor (see modules/ai-dm).
 export const aiDmSeats = sqliteTable('ai_dm_seats', {
   campaignId: integer('campaign_id').primaryKey(),
+  mode: text('mode').notNull().default('off'), // 'off' | 'co_dm' | 'driver' (issue #311)
   enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
   model: text('model').notNull().default(''),
   instructions: text('instructions').notNull().default(''),
