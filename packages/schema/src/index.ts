@@ -11,6 +11,22 @@
  *  - Create/Update input schemas are derived from the entity schema
  */
 import { z } from 'zod';
+// Starfinder 1e rule-system adapter (issue #297). Lives in its own file (type-only import
+// back into this module, so no runtime cycle); registered in ADAPTERS below + re-exported.
+import { StarfinderAdapter, STARFINDER_ADAPTER_ID } from './starfinder-adapter';
+export {
+  StarfinderAdapter,
+  STARFINDER_ADAPTER_ID,
+  STARFINDER_CONDITIONS,
+  starfinderArmorClasses,
+  starfinderHitPoints,
+} from './starfinder-adapter';
+export type {
+  StarfinderArmorClasses,
+  StarfinderHitPoints,
+  StarfinderStatblockData,
+  StarfinderRuleSystemAdapter,
+} from './starfinder-adapter';
 
 // ---------- shared ----------
 export const Role = z.enum(['dm', 'player', 'viewer']);
@@ -1144,6 +1160,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
  */
 const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [DND5E_ADAPTER_ID]: Dnd5eAdapter,
+  [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
 };
 
 /**
