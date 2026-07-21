@@ -24,7 +24,7 @@ export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] 
         </Link>
       </div>
       {npcs.length === 0 ? (
-        <EmptyState icon="🤝" title="No NPCs yet" />
+        <EmptyState icon="shaking-hands" title="No NPCs yet" />
       ) : (
         npcs.map((npc) => (
           <Link

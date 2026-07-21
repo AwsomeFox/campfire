@@ -170,7 +170,7 @@ export function QuestsCard({
       </div>
       {error && <p className="text-xs text-rose-400">{error}</p>}
       {roots.length === 0 ? (
-        <EmptyState icon="📜" title="No quests yet" hint={role === 'dm' ? 'Start one from the Quests page.' : 'Check back after the next session.'} />
+        <EmptyState icon="scroll-unfurled" title="No quests yet" hint={role === 'dm' ? 'Start one from the Quests page.' : 'Check back after the next session.'} />
       ) : (
         roots.map((q) => renderQuest(q))
       )}

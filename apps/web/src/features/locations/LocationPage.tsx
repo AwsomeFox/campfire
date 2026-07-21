@@ -20,11 +20,12 @@ import { attachmentFileUrl } from '../../components/ImageUpload';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { GameIcon } from '../../components/GameIcon';
 
 const statusLabel: Record<Location['status'], string> = {
   unexplored: 'Unexplored',
   explored: 'Explored',
-  current: '📍 Current',
+  current: 'Current',
 };
 
 /** Design's primary "discover" action advances one step: unexplored -> explored -> current. */
@@ -392,7 +393,7 @@ export default function LocationPage() {
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}>{statusLabel[location.status]}</Chip>
             {isDm && location.status === 'unexplored' && (
-              <Chip variant="failed" className="!ml-0">🙈 Hidden from players</Chip>
+              <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
             )}
             {isDm && nextStatus && (
               <Btn
@@ -538,7 +539,7 @@ export default function LocationPage() {
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Here &amp; connected</h2>
                 {hereNpcs.length === 0 && connectedQuests.length === 0 ? (
-                  <EmptyState icon="🤝" title="Nothing connected here yet" />
+                  <EmptyState icon="shaking-hands" title="Nothing connected here yet" />
                 ) : (
                   <div className="grid sm:grid-cols-2 gap-3">
                     {hereNpcs.map((npc) => (
@@ -551,7 +552,7 @@ export default function LocationPage() {
                         }}
                         className="cf-inset p-3 hover:border-amber-500/50"
                       >
-                        <p className="text-sm font-bold text-purple-400">🤝 {npc.name}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-purple-400"><GameIcon slug="hooded-figure" size={13} /> {npc.name}</p>
                         <p className="text-xs text-slate-400">{npc.role || 'NPC'}</p>
                       </a>
                     ))}
@@ -565,7 +566,7 @@ export default function LocationPage() {
                         }}
                         className="cf-inset p-3 hover:border-amber-500/50"
                       >
-                        <p className="text-sm font-bold text-amber-400">📜 {q.title}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={13} /> {q.title}</p>
                         <Chip variant={statusVariant(q.status)} className="mt-1">
                           {q.status}
                         </Chip>
@@ -589,7 +590,7 @@ export default function LocationPage() {
                         }}
                         className="cf-inset p-3 hover:border-amber-500/50"
                       >
-                        <p className="text-sm font-bold text-amber-400">🗺 {child.name}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="treasure-map" size={13} /> {child.name}</p>
                         <p className="text-xs text-slate-400">{child.kind || 'Location'}</p>
                       </a>
                     ))}
@@ -625,7 +626,7 @@ export default function LocationPage() {
         <Card className="space-y-3">
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
-              💡 You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
+              <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
             </p>
           )}
           {saveError && <ErrorNote message={saveError} />}
@@ -661,7 +662,7 @@ export default function LocationPage() {
           </div>
           {!proposeMode && (
             <div className="space-y-1">
-              <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
+              <label className="flex items-center gap-1 text-[10px] text-amber-500 font-bold uppercase"><GameIcon slug="padlock" size={11} /> DM secret</label>
               <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
             </div>
           )}

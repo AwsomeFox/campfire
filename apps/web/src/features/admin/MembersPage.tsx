@@ -18,6 +18,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { GameIcon } from '../../components/GameIcon';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -81,7 +82,7 @@ export default function MembersPage() {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
         <Card className="text-center space-y-1">
-          <p className="text-2xl">🔒</p>
+          <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} /></p>
           <p className="text-sm text-slate-300 font-semibold">You're not a member of this campaign</p>
         </Card>
       </div>
@@ -257,7 +258,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
 }
 
 function ReadOnlyMemberTable({ members }: { members: CampaignMember[] }) {
-  if (members.length === 0) return <EmptyState icon="🛡" title="No members yet" />;
+  if (members.length === 0) return <EmptyState icon="shield" title="No members yet" />;
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -405,7 +406,7 @@ function MembersCard({
       )}
 
       {members.length === 0 ? (
-        <EmptyState icon="🛡" title="No members yet" hint="Add one above." />
+        <EmptyState icon="shield" title="No members yet" hint="Add one above." />
       ) : (
         <div className="flex flex-col">
           {members.map((m) => (
@@ -689,7 +690,7 @@ function timeAgo(iso: string): string {
   return `${days}d`;
 }
 
-const ACTOR_ICON: Record<Role, string> = { dm: '🎩', player: '👤', viewer: '👤' };
+const ACTOR_ICON: Record<Role, string> = { dm: 'top-hat', player: 'person', viewer: 'person' };
 
 /**
  * Resolve an AuditEntry.actor (see auditActor() in apps/server/src/common/user.types.ts)
@@ -711,14 +712,14 @@ function resolveActorLabel(actor: string, members: CampaignMember[]): { label: s
 }
 
 function AuditList({ entries, members }: { entries: AuditEntry[]; members: CampaignMember[] }) {
-  if (entries.length === 0) return <EmptyState icon="📜" title="No activity yet" />;
+  if (entries.length === 0) return <EmptyState icon="scroll-unfurled" title="No activity yet" />;
   return (
     <ul className="text-xs space-y-2 text-slate-400">
       {entries.slice(0, 20).map((e) => {
         const { label, isToken } = resolveActorLabel(e.actor, members);
         return (
           <li key={e.id}>
-            <span className="text-slate-600">{timeAgo(e.createdAt)}</span> {ACTOR_ICON[e.actorRole]}{' '}
+            <span className="text-slate-600">{timeAgo(e.createdAt)}</span> <GameIcon slug={ACTOR_ICON[e.actorRole]} size={12} className="inline align-text-bottom" />{' '}
             <b className="text-slate-300">{label}</b>{' '}
             {isToken && (
               <span className="tag tag-neutral" style={{ fontSize: 9 }}>

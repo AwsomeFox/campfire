@@ -12,6 +12,7 @@ import { formatDateTime } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { GameIcon } from '../../components/GameIcon';
 
 const RSVP_OPTIONS: Array<{ status: RsvpStatus; label: string; icon: string }> = [
   { status: 'yes', label: 'In', icon: '✓' },
@@ -97,7 +98,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
       {!next && !showAddForm && (
         <Card>
           <EmptyState
-            icon="🗓️"
+            icon="calendar"
             title="No session on the calendar"
             hint={isDm ? 'Use “+ Schedule session” to pick the next game night.' : 'Your DM hasn’t scheduled the next session yet.'}
           />
@@ -204,7 +205,7 @@ function ScheduleItem({
           {schedule.title && <span className="text-muted text-sm">{schedule.title}</span>}
           <span className="text-muted text-xs ml-auto">{formatDuration(schedule.durationMinutes)}</span>
         </div>
-        {schedule.location && <p className="text-muted text-xs m-0">📍 {schedule.location}</p>}
+        {schedule.location && <p className="flex items-center gap-1 text-muted text-xs m-0"><GameIcon slug="position-marker" size={11} /> {schedule.location}</p>}
         {schedule.notes && <p className="text-sm m-0" style={{ color: 'var(--color-text)' }}>{schedule.notes}</p>}
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -409,7 +410,7 @@ function FeedCard({
   return (
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2">
-        <span className="text-sm font-bold text-white">📅 Calendar feed</span>
+        <span className="flex items-center gap-2 text-sm font-bold text-white"><GameIcon slug="calendar" size={16} /> Calendar feed</span>
         <div className="flex-1" />
         {isDm && absoluteUrl && (
           <>

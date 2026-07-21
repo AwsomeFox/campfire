@@ -10,6 +10,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { GameIcon } from '../../components/GameIcon';
 
 function firstLine(body: string): string {
   const line = body.split('\n').find((l) => l.trim().length > 0);
@@ -19,7 +20,7 @@ function firstLine(body: string): string {
 const statusLabel: Record<Location['status'], string> = {
   unexplored: 'Unexplored',
   explored: 'Explored',
-  current: '📍 Current',
+  current: 'Current',
 };
 
 /**
@@ -141,7 +142,7 @@ export default function LocationListPage() {
       <Card className="space-y-4">
         <div className="flex items-center justify-between border-b border-slate-700 pb-3">
           <h1 className="font-bold text-white text-lg flex items-center gap-2">
-            🗺 World <span className="text-slate-500 font-normal text-sm">· Locations</span>
+            <GameIcon slug="world" size={18} /> World <span className="text-slate-500 font-normal text-sm">· Locations</span>
           </h1>
           <Link to={`/c/${id}/npcs`} className="btn btn-ghost" style={{ fontSize: 12 }}>
             NPCs →
@@ -194,7 +195,7 @@ export default function LocationListPage() {
         )}
 
         {locations.length === 0 ? (
-          <EmptyState icon="🗺" title="No locations yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any locations yet.'} />
+          <EmptyState icon="treasure-map" title="No locations yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any locations yet.'} />
         ) : (
           <div className="flex flex-col gap-2.5" style={{ maxWidth: 720 }}>
             {toTree(locations).map(({ loc, depth }) => (
@@ -214,7 +215,7 @@ export default function LocationListPage() {
                     <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
                     <Chip variant={statusVariant(loc.status)}>{statusLabel[loc.status]}</Chip>
                     {isDm && loc.status === 'unexplored' && (
-                      <Chip variant="failed">🙈 Hidden from players</Chip>
+                      <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
                     )}
                     {isDm && loc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   </div>
@@ -222,7 +223,7 @@ export default function LocationListPage() {
                 </div>
                 {loc.mapX != null && loc.mapY != null && (
                   <span className="text-[11px] text-slate-500 shrink-0">
-                    📍 {Math.round(loc.mapX)},{Math.round(loc.mapY)}
+                    <GameIcon slug="position-marker" size={11} className="inline align-text-bottom mr-1" />{Math.round(loc.mapX)},{Math.round(loc.mapY)}
                   </span>
                 )}
               </a>

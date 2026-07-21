@@ -147,7 +147,7 @@ export default function QuestListPage() {
   if (forbidden) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <EmptyState icon="🔒" title={t('quests.noAccess')} />
+        <EmptyState icon="padlock" title={t('quests.noAccess')} />
       </div>
     );
   }
@@ -203,7 +203,7 @@ export default function QuestListPage() {
           <Skeleton lines={5} />
         </div>
       ) : roots.length === 0 ? (
-        <EmptyState icon="📜" title={t('quests.empty.title')} hint={isDm ? t('quests.empty.hintDm') : t('quests.empty.hintPlayer')} />
+        <EmptyState icon="scroll-unfurled" title={t('quests.empty.title')} hint={isDm ? t('quests.empty.hintDm') : t('quests.empty.hintPlayer')} />
       ) : (
         roots.map((q) => {
           const kids = childrenOf(q.id);

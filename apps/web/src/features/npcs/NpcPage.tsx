@@ -321,7 +321,7 @@ export default function NpcPage() {
               {npc.role && <p className="text-sm text-slate-400 break-words">{npc.role}</p>}
             </div>
             <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
-            {isDm && npc.hidden && <Chip variant="failed">🙈 Hidden from players</Chip>}
+            {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {isDm && (
               <div className="flex gap-2 ml-auto">
                 <Btn
@@ -331,7 +331,7 @@ export default function NpcPage() {
                   onClick={toggleHidden}
                   title={npc.hidden ? 'Make this NPC visible to players' : 'Hide this NPC from players'}
                 >
-                  {togglingHidden ? '…' : npc.hidden ? '👁 Reveal' : '🙈 Hide'}
+                  {togglingHidden ? '…' : npc.hidden ? <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Reveal</> : <><GameIcon slug="sight-disabled" size={12} className="inline align-text-bottom" /> Hide</>}
                 </Btn>
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
@@ -377,7 +377,7 @@ export default function NpcPage() {
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Connected</h2>
                 {connectedQuests.length === 0 ? (
-                  <EmptyState icon="📜" title="No connected quests" />
+                  <EmptyState icon="scroll-unfurled" title="No connected quests" />
                 ) : (
                   <div className="grid sm:grid-cols-2 gap-3">
                     {connectedQuests.map((q) => (
@@ -390,7 +390,7 @@ export default function NpcPage() {
                         }}
                         className="cf-inset p-3 hover:border-amber-500/50"
                       >
-                        <p className="text-sm font-bold text-amber-400">📜 {q.title}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={13} /> {q.title}</p>
                         <Chip variant={statusVariant(q.status)} className="mt-1">
                           {q.status}
                         </Chip>
@@ -456,7 +456,7 @@ export default function NpcPage() {
         <Card className="space-y-3">
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
-              💡 You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
+              <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
             </p>
           )}
           {saveError && <ErrorNote message={saveError} />}
@@ -533,12 +533,12 @@ export default function NpcPage() {
           {!proposeMode && (
             <>
               <div className="space-y-1">
-                <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
+                <label className="flex items-center gap-1 text-[10px] text-amber-500 font-bold uppercase"><GameIcon slug="padlock" size={11} /> DM secret</label>
                 <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
               </div>
               <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
                 <input type="checkbox" checked={form.hidden} onChange={(e) => setForm({ ...form, hidden: e.target.checked })} />
-                <span>🙈 Hidden from players (whole NPC, not just the secret)</span>
+                <span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players (whole NPC, not just the secret)</span>
               </label>
             </>
           )}

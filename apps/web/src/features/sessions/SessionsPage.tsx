@@ -153,7 +153,7 @@ export default function SessionsPage() {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🔒" title="You don't have access to this campaign" />
+          <EmptyState icon="padlock" title="You don't have access to this campaign" />
         </Card>
       </div>
     );
@@ -301,7 +301,7 @@ export default function SessionsPage() {
           ) : (
             <Card>
               {sessions.length > 0 ? (
-                <EmptyState icon="📖" title="Select a session" hint="Pick a recap from the timeline on the left." />
+                <EmptyState icon="open-book" title="Select a session" hint="Pick a recap from the timeline on the left." />
               ) : (
                 <EmptyState title="No sessions yet — add your first recap" hint="Use “+ Add recap” to log your first session." />
               )}

@@ -9,6 +9,8 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import type { SearchResponse, SearchResult } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, EmptyState, ErrorNote, Skeleton, TextInput } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
+import { ENTITY_ICON } from '../../lib/uiIcons';
 
 const typeLabel: Record<SearchResult['type'], string> = {
   quest: 'Quests',
@@ -26,18 +28,18 @@ const typeLabel: Record<SearchResult['type'], string> = {
 };
 
 const typeIcon: Record<SearchResult['type'], string> = {
-  quest: '📜',
-  npc: '🧑',
-  faction: '🏴',
-  location: '🗺️',
-  character: '🛡️',
-  session: '📖',
-  note: '📝',
-  timeline: '🕰️',
-  item: '🎒',
-  comment: '💬',
-  arc: '🌿',
-  beat: '🎬',
+  quest: ENTITY_ICON.quest,
+  npc: ENTITY_ICON.npc,
+  faction: ENTITY_ICON.faction,
+  location: ENTITY_ICON.location,
+  character: ENTITY_ICON.character,
+  session: ENTITY_ICON.session,
+  note: ENTITY_ICON.note,
+  timeline: ENTITY_ICON.timeline,
+  item: ENTITY_ICON.item,
+  comment: ENTITY_ICON.comment,
+  arc: ENTITY_ICON.arc,
+  beat: ENTITY_ICON.beat,
 };
 
 const typeRoute: Record<SearchResult['type'], string> = {
@@ -164,7 +166,7 @@ export default function SearchPage() {
       {error && <ErrorNote message={error} />}
 
       {!loading && !error && q.trim() && data && data.results.length === 0 && (
-        <EmptyState icon="🔍" title={`No results for “${q}”`} hint="Try a different word or a name." />
+        <EmptyState icon="magnifying-glass" title={`No results for “${q}”`} hint="Try a different word or a name." />
       )}
 
       {!loading && !error && data && data.results.length > 0 && (
@@ -177,7 +179,7 @@ export default function SearchPage() {
             .map((t) => (
               <div key={t} className="space-y-2">
                 <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
-                  <span>{typeIcon[t]}</span>
+                  <span className="inline-flex text-[var(--color-accent)]"><GameIcon slug={typeIcon[t]} size={16} /></span>
                   {typeLabel[t]}
                   <span className="text-muted font-normal">({grouped.get(t)!.length})</span>
                 </h2>

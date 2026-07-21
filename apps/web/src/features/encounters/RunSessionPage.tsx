@@ -48,6 +48,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity } from '../ai-dm/toolActivity';
+import { GameIcon } from '../../components/GameIcon';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -95,7 +96,7 @@ function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | nul
     `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
   return (
     <span className="tag" style={{ fontSize: 10, ...DIFFICULTY_STYLE[difficulty.band] }} title={title}>
-      ⚔ {DIFFICULTY_LABEL[difficulty.band]}
+      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />{DIFFICULTY_LABEL[difficulty.band]}
     </span>
   );
 }
@@ -172,17 +173,17 @@ function EncounterLinks({
     <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11 }}>
       {encounter.locationId != null && (
         <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          🗺 {locName ? linkLabel('location', locName) : `Location #${encounter.locationId}`}
+          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />{locName ? linkLabel('location', locName) : `Location #${encounter.locationId}`}
         </span>
       )}
       {encounter.questId != null && (
         <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          📜 {questName ? linkLabel('quest', questName) : `Quest #${encounter.questId}`}
+          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />{questName ? linkLabel('quest', questName) : `Quest #${encounter.questId}`}
         </span>
       )}
       {encounter.sessionId != null && (
         <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          📓 {sessName ? linkLabel('session', sessName) : `Session #${encounter.sessionId}`}
+          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />{sessName ? linkLabel('session', sessName) : `Session #${encounter.sessionId}`}
         </span>
       )}
       {!hasLink && canEdit && !editing && <span className="text-muted">No location / quest / session linked.</span>}
@@ -201,7 +202,7 @@ function EncounterLinks({
             disabled={saving}
             onChange={(e) => void save({ locationId: e.target.value ? Number(e.target.value) : null })}
           >
-            <option value="">🗺 — no location —</option>
+            <option value="">— no location —</option>
             {locations.map((l) => (
               <option key={l.id} value={l.id}>
                 {linkLabel('location', l)}
@@ -215,7 +216,7 @@ function EncounterLinks({
             disabled={saving}
             onChange={(e) => void save({ questId: e.target.value ? Number(e.target.value) : null })}
           >
-            <option value="">📜 — no quest —</option>
+            <option value="">— no quest —</option>
             {quests.map((q) => (
               <option key={q.id} value={q.id}>
                 {linkLabel('quest', q)}
@@ -229,7 +230,7 @@ function EncounterLinks({
             disabled={saving}
             onChange={(e) => void save({ sessionId: e.target.value ? Number(e.target.value) : null })}
           >
-            <option value="">📓 — no session —</option>
+            <option value="">— no session —</option>
             {sessions.map((s) => (
               <option key={s.id} value={s.id}>
                 {linkLabel('session', s)}
@@ -793,7 +794,7 @@ export default function RunSessionPage() {
               onClick={() => navigate(`/c/${cid}/screen`)}
               title="Open the player display — initiative + revealed info, no secrets"
             >
-              📺 Cast
+              <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
             </Btn>
             {encounter.status === 'preparing' && (
               <>
@@ -892,7 +893,7 @@ export default function RunSessionPage() {
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
-            <EmptyState icon="⚔️" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
+            <EmptyState icon="crossed-swords" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
           </div>
         ) : (
           orderedCombatants.map((c) => (
@@ -2163,7 +2164,7 @@ function CombatantRow({
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
-              {down && <span aria-hidden="true" style={{ marginRight: 5 }}>💀</span>}
+              {down && <GameIcon slug="death-skull" size={14} className="inline align-text-bottom" title="" />}
               {combatant.name}
             </span>
             <span className={kindTagClass} style={{ fontSize: 9 }}>
@@ -2288,7 +2289,7 @@ function CombatantRow({
             <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3, display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'baseline' }}>
               {combatant.hpTemp != null && combatant.hpTemp > 0 && (
                 <span className="tag tag-accent" style={{ fontSize: 9 }} title="Temporary HP — absorbs damage first">
-                  🛡 {combatant.hpTemp}
+                  <GameIcon slug="shield" size={10} className="inline align-text-bottom mr-1" />{combatant.hpTemp}
                 </span>
               )}
               <span>
@@ -2443,13 +2444,13 @@ function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; 
 }
 
 const EVENT_ICON: Record<string, string> = {
-  damage: '⚔️',
-  heal: '✨',
-  condition: '🌀',
-  death: '💀',
-  turn: '⏱️',
-  roll: '🎲',
-  note: '📝',
+  damage: 'crossed-swords',
+  heal: 'sparkles',
+  condition: 'whirlwind',
+  death: 'death-skull',
+  turn: 'stopwatch',
+  roll: 'rolling-dices',
+  note: 'quill-ink',
 };
 
 /**
@@ -2471,7 +2472,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
           {events.map((ev) => (
             <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5, lineHeight: 1.4 }}>
               <span aria-hidden="true" style={{ flex: 'none' }}>
-                {EVENT_ICON[ev.type] ?? '•'}
+                {EVENT_ICON[ev.type] ? <GameIcon slug={EVENT_ICON[ev.type]} size={13} /> : '•'}
               </span>
               {ev.round > 0 && (
                 <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>

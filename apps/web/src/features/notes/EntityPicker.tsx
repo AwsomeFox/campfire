@@ -17,13 +17,13 @@ export type EntityLink = { entityType: EntityTypeValue; entityId: number };
 
 /** Entity types quick-capture can attach to (campaign excluded — nothing anchors "to the campaign" here). */
 const ATTACHABLE: { value: EntityTypeValue; label: string; listPath: string }[] = [
-  { value: 'quest', label: '📜 Quest', listPath: 'quests' },
-  { value: 'npc', label: '🤝 NPC', listPath: 'npcs' },
-  { value: 'faction', label: '🏴 Faction', listPath: 'factions' },
-  { value: 'location', label: '🗺 Location', listPath: 'locations' },
-  { value: 'session', label: '📓 Session', listPath: 'sessions' },
-  { value: 'character', label: '🛡 Character', listPath: 'characters' },
-  { value: 'encounter', label: '⚔️ Encounter', listPath: 'encounters' },
+  { value: 'quest', label: 'Quest', listPath: 'quests' },
+  { value: 'npc', label: 'NPC', listPath: 'npcs' },
+  { value: 'faction', label: 'Faction', listPath: 'factions' },
+  { value: 'location', label: 'Location', listPath: 'locations' },
+  { value: 'session', label: 'Session', listPath: 'sessions' },
+  { value: 'character', label: 'Character', listPath: 'characters' },
+  { value: 'encounter', label: 'Encounter', listPath: 'encounters' },
 ];
 
 interface EntityOption {
@@ -107,7 +107,7 @@ export function EntityPicker({
           emit(next, '');
         }}
       >
-        <option value="">🔗 No entity</option>
+        <option value="">No entity</option>
         {ATTACHABLE.map((l) => (
           <option key={l.value} value={l.value}>
             {l.label}
