@@ -26,6 +26,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAnnounce } from '../../components/Announcer';
 import { useAuth } from '../../app/auth';
+import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
 import {
   safeCombatants,
   safeLocation,
@@ -53,6 +54,13 @@ export default function PlayerDisplayPage() {
   const announce = useAnnounce();
   const { roleIn } = useAuth();
   const role = roleIn(cid);
+
+  // Minimal AI-DM narration ticker (#344 point 5 — optional/cuttable, kept lightweight).
+  // This page renders OUTSIDE app/Layout.tsx (issue #60's no-chrome cast view), so it
+  // can't reach that mounted subscription's context; it opens its own, gated the same
+  // way (Driver mode only). Since /screen and the campaign-chrome routes are siblings —
+  // never both mounted in the same tab — this never creates a second live connection.
+  const liveActivity = useAiDmLiveActivityState(Number.isFinite(cid) ? cid : undefined);
 
   const [summary, setSummary] = useState<CampaignSummary | null>(null);
   const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
@@ -255,6 +263,9 @@ export default function PlayerDisplayPage() {
           )}
           <span className="cf-chip">Session {summary.campaign.sessionCount}</span>
         </div>
+        {liveActivity.mode === 'driver' && liveActivity.lastNarration && (
+          <p className="cf-ai-ticker">🤖 {liveActivity.lastNarration}</p>
+        )}
       </header>
 
       <div className="cf-screen-grid">
@@ -508,6 +519,13 @@ const SCREEN_CSS = `
   color: var(--color-accent-2);
 }
 .cf-chip-sub { opacity: 0.7; }
+.cf-ai-ticker {
+  margin: 10px 0 0;
+  font-size: clamp(13px, 1.3vw, 18px);
+  color: var(--color-accent-2, var(--color-accent));
+  opacity: 0.9;
+  max-width: 70ch;
+}
 .cf-screen-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
