@@ -519,6 +519,36 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(ended.status).toBe('ended');
   });
 
+  it('get_encounter redacts monster HP for a non-DM viewer PAT (issue #256)', async () => {
+    // DM seeds an encounter with a monster carrying exact HP.
+    const dmC = await mcpClient(dmToken);
+    const enc = parseResult(
+      await dmC.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'Secret Ambush' } }),
+    ) as { id: number };
+    await dmC.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: enc.id, kind: 'monster', name: 'Hidden Ogre', hpMax: 59 },
+    });
+
+    // The DM sees exact HP…
+    const dmView = parseResult(
+      await dmC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { combatants: Array<{ name: string; hpCurrent: number | null; hpBand?: string }> };
+    const dmOgre = dmView.combatants.find((c) => c.name === 'Hidden Ogre')!;
+    expect(dmOgre.hpCurrent).toBe(59);
+
+    // …but a viewer-scoped PAT gets the HP banded, never the exact number.
+    const viewerC = await mcpClient(viewerToken);
+    const viewerRes = await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } });
+    expect(viewerRes.isError).toBeFalsy();
+    const viewerView = parseResult(viewerRes) as {
+      combatants: Array<{ name: string; hpCurrent: number | null; hpBand?: string }>;
+    };
+    const viewerOgre = viewerView.combatants.find((c) => c.name === 'Hidden Ogre')!;
+    expect(viewerOgre.hpCurrent).toBeNull();
+    expect(viewerOgre.hpBand).toBeTruthy();
+  });
+
   it('draft_session_recap assembles the template scaffold + seeds encounters and resolved inbox threads (issue #62)', async () => {
     const client = await mcpClient(dmToken);
 
