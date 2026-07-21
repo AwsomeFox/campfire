@@ -816,6 +816,29 @@ function migrateNpcsTableForFactionId(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before story beats linked to the play record (issue #264):
+ * `story_beats.session_id` / `quest_id` / `encounter_id` didn't exist. Plain nullable ADD
+ * COLUMNs — same shape as migrateEncountersTableForLinks above. Existing beats get NULL (no
+ * link), preserving the pre-migration behavior where a beat was a planning-only note; a DM
+ * records where a beat landed by setting the links. The declared REFERENCES clauses are
+ * omitted here (added only for fresh DBs via bootstrap) per the #69 convention — SQLite
+ * cannot ADD a foreign key to an existing table. New DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the columns.
+ */
+function migrateStoryBeatsTableForLinks(sqlite: Database.Database): void {
+  const hasStoryBeatsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='story_beats'")
+    .get();
+  if (!hasStoryBeatsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(story_beats)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('session_id')) sqlite.exec('ALTER TABLE story_beats ADD COLUMN session_id INTEGER');
+  if (!has('quest_id')) sqlite.exec('ALTER TABLE story_beats ADD COLUMN quest_id INTEGER');
+  if (!has('encounter_id')) sqlite.exec('ALTER TABLE story_beats ADD COLUMN encounter_id INTEGER');
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -864,6 +887,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0033_encounters_aoe_hex', run: migrateEncountersTableForAoeHex },
   { name: '0034_campaigns_dm_controls_progression', run: migrateCampaignsTableForDmControlsProgression },
   { name: '0035_encounters_hidden', run: migrateEncountersTableForHidden },
+  { name: '0036_story_beats_links', run: migrateStoryBeatsTableForLinks },
 ];
 
 /**

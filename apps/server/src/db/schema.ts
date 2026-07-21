@@ -125,6 +125,12 @@ export const storyBeats = sqliteTable('story_beats', {
   body: text('body').notNull().default(''),
   status: text('status').notNull().default('planned'),
   sortOrder: integer('sort_order').notNull().default(0),
+  // Optional links to the play record this planned beat corresponds to (issue #264) —
+  // the session it landed in, the quest it advanced, the encounter that resolved it.
+  // Nullable; added by migration on older DBs (0036_story_beats_links in db/db.module.ts).
+  sessionId: integer('session_id'),
+  questId: integer('quest_id'),
+  encounterId: integer('encounter_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

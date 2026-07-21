@@ -155,4 +155,78 @@ describe('storylines (e2e)', () => {
     expect((await request(server).get(`/api/v1/arcs/${arcId}`).set(dm)).status).toBe(404);
     expect((await request(server).get(`/api/v1/beats/${beatId}`).set(dm)).status).toBe(404);
   });
+
+  // Issue #264: a beat links to the play record it corresponds to (session/quest/encounter),
+  // the links validate same-campaign membership, and they round-trip on read.
+  it('links a beat to session/quest/encounter, rejects cross-campaign refs, and round-trips', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Play records to link to, all in THIS campaign.
+    const session = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 42 });
+    const quest = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Expose the Duke' });
+    const encounter = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Throne Room Betrayal' });
+    const sessionId = session.body.id;
+    const questId = quest.body.id;
+    const encounterId = encounter.body.id;
+
+    const arcRes = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Betrayal Arc' });
+    const arcId = arcRes.body.id;
+
+    // Create a beat carrying all three links at once — they persist on the create response.
+    const beatRes = await request(server)
+      .post(`/api/v1/arcs/${arcId}/beats`)
+      .set(dm)
+      .send({ title: 'The duke betrays the party', sessionId, questId, encounterId });
+    expect(beatRes.status).toBe(201);
+    const beatId = beatRes.body.id;
+    expect(beatRes.body.sessionId).toBe(sessionId);
+    expect(beatRes.body.questId).toBe(questId);
+    expect(beatRes.body.encounterId).toBe(encounterId);
+
+    // Round-trips on a direct read.
+    const getRes = await request(server).get(`/api/v1/beats/${beatId}`).set(dm);
+    expect(getRes.body).toMatchObject({ sessionId, questId, encounterId });
+
+    // And on the arc list read that embeds beats.
+    const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/arcs`).set(dm);
+    const listedArc = listRes.body.find((a: { id: number }) => a.id === arcId);
+    const listedBeat = listedArc.beats.find((b: { id: number }) => b.id === beatId);
+    expect(listedBeat).toMatchObject({ sessionId, questId, encounterId });
+
+    // An update can clear a link (null) and change another; omitted links stay put.
+    const patchRes = await request(server)
+      .patch(`/api/v1/beats/${beatId}`)
+      .set(dm)
+      .send({ questId: null });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.questId).toBeNull();
+    expect(patchRes.body.sessionId).toBe(sessionId); // untouched
+    expect(patchRes.body.encounterId).toBe(encounterId); // untouched
+
+    // Cross-campaign refs are rejected. A second campaign owns its own play records.
+    const other = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Campaign' });
+    const otherId = other.body.id;
+    const otherSession = await request(server).post(`/api/v1/campaigns/${otherId}/sessions`).set(dm).send({ number: 1 });
+    const otherQuest = await request(server).post(`/api/v1/campaigns/${otherId}/quests`).set(dm).send({ title: 'Elsewhere' });
+    const otherEncounter = await request(server).post(`/api/v1/campaigns/${otherId}/encounters`).set(dm).send({ name: 'Elsewhere Fight' });
+
+    // On create.
+    const badSession = await request(server)
+      .post(`/api/v1/arcs/${arcId}/beats`)
+      .set(dm)
+      .send({ title: 'Bad session link', sessionId: otherSession.body.id });
+    expect(badSession.status).toBe(400);
+
+    // On update, for each of the three link kinds.
+    expect((await request(server).patch(`/api/v1/beats/${beatId}`).set(dm).send({ questId: otherQuest.body.id })).status).toBe(400);
+    expect((await request(server).patch(`/api/v1/beats/${beatId}`).set(dm).send({ encounterId: otherEncounter.body.id })).status).toBe(400);
+    expect((await request(server).patch(`/api/v1/beats/${beatId}`).set(dm).send({ sessionId: otherSession.body.id })).status).toBe(400);
+
+    // A rejected update leaves the beat's existing links intact.
+    const afterReject = await request(server).get(`/api/v1/beats/${beatId}`).set(dm);
+    expect(afterReject.body).toMatchObject({ sessionId, questId: null, encounterId });
+
+    // A nonexistent ref is likewise rejected.
+    expect((await request(server).patch(`/api/v1/beats/${beatId}`).set(dm).send({ sessionId: 999999 })).status).toBe(400);
+  });
 });
