@@ -1138,12 +1138,19 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   },
 };
 
+// Pathfinder 1e adapter (issue #296) lives in its own file (imports only *types* from here,
+// so there is no runtime import cycle). Registered below and re-exported for consumers.
+import { Pathfinder1eAdapter, PF1E_PACK_SLUG } from './pathfinder1e';
+export * from './pathfinder1e';
+
 /**
- * Registry of rule-system adapters, keyed by family id. Only 5e exists today; a second
- * system is added here (not by editing the combat/statblock code).
+ * Registry of rule-system adapters, keyed by family id (which, for packs like PF1e, is also
+ * the rule-pack slug so `ruleSystemAdapter(campaign.ruleSystem)` resolves directly). Adding a
+ * system is one entry here plus its own adapter file — not a sweep across the combat code.
  */
 const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [DND5E_ADAPTER_ID]: Dnd5eAdapter,
+  [PF1E_PACK_SLUG]: Pathfinder1eAdapter, // Pathfinder 1e (issue #296)
 };
 
 /**
