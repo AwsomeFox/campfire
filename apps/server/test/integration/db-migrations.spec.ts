@@ -48,7 +48,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id', 'hidden']),
       );
       expect(columnNames(sqlite, 'combatants')).toEqual(
-        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures']),
+        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id']),
       );
       expect(columnNames(sqlite, 'attachments')).toContain('hidden');
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
@@ -117,6 +117,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(combatant).toMatchObject({ name: 'Legacy Goblin', hp_current: 5, hp_max: 7, hp_temp: 0, death_state: 'none' });
       expect(combatant.death_save_successes).toBe(0);
       expect(combatant.death_save_failures).toBe(0);
+      expect(combatant.npc_id).toBeNull(); // 0044: npc_id ADD COLUMN — null for the pre-existing row
+
+
 
       // rule_entries icon_slug (0038, issue #305): ADD COLUMN default backfills the row.
       const ruleEntry = sqlite.prepare('SELECT * FROM rule_entries WHERE id = 1').get() as Record<string, unknown>;

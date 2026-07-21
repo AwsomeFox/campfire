@@ -27,6 +27,7 @@ import type {
   FogState,
   GridType,
   MapPing,
+  Npc,
   RuleEntry,
   TokenSize,
 } from '@campfire/schema';
@@ -2177,7 +2178,8 @@ function CombatantRow({
   }
 
   const edgeColor = isCurrentTurn ? 'var(--color-accent)' : 'transparent';
-  const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : 'tag tag-neutral';
+  const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : combatant.kind === 'npc' ? 'tag tag-outline' : 'tag tag-neutral';
+  const kindLabel = combatant.kind === 'npc' ? 'NPC' : combatant.kind;
   // Issue #107: a combatant at 0 HP got no visual treatment mid-fight — the row
   // looked identical bar an empty HP bar, so a "dead" creature was invisible in the
   // order (the end-of-combat summary already counted it as Fallen). Dim + desaturate
@@ -2303,7 +2305,7 @@ function CombatantRow({
               {combatant.name}
             </span>
             <span className={kindTagClass} style={{ fontSize: 9 }}>
-              {combatant.kind}
+              {kindLabel}
             </span>
             {combatant.deathState !== 'none' && combatant.deathState !== undefined ? (
               <span className="tag tag-outline" style={{ fontSize: 9 }}>
@@ -2673,7 +2675,7 @@ function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
 
 // ---------------------------------------------------------------------------
 
-type AddTab = 'manual' | 'compendium' | 'party';
+type AddTab = 'manual' | 'compendium' | 'party' | 'npc';
 
 function AddCombatantPanel({
   encounterId,
@@ -2709,6 +2711,13 @@ function AddCombatantPanel({
   const [compCount, setCompCount] = useState('1');
   const [nameOverride, setNameOverride] = useState('');
 
+  // NPC (issue: NPCs as combatants) — pick a campaign NPC for identity, then give it
+  // HP manually or by linking a compendium statblock (the compendium search below).
+  const [npcs, setNpcs] = useState<Npc[]>([]);
+  const [selectedNpcId, setSelectedNpcId] = useState('');
+  const [npcHp, setNpcHp] = useState('');
+  const [npcInit, setNpcInit] = useState('');
+
   /** Clamp a free-text quantity field to a sane 1–50, defaulting to 1. */
   function parseCount(raw: string): number {
     const n = Math.floor(Number(raw));
@@ -2716,8 +2725,24 @@ function AddCombatantPanel({
     return Math.min(50, n);
   }
 
+  // Campaign NPCs for the NPC tab's picker. Low-churn, fetched once.
   useEffect(() => {
-    if (tab !== 'compendium' || !debouncedQuery.trim()) {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.get<Npc[]>(`${API}/campaigns/${cid}/npcs`);
+        if (!cancelled) setNpcs(list);
+      } catch {
+        /* leave empty — the tab shows an empty-state hint */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cid]);
+
+  useEffect(() => {
+    if ((tab !== 'compendium' && tab !== 'npc') || !debouncedQuery.trim()) {
       setResults([]);
       return;
     }
@@ -2812,11 +2837,45 @@ function AddCombatantPanel({
     }
   }
 
+  // Add the selected NPC as a combatant. With a statblock `entry` it borrows that
+  // statblock's HP (like a compendium add); otherwise it uses the manual HP field.
+  async function addFromNpc(entry?: RuleEntry) {
+    const npcIdNum = Number(selectedNpcId);
+    if (!selectedNpcId || !Number.isFinite(npcIdNum)) {
+      setError('Pick an NPC to add.');
+      return;
+    }
+    if (!entry && (!npcHp.trim() || !Number.isFinite(Number(npcHp)) || Number(npcHp) < 1)) {
+      setError('Enter max HP (1 or more), or pick a statblock, for this NPC.');
+      return;
+    }
+    const npc = npcs.find((n) => n.id === npcIdNum);
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/encounters/${encounterId}/combatants`, {
+        kind: 'npc' as CombatantKind,
+        npcId: npcIdNum,
+        name: npc?.name,
+        ruleEntryId: entry?.id,
+        hpMax: entry ? undefined : Math.max(1, Number(npcHp)),
+        initMod: npcInit ? Number(npcInit) : undefined,
+      });
+      setNpcHp('');
+      setNpcInit('');
+      await onAdded();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Card className="space-y-3">
       <span className="card-kicker">Add combatant</span>
       <div className="seg self-start inline-flex">
-        {(['manual', 'compendium', 'party'] as AddTab[]).map((t) => (
+        {(['manual', 'compendium', 'party', 'npc'] as AddTab[]).map((t) => (
           <button
             key={t}
             style={{
@@ -2832,7 +2891,7 @@ function AddCombatantPanel({
             }}
             onClick={() => setTab(t)}
           >
-            {t === 'manual' ? 'Manual' : t === 'compendium' ? 'Compendium' : 'Party'}
+            {t === 'manual' ? 'Manual' : t === 'compendium' ? 'Compendium' : t === 'party' ? 'Party' : 'NPC'}
           </button>
         ))}
       </div>
@@ -2965,6 +3024,94 @@ function AddCombatantPanel({
               </button>
             ));
           })()}
+        </div>
+      )}
+
+      {tab === 'npc' && (
+        <div className="space-y-2">
+          {npcs.length === 0 ? (
+            <p className="text-muted" style={{ fontSize: 12 }}>
+              No NPCs in this campaign yet — create one on the NPCs page.
+            </p>
+          ) : (
+            <>
+              <div className="field">
+                <label htmlFor="npc-select">NPC</label>
+                <select
+                  id="npc-select"
+                  className="cf-select"
+                  value={selectedNpcId}
+                  onChange={(e) => setSelectedNpcId(e.target.value)}
+                >
+                  <option value="">Choose an NPC…</option>
+                  {npcs.map((n) => (
+                    <option key={n.id} value={String(n.id)}>
+                      {n.name}
+                      {n.role ? ` — ${n.role}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <form onSubmit={(e) => { e.preventDefault(); void addFromNpc(); }} className="flex gap-2 flex-wrap items-end">
+                <div className="field" style={{ width: 80 }}>
+                  <label htmlFor="npc-hp">HP</label>
+                  <TextInput id="npc-hp" aria-label="Max HP" placeholder="22" value={npcHp} onChange={(e) => setNpcHp(e.target.value)} />
+                </div>
+                <div className="field" style={{ width: 80 }}>
+                  <label htmlFor="npc-init">Init mod</label>
+                  <TextInput id="npc-init" aria-label="Initiative modifier" placeholder="2" value={npcInit} onChange={(e) => setNpcInit(e.target.value)} />
+                </div>
+                <Btn type="submit" disabled={saving || !selectedNpcId}>
+                  {saving ? 'Adding…' : 'Add NPC'}
+                </Btn>
+              </form>
+              <div className="hr" style={{ margin: '4px 0' }} />
+              <p className="text-muted" style={{ fontSize: 11.5 }}>
+                …or give it a statblock — search the compendium and pick one (its HP is used):
+              </p>
+              <TextInput
+                aria-label="Search monster statblocks for this NPC"
+                placeholder="Search statblocks…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              {searching ? (
+                <Skeleton lines={2} />
+              ) : results.length === 0 ? (
+                <p className="text-muted" style={{ fontSize: 12 }}>
+                  {query.trim() ? 'No matches.' : 'Optional — leave blank to add with manual HP above.'}
+                </p>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {results.map((entry) => (
+                    <button
+                      key={entry.id}
+                      className="card elev-sm"
+                      style={{
+                        border: 0,
+                        font: 'inherit',
+                        color: 'var(--color-text)',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '8px 12px',
+                      }}
+                      disabled={saving || !selectedNpcId}
+                      title={!selectedNpcId ? 'Choose an NPC first' : `Add ${entry.name}'s statblock to the selected NPC`}
+                      onClick={() => void addFromNpc(entry)}
+                    >
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
+                      <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>
+                        statblock
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
     </Card>

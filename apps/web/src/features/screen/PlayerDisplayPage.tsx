@@ -389,7 +389,9 @@ export default function PlayerDisplayPage() {
 // ---------------------------------------------------------------------------
 
 function InitiativeRow({ combatant, isCurrent }: { combatant: SafeCombatant; isCurrent: boolean }) {
-  const isMonster = combatant.kind === 'monster';
+  // Non-character combatants (monsters AND DM-controlled NPCs) show a coarse HP band,
+  // not exact numbers — safeCombatant redacts both, so treat both the same here.
+  const isMonster = combatant.kind !== 'character';
   const bandPct = combatant.hpBand ? HP_BAND_PCT[combatant.hpBand] : 0;
   const bandTone = combatant.hpBand ? HP_BAND_TONE[combatant.hpBand] : '';
   const charPct =
@@ -404,7 +406,7 @@ function InitiativeRow({ combatant, isCurrent }: { combatant: SafeCombatant; isC
       <div className="cf-init-main">
         <div className="cf-init-name">
           {combatant.name}
-          <span className={`cf-chip cf-chip-sm ${isMonster ? '' : 'cf-chip-accent'}`}>{combatant.kind}</span>
+          <span className={`cf-chip cf-chip-sm ${isMonster ? '' : 'cf-chip-accent'}`}>{combatant.kind === 'npc' ? 'NPC' : combatant.kind}</span>
         </div>
         {combatant.conditions.length > 0 && (
           <div className="cf-conds">
