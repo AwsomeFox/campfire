@@ -1819,6 +1819,203 @@ describe('encounters — issue #39: per-encounter battle map + combatant tokens 
   });
 });
 
+// Issue #40 — VTT phase 2–3: grid config, token size, fog of war (+ its server-side
+// token redaction). Own campaign so the party/fixtures don't leak in from other suites.
+describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let ownedCharacterId: number; // owned by dev:p-1 — exercises the player path
+  let encounterId: number;
+  let charCombatantId: number;
+  let monsterCombatantId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'VTT Campaign' })).body.id;
+
+    ownedCharacterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Aria', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' })
+    ).body.id;
+
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grid Fight' });
+    encounterId = encRes.body.id;
+    charCombatantId = encRes.body.combatants.find((c: CombatantShape) => c.characterId === ownedCharacterId).id;
+    monsterCombatantId = (
+      await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Ogre', hpMax: 59 })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a fresh encounter has null grid config, no fog, and medium-size tokens (unchanged behaviour)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.gridSize).toBeNull();
+    expect(res.body.gridScale).toBeNull();
+    expect(res.body.gridUnit).toBeNull();
+    expect(res.body.gridSnap).toBe(false);
+    expect(res.body.fog).toBeNull();
+    for (const c of res.body.combatants) expect(c.tokenSize).toBe('medium');
+  });
+
+  it('DM configures the grid (size/scale/unit/snap round-trip and persist)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ gridSize: 8, gridScale: 5, gridUnit: 'ft', gridSnap: true });
+    expect(res.status).toBe(200);
+    expect(res.body.gridSize).toBe(8);
+    expect(res.body.gridScale).toBe(5);
+    expect(res.body.gridUnit).toBe('ft');
+    expect(res.body.gridSnap).toBe(true);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(getRes.body.gridSize).toBe(8);
+    expect(getRes.body.gridScale).toBe(5);
+  });
+
+  it('gridSize: null turns the grid off again', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridSize: null });
+    expect(res.status).toBe(200);
+    expect(res.body.gridSize).toBeNull();
+    // other grid fields are independent — scale/unit are untouched.
+    expect(res.body.gridScale).toBe(5);
+  });
+
+  it('a bad gridScale (0 / negative) is rejected (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridScale: 0 });
+    expect(res.status).toBe(400);
+  });
+
+  it('a player cannot change grid config (dm only, 403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ gridSize: 12 });
+    expect(res.status).toBe(403);
+  });
+
+  it('DM sets a combatant token size; it round-trips', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(dm)
+      .send({ tokenSize: 'huge' });
+    expect(res.status).toBe(200);
+    expect(res.body.tokenSize).toBe('huge');
+  });
+
+  it('an invalid token size is rejected (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(dm)
+      .send({ tokenSize: 'colossal' });
+    expect(res.status).toBe(400);
+  });
+
+  it('a player may NOT change token size, even on their own combatant (dm only, 403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${charCombatantId}`)
+      .set(player)
+      .send({ tokenSize: 'large' });
+    expect(res.status).toBe(403);
+  });
+
+  describe('fog of war + server-side token redaction', () => {
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      // Place the monster top-left (10,10) and the PC bottom-right (80,80).
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`).set(dm).send({ tokenX: 10, tokenY: 10 });
+      await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${charCombatantId}`).set(dm).send({ tokenX: 80, tokenY: 80 });
+    });
+
+    it('DM sets fog with a revealed region covering only the PC corner', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] } });
+      expect(res.status).toBe(200);
+      expect(res.body.fog.enabled).toBe(true);
+      expect(res.body.fog.revealed).toHaveLength(1);
+    });
+
+    it('the DM still sees every token position (no redaction)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monster = res.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+      expect(monster.tokenX).toBe(10);
+      expect(monster.tokenY).toBe(10);
+    });
+
+    it('a player does NOT receive the monster in the dark, but DOES see the token in the revealed region', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      const monster = res.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+      const pc = res.body.combatants.find((c: CombatantShape) => c.id === charCombatantId);
+      // Monster at (10,10) is outside the revealed rectangle — position withheld server-side.
+      expect(monster.tokenX).toBeNull();
+      expect(monster.tokenY).toBeNull();
+      // PC at (80,80) is inside the revealed rectangle — position visible.
+      expect(pc.tokenX).toBe(80);
+      expect(pc.tokenY).toBe(80);
+    });
+
+    it('reveal_map_region-style reveal (via PATCH) lights the monster corner for players', async () => {
+      const server = ctx.app.getHttpServer();
+      // Reveal the whole map for this assertion.
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 100, h: 100 }] } });
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      const monster = res.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+      expect(monster.tokenX).toBe(10);
+      expect(monster.tokenY).toBe(10);
+    });
+
+    it('disabling fog reveals all token positions to players regardless of revealed regions', async () => {
+      const server = ctx.app.getHttpServer();
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: false, revealed: [] } });
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      const monster = res.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+      expect(monster.tokenX).toBe(10);
+      expect(monster.tokenY).toBe(10);
+    });
+
+    it('a player cannot edit fog (dm only, 403)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(player)
+        .send({ fog: { enabled: true, revealed: [] } });
+      expect(res.status).toBe(403);
+    });
+
+    it('an out-of-range fog rectangle is rejected (400)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: true, revealed: [{ x: -5, y: 0, w: 200, h: 10 }] } });
+      expect(res.status).toBe(400);
+    });
+  });
+});
+
 // Issue #126 (location/quest/session linking + summary + note pinning) and
 // issue #58 (difficulty band). Own campaign + fixtures so nothing else pollutes the
 // party or the campaign summary.

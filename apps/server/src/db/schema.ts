@@ -614,6 +614,14 @@ export const encounters = sqliteTable('encounters', {
   questId: integer('quest_id'),
   sessionId: integer('session_id'),
   mapAttachmentId: integer('map_attachment_id'),
+  // VTT grid + fog (issue #40, phases 2–3). All nullable; added by migration on older DBs
+  // (see db/db.module.ts migrateEncountersTableForVtt). gridSize null = no grid drawn; fog
+  // is a JSON FogState blob (null = never configured). See @campfire/schema.
+  gridSize: real('grid_size'),
+  gridScale: real('grid_scale'),
+  gridUnit: text('grid_unit'),
+  gridSnap: integer('grid_snap', { mode: 'boolean' }).notNull().default(false),
+  fog: text('fog'),
   endedAt: text('ended_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -721,6 +729,9 @@ export const combatants = sqliteTable('combatants', {
   // DBs — see db/db.module.ts migrateCombatantsTableForTokenPosition. null = not placed.
   tokenX: real('token_x'),
   tokenY: real('token_y'),
+  // Token footprint size category (issue #40, phase 2). NOT NULL DEFAULT 'medium'; added by
+  // migration on older DBs — see db/db.module.ts migrateCombatantsTableForTokenSize.
+  tokenSize: text('token_size').notNull().default('medium'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row
