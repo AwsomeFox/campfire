@@ -1,61 +1,61 @@
 import { BadRequestException } from '@nestjs/common';
+import { load as loadYaml } from 'js-yaml';
 import type { RuleEntryType } from '@campfire/schema';
 
 /**
- * Importer for the Open Legend SRD / community codex (https://openlegendrpg.com — issue
- * #299). Open Legend is a fully-open OGL system whose game content (the SRD: attributes,
- * banes, boons, feats, and the community bestiary) is redistributable under the Open Game
- * License. This importer fetches at install-time from a JSON source exposing that content
- * and maps it to Campfire's rule-entry vocabulary — it does NOT bundle a dataset.
+ * Importer for the Open Legend SRD (issue #299; live source wired for #346).
  *
- * How this differs from the Open5e importer (open5e-importer.ts), and why:
- *   - Open Legend has NO classes/races/spells. Its content sections are creatures,
- *     banes, boons, feats, and items. Banes and boons are Open Legend's status-effect
- *     vocabulary (≈ 5e conditions), so both map to ruleEntry.type 'condition'; creatures
- *     map to 'monster', feats to 'feat', items to 'item'.
- *   - A creature statblock is attribute-based: the eighteen Open Legend attributes drive
- *     everything (there are no 5e-style ability scores). The statblock's numbers we carry
- *     are the eighteen `attributes`, the three defences (Guard/Toughness/Resolve — Guard is
- *     the AC analogue), `hp`, `speed`, `level` (Open Legend's threat rating, not a CR), and
- *     the creature's known banes/boons. The RuleSystemAdapter (`OpenLegendAdapter`) knows how
- *     to read this shape back out (guard→armorClass, level→challengeRating, agility→initiative).
- *   - The source may serve a section as either a paginated `{count,next,previous,results}`
- *     page (like Open5e) OR a bare top-level JSON array — community exports appear as both, so
- *     `readPage` normalises either shape. Pagination, the same-origin `next` guard, transient-
- *     failure retry, the per-section entry cap, the page cap, and (name,type) de-duplication all
- *     mirror the Open5e importer so the two share operational behaviour and hardening.
+ * SOURCE (validated live 2026-07-21): the OFFICIAL Open Legend `core-rules` repository,
+ * https://github.com/openlegend/core-rules — the same content published to
+ * openlegendrpg.com. The former default (`https://openlegendrpg.com/api`) was a placeholder:
+ * that host serves no JSON API (its root 404s). The real machine-readable open data is the
+ * repo's YAML files, fetched over GitHub's raw CDN (permanent, first-party, no third-party
+ * hobby host to go dark). Content is redistributable under the **Open Legend Community
+ * License** (LICENSE.mdx in that repo), stamped on every imported entry.
  *
- * Field shapes below reflect the Open Legend Community Codex JSON export; where the live
- * source is unreachable at build time the importer is proven against a small real-shaped
- * sample (test/fake-open-legend.ts) that exercises the same mapping code a live install would.
+ * What the open source actually contains (and what it does NOT):
+ *   - `boons/boons.yml`  — Open Legend boons (buff/utility effects)  → ruleEntry.type 'condition'
+ *   - `banes/banes.yml`  — Open Legend banes (debuff/status effects) → ruleEntry.type 'condition'
+ *   - `feats/feats.yml`  — Open Legend feats                          → ruleEntry.type 'feat'
+ * There is NO open, structured creature/bestiary or item dataset in the repo (the `core/`
+ * folder is prose rules text, not a data file), so — being honest about coverage per #346 —
+ * this importer imports exactly the three sections that exist as data. Open Legend creatures
+ * are attribute-based statblocks the `OpenLegendAdapter` still knows how to read; a table
+ * that wants them can `POST /rules/packs/upload` a JSON pack.
+ *
+ * Format handling: the source files are YAML (each a top-level list; items carry a YAML
+ * non-specific `!` tag js-yaml parses fine). The fetch layer is content-agnostic — it reads
+ * the body as text and parses YAML OR JSON — so the `url` override (mainly for tests, but
+ * also a self-hosted mirror) can serve either a `.yml` file or a JSON array / `{results}`
+ * page. Retry/timeout, the same-origin pagination guard (for a paginated JSON override), the
+ * per-section cap, and (name)-dedup mirror the Open5e importer's hardening.
  */
 
-export const OPEN_LEGEND_DEFAULT_BASE_URL = 'https://openlegendrpg.com/api';
+export const OPEN_LEGEND_DEFAULT_BASE_URL = 'https://raw.githubusercontent.com/openlegend/core-rules/master';
 export const OL_MAX_ENTRIES_PER_SECTION = 2000;
-const PAGE_LIMIT = 500;
 const MAX_PAGES_PER_SECTION = 50;
 const FETCH_TIMEOUT_MS = 30_000;
 const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 
-export type OpenLegendSection = 'creatures' | 'banes' | 'boons' | 'feats' | 'items';
+export type OpenLegendSection = 'boons' | 'banes' | 'feats';
 
+/** The three sections that exist as open data in the core-rules repo (see file header). */
+export const ALL_OPEN_LEGEND_SECTIONS: OpenLegendSection[] = ['boons', 'banes', 'feats'];
+
+/** Path (relative to the base) of each section's data file in the core-rules repo. */
 const SECTION_TO_PATH: Record<OpenLegendSection, string> = {
-  creatures: 'creatures',
-  banes: 'banes',
-  boons: 'boons',
-  feats: 'feats',
-  items: 'items',
+  boons: 'boons/boons.yml',
+  banes: 'banes/banes.yml',
+  feats: 'feats/feats.yml',
 };
 
-// Banes AND boons are Open Legend's status-effect vocabulary, so both land as 'condition'
-// (Campfire has no bane/boon entry type — see file header). The importer keeps them
-// distinguishable via each entry's dataJson.kind ('bane' | 'boon').
+// Boons AND banes are Open Legend's status-effect vocabulary, so both land as 'condition'
+// (Campfire has no boon/bane entry type). The importer keeps them distinguishable via each
+// entry's dataJson.kind ('boon' | 'bane').
 const SECTION_TO_ENTRY_TYPE: Record<OpenLegendSection, RuleEntryType> = {
-  creatures: 'monster',
-  banes: 'condition',
   boons: 'condition',
+  banes: 'condition',
   feats: 'feat',
-  items: 'item',
 };
 
 export interface OlImportedEntry {
@@ -87,20 +87,24 @@ export interface OpenLegendSectionResult {
   dedupedCount: number;
 }
 
-/** Default license/attribution stamped on an entry that doesn't carry its own (issue #143). */
-const OPEN_LEGEND_DEFAULT_LICENSE = 'Open Game License v1.0a';
-const OPEN_LEGEND_DEFAULT_SOURCE = 'Open Legend SRD (openlegendrpg.com)';
+/** License/attribution stamped on entries that don't carry their own (the repo's files don't). */
+export const OPEN_LEGEND_DEFAULT_LICENSE = 'Open Legend Community License';
+const OPEN_LEGEND_DEFAULT_SOURCE = 'Open Legend Core Rules (openlegend/core-rules)';
 
 function asString(v: unknown): string {
   if (typeof v !== 'string') return '';
-  // Mirror the Open5e importer's escape-normalisation: some community exports carry literal
+  // Mirror the Open5e importer's escape-normalisation: some exports carry literal
   // backslash-n/t sequences in prose, which break markdown rendering in the reader.
   return v.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t');
 }
 
-function asStringArray(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  return v.map((x) => (typeof x === 'string' ? asString(x) : asString((x as Record<string, unknown>)?.name))).filter(Boolean);
+/** Flatten a value that may be a string, a number, or an array of either, into a joined label. */
+function asLabelList(v: unknown): string[] {
+  if (v === null || v === undefined) return [];
+  const arr = Array.isArray(v) ? v : [v];
+  return arr
+    .map((x) => (typeof x === 'string' ? asString(x) : typeof x === 'number' ? String(x) : ''))
+    .filter(Boolean);
 }
 
 function truncate(s: string, max: number): string {
@@ -121,98 +125,53 @@ function slugOf(row: Record<string, unknown>): string {
 }
 
 function licenseOf(row: Record<string, unknown>): string {
-  const direct = asString(row.license);
-  if (direct) return direct;
-  const doc = row.document as Record<string, unknown> | undefined;
-  const licenses = doc?.licenses as Array<Record<string, unknown>> | undefined;
-  if (Array.isArray(licenses) && licenses.length > 0) {
-    const joined = licenses.map((l) => asString(l.name)).filter(Boolean).join(', ');
-    if (joined) return joined;
-  }
-  return OPEN_LEGEND_DEFAULT_LICENSE;
+  return asString(row.license) || OPEN_LEGEND_DEFAULT_LICENSE;
 }
 
 function sourceOf(row: Record<string, unknown>): string {
-  const direct = asString(row.source);
-  if (direct) return direct;
-  const doc = row.document;
-  if (doc && typeof doc === 'object') {
-    const name = asString((doc as Record<string, unknown>).name);
-    if (name) return name;
-  } else if (typeof doc === 'string' && doc) {
-    return doc;
-  }
-  return OPEN_LEGEND_DEFAULT_SOURCE;
+  return asString(row.source) || OPEN_LEGEND_DEFAULT_SOURCE;
+}
+
+/** description + effect + special, in order, joined as markdown paragraphs. */
+function proseBody(row: Record<string, unknown>): string {
+  return [asString(row.description) || asString(row.desc), asString(row.effect), asString(row.special)]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 /**
- * De-dup canonicality rank (issue #143): prefer an entry from the core SRD over a
- * community/third-party document when the same (name,type) shows up twice. Lower wins; the
- * default 1 keeps first-seen order stable when nothing distinguishes two rows.
+ * Boons and banes share a mapper — `kind` records which, and both become 'condition' entries.
+ * Real Open Legend fields: `power` (a list of power thresholds), `attribute`/`attackAttributes`
+ * (the invoking attribute(s)), `invocationTime`, `duration`. All are preserved in dataJson so
+ * the reader can show the full effect while the condition list stays simple.
  */
-function documentRank(row: Record<string, unknown>): number {
-  const doc = row.document;
-  const key = (doc && typeof doc === 'object' ? asString((doc as Record<string, unknown>).key) : asString(doc)).toLowerCase();
-  const src = asString(row.source).toLowerCase();
-  if (key.includes('srd') || key === 'core' || src.includes('srd')) return 0;
-  return 1;
-}
-
-function mapCreature(row: Record<string, unknown>): OlImportedEntry {
-  const descriptor = asString(row.descriptor) || asString(row.type);
-  const level = row.level ?? null;
-  const defenses = (row.defenses ?? row.defense) as Record<string, unknown> | undefined;
-  const attributes = (row.attributes ?? row.abilityScores) as Record<string, unknown> | undefined;
-  const banes = asStringArray(row.banes);
-  const boons = asStringArray(row.boons);
-  const desc = asString(row.description) || asString(row.desc);
-  return {
-    slug: slugOf(row),
-    name: asString(row.name),
-    type: 'monster',
-    summary: truncate([descriptor, level !== null && level !== undefined ? `level ${level}` : null].filter(Boolean).join(' · ') || desc, 300),
-    body: desc,
-    dataJson: JSON.stringify({
-      descriptor: descriptor || null,
-      level: level ?? null,
-      hp: row.hp ?? row.hitPoints ?? null,
-      speed: row.speed ?? null,
-      defenses: defenses && typeof defenses === 'object' ? defenses : null,
-      attributes: attributes && typeof attributes === 'object' ? attributes : null,
-      banes,
-      boons,
-      actions: row.actions ?? null,
-    }),
-    license: licenseOf(row),
-    source: sourceOf(row),
-  };
-}
-
-/** Banes and boons share a mapper — `kind` records which, and both become 'condition' entries. */
-function makeStatusMapper(kind: 'bane' | 'boon') {
+function makeStatusMapper(kind: 'boon' | 'bane') {
   return (row: Record<string, unknown>): OlImportedEntry => {
-    const desc = asString(row.description) || asString(row.desc);
-    const power = row.power ?? row.powerLevel ?? null;
-    const attribute = asString(row.attribute);
-    const resist = asString(row.resist) || asString(row.resisted_by);
+    const power = asLabelList(row.power);
+    // boons carry `attribute`; banes carry `attackAttributes` (the older single `attribute`
+    // and `resist`/`resisted_by` fields are accepted too, for JSON overrides).
+    const attribute = asLabelList(row.attribute).length ? asLabelList(row.attribute) : asLabelList(row.attackAttributes);
     const duration = asString(row.duration);
+    const invocationTime = asString(row.invocationTime);
+    const resist = asString(row.resist) || asString(row.resisted_by);
     return {
       slug: slugOf(row),
       name: asString(row.name),
       type: 'condition',
       summary: truncate(
-        [kind === 'bane' ? 'Bane' : 'Boon', power !== null && power !== undefined ? `power ${power}` : null, attribute || null]
+        [kind === 'boon' ? 'Boon' : 'Bane', power.length ? `power ${power.join('/')}` : null, attribute.length ? attribute.join('/') : null]
           .filter(Boolean)
-          .join(' · ') || desc,
+          .join(' · ') || proseBody(row),
         300,
       ),
-      body: desc,
+      body: proseBody(row),
       dataJson: JSON.stringify({
         kind,
-        power: power ?? null,
-        attribute: attribute || null,
-        resist: resist || null,
+        power: power.length ? power : null,
+        attribute: attribute.length ? attribute : null,
+        invocationTime: invocationTime || null,
         duration: duration || null,
+        resist: resist || null,
       }),
       license: licenseOf(row),
       source: sourceOf(row),
@@ -221,44 +180,38 @@ function makeStatusMapper(kind: 'bane' | 'boon') {
 }
 
 function mapFeat(row: Record<string, unknown>): OlImportedEntry {
-  const desc = asString(row.description) || asString(row.desc);
+  const tags = asLabelList(row.tags);
+  const cost = asLabelList(row.cost);
   const tier = asString(row.tier);
-  const prerequisite = asString(row.prerequisite) || asString(row.prerequisites);
+  // Real feats carry a structured `prerequisites` object; JSON overrides may pass a flat string.
+  const prereqRaw = row.prerequisites ?? row.prerequisite;
+  const prerequisite = typeof prereqRaw === 'string' ? asString(prereqRaw) : '';
   return {
     slug: slugOf(row),
     name: asString(row.name),
     type: 'feat',
-    summary: truncate([tier ? `${tier} feat` : null, prerequisite ? `Prerequisite: ${prerequisite}` : null].filter(Boolean).join(' · ') || desc, 300),
-    body: desc,
-    dataJson: JSON.stringify({ tier: tier || null, prerequisite: prerequisite || null }),
-    license: licenseOf(row),
-    source: sourceOf(row),
-  };
-}
-
-function mapItem(row: Record<string, unknown>): OlImportedEntry {
-  const desc = asString(row.description) || asString(row.desc);
-  const category = asString(row.category) || asString(row.type);
-  const wealthLevel = row.wealthLevel ?? row.wealth_level ?? null;
-  const properties = asStringArray(row.properties);
-  return {
-    slug: slugOf(row),
-    name: asString(row.name),
-    type: 'item',
-    summary: truncate([category || null, wealthLevel !== null && wealthLevel !== undefined ? `wealth ${wealthLevel}` : null].filter(Boolean).join(' · ') || desc, 300),
-    body: desc,
-    dataJson: JSON.stringify({ category: category || null, wealthLevel: wealthLevel ?? null, properties }),
+    summary: truncate(
+      [tier ? `${tier} feat` : null, cost.length ? `cost ${cost.join('/')}` : null, prerequisite ? `Prerequisite: ${prerequisite}` : null]
+        .filter(Boolean)
+        .join(' · ') || proseBody(row),
+      300,
+    ),
+    body: proseBody(row),
+    dataJson: JSON.stringify({
+      tier: tier || null,
+      cost: cost.length ? cost : null,
+      tags: tags.length ? tags : null,
+      prerequisites: prereqRaw ?? null,
+    }),
     license: licenseOf(row),
     source: sourceOf(row),
   };
 }
 
 const SECTION_MAPPER: Record<OpenLegendSection, (row: Record<string, unknown>) => OlImportedEntry> = {
-  creatures: mapCreature,
-  banes: makeStatusMapper('bane'),
   boons: makeStatusMapper('boon'),
+  banes: makeStatusMapper('bane'),
   feats: mapFeat,
-  items: mapItem,
 };
 
 interface NormalizedPage {
@@ -267,20 +220,27 @@ interface NormalizedPage {
 }
 
 /**
- * Normalise a section response into {results, next}. The source may serve either a paginated
- * `{count,next,previous,results}` object (Open5e-style) or a bare top-level JSON array
- * (single-file export) — both appear in community data, so we accept either. A bare array has
- * no further pages (`next: null`).
+ * Parse a section response body (text) into rows. Accepts, in order:
+ *   - a YAML or JSON top-level list (the real `.yml` files, and single-file JSON exports)
+ *   - a JSON `{count,next,previous,results}` page (a paginated JSON override / mirror)
+ * YAML is a superset of JSON, so `loadYaml` handles both; we still special-case an object
+ * with a `results` array to preserve the `next` pagination link for JSON-API overrides.
  */
-function readPage(body: unknown): NormalizedPage {
-  if (Array.isArray(body)) return { results: body as Array<Record<string, unknown>>, next: null };
-  if (body && typeof body === 'object') {
-    const obj = body as Record<string, unknown>;
+function parseBody(text: string): NormalizedPage {
+  let doc: unknown;
+  try {
+    doc = loadYaml(text);
+  } catch (err) {
+    throw new Error(`not valid YAML/JSON: ${(err as Error).message}`);
+  }
+  if (Array.isArray(doc)) return { results: doc as Array<Record<string, unknown>>, next: null };
+  if (doc && typeof doc === 'object') {
+    const obj = doc as Record<string, unknown>;
     if (Array.isArray(obj.results)) {
       return { results: obj.results as Array<Record<string, unknown>>, next: typeof obj.next === 'string' ? obj.next : null };
     }
   }
-  throw new Error('response is neither a JSON array nor a {results:[…]} page');
+  throw new Error('response is neither a list nor a {results:[…]} page');
 }
 
 async function fetchWithTimeout(url: string): Promise<Response> {
@@ -339,24 +299,28 @@ function isSameOrigin(origin: string, candidate: string): boolean {
   }
 }
 
+/** First URL to fetch for a section — the section's data file relative to the base. */
+function sectionUrl(baseUrl: string, section: OpenLegendSection): string {
+  return `${baseUrl.replace(/\/$/, '')}/${SECTION_TO_PATH[section]}`;
+}
+
 /**
- * Fetch and map one section's entries, paginating until the source runs out of pages or the
- * per-section cap is hit. Mirrors fetchOpen5eSection's hardening: same-origin `next` guard,
- * transient-failure retry, page cap, (name,type) de-dup preferring the more-canonical source,
- * and a per-section import-count log so an empty/short section is visible.
+ * Fetch and map one section's entries. The real source is a single YAML file per section
+ * (no pagination), but a JSON override may paginate via `next` — the loop follows same-origin
+ * `next` links only (cross-origin is refused, not followed), caps pages, de-dups by name, and
+ * logs a per-section count so an empty section is visible. Mirrors fetchOpen5eSection.
  */
 export async function fetchOpenLegendSection(
   baseUrl: string,
   section: OpenLegendSection,
   logger: OpenLegendImportLogger = consoleLogger,
 ): Promise<OpenLegendSectionResult> {
-  const path = SECTION_TO_PATH[section];
   const mapper = SECTION_MAPPER[section];
-  const byName = new Map<string, { entry: OlImportedEntry; rank: number }>();
+  const byName = new Map<string, OlImportedEntry>();
   let skippedCount = 0;
   let dedupedCount = 0;
   let pagesFetched = 0;
-  let url: string | null = `${baseUrl.replace(/\/$/, '')}/${path}/?limit=${PAGE_LIMIT}`;
+  let url: string | null = sectionUrl(baseUrl, section);
 
   while (url && byName.size < OL_MAX_ENTRIES_PER_SECTION) {
     if (pagesFetched >= MAX_PAGES_PER_SECTION) {
@@ -375,24 +339,23 @@ export async function fetchOpenLegendSection(
     if (!res.ok) {
       throw new BadRequestException(`Open Legend section "${section}" returned HTTP ${res.status} for ${url}`);
     }
-    let body: unknown;
+    let text: string;
     try {
-      body = await res.json();
+      text = await res.text();
     } catch (err) {
-      throw new BadRequestException(`Open Legend section "${section}" returned invalid JSON: ${(err as Error).message}`);
+      throw new BadRequestException(`Open Legend section "${section}" body could not be read: ${(err as Error).message}`);
     }
     let page: NormalizedPage;
     try {
-      page = readPage(body);
+      page = parseBody(text);
     } catch (err) {
       throw new BadRequestException(`Open Legend section "${section}" has an unexpected shape: ${(err as Error).message}`);
     }
     for (const row of page.results) {
       let entry: OlImportedEntry;
-      let rank: number;
       try {
+        if (!row || typeof row !== 'object') throw new Error('non-object row');
         entry = mapper(row);
-        rank = documentRank(row);
       } catch {
         skippedCount += 1;
         continue;
@@ -402,14 +365,12 @@ export async function fetchOpenLegendSection(
         skippedCount += 1;
         continue;
       }
-      const existing = byName.get(key);
-      if (existing) {
-        dedupedCount += 1;
-        if (rank < existing.rank) byName.set(key, { entry, rank });
-      } else {
-        if (byName.size >= OL_MAX_ENTRIES_PER_SECTION) break;
-        byName.set(key, { entry, rank });
+      if (byName.has(key)) {
+        dedupedCount += 1; // keep first-seen (stable)
+        continue;
       }
+      if (byName.size >= OL_MAX_ENTRIES_PER_SECTION) break;
+      byName.set(key, entry);
     }
 
     if (page.next && !isSameOrigin(baseUrl, page.next)) {
@@ -423,7 +384,7 @@ export async function fetchOpenLegendSection(
     }
   }
 
-  const entries = [...byName.values()].map((v) => v.entry);
+  const entries = [...byName.values()];
   logger.info(
     `[open-legend-importer] section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)` +
       (dedupedCount > 0 ? ` (de-duped ${dedupedCount} same-name row(s))` : ''),
@@ -438,5 +399,3 @@ export async function fetchOpenLegendSection(
 export function entryTypeForOpenLegendSection(section: OpenLegendSection): RuleEntryType {
   return SECTION_TO_ENTRY_TYPE[section];
 }
-
-export const ALL_OPEN_LEGEND_SECTIONS: OpenLegendSection[] = ['creatures', 'banes', 'boons', 'feats', 'items'];

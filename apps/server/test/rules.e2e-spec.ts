@@ -1093,17 +1093,21 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
     const { startFakeOpenLegend } = await import('./fake-open-legend');
     const fake = await startFakeOpenLegend();
     try {
+      // No `url`? open-legend has a real wired source (#346), but pointing at the fake keeps
+      // this test offline. boons/banes -> condition; feats -> feat.
       const job = await installSource({ source: 'open-legend', url: fake.baseUrl });
       expect(job.status).toBe('completed');
       expect(job.pack.slug).toBe('open-legend-srd');
+      expect(job.pack.license).toContain('Open Legend Community License');
 
-      // creatures -> monster; banes/boons -> condition.
-      const creature = await request(server).get('/api/v1/rules/search').query({ q: 'ogre', type: 'monster' }).set(dm);
-      expect(creature.body.some((e: { name: string }) => e.name === 'Ogre')).toBe(true);
-      const bane = await request(server).get('/api/v1/rules/search').query({ q: 'stunned', type: 'condition' }).set(dm);
-      expect(bane.body.some((e: { name: string }) => e.name === 'Stunned')).toBe(true);
+      const boon = await request(server).get('/api/v1/rules/search').query({ q: 'haste', type: 'condition' }).set(dm);
+      expect(boon.body.some((e: { name: string }) => e.name === 'Haste')).toBe(true);
+      const bane = await request(server).get('/api/v1/rules/search').query({ q: 'blinded', type: 'condition' }).set(dm);
+      expect(bane.body.some((e: { name: string }) => e.name === 'Blinded')).toBe(true);
+      const feat = await request(server).get('/api/v1/rules/search').query({ q: 'combat momentum', type: 'feat' }).set(dm);
+      expect(feat.body.some((e: { name: string }) => e.name === 'Combat Momentum')).toBe(true);
 
-      // Open Legend uses 'creatures', not 'monsters' -> 'monsters' is foreign -> 400.
+      // Open Legend has no creatures/items as open data — 'monsters' is foreign -> 400.
       const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'open-legend', url: fake.baseUrl, sections: ['monsters'] });
       expect(bad.status).toBe(400);
 
@@ -1168,5 +1172,59 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
     } finally {
       await fake.close();
     }
+  });
+
+  it('GET /rules/sources reports honesty metadata (#346): api vs manual-upload, per source', async () => {
+    const res = await request(server).get('/api/v1/rules/sources').set(dm);
+    expect(res.status).toBe(200);
+    const bySource = Object.fromEntries(res.body.map((m: { source: string }) => [m.source, m]));
+    // Every install source is described.
+    for (const s of ['open5e', 'pf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'other']) {
+      expect(bySource[s]).toBeDefined();
+    }
+    // Wired live sources install without a url.
+    expect(bySource['open-legend']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
+    expect(bySource['open5e']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
+    // Systems with no open source are honestly flagged manual-upload (and carry a note + license).
+    for (const s of ['pf1e', 'starfinder', 'archmage', 'osr']) {
+      expect(bySource[s]).toMatchObject({ sourceKind: 'manual-upload', installableWithoutUrl: false });
+      expect(typeof bySource[s].note).toBe('string');
+      expect(bySource[s].note.length).toBeGreaterThan(0);
+      expect(typeof bySource[s].license).toBe('string');
+    }
+  });
+});
+
+/**
+ * Live smoke test (issue #346 acceptance): proves the Open Legend DEFAULT source actually
+ * resolves against the real GitHub-hosted core-rules repo, with NO `url` override. Skipped by
+ * default (it needs network); run with RUN_LIVE_RULES_SMOKE=1 to exercise the live source.
+ */
+const liveSmoke = process.env.RUN_LIVE_RULES_SMOKE === '1' ? describe : describe.skip;
+liveSmoke('rules / rule packs — Open Legend live default source smoke (issue #346)', () => {
+  let ctx: TestAppContext;
+  let server: Server;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+  });
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('installs boons/banes/feats from the real Open Legend repo with no url override', async () => {
+    const res = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'open-legend' });
+    expect(res.status).toBe(202);
+    const job = await pollJob(server, dm, res.body.id, { timeoutMs: 60_000 });
+    expect(job.status).toBe('completed');
+    expect(job.pack.slug).toBe('open-legend-srd');
+    expect(job.pack.entryCount).toBeGreaterThan(50); // real repo has 30+ boons, 25+ banes, 70+ feats
+    expect(job.pack.license).toContain('Open Legend Community License');
+
+    const boon = await request(server).get('/api/v1/rules/search').query({ q: 'haste', type: 'condition' }).set(dm);
+    expect(boon.body.some((e: { name: string }) => e.name === 'Haste')).toBe(true);
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
   });
 });
