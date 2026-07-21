@@ -1,5 +1,5 @@
 import { fetchPf2eSection, entryTypeForSection, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
-import { startFakePf2e, startFakePf2eDuplicates, type FakePf2e } from '../fake-pf2e';
+import { startFakePf2e, startFakePf2eDuplicates, startFakePf2eMixed, type FakePf2e } from '../fake-pf2e';
 
 /**
  * Unit tests for the PF2e importer (issue #295) against the fake AoN Elasticsearch source
@@ -97,6 +97,27 @@ describe('pf2e-importer — de-duplication + malformed rows', () => {
     expect(entries[0].name).toBe('Goblin Warrior');
     expect(dedupedCount).toBe(1); // second same-name book collapsed
     expect(skippedCount).toBe(1); // the _source-less hit
+  });
+});
+
+describe('pf2e-importer — mixed-row source-type guard (issue #326)', () => {
+  let fake: FakePf2e;
+  beforeAll(async () => {
+    fake = await startFakePf2eMixed();
+  });
+  afterAll(async () => {
+    await fake.close();
+  });
+
+  it('skips a stray row whose SOURCE type does not match the section AoN type', async () => {
+    // The `backgrounds` section maps to entry type `feat`, so a stray `feat` source row
+    // would slip past the old `entry.type !== entryType` guard (feat === feat). The
+    // corrected guard compares src.type against the AoN type (`background`) and drops it.
+    const { entries, skippedCount } = await fetchPf2eSection(fake.baseUrl, 'backgrounds', silentLogger);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe('Acolyte');
+    expect(entries.some((e) => e.name === 'Power Attack')).toBe(false);
+    expect(skippedCount).toBe(1); // the stray feat row
   });
 });
 

@@ -563,6 +563,10 @@ export default function RunSessionPage() {
   const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
   function canEditCombatant(c: Combatant): boolean {
+    // An ended encounter is immutable server-side (assertMutable, #163): the interactive
+    // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
+    // status like canSetInitiative so an ended encounter renders read-only (#368).
+    if (encounter?.status === 'ended') return false;
     if (isDm) return true;
     if (role !== 'player') return false;
     return c.characterId != null && ownedCharacterIds.has(c.characterId);

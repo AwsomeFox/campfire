@@ -235,6 +235,53 @@ export async function startFakePf2e(): Promise<FakePf2e> {
 }
 
 /**
+ * Fake AoN endpoint reproducing the mixed-row scenario (issue #326): for a `type:background`
+ * query the index also returns a stray row whose SOURCE `type` is `feat`. Because the
+ * `backgrounds` section maps to entry type `feat`, the stray row's mapped `entry.type`
+ * ('feat') equals the section's own entry type — so the old `entry.type !== entryType` guard
+ * could never reject it. The corrected guard compares the SOURCE `type` against the section's
+ * AoN type (`background`) and must skip the stray. Emits `_source.type === 'feat'`, mapped as
+ * a background would be (name/text), so only the source-type guard can tell them apart.
+ */
+export async function startFakePf2eMixed(): Promise<FakePf2e> {
+  const app = express();
+  app.get('/aon/_search', (req, res) => {
+    const type = parseType(req.query.q);
+    if (type !== 'background') {
+      res.json({ hits: { total: { value: 0 }, hits: [] } });
+      return;
+    }
+    res.json({
+      hits: {
+        total: { value: 2 },
+        hits: [
+          { _id: 'acolyte', _source: { id: 'acolyte', name: 'Acolyte', type: 'background', text: 'A religious upbringing.', source: 'Pathfinder Player Core', license: 'ORC' } },
+          // Stray mixed row: source type is `feat`, NOT `background`. Must be skipped.
+          { _id: 'power-attack', _source: { id: 'power-attack', name: 'Power Attack', type: 'feat', text: 'A stray feat leaked into the background query.', source: 'Pathfinder Player Core', license: 'ORC' } },
+        ],
+      },
+    });
+  });
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  return {
+    baseUrl,
+    server,
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}
+
+/**
  * Fake AoN endpoint reproducing the de-dupe scenario: the SAME creature name appears in
  * two source books (Monster Core + a Legacy Bestiary). The importer must collapse them to
  * ONE canonical entry per (name, type). Also carries one malformed hit (no `_source`) that
@@ -259,6 +306,58 @@ export async function startFakePf2eDuplicates(): Promise<FakePf2e> {
         ],
       },
     });
+  });
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  return {
+    baseUrl,
+    server,
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}
+
+/**
+ * Fake AoN endpoint reproducing the CROSS-SECTION (type, slug) collision (issues #326/#353):
+ * a feat named "Cleave" and a background named "Cleave" both map to entry type `feat` with
+ * slug `cleave`. Importers only de-dupe WITHIN a section, so both survive to persistPack and
+ * collide on the (pack_id, type, slug) UNIQUE index — a fresh install would 500 mid-transaction
+ * unless persistPack de-dupes across sections. All other sections are empty.
+ */
+export async function startFakePf2eCrossSection(): Promise<FakePf2e> {
+  const app = express();
+  app.get('/aon/_search', (req, res) => {
+    const type = parseType(req.query.q);
+    if (type === 'feat') {
+      res.json({
+        hits: {
+          total: { value: 1 },
+          // Same `id` as the background below -> same slug ('cleave'); both map to entry
+          // type `feat`, so the two rows share the (type, slug) key across sections.
+          hits: [{ _id: 'cleave-feat', _source: { id: 'cleave', name: 'Cleave', type: 'feat', level: 1, text: 'A sweeping strike.', source: 'Pathfinder Player Core', license: 'ORC' } }],
+        },
+      });
+      return;
+    }
+    if (type === 'background') {
+      res.json({
+        hits: {
+          total: { value: 1 },
+          hits: [{ _id: 'cleave-bg', _source: { id: 'cleave', name: 'Cleave', type: 'background', text: 'You grew up splitting logs.', source: 'Pathfinder Player Core', license: 'ORC' } }],
+        },
+      });
+      return;
+    }
+    res.json({ hits: { total: { value: 0 }, hits: [] } });
   });
 
   const server: Server = await new Promise((resolve) => {

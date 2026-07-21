@@ -1049,6 +1049,49 @@ describe('rules / rule packs — Pathfinder 2e install (e2e, fake AoN server)', 
 });
 
 /**
+ * Issues #326/#353: two PF2e sections (feats + backgrounds) map onto the SAME entry type
+ * (`feat`). Importers only de-dupe within a section, so a cross-section name collision
+ * (a feat and a background both named "Cleave" -> (feat, cleave) twice) reaches persistPack.
+ * Before the fix that tripped the (pack_id, type, slug) UNIQUE index mid-transaction and the
+ * fresh install 500'd (misreported as a pack-slug race). persistPack now de-dupes by
+ * (type, slug) first, so the install completes with one canonical entry.
+ */
+describe('rules / rule packs — cross-section (type,slug) collision de-dupes (issues #326/#353)', () => {
+  let ctx: TestAppContext;
+  let pf2e: import('./fake-pf2e').FakePf2e;
+  let server: Server;
+
+  beforeAll(async () => {
+    const { startFakePf2eCrossSection } = await import('./fake-pf2e');
+    ctx = await createTestApp();
+    pf2e = await startFakePf2eCrossSection();
+    server = ctx.app.getHttpServer();
+  });
+
+  afterAll(async () => {
+    await pf2e.close();
+    await closeTestApp(ctx);
+  });
+
+  it('installs cleanly (no 500) and keeps a single (feat, cleave) entry', async () => {
+    const res = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'pf2e', url: pf2e.baseUrl });
+    expect(res.status).toBe(202);
+    const job = await pollJob(server, dm, res.body.id);
+
+    // Before the fix this job failed (UNIQUE constraint mid-transaction). It must complete.
+    expect(job.status).toBe('completed');
+    expect(job.pack.entryCount).toBe(1);
+
+    const cleaveRes = await request(server).get('/api/v1/rules/search').query({ q: 'Cleave', type: 'feat' }).set(dm);
+    expect(cleaveRes.status).toBe(200);
+    const cleaves = cleaveRes.body.filter((e: { name: string }) => e.name === 'Cleave');
+    expect(cleaves).toHaveLength(1); // the two cross-section rows collapsed to one
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+  });
+});
+
+/**
  * Sibling open-ruleset importers wired into the install endpoint (issue #345). Each new
  * `source` — pf1e / starfinder / archmage / open-legend / osr — routes POST /rules/packs/install
  * to its own importer, installs under the pack slug the matching RuleSystemAdapter is
