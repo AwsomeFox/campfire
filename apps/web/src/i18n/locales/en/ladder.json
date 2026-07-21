@@ -1,0 +1,66 @@
+{
+  "ladder": {
+    "stuckTitle": "The AI DM needs a hand",
+    "stuckSince": "Stuck since {{time}} · turn {{turn}}",
+    "viewerStuckHint": "The AI DM is stuck — a player at the table can help it recover.",
+
+    "reason": {
+      "tool_error": "A tool call failed",
+      "budget_exhausted": "The token budget ran out",
+      "max_steps": "The DM ran out of steps",
+      "no_narration": "The DM produced no narration",
+      "loop": "The DM repeated itself",
+      "dispute": "A ruling was disputed"
+    },
+
+    "tableTools": "Table tools",
+    "working": "Working…",
+
+    "lever": {
+      "retry": "Retry",
+      "nudge": "Nudge",
+      "flag": "Flag a ruling",
+      "vote": "Call a vote",
+      "rules_lookup": "Rules lookup",
+      "request_takeover": "Request takeover",
+      "pause": "Pause"
+    },
+
+    "nudgeHintPlaceholder": "Optional hint to steer the DM (leave blank for a plain retry)…",
+    "nudgeConfirm": "Nudge the DM",
+
+    "flagObjectionPlaceholder": "Why was that ruling wrong or unfair? The DM will re-decide with this in view…",
+    "flagConfirm": "Dispute the ruling",
+
+    "rulesHint": "Answered from the installed rule packs — no model budget spent.",
+    "rulesPlaceholder": "Ask a rules question…",
+    "rulesConfirm": "Look it up",
+    "rulesAnswerLabel": "Rules · {{query}}",
+
+    "voteOpenPrompt": "What should the table vote on?",
+    "voteOpenOverride": "Override the ruling",
+    "voteOpenPause": "Pause the seat",
+    "voteTitle": {
+      "override": "Vote: override the AI DM's last ruling",
+      "pause": "Vote: pause the AI DM"
+    },
+    "voteTally": "{{yes}} of {{threshold}} needed · {{no}} against",
+    "voteYourBallot": "You voted {{choice}}.",
+    "voteYes": "yes",
+    "voteNo": "no",
+    "voteCastYes": "Vote yes",
+    "voteCastNo": "Vote no",
+
+    "takeoverRequested": "{{name}} asked for a human to take the DM seat.",
+    "grantTakeover": "Grant human takeover",
+    "grantNotePlaceholder": "Optional note recorded with the grant…",
+    "grantConfirm": "Grant the seat",
+    "grantNoteLabel": "Note:",
+
+    "humanControlTitle": "{{name}} is running the table",
+    "humanControlHint": "The AI DM is frozen while a human holds the seat. Hand it back to resume AI play.",
+    "handback": "Hand back to the AI",
+    "handbackNotePlaceholder": "Optional: record the call you made while running the table…",
+    "handbackConfirm": "Hand back the seat"
+  }
+}

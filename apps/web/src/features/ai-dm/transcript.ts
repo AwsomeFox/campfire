@@ -79,7 +79,7 @@ export interface ToolEntry {
 export interface SystemEntry {
   id: string;
   kind: 'system';
-  variant: 'divider' | 'scene' | 'stuck' | 'recovered' | 'paused' | 'resumed' | 'takeover' | 'vote' | 'info';
+  variant: 'divider' | 'scene' | 'stuck' | 'recovered' | 'paused' | 'resumed' | 'takeover' | 'vote' | 'rules' | 'info';
   /** Optional raw text (e.g. a seeded scene label or a stuck detail) for the page to render. */
   text?: string;
   /** Optional structured payload (e.g. the stuck reason, vote outcome) for the page. */
@@ -107,6 +107,11 @@ export type TranscriptAction =
   | { type: 'stream'; event: AiDmStreamEvent }
   /** Echo this client's own submission immediately (before/independent of the stream). */
   | { type: 'localPlayer'; memberName: string; characterName?: string; text: string; id?: string; at?: string }
+  /**
+   * Drop a locally-originated system line into the transcript (e.g. a rules-lookup answer,
+   * which is a retrieval result this client requested rather than a broadcast SSE signal).
+   */
+  | { type: 'localSystem'; variant: SystemEntry['variant']; text?: string; data?: Record<string, string>; id?: string; at?: string }
   /** Seed a fresh transcript for a late joiner from thin session state. */
   | { type: 'seed'; scene?: string | null; lastNarration?: string | null; at?: string }
   /** Replace the whole state (e.g. after hydrating from localStorage). */
@@ -327,6 +332,18 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
           memberName: action.memberName,
           characterName: action.characterName,
           text: action.text,
+          at: action.at ?? new Date().toISOString(),
+        }),
+      };
+
+    case 'localSystem':
+      return {
+        entries: push(state.entries, {
+          id: action.id ?? makeId(),
+          kind: 'system',
+          variant: action.variant,
+          text: action.text,
+          data: action.data,
           at: action.at ?? new Date().toISOString(),
         }),
       };
