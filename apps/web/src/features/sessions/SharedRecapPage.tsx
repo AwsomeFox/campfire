@@ -95,7 +95,8 @@ export default function SharedRecapPage() {
 
 function formatDate(iso: string | null): string {
   if (!iso) return 'Undated';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return 'Undated';
-  return formatLocaleDate(d, { month: 'short', day: 'numeric', year: 'numeric' });
+  if (Number.isNaN(new Date(iso).getTime())) return 'Undated';
+  // Pass the raw string (not a pre-parsed Date) so date-only values like
+  // `2026-07-21` get calendar treatment in formatLocaleDate (issue #267).
+  return formatLocaleDate(iso, { month: 'short', day: 'numeric', year: 'numeric' });
 }

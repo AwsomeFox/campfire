@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
 import { api, API } from '../../lib/api';
+import { formatDate } from '../../lib/format';
 import { EmptyState } from '../../components/ui';
 
 /** Strip basic markdown syntax from a recap excerpt for a one-line preview. */
@@ -94,7 +95,7 @@ export function SessionLog({ campaignId, sessions }: { campaignId: number; sessi
             <span style={{ fontSize: 12, color: 'var(--color-accent)', flex: 'none' }}>S{s.number}</span>
             <span style={{ fontSize: 14 }}>{s.title || firstLinePlain(s.recapExcerpt) || 'No recap yet.'}</span>
             <span className="text-muted" style={{ fontSize: 11, marginLeft: 'auto', flex: 'none' }}>
-              {s.playedAt ? new Date(s.playedAt).toLocaleDateString() : ''}
+              {s.playedAt ? formatDate(s.playedAt) : ''}
             </span>
           </Link>
         ))
