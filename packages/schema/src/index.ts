@@ -3216,7 +3216,10 @@ export const EncounterSuggestion = z.object({
 });
 export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
 
-export const CombatantKind = z.enum(['character', 'monster']);
+// 'npc' combatants are DM-controlled like monsters (exact HP redacted for non-DM
+// viewers, no death saves) but carry an `npcId` link to the campaign NPC for
+// identity, and may optionally borrow a compendium statblock via `ruleEntryId`.
+export const CombatantKind = z.enum(['character', 'monster', 'npc']);
 export type CombatantKind = z.infer<typeof CombatantKind>;
 
 /**
@@ -3246,6 +3249,9 @@ export const Combatant = z.object({
   encounterId: Id,
   kind: CombatantKind,
   characterId: Id.nullable().default(null),
+  // Set for kind==='npc': the campaign NPC this combatant represents (identity/icon;
+  // its NPC page + dmSecret stay DM-gated as usual). Null for characters/monsters.
+  npcId: Id.nullable().default(null),
   name: z.string().min(1).max(120),
   initiative: z.number().int().nullable().default(null),
   initMod: z.number().int().default(0),
@@ -3281,6 +3287,7 @@ export const CombatantCreate = z.object({
   kind: CombatantKind,
   name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId
   characterId: Id.optional(), // link a late-joining party member
+  npcId: Id.optional(), // link a campaign NPC as an 'npc' combatant (identity/icon)
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
