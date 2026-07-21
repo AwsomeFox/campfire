@@ -18,9 +18,3 @@ export function initials(name: string): string {
   if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
   return (parts[0]![0] + parts[parts.length - 1]![0]).toUpperCase();
 }
-
-/** Ability modifier: floor((score - 10) / 2), signed string e.g. "+2", "-1", "+0". */
-export function abilityMod(score: number): string {
-  const mod = Math.floor((score - 10) / 2);
-  return mod >= 0 ? `+${mod}` : `${mod}`;
-}
