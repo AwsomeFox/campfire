@@ -1,23 +1,30 @@
 /**
- * Credits / attributions (issue #302).
+ * Credits / attributions (issue #302; full-set counts issue #349).
  *
- * Surfaces the CC-BY attribution for the bundled game-icons.net entity-icon set.
+ * Surfaces the CC-BY attribution for the game-icons.net entity-icon library.
  * CC BY 3.0 requires crediting each icon's author ("Icons made by {author}"), so
- * this page lists every contributor whose work ships in the curated catalog, with
- * a link to the source and the license. This is the canonical home for
- * open-content attributions; future open-licensed asset imports can add sections
- * here alongside the existing per-pack license text shown in the compendium.
+ * this page lists every contributor whose work is reachable — not just the ~180
+ * bundled inline for instant rendering, but the full ~4,130-icon set the picker
+ * can search and any entity can use (issue #349) — with a link to the source and
+ * the license. This is the canonical home for open-content attributions; future
+ * open-licensed asset imports can add sections here alongside the existing
+ * per-pack license text shown in the compendium.
+ *
+ * Per-artist counts come from `ICON_ARTIST_TOTAL_COUNTS`, a small generated
+ * table covering the full set — NOT from importing the full icon index itself,
+ * which stays a lazy chunk this page never has to load.
  */
 import { Link } from 'react-router-dom';
 import { Card } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import {
   ICON_ARTISTS,
+  ICON_ARTIST_TOTAL_COUNTS,
   ICON_COUNT,
+  TOTAL_ICON_COUNT,
   ICON_LICENSE,
   ICON_SOURCE_NAME,
   ICON_SOURCE_URL,
-  ICON_CATALOG,
 } from '../../lib/icons';
 
 // A few representative slugs to show the set at a glance (fall back silently if
@@ -43,7 +50,7 @@ export default function CreditsPage() {
       <Card className="space-y-4">
         <div className="flex items-center gap-3 flex-wrap">
           <h2 className="font-bold text-white text-base m-0">Entity icons</h2>
-          <span className="cf-chip cf-chip-available">{ICON_COUNT} icons</span>
+          <span className="cf-chip cf-chip-available">{TOTAL_ICON_COUNT} icons</span>
           <span className="cf-chip cf-chip-available">{ICON_LICENSE}</span>
         </div>
 
@@ -56,11 +63,12 @@ export default function CreditsPage() {
         </div>
 
         <p className="text-sm text-[var(--color-neutral-400)] leading-relaxed">
-          Campfire ships a curated set of {ICON_COUNT} RPG icons from{' '}
+          Campfire makes the full {TOTAL_ICON_COUNT}-icon library from{' '}
           <a href={ICON_SOURCE_URL} target="_blank" rel="noreferrer" className="hover:underline" style={{ color: 'var(--color-accent)' }}>
             {ICON_SOURCE_NAME}
-          </a>
-          , licensed under{' '}
+          </a>{' '}
+          searchable from any icon picker — a curated set of {ICON_COUNT} loads instantly, the rest load on
+          demand as you search or open an entity that uses one. All are licensed under{' '}
           <a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noreferrer" className="hover:underline" style={{ color: 'var(--color-accent)' }}>
             Creative Commons Attribution 3.0
           </a>{' '}
@@ -70,7 +78,7 @@ export default function CreditsPage() {
 
         <ul className="grid sm:grid-cols-2 gap-x-6 gap-y-1.5 list-none p-0 m-0">
           {ICON_ARTISTS.map((artist) => {
-            const count = ICON_CATALOG.filter((e) => e.artist === artist.key).length;
+            const count = ICON_ARTIST_TOTAL_COUNTS[artist.key] ?? 0;
             return (
               <li key={artist.key} className="text-sm text-[var(--color-neutral-300)] flex items-baseline justify-between gap-2">
                 <span>
@@ -90,7 +98,9 @@ export default function CreditsPage() {
         </ul>
 
         <p className="text-[11px] text-[var(--color-neutral-600)] leading-snug">
-          The full icon collection (4,000+ icons) is available at {ICON_SOURCE_NAME}. Only a curated subset is bundled here.
+          Campfire is self-hosted and works offline: every icon above ships with the app (no runtime requests to{' '}
+          {ICON_SOURCE_NAME}). The {ICON_COUNT}-icon curated set is in the main app bundle; the rest load from a
+          static, cached-once-viewed bundle the first time they're searched or used.
         </p>
       </Card>
     </div>

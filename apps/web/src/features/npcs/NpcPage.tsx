@@ -19,7 +19,6 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
-import { getIcon } from '../../lib/icons';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -309,11 +308,13 @@ export default function NpcPage() {
         <>
           <div className="flex items-center gap-3 flex-wrap">
             <div className="h-13 w-13 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0 overflow-hidden" style={{ height: 52, width: 52 }}>
-              {getIcon(npc.iconSlug) ? (
-                <GameIcon slug={npc.iconSlug} size={30} title={npc.name} className="text-[var(--color-accent)]" />
-              ) : (
-                initials(npc.name)
-              )}
+              <GameIcon
+                slug={npc.iconSlug}
+                size={30}
+                title={npc.name}
+                className="text-[var(--color-accent)]"
+                fallback={initials(npc.name)}
+              />
             </div>
             <div className="min-w-0">
               <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{npc.name}</h1>
@@ -507,11 +508,13 @@ export default function NpcPage() {
             <label className="text-[10px] text-slate-500 font-bold uppercase">Icon</label>
             <div className="flex items-center gap-3">
               <div className="h-11 w-11 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-sm text-[var(--color-neutral-400)] shrink-0 overflow-hidden">
-                {getIcon(form.iconSlug) ? (
-                  <GameIcon slug={form.iconSlug} size={26} title={getIcon(form.iconSlug)?.name} className="text-[var(--color-accent)]" />
-                ) : (
-                  initials(form.name || npc.name)
-                )}
+                <GameIcon
+                  slug={form.iconSlug}
+                  size={26}
+                  title={form.name || npc.name}
+                  className="text-[var(--color-accent)]"
+                  fallback={initials(form.name || npc.name)}
+                />
               </div>
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setPickingIcon(true)}>
                 {form.iconSlug ? 'Change icon' : 'Choose icon'}
