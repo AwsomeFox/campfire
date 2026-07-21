@@ -11,6 +11,7 @@ import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
+import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
 import { NotificationsBell } from '../features/notifications/NotificationsBell';
@@ -245,6 +246,12 @@ export function Layout() {
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
+
+  // AI-DM seat mode drives the "Table" nav item (issue #339): the player-facing table
+  // only exists when the AI holds the DM seat (Driver mode). The seat read stops on a
+  // 4xx (feature off / not a member), so the item simply stays hidden then — no error.
+  const aiSeatQuery = useAiDmSeat(campaignId);
+  const aiDriverActive = aiSeatQuery.data?.mode === 'driver';
   const roleLabel =
     role === 'dm'
       ? t('nav.roleDm')
@@ -369,6 +376,8 @@ export function Layout() {
         { key: 'timeline', label: t('nav.timeline'), to: `/c/${campaignId}/timeline` },
         { key: 'session-zero', label: t('nav.sessionZero'), to: `/c/${campaignId}/session-zero` },
         { key: 'encounters', label: t('nav.encounters'), to: `/c/${campaignId}/encounters` },
+        // Only surfaced while the AI holds the DM seat (Driver mode) — issue #339.
+        ...(aiDriverActive ? [{ key: 'table', label: t('nav.table'), to: `/c/${campaignId}/table` }] : []),
         { key: 'compendium', label: t('nav.compendium'), to: `/c/${campaignId}/compendium` },
         { key: 'notes', label: t('nav.myNotes'), to: `/c/${campaignId}/notes` },
         // Non-DM members get a self-view of the proposals they've submitted (issue #124);
@@ -387,10 +396,26 @@ export function Layout() {
       ]
     : [];
 
+  // Server admin console is on any /admin* route (issue #350) — mirrors the
+  // campaign dmNav pattern above so the sidebar shows a "Server admin" section
+  // with sub-page links instead of the flat single entry used everywhere else.
+  const onAdminRoute = location.pathname.startsWith('/admin');
+  const adminNav: NavItem[] = isAdmin
+    ? [
+        { key: 'admin-overview', label: t('nav.adminOverview'), to: '/admin' },
+        { key: 'admin-users', label: t('nav.adminUsers'), to: '/admin/users' },
+        { key: 'admin-rules', label: t('nav.adminRules'), to: '/admin/rules' },
+        { key: 'admin-ai', label: t('nav.adminAi'), to: '/admin/ai' },
+        { key: 'admin-auth', label: t('nav.adminAuth'), to: '/admin/auth' },
+        { key: 'admin-storage', label: t('nav.adminStorage'), to: '/admin/storage' },
+        { key: 'admin-audit', label: t('nav.adminAudit'), to: '/admin/audit' },
+      ]
+    : [];
+
   const isActivePath = (to?: string) => {
     if (!to) return false;
     const path = to.split('#')[0];
-    if (path === `/c/${campaignId}`) {
+    if (path === `/c/${campaignId}` || path === '/admin') {
       return location.pathname === path;
     }
     return location.pathname.startsWith(path);
@@ -415,7 +440,7 @@ export function Layout() {
   return (
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
       {/* Desktop sidebar */}
-      {campaignId !== undefined && (
+      {(campaignId !== undefined || onAdminRoute) && (
         <aside
           className="hidden md:flex w-[230px] shrink-0 sticky top-0 flex-col gap-1.5 h-screen overflow-y-auto overflow-x-hidden p-3.5 border-r"
           style={{ borderColor: 'var(--color-divider)' }}
@@ -461,8 +486,21 @@ export function Layout() {
             </>
           )}
 
+          {onAdminRoute && isAdmin && (
+            <>
+              <div className="text-muted text-[10.5px] uppercase tracking-wide pt-3 pb-1 px-2.5">
+                {t('nav.serverAdmin')}
+              </div>
+              <nav className="flex flex-col gap-0.5">
+                {adminNav.map((item) => (
+                  <SidebarNavButton key={item.key} item={item} active={isActivePath(item.to)} />
+                ))}
+              </nav>
+            </>
+          )}
+
           <nav className="flex flex-col gap-0.5 mt-1">
-            {isAdmin && (
+            {isAdmin && !onAdminRoute && (
               <SidebarNavButton
                 item={{ key: 'admin', label: t('nav.serverAdmin'), to: '/admin' }}
                 active={location.pathname === '/admin'}
@@ -546,13 +584,26 @@ export function Layout() {
               >
                 {initials(displayName)}
               </button>
-              {menuOpen && <UserMenu isAdmin={isAdmin} displayName={displayName} onLogout={onLogout} onClose={() => setMenuOpen(false)} onChangePassword={() => setShowPasswordModal(true)} />}
+              {menuOpen && (
+                <UserMenu
+                  isAdmin={isAdmin}
+                  adminNav={adminNav}
+                  onAdminRoute={onAdminRoute}
+                  displayName={displayName}
+                  onLogout={onLogout}
+                  onClose={() => setMenuOpen(false)}
+                  onChangePassword={() => setShowPasswordModal(true)}
+                />
+              )}
             </div>
           )}
         </header>
 
-        {/* Desktop-only header for non-campaign routes (home, admin, tokens) */}
-        {campaignId === undefined && (
+        {/* Desktop-only header for non-campaign, non-admin routes (home, tokens,
+            preferences, credits) — /admin* gets the sidebar above instead, same
+            as campaign routes, so this header would just duplicate the brand
+            and admin links. */}
+        {campaignId === undefined && !onAdminRoute && (
           <header
             className="hidden md:flex sticky top-0 z-30 items-center gap-2.5 px-5 py-3 border-b"
             style={{ borderColor: 'var(--color-divider)' }}
@@ -772,12 +823,16 @@ function MoreSheetItem({ item, onNavigate }: { item: NavItem; onNavigate: () => 
 
 function UserMenu({
   isAdmin,
+  adminNav,
+  onAdminRoute,
   displayName,
   onLogout,
   onClose,
   onChangePassword,
 }: {
   isAdmin: boolean;
+  adminNav: NavItem[];
+  onAdminRoute: boolean;
   displayName: string;
   onLogout: () => void;
   onClose: () => void;
@@ -795,10 +850,29 @@ function UserMenu({
       style={{ gap: 2 }}
     >
       <p className="px-2 py-1 text-xs text-muted truncate">{displayName}</p>
-      {isAdmin && (
-        <Link to="/admin" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
-          Admin
-        </Link>
+      {isAdmin && onAdminRoute ? (
+        // Mobile topbar equivalent of the desktop sidebar's "Server admin"
+        // section (issue #350) — this dropdown is the only nav surface on
+        // mobile for /admin* routes, since the bottom tabbar/More sheet only
+        // render inside a campaign.
+        adminNav.map((item) => (
+          <Link
+            key={item.key}
+            to={item.to!}
+            role="menuitem"
+            className="block px-2 py-1.5 rounded-md"
+            style={{ color: 'var(--color-text)' }}
+            onClick={onClose}
+          >
+            {item.label}
+          </Link>
+        ))
+      ) : (
+        isAdmin && (
+          <Link to="/admin" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+            Admin
+          </Link>
+        )
       )}
       <Link to="/tokens" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
         API tokens

@@ -56,6 +56,15 @@ const SECTION_LABEL: Record<Section, string> = {
   classes: 'Classes',
   races: 'Races',
   feats: 'Feats',
+  // Sibling-system sections (issue #345 widened the union). This Open5e-only card
+  // doesn't surface them yet — the per-source picker is #347 — but the label map
+  // must cover every member of the Section union to type-check.
+  equipment: 'Equipment',
+  starships: 'Starships',
+  vehicles: 'Vehicles',
+  creatures: 'Creatures',
+  banes: 'Banes',
+  boons: 'Boons',
 };
 
 export function RulePacksCard() {

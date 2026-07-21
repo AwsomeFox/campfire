@@ -1,21 +1,30 @@
 /**
- * GameIcon (issue #302) — renders a bundled game-icons.net entity icon by slug.
+ * GameIcon (issue #302; full-set lazy resolution issue #349) — renders a
+ * bundled game-icons.net entity icon by slug.
  *
- * The icon body is trusted, build-time-generated SVG markup shipped in the app
- * bundle (see apps/web/src/lib/icons) — never user input — so injecting it via
- * dangerouslySetInnerHTML is safe. The icon inherits the current text colour
- * (`fill: currentColor`), so callers colour it by setting `color` on a wrapper.
+ * The icon body is trusted, either build-time-generated SVG markup shipped in
+ * the app bundle (curated set) or fetched from a static, build-generated json
+ * shard (full set, see apps/web/src/lib/icons/index.ts#resolveIcon) — never
+ * user input — so injecting it via dangerouslySetInnerHTML is safe either way.
+ * The icon inherits the current text colour (`fill: currentColor`), so callers
+ * colour it by setting `color` on a wrapper.
  *
- * Renders nothing when the slug isn't in the bundled set, so an unknown/removed
- * slug degrades gracefully to whatever fallback the caller shows alongside it.
+ * Curated slugs (the common case) render synchronously on first paint, same as
+ * before. A slug outside the curated ~180 kicks off `resolveIcon` — which
+ * lazily loads the full-set index + the relevant body shard — and renders
+ * `fallback` until it resolves (or forever, for a genuinely unknown/removed
+ * slug). `fallback` defaults to nothing, matching the old "unknown slug
+ * renders nothing" behaviour for callers that don't pass one.
  */
-import { getIcon, ICON_VIEWBOX } from '../lib/icons';
+import { useEffect, useState, type ReactNode } from 'react';
+import { getIcon, resolveIcon, ICON_VIEWBOX, type GameIconEntry } from '../lib/icons';
 
 export function GameIcon({
   slug,
   size = 24,
   className = '',
   title,
+  fallback = null,
 }: {
   slug: string | null | undefined;
   /** Pixel size of the square icon. */
@@ -23,9 +32,29 @@ export function GameIcon({
   className?: string;
   /** Accessible label; when omitted the icon is treated as decorative. */
   title?: string;
+  /** Rendered while a non-curated slug resolves, and permanently for an unknown slug. */
+  fallback?: ReactNode;
 }) {
-  const icon = getIcon(slug);
-  if (!icon) return null;
+  const [icon, setIcon] = useState<GameIconEntry | undefined>(() => getIcon(slug));
+
+  useEffect(() => {
+    const cached = getIcon(slug);
+    if (cached) {
+      setIcon(cached);
+      return;
+    }
+    setIcon(undefined);
+    if (!slug) return;
+    let live = true;
+    resolveIcon(slug).then((entry) => {
+      if (live) setIcon(entry);
+    });
+    return () => {
+      live = false;
+    };
+  }, [slug]);
+
+  if (!icon) return <>{fallback}</>;
   return (
     <svg
       viewBox={`0 0 ${ICON_VIEWBOX} ${ICON_VIEWBOX}`}

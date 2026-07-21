@@ -1,0 +1,617 @@
+/**
+ * AI-DM Table page (issue #339) — the player-facing surface where a Driver-mode
+ * session with the AI DM is actually played.
+ *
+ * It composes the #338 foundation rather than re-deriving it:
+ *   - lib/useAiDmStream          — the SSE narration/signal stream.
+ *   - features/ai-dm/transcript  — the pure reducer + localStorage persistence that
+ *                                  turns stream events (+ this client's own echoes)
+ *                                  into the running transcript every player watches.
+ *   - features/ai-dm/toolActivity — the tool-event → query-invalidation + chip map, so
+ *                                  the tracker / party / map / proposal queue reconcile
+ *                                  live off the AI's actions.
+ *   - lib/query (useAiDmSeat / useAiDmSession / invalidateAiDm) — the thin server truth.
+ *
+ * Flow: the SSE stream folds into a `useReducer(transcriptReducer)`; a `turn.start`
+ * opens a DM bubble that `narration.delta` fills token-by-token and `turn.end` closes
+ * with a meta row. Between `turn.start` and `turn.end` the composer is locked
+ * TABLE-WIDE — every client sees the same events, so every composer locks together.
+ * Submitting a player action POSTs to /ai-dm/message (speaker-prefixed per #317) and
+ * echoes locally; the AI's reply streams back in.
+ *
+ * The stuck-ladder banner + recovery levers (#340), co-DM draft buttons (#341), the
+ * scribe (#342) and onboarding checklist (#343) are OWNED BY THEIR OWN ISSUES — this
+ * page leaves clearly-marked seams for them (see the `session.stuck` / `session.state`
+ * region below) and renders only a minimal fallback for the gated/off states.
+ */
+import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { Character, Encounter, EncounterWithCombatants } from '@campfire/schema';
+import { api, API, translateApiError } from '../../lib/api';
+import { useAuth } from '../../app/auth';
+import {
+  queryKeys,
+  useAiDmSeat,
+  useAiDmSession,
+  invalidateAiDm,
+} from '../../lib/query';
+import { useAiDmStream } from '../../lib/useAiDmStream';
+import {
+  transcriptReducer,
+  loadTranscript,
+  saveTranscript,
+  speakerPrefix,
+  dmEntryText,
+  emptyTranscript,
+  type DmEntry,
+  type PlayerEntry,
+  type SystemEntry,
+  type ToolEntry,
+} from './transcript';
+import { invalidateForToolEvent, resolveToolActivity, type ToolResource } from './toolActivity';
+import { Markdown } from '../../components/Markdown';
+import { Btn, Card, Chip, EmptyState, Skeleton, TextArea, TextInput, type ChipVariant } from '../../components/ui';
+
+/** Emoji for a tool chip's resource family — the shared map returns lucide names, which
+ * this app doesn't bundle, so we render an equivalent emoji glyph. */
+const RESOURCE_EMOJI: Record<ToolResource, string> = {
+  dice: '🎲',
+  encounter: '⚔️',
+  party: '🛡️',
+  map: '🗺️',
+  proposals: '📝',
+  rules: '📖',
+  other: '✨',
+};
+
+/** Seat status → chip variant for the header status pill. */
+const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human', ChipVariant> = {
+  idle: 'available',
+  narrating: 'active',
+  paused: 'private',
+  human: 'dm',
+};
+
+export default function AiTablePage() {
+  const { t } = useTranslation();
+  const params = useParams<{ campaignId: string }>();
+  const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
+  const { me, roleIn } = useAuth();
+  const queryClient = useQueryClient();
+
+  const role = campaignId !== undefined ? roleIn(campaignId) : null;
+  const isDm = role === 'dm';
+  const canCompose = role === 'dm' || role === 'player';
+
+  const seatQuery = useAiDmSeat(campaignId);
+  const seat = seatQuery.data;
+  const isDriver = seat?.mode === 'driver';
+
+  const sessionQuery = useAiDmSession(campaignId);
+  const session = sessionQuery.data;
+
+  // The running transcript is assembled client-side (see transcript.ts). Lazy-hydrate
+  // from localStorage so a reload keeps the recent local scrollback.
+  const [transcript, dispatch] = useReducer(
+    transcriptReducer,
+    campaignId,
+    (id) => (id !== undefined ? loadTranscript(id) : emptyTranscript),
+  );
+
+  // `streaming` is the table-wide composer lock: true between turn.start and turn.end.
+  // It is driven purely by SSE events, so every client's composer locks in lockstep.
+  const [streaming, setStreaming] = useState(false);
+
+  const [input, setInput] = useState('');
+  const [sceneField, setSceneField] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [pauseError, setPauseError] = useState<string | null>(null);
+  const [pauseBusy, setPauseBusy] = useState(false);
+
+  // Party roster — resolves this member's character name for speaker attribution, and
+  // is also a live surface refreshed by party-touching tool events.
+  const charactersQuery = useQuery({
+    queryKey: campaignId !== undefined ? queryKeys.campaignCharacters(campaignId) : ['characters', 'disabled'],
+    queryFn: () => api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`),
+    enabled: campaignId !== undefined && isDriver,
+  });
+
+  // Live-encounter strip: the running encounter this table sits beside (design point 4).
+  const encountersQuery = useQuery({
+    queryKey: campaignId !== undefined ? queryKeys.campaignEncounters(campaignId) : ['encounters', 'disabled'],
+    queryFn: () => api.get<Encounter[]>(`${API}/campaigns/${campaignId}/encounters`),
+    enabled: campaignId !== undefined && isDriver,
+  });
+  const activeEncounter = encountersQuery.data?.find((e) => e.status === 'running');
+  const activeEncounterId = activeEncounter?.id;
+
+  // Detail of the running encounter, only to name whose turn it is in the placeholder.
+  const activeEncounterQuery = useQuery({
+    queryKey: activeEncounterId !== undefined ? queryKeys.encounter(activeEncounterId) : ['encounter', 'disabled'],
+    queryFn: () => api.get<EncounterWithCombatants>(`${API}/encounters/${activeEncounterId}`),
+    enabled: activeEncounterId !== undefined,
+  });
+  const currentCombatantName = useMemo(() => {
+    const d = activeEncounterQuery.data;
+    if (!d?.currentCombatantId) return undefined;
+    return d.combatants.find((c) => c.id === d.currentCombatantId)?.name;
+  }, [activeEncounterQuery.data]);
+
+  // Speaker identity for the composer (design point 3): the character this member owns
+  // when they have one, else their display name. #317 fences the raw input server-side,
+  // so the prefix is flavour for the model, not authority.
+  const myMembership = me?.memberships.find((m) => m.campaignId === campaignId);
+  const myCharacter = charactersQuery.data?.find((c) => c.id === myMembership?.characterId);
+  const memberName = me?.user.displayName || me?.user.username || t('table.you');
+  const characterName = myCharacter?.name;
+
+  // Persist the transcript on every change (bounded inside saveTranscript).
+  useEffect(() => {
+    if (campaignId !== undefined) saveTranscript(campaignId, transcript);
+  }, [campaignId, transcript]);
+
+  // Seed a fresh transcript (empty localStorage) from thin session state so a brand-new
+  // browser drops in behind a "joined mid-session" divider showing scene + last narration.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current || !isDriver) return;
+    if (transcript.entries.length > 0) {
+      seededRef.current = true;
+      return;
+    }
+    if (session) {
+      if (session.scene || session.lastNarration) {
+        dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
+      }
+      seededRef.current = true;
+    }
+  }, [session, isDriver, transcript.entries.length]);
+
+  // Subscribe to the narration stream. Only opened in Driver mode; the hook itself also
+  // stops on a 401/403 (feature off / not a member), so a non-member simply gets nothing.
+  useAiDmStream(
+    campaignId,
+    {
+      onEvent: (event) => {
+        if (campaignId === undefined) return;
+        dispatch({ type: 'stream', event });
+        if (event.type === 'turn.start') setStreaming(true);
+        else if (event.type === 'turn.end') setStreaming(false);
+        else if (event.type === 'tool') {
+          invalidateForToolEvent(queryClient, event, { campaignId, encounterId: activeEncounterId });
+        } else if (
+          event.type === 'state' ||
+          event.type === 'stuck' ||
+          event.type === 'recovered' ||
+          event.type === 'vote' ||
+          event.type === 'takeover'
+        ) {
+          // Lifecycle signals move the thin server truth — reconcile the session/seat reads
+          // so the header + composer-lock reflect the new state (#340 reads the same truth).
+          invalidateAiDm(queryClient, campaignId);
+          if (event.type === 'state' && event.state !== 'running') setStreaming(false);
+        }
+      },
+      onReconnect: () => {
+        if (campaignId === undefined) return;
+        // Caught up after a drop: refetch the session + the live surfaces we may have missed.
+        setStreaming(false);
+        invalidateAiDm(queryClient, campaignId);
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) });
+      },
+    },
+    { enabled: campaignId !== undefined && isDriver },
+  );
+
+  // Auto-scroll to the newest entry as the transcript grows / streams.
+  const bottomRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [transcript.entries]);
+
+  // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
+  const paused = session?.state === 'paused';
+  const humanControl = session?.state === 'human_control';
+  const awaiting = session?.state === 'awaiting_players';
+  const locked = streaming || paused || humanControl || awaiting;
+  const lockReason = streaming
+    ? t('table.composerLockedStreaming')
+    : paused
+      ? t('table.composerLockedPaused')
+      : humanControl
+        ? t('table.composerLockedHuman')
+        : awaiting
+          ? t('table.composerLockedAwaiting')
+          : null;
+
+  const placeholder = activeEncounter
+    ? currentCombatantName
+      ? t('table.composerPlaceholderTurn', { name: currentCombatantName })
+      : t('table.composerPlaceholderCombat')
+    : t('table.composerPlaceholder');
+
+  async function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text || locked || submitting || campaignId === undefined) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    // Prefix with the speaker identity (#317-safe flavour). The DM may also set the scene.
+    const body: { input: string; scene?: string } = {
+      input: `${speakerPrefix(memberName, characterName)} ${text}`,
+    };
+    if (isDm && sceneField.trim()) body.scene = sceneField.trim();
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
+      // Echo our own action immediately — the stream carries only the AI's narration back.
+      dispatch({ type: 'localPlayer', memberName, characterName, text });
+      setInput('');
+      setSceneField('');
+    } catch (err) {
+      // 403 (gate/turn cap) / 503 (provider) messages are shown verbatim.
+      setSubmitError(translateApiError(err, t));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function onTogglePause() {
+    if (campaignId === undefined) return;
+    const action = paused ? 'resume' : 'pause';
+    setPauseBusy(true);
+    setPauseError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
+      invalidateAiDm(queryClient, campaignId);
+    } catch {
+      setPauseError(t('table.pauseFailed'));
+    } finally {
+      setPauseBusy(false);
+    }
+  }
+
+  // ---- Gated / off / loading states --------------------------------------
+  // The onboarding issue (#343) owns the rich explainer/checklist; here we render only
+  // the minimal fallback the issue calls for (message + a settings link).
+
+  if (seatQuery.isLoading) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 mt-8">
+        <Skeleton lines={6} />
+      </div>
+    );
+  }
+
+  if (seatQuery.isError) {
+    return (
+      <Gate
+        title={t('table.gatedTitle')}
+        hint={translateApiError(seatQuery.error, t)}
+        campaignId={campaignId}
+        isDm={isDm}
+      />
+    );
+  }
+
+  if (!isDriver) {
+    const off = seat?.mode === 'off';
+    return (
+      <Gate
+        icon={off ? '🌙' : '🤝'}
+        title={off ? t('table.offTitle') : t('table.coDmTitle')}
+        hint={off ? t('table.offHint') : t('table.coDmHint')}
+        campaignId={campaignId}
+        isDm={isDm}
+      />
+    );
+  }
+
+  const statusKey: 'idle' | 'narrating' | 'paused' | 'human' = streaming
+    ? 'narrating'
+    : paused
+      ? 'paused'
+      : humanControl
+        ? 'human'
+        : 'idle';
+  const statusLabel = {
+    idle: t('table.seatIdle'),
+    narrating: t('table.seatNarrating'),
+    paused: t('table.seatPaused'),
+    human: t('table.seatHumanControl'),
+  }[statusKey];
+
+  return (
+    <div className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3" style={{ minHeight: 'calc(100dvh - 60px)' }}>
+      {/* Header: scene, status pill, token budget, DM pause/resume */}
+      <Card className="!p-4">
+        <div className="flex items-start gap-3 flex-wrap">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-neutral-600)]">
+                {t('table.scene')}
+              </span>
+              <Chip variant={STATUS_VARIANT[statusKey]}>{statusLabel}</Chip>
+            </div>
+            <p className="text-sm mt-1 truncate text-[var(--color-neutral-200)]">
+              {session?.scene || t('table.noScene')}
+            </p>
+            {session !== undefined && (
+              <p className="text-[11px] text-[var(--color-neutral-600)] mt-0.5">
+                {t('table.turnCount', { count: session.turnCount })}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-col items-end gap-1.5">
+            <BudgetMeter used={seat?.tokensUsed ?? 0} budget={seat?.tokenBudget ?? 0} />
+            {isDm && (
+              <Btn ghost onClick={onTogglePause} disabled={pauseBusy}>
+                {paused ? t('table.resume') : t('table.pause')}
+              </Btn>
+            )}
+          </div>
+        </div>
+        {pauseError && <p className="text-xs text-rose-400 mt-2">{pauseError}</p>}
+      </Card>
+
+      {/* Live-encounter strip (design point 4) */}
+      {activeEncounter && (
+        <Link
+          to={`/c/${campaignId}/encounters/${activeEncounter.id}`}
+          className="cf-inset p-3 flex items-center gap-2 text-sm"
+          style={{ color: 'var(--color-neutral-200)' }}
+        >
+          <span>⚔️</span>
+          <span className="font-semibold">{t('table.liveEncounterTitle')}</span>
+          {currentCombatantName && (
+            <span className="text-[var(--color-neutral-600)]">· {t('table.liveEncounterTurn', { name: currentCombatantName })}</span>
+          )}
+          <span className="ml-auto text-[var(--color-accent)]">{t('table.openTracker')} →</span>
+        </Link>
+      )}
+
+      {/*
+        #340 SEAM: the stuck-ladder banner + recovery levers mount here, driven by
+        session.stuck / session.state / session.vote / session.actingDm (already carried
+        by useAiDmSession). Until then, the transcript's system lines and the composer
+        lock convey the paused/awaiting/human-control states; no lever UI lives here yet.
+      */}
+
+      {/* Transcript */}
+      <Card className="!p-0 flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {transcript.entries.length === 0 ? (
+            <EmptyState icon="🔥" title={t('table.emptyTitle')} hint={t('table.emptyHint')} />
+          ) : (
+            transcript.entries.map((entry) => (
+              <TranscriptRow
+                key={entry.id}
+                entry={entry}
+                campaignId={campaignId!}
+                encounterId={activeEncounterId}
+              />
+            ))
+          )}
+          <div ref={bottomRef} />
+        </div>
+      </Card>
+
+      {/* Composer */}
+      {canCompose ? (
+        <form onSubmit={onSubmit} className="flex flex-col gap-2">
+          {isDm && (
+            <TextInput
+              value={sceneField}
+              onChange={(e) => setSceneField(e.target.value)}
+              placeholder={t('table.sceneFieldPlaceholder')}
+              disabled={submitting}
+            />
+          )}
+          <div className="flex items-end gap-2">
+            <TextArea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void onSubmit(e as unknown as FormEvent);
+                }
+              }}
+              placeholder={locked && lockReason ? lockReason : placeholder}
+              disabled={locked || submitting}
+              rows={2}
+              className="flex-1 resize-none"
+            />
+            <Btn type="submit" disabled={locked || submitting || !input.trim()}>
+              {submitting ? t('table.sending') : t('table.send')}
+            </Btn>
+          </div>
+          {lockReason && <p className="text-xs text-[var(--color-neutral-600)]">{lockReason}</p>}
+          {submitError && <p className="text-xs text-rose-400">{submitError}</p>}
+        </form>
+      ) : (
+        <p className="text-xs text-center text-[var(--color-neutral-600)] py-2">{t('table.viewerHint')}</p>
+      )}
+    </div>
+  );
+}
+
+/** The token-budget meter in the header. */
+function BudgetMeter({ used, budget }: { used: number; budget: number }) {
+  const { t } = useTranslation();
+  if (budget <= 0) {
+    return <span className="text-[11px] text-[var(--color-neutral-600)]">{t('table.noBudget')}</span>;
+  }
+  const pct = Math.max(0, Math.min(100, (used / budget) * 100));
+  const tone = pct > 90 ? '#f43f5e' : pct > 70 ? '#f59e0b' : 'var(--color-accent)';
+  return (
+    <div className="text-right">
+      <div className="text-[10px] uppercase tracking-widest text-[var(--color-neutral-600)]">{t('table.tokenBudget')}</div>
+      <div
+        className="mt-1 rounded-full overflow-hidden"
+        style={{ width: 120, height: 6, background: 'var(--color-neutral-800)' }}
+        role="progressbar"
+        aria-valuenow={Math.round(pct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <div style={{ width: `${pct}%`, height: '100%', background: tone }} />
+      </div>
+      <div className="text-[10px] text-[var(--color-neutral-600)] mt-0.5">
+        {t('table.tokensUsedOf', { used: used.toLocaleString(), budget: budget.toLocaleString() })}
+      </div>
+    </div>
+  );
+}
+
+/** Render one transcript entry. */
+function TranscriptRow({
+  entry,
+  campaignId,
+  encounterId,
+}: {
+  entry: PlayerEntry | DmEntry | ToolEntry | SystemEntry;
+  campaignId: number;
+  encounterId?: number;
+}) {
+  const { t } = useTranslation();
+
+  if (entry.kind === 'player') {
+    return (
+      <div className="flex flex-col items-end">
+        <div className="text-[11px] text-[var(--color-neutral-600)] mb-0.5">
+          {entry.characterName
+            ? `${entry.characterName} · ${t('table.playedBy', { name: entry.memberName })}`
+            : entry.memberName}
+        </div>
+        <div
+          className="max-w-[85%] rounded-lg px-3 py-2 text-sm"
+          style={{
+            background: 'color-mix(in srgb, var(--color-accent) 12%, transparent)',
+            color: 'var(--color-neutral-100)',
+          }}
+        >
+          {entry.text}
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'dm') {
+    const text = dmEntryText(entry);
+    return (
+      <div className="flex flex-col items-start">
+        <div className="text-[11px] font-semibold text-[var(--color-accent)] mb-0.5">DM</div>
+        <div className="max-w-[92%] rounded-lg px-3 py-2 cf-inset">
+          {text ? <Markdown>{text}</Markdown> : <span className="cf-typing text-[var(--color-neutral-600)]">…</span>}
+          {entry.status === 'streaming' && text && <span className="cf-typing"> ▍</span>}
+          {entry.meta && (
+            <div className="text-[10px] text-[var(--color-neutral-600)] mt-1.5 pt-1.5 border-t border-[var(--color-divider)]">
+              {entry.meta.stopReason} · {entry.meta.steps} steps · {entry.meta.tokensUsed.toLocaleString()} tokens ·{' '}
+              {entry.meta.budgetRemaining.toLocaleString()} left
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (entry.kind === 'tool') {
+    const chip = resolveToolActivity(
+      { type: 'tool', campaignId, name: entry.name, isError: entry.isError, proposed: entry.proposed, at: entry.at },
+      { campaignId, encounterId },
+    );
+    const tone =
+      chip.variant === 'error'
+        ? 'var(--color-neutral-600)'
+        : chip.variant === 'proposal'
+          ? 'var(--color-accent)'
+          : 'var(--color-neutral-400)';
+    const body = (
+      <span
+        className="cf-chip inline-flex items-center gap-1"
+        style={{ color: tone, borderColor: 'var(--color-divider)' }}
+      >
+        <span>{RESOURCE_EMOJI[chip.resource]}</span>
+        <span>{chip.label}</span>
+      </span>
+    );
+    return (
+      <div className="flex justify-center">
+        {chip.href ? (
+          <Link to={chip.href}>{body}</Link>
+        ) : (
+          body
+        )}
+      </div>
+    );
+  }
+
+  // system
+  return (
+    <div className="flex justify-center">
+      <span className="text-[11px] text-[var(--color-neutral-600)] italic px-2">{systemText(entry, t)}</span>
+    </div>
+  );
+}
+
+/** Localized text for a system/divider transcript line. */
+function systemText(entry: SystemEntry, t: (k: string, o?: Record<string, unknown>) => string): string {
+  switch (entry.variant) {
+    case 'divider':
+      return `— ${t('table.joinedDivider')} —`;
+    case 'scene':
+      return t('table.systemScene', { text: entry.text ?? '' });
+    case 'stuck':
+      return entry.text ? `${t('table.systemStuck')} ${entry.text}` : t('table.systemStuck');
+    case 'recovered':
+      return t('table.systemRecovered');
+    case 'paused':
+      return t('table.systemPaused');
+    case 'resumed':
+      return t('table.systemResumed');
+    case 'takeover':
+      return t('table.systemTakeover');
+    case 'vote':
+      return t('table.systemVote', { action: entry.data?.action ?? '' });
+    case 'info':
+    default:
+      return t('table.systemInfo', { state: entry.data?.state ?? '' });
+  }
+}
+
+/** Minimal gated/off fallback (the onboarding issue #343 owns the rich explainer). */
+function Gate({
+  icon = '🚫',
+  title,
+  hint,
+  campaignId,
+  isDm,
+}: {
+  icon?: string;
+  title: string;
+  hint: string;
+  campaignId: number | undefined;
+  isDm: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="max-w-lg mx-auto px-4 mt-10">
+      <Card className="text-center space-y-3">
+        <p className="text-3xl">{icon}</p>
+        <p className="font-bold text-[var(--color-text)]">{title}</p>
+        <p className="text-sm text-[var(--color-neutral-400)]">{hint}</p>
+        {isDm && campaignId !== undefined && (
+          <Link to={`/c/${campaignId}/settings`} className="cf-btn inline-flex">
+            {t('table.openSettings')}
+          </Link>
+        )}
+      </Card>
+    </div>
+  );
+}
