@@ -33,6 +33,17 @@ export const ALLOWED_MIME_TO_EXT: Record<string, string> = {
 };
 export const MAX_UPLOAD_BYTES = 8 * 1024 * 1024; // 8MB
 
+/**
+ * Mime → extension for SERVER-GENERATED attachments only (issue #306). Kept separate
+ * from the ALLOWED_MIME_TO_EXT upload allowlist above: uploads stay png/jpeg/webp
+ * (raster, magic-byte sniffed), while the procedural map generator produces SVG whose
+ * bytes the server itself authors (no untrusted upload, so no sniff needed). filePath()
+ * consults both maps so a generated .svg map resolves to the right on-disk name.
+ */
+export const GENERATED_MIME_TO_EXT: Record<string, string> = {
+  'image/svg+xml': 'svg',
+};
+
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /**
@@ -96,7 +107,7 @@ export class AttachmentsService {
 
   /** Absolute path a stored attachment's bytes live at, given its DB row. */
   filePath(row: { campaignId: number; id: number; mime: string }): string {
-    const ext = ALLOWED_MIME_TO_EXT[row.mime] ?? 'bin';
+    const ext = ALLOWED_MIME_TO_EXT[row.mime] ?? GENERATED_MIME_TO_EXT[row.mime] ?? 'bin';
     return path.join(uploadsRoot(), String(row.campaignId), `${row.id}.${ext}`);
   }
 
@@ -302,6 +313,56 @@ export class AttachmentsService {
       actor: auditActor(user),
       actorRole: role,
       action: 'attachment.upload',
+      entityType: 'attachment',
+      entityId: row.id,
+      campaignId,
+      detail: kind,
+    });
+
+    return toDomain(row);
+  }
+
+  /**
+   * Persist a SERVER-GENERATED attachment (issue #306 — the procedural battle-map
+   * generator). Unlike create(), the bytes are authored by the server (not an untrusted
+   * multipart upload), so there is no magic-byte sniff — the mime is trusted from the
+   * caller (SVG for generated maps). Still enforces the per-campaign storage quota (#24)
+   * and defaults visibility per kind (#97): a 'map' lands hidden=true (DM-only prep), so a
+   * generated map never auto-leaks to players (regression-guard for #259) until revealed.
+   */
+  async createGenerated(
+    campaignId: number,
+    kind: AttachmentKind,
+    file: { filename: string; mime: string; bytes: Buffer },
+    user: RequestUser,
+    role: Role,
+  ): Promise<Attachment> {
+    await this.enforceQuota(campaignId, file.bytes.length);
+
+    const ts = nowIso();
+    const [row] = await this.db
+      .insert(attachments)
+      .values({
+        campaignId,
+        uploaderUserId: user.id,
+        kind,
+        filename: file.filename.slice(0, 255),
+        mime: file.mime,
+        size: file.bytes.length,
+        hidden: defaultHiddenForKind(kind),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+
+    const dest = this.filePath(row);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, file.bytes);
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'attachment.generate',
       entityType: 'attachment',
       entityId: row.id,
       campaignId,

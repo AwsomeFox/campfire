@@ -53,6 +53,7 @@ import {
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
   RsvpSet,
+  GenerateMapParams,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
@@ -71,6 +72,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { MapsService } from '../maps/maps.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
@@ -224,6 +226,7 @@ export class McpToolsService {
     private readonly proposals: ProposalsService,
     private readonly rules: RulesService,
     private readonly encounters: EncountersService,
+    private readonly maps: MapsService,
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
     private readonly aiDm: AiDmService,
@@ -2261,6 +2264,37 @@ export class McpToolsService {
           user,
           role,
         );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'generate_map',
+      'DM only: procedurally GENERATE a battle map server-side (issue #306) and save it as a hidden attachment ' +
+        '(kind=map). Deterministic + offline + license-clean — no external calls. kind: "dungeon" (room-and-corridor), ' +
+        '"cave" (organic cavern), or "wilderness" (open ground with terrain). size: small|medium|large. Pass a `seed` ' +
+        'to reproduce a map exactly; omit it and the server picks one and returns it. Optional complexity (0–1), theme, ' +
+        'gridScale/gridUnit (real-world cell size, default 5 ft). Pass encounterId to ALSO set the generated map as ' +
+        'that encounter\'s battle map with an aligned grid, in one call. The attachment defaults HIDDEN (DM-only) so a ' +
+        'prepped map never auto-reveals to players (#97/#259) — reveal it deliberately when the party arrives. Returns ' +
+        '{ attachmentId, seed, gridConfig, kind, widthCells, heightCells, roomCount }; fetch the image via GET /attachments/:id/file.',
+      {
+        campaignId: CampaignIdArg,
+        encounterId: Id.optional().describe('Optional: also attach the generated map to this encounter and align its grid (must be in the same campaign)'),
+        ...GenerateMapParams.shape,
+      },
+      async ({ campaignId, encounterId, ...fields }) => {
+        const params = GenerateMapParams.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        if (encounterId !== undefined) {
+          const row = await this.encounters.getRowOrThrow(encounterId as number);
+          if (row.campaignId !== (campaignId as number)) {
+            throw new BadRequestException(`Encounter ${encounterId} is not in campaign ${campaignId}`);
+          }
+          return this.maps.generateForEncounter(encounterId as number, campaignId as number, params, user, role);
+        }
+        return this.maps.generateForCampaign(campaignId as number, params, user, role);
       },
     );
 
