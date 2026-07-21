@@ -9,6 +9,7 @@ import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
+import { LocationStatusLabel } from '../../components/LocationStatusLabel';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { GameIcon } from '../../components/GameIcon';
 
@@ -17,21 +18,6 @@ function firstLine(body: string): string {
   return line?.trim() ?? '';
 }
 
-const statusLabel: Record<Location['status'], string> = {
-  unexplored: 'Unexplored',
-  explored: 'Explored',
-  current: 'Current',
-};
-
-/** Status text with a map-marker glyph on the "current" status (the only one that carries an icon). */
-function StatusLabel({ status }: { status: Location['status'] }) {
-  return (
-    <span className="inline-flex items-center gap-1">
-      {status === 'current' && <GameIcon slug="position-marker" size={11} />}
-      {statusLabel[status]}
-    </span>
-  );
-}
 
 /**
  * Flatten the location hierarchy (#99) into render order: each root followed by its
@@ -223,7 +209,7 @@ export default function LocationListPage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
-                    <Chip variant={statusVariant(loc.status)}><StatusLabel status={loc.status} /></Chip>
+                    <Chip variant={statusVariant(loc.status)}><LocationStatusLabel status={loc.status} /></Chip>
                     {isDm && loc.status === 'unexplored' && (
                       <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
                     )}
