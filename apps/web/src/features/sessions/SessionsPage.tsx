@@ -202,7 +202,7 @@ export default function SessionsPage() {
       ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Timeline list */}
-        <aside className={showDetailOnMobile ? 'hidden lg:block' : ''}>
+        <aside className={`min-w-0 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
           {sessions.length === 0 && !showAddForm ? (
             <Card>
               <EmptyState title="No sessions yet — add your first recap" />
@@ -255,7 +255,7 @@ export default function SessionsPage() {
         </aside>
 
         {/* Recap detail */}
-        <main className={`lg:col-span-2 space-y-4 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
+        <main className={`min-w-0 lg:col-span-2 space-y-4 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
           {selected ? (
             <SessionDetail session={selected} campaignId={cid} isDm={isDm} onBack={backToList} onChange={load} />
           ) : (
