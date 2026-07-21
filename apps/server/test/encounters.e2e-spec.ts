@@ -1809,6 +1809,82 @@ describe('encounters — issue #39: per-encounter battle map + combatant tokens 
     expect(res.status).toBe(403);
   });
 
+  // Issue #260: a placed token must actually PERSIST — a fresh GET (what a reloading/other
+  // client sees) has to return the same coordinates, not fall back to "Unplaced".
+  it('a placed token persists across a fresh GET (issue #260)', async () => {
+    const server = ctx.app.getHttpServer();
+    const patch = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(dm)
+      .send({ tokenX: 33, tokenY: 66 });
+    expect(patch.status).toBe(200);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const monster = getRes.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+    expect(monster.tokenX).toBe(33);
+    expect(monster.tokenY).toBe(66);
+  });
+
+  // Issue #271: an explicit null clears the position (unplace) rather than 400ing, and
+  // does NOT clamp to 0 — the token returns to the "Unplaced" tray.
+  it('an explicit null clears a token position (unplace, issue #271)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Pre-condition: monster is placed from the previous test.
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(dm)
+      .send({ tokenX: null, tokenY: null });
+    expect(res.status).toBe(200);
+    expect(res.body.tokenX).toBeNull();
+    expect(res.body.tokenY).toBeNull();
+
+    // Persisted: a fresh GET shows it unplaced (null, not 0).
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const monster = getRes.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+    expect(monster.tokenX).toBeNull();
+    expect(monster.tokenY).toBeNull();
+  });
+
+  // Issue #271: unplacing keeps the combatant (and its HP/conditions/initiative) — it is
+  // NOT a delete. Regression guard for "the only way to remove a token was to delete the row".
+  it('unplacing a token preserves the combatant and its HP/conditions (issue #271)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Give the monster some combat state, place it, then unplace it.
+    await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(dm)
+      .send({ tokenX: 50, tokenY: 50, addConditions: ['prone'], hpSet: 3 });
+    const clear = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+      .set(dm)
+      .send({ tokenX: null, tokenY: null });
+    expect(clear.status).toBe(200);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const monster = getRes.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+    expect(monster).toBeDefined(); // still present — not deleted
+    expect(monster.tokenX).toBeNull();
+    expect(monster.tokenY).toBeNull();
+    expect(monster.hpCurrent).toBe(3);
+    expect(monster.conditions).toContain('prone');
+  });
+
+  // Issue #271: a player may unplace their OWN token (same gate as moving it).
+  it('a player may unplace their own character token (issue #271)', async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${charCombatantId}`)
+      .set(player)
+      .send({ tokenX: 20, tokenY: 20 });
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${charCombatantId}`)
+      .set(player)
+      .send({ tokenX: null, tokenY: null });
+    expect(res.status).toBe(200);
+    expect(res.body.tokenX).toBeNull();
+    expect(res.body.tokenY).toBeNull();
+  });
+
   it('DM can clear the battle map (mapAttachmentId back to null)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ mapAttachmentId: null });

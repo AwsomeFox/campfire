@@ -658,6 +658,10 @@ export default function RunSessionPage() {
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
   const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(combatantId, { tokenX: x, tokenY: y });
+  // Unplace a token (issue #271): clear its position back to null so it returns to the
+  // "Unplaced" tray WITHOUT deleting the combatant (its HP/conditions/initiative survive).
+  // An explicit null is required — `undefined` would be a no-op patch server-side.
+  const unplaceToken = (combatantId: number) => patchCombatant(combatantId, { tokenX: null, tokenY: null });
   // Token size category (issue #40, phase 2) — DM-only, server-enforced.
   const setTokenSize = (combatantId: number, size: TokenSize) => patchCombatant(combatantId, { tokenSize: size });
 
@@ -830,6 +834,7 @@ export default function RunSessionPage() {
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
+          onUnplaceToken={unplaceToken}
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
@@ -1086,6 +1091,7 @@ function BattleMap({
   canMoveToken,
   onSetMap,
   onMoveToken,
+  onUnplaceToken,
   onSetGrid,
   onSetFog,
   onSetAoe,
@@ -1100,6 +1106,7 @@ function BattleMap({
   canMoveToken: (c: Combatant) => boolean;
   onSetMap: (attachmentId: number | null) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
+  onUnplaceToken: (combatantId: number) => void;
   onSetGrid: (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>>) => void;
   onSetFog: (fog: FogState | null) => void;
   onSetAoe: (aoe: AoeTemplate[]) => void;
@@ -1599,6 +1606,43 @@ function BattleMap({
                   >
                     {tokenInitials(c.name)}
                   </span>
+                  {/* Unplace control (issue #271): remove the token from the board without
+                      deleting the combatant. Only offered to whoever may move this token, and
+                      only in move mode. stopPropagation on pointer-down so tapping it never
+                      starts a token drag. */}
+                  {movable && (
+                    <button
+                      type="button"
+                      aria-label={`Remove ${c.name} from the map`}
+                      title="Remove from map"
+                      disabled={busy}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onUnplaceToken(c.id);
+                      }}
+                      style={{
+                        position: 'absolute',
+                        top: -6,
+                        right: -6,
+                        width: 16,
+                        height: 16,
+                        display: 'grid',
+                        placeItems: 'center',
+                        padding: 0,
+                        borderRadius: '50%',
+                        border: '1px solid rgba(15,23,42,.85)',
+                        background: 'var(--color-danger, #b91c1c)',
+                        color: '#fff',
+                        fontSize: 11,
+                        lineHeight: 1,
+                        cursor: busy ? 'default' : 'pointer',
+                        zIndex: 3,
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
               );
             })}

@@ -2012,9 +2012,12 @@ export const CombatantUpdate = z.object({
   initMod: z.number().int().optional(),
   // Battle-map token position (issue #39), 0–100 percent overlay. The DM may move any
   // token; a player may move only their own character's. Values are clamped to 0–100
-  // server-side (mirrors the campaign map's location-pin drag). Both must be sent together.
-  tokenX: z.number().optional(),
-  tokenY: z.number().optional(),
+  // server-side (mirrors the campaign map's location-pin drag). A place/move normally
+  // sends both, but each axis is applied independently — omitting one leaves it as-is.
+  // Nullable so an explicit `null` clears the position and returns the token to the
+  // "Unplaced" tray without deleting the combatant (issue #271).
+  tokenX: z.number().nullable().optional(),
+  tokenY: z.number().nullable().optional(),
   // Token footprint size category (issue #40) — dm only, enforced server-side (an
   // identity-like attribute, alongside name/hpMax/initMod above).
   tokenSize: TokenSize.optional(),
