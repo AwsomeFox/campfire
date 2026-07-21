@@ -11,6 +11,7 @@ import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
 const STATUS_LABEL: Record<EncounterStatus, string> = {
   preparing: 'Preparing',
@@ -65,6 +66,7 @@ export default function EncounterListPage() {
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-extrabold text-white">Encounters</h1>
         <div className="flex-1" />
+        <DraftWithAiButton campaignId={id} target="encounter" />
         {isDm && !creating && (
           <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
             + New encounter

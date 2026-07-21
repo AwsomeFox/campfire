@@ -14,7 +14,7 @@ export function Inset({ children, className = '' }: { children: ReactNode; class
 
 export type ChipVariant =
   | 'active' | 'available' | 'completed' | 'failed'
-  | 'private' | 'dm' | 'party' | 'proposal' | 'whisper';
+  | 'private' | 'dm' | 'party' | 'proposal' | 'whisper' | 'ai';
 
 const chipClass: Record<ChipVariant, string> = {
   active: 'cf-chip-active',
@@ -26,6 +26,9 @@ const chipClass: Record<ChipVariant, string> = {
   party: 'cf-chip-party',
   proposal: 'cf-chip-proposal',
   whisper: 'cf-chip-whisper',
+  // AI-drafted proposal attribution (issue #341): distinct teal so an AI-authored
+  // proposal reads as its own thing next to the proposer/delete/status chips.
+  ai: 'cf-chip-ai',
 };
 
 export function Chip({ variant, children, className = '' }: { variant: ChipVariant; children: ReactNode; className?: string }) {
