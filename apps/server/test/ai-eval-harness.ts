@@ -63,11 +63,19 @@ export interface AiEvalHarness {
   enableExperimental(): Promise<void>;
   /** Create a campaign and return its id. */
   createCampaign(name?: string): Promise<number>;
-  /** Configure + (by default) enable the AI DM seat for a campaign. */
+  /**
+   * Configure + (by default) enable the AI DM seat for a campaign. Pass `mode:'driver'` to arm the
+   * autonomous driver loop — the harness first configures a deterministic `mock` provider for the
+   * campaign (Driver mode requires a provider, #311) so the mode write is accepted. Co-DM / scribe
+   * callers omit `mode` (they only need enabled + budget and must NOT configure a provider, so the
+   * scribe keeps exercising its unconfigured-provider fallback path).
+   */
   configureSeat(
     campaignId: number,
-    patch?: { enabled?: boolean; model?: string; instructions?: string; tokenBudget?: number },
+    patch?: { enabled?: boolean; mode?: 'off' | 'co_dm' | 'driver'; model?: string; instructions?: string; tokenBudget?: number },
   ): Promise<request.Response>;
+  /** Configure a per-campaign `mock` AI provider (needed before switching a seat to Driver mode). */
+  configureProvider(campaignId: number): Promise<request.Response>;
   /** POST a turn to the AI DM seat. */
   takeTurn(campaignId: number, body: { prompt: string; kind?: AiDmTurnKind; maxTokens?: number }): Promise<request.Response>;
   /** POST player input to the driver runtime (#312) — runs a streamed, tool-executing turn. */
@@ -134,7 +142,15 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
       if (!res.body?.id) throw new Error(`createCampaign failed: ${res.status} ${res.text}`);
       return res.body.id as number;
     },
-    configureSeat(campaignId, patch = {}): Promise<request.Response> {
+    configureProvider(campaignId): Promise<request.Response> {
+      return request(server)
+        .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+        .set(dm)
+        .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-test-key-1234' });
+    },
+    async configureSeat(campaignId, patch = {}): Promise<request.Response> {
+      // Driver mode requires a configured provider (assertDriverAllowed, #311) — set one up first.
+      if (patch.mode === 'driver') await harness.configureProvider(campaignId);
       const body = { enabled: true, tokenBudget: 100_000, ...patch };
       return request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm).send(body);
     },

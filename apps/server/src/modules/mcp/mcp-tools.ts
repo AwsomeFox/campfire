@@ -176,6 +176,14 @@ export interface DriverTool {
   description: string;
   inputSchema: Record<string, unknown>;
   proposalCapable: boolean;
+  /**
+   * True when this tool MUTATES state (registered via writeTool), false for pure reads.
+   * The driver runtime (#312/#378) uses this to default-deny: reads are always allowed,
+   * proposal-capable writes are forced onto the proposal path, and every OTHER direct
+   * write must be on the explicit live-play allow-list — so no administrative/economy/
+   * settings tool is ever driveable by the seat just because it wasn't denylisted.
+   */
+  mutating: boolean;
   invoke(args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
 }
 
@@ -387,6 +395,10 @@ export class McpToolsService {
     description: string,
     shape: z.ZodRawShape,
     handler: (args: Record<string, unknown>) => Promise<unknown>,
+    // Marks this registration as a mutating (write) tool — set by writeTool(). Reads
+    // omit it. Recorded on the DriverTool so the driver's live-play allow-list (#378)
+    // can default-deny every non-live-play write without a fragile denylist.
+    mutating = false,
   ): void {
     // Every tool's args are validated against z.object(shape).strict() — an unknown/
     // misnamed key (e.g. {hpCurrent} instead of {hpSet}) is a validation_failed error
@@ -436,6 +448,7 @@ export class McpToolsService {
         // zod type to avoid TS2589 (the deep conditional generics zodToJsonSchema infers).
         inputSchema: zodToJsonSchema(strictShape, { $refStrategy: 'none' }),
         proposalCapable: Object.prototype.hasOwnProperty.call(shape, 'propose'),
+        mutating,
         invoke: async (args) => {
           const res = await cb(args);
           return { text: res.content.map((c) => c.text).join('\n'), isError: res.isError === true };
@@ -466,10 +479,17 @@ export class McpToolsService {
     handler: (args: Record<string, unknown>) => Promise<unknown>,
   ): void {
     const proposalCapable = Object.prototype.hasOwnProperty.call(shape, 'propose');
-    this.tool(server, name, description, shape, async (args) => {
-      if (!proposalCapable) assertDirectWriteAllowed(user);
-      return handler(args);
-    });
+    this.tool(
+      server,
+      name,
+      description,
+      shape,
+      async (args) => {
+        if (!proposalCapable) assertDirectWriteAllowed(user);
+        return handler(args);
+      },
+      true, // mutating — recorded on the DriverTool for the driver's live-play allow-list
+    );
   }
 
   // ---------- READ ----------

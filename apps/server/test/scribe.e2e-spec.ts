@@ -61,6 +61,13 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     const payload = typeof proposal.payload === 'string' ? JSON.parse(proposal.payload) : proposal.payload;
     expect(payload.recap).toContain('cracked the vault');
 
+    // #383: an AI-written recap is attributed to the AI scribe (the `ai-dm:` prefix the review-queue
+    // badge/filter keys on) — NOT the human DM who triggered the on-demand run. Previously an
+    // on-demand run recorded the DM's own id + display name as proposer, misattributing the AI draft.
+    expect(proposal.proposerUserId).toBe(`ai-dm:${campaignId}`);
+    expect(proposal.proposer).toContain('AI Scribe');
+    expect(proposal.proposerUserId).not.toBe('dev:ai-eval-dm');
+
     // Nothing was published to canon — no session row yet.
     const sessions = await request(harness.server).get(`${API}/campaigns/${campaignId}/sessions`).set(dm);
     expect(sessions.body).toHaveLength(0);

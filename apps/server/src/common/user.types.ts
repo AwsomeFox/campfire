@@ -15,6 +15,14 @@ export interface RequestUser {
   serverRole: ServerRole; // 'admin' | 'user'
   devRole?: Role; // set only on the DEV_AUTH header path; short-circuits RoleResolver
   tokenContext?: TokenContext; // set only on the PAT (Authorization: Bearer cf_pat_...) path
+  /**
+   * Default proposer provenance for proposals this principal files (issue #383). Set ONLY on the
+   * synthetic AI-DM driver seat: its forced proposals must badge as an AI author (the `ai-dm:`
+   * prefix the review queue's AI badge/filter keys on), not the seat's raw audit-actor id
+   * (`ai-dm-seat:…`). Real users never set this; ProposalRecordsService.create falls back to it
+   * when no explicit `attribution` argument is passed.
+   */
+  proposalAttribution?: { proposer: string; proposerUserId?: string; proposerToken?: string | null };
 }
 
 /**
