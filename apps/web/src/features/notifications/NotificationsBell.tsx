@@ -32,6 +32,11 @@ function targetPath(n: Notification): string {
     case 'note_reply':
     case 'note_shared':
       return `/c/${n.campaignId}/notes`;
+    case 'ai_dm_alert':
+      // Stuck ladder / dispute / vote / takeover (#314) — land the reader on the Table
+      // page (#339) where the levers + composer live. #339 owns the route itself; this
+      // link is stable even before that page ships.
+      return `/c/${n.campaignId}/table`;
     case 'comment_reply':
       // Discussion threads currently render on the session/recap page; deep-link
       // to the thread's session when we know it, else the session log.
@@ -66,6 +71,8 @@ function typeIcon(type: Notification['type']): string {
       return '📝';
     case 'proposal_resolved':
       return '⚖️';
+    case 'ai_dm_alert':
+      return '🤖';
     default:
       return '🔔';
   }
@@ -243,14 +250,21 @@ export function NotificationsBell() {
                 >
                   <span className="text-base leading-none pt-0.5">{typeIcon(n.type)}</span>
                   <span className="min-w-0 flex-1">
-                    <span
-                      className="block text-[13px] leading-snug"
-                      style={{
-                        color: 'var(--color-text)',
-                        fontWeight: n.readAt ? 400 : 600,
-                      }}
-                    >
-                      {n.title}
+                    <span className="flex items-center gap-1.5 flex-wrap">
+                      {n.type === 'ai_dm_alert' && (
+                        <span className="tag tag-accent" style={{ fontSize: 8.5 }}>
+                          AI DM
+                        </span>
+                      )}
+                      <span
+                        className="block text-[13px] leading-snug"
+                        style={{
+                          color: 'var(--color-text)',
+                          fontWeight: n.readAt ? 400 : 600,
+                        }}
+                      >
+                        {n.title}
+                      </span>
                     </span>
                     {n.body && (
                       <span className="block text-xs truncate" style={{ color: 'var(--color-neutral-400)' }}>

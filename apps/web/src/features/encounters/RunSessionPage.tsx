@@ -45,6 +45,9 @@ import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useAnnounce } from '../../components/Announcer';
+import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
+import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
+import { resolveToolActivity } from '../ai-dm/toolActivity';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -376,6 +379,33 @@ export default function RunSessionPage() {
   const conditionSuggestions = useMemo(() => [...ruleSystemAdapter(ruleSystem).conditions], [ruleSystem]);
 
   const queryClient = useQueryClient();
+
+  // AI-DM live-state relay (#344): the presence chip + activity toast read off the
+  // single app-wide stream subscription mounted in app/Layout.tsx — this page does
+  // NOT open its own /ai-dm/stream connection. The underlying tool/HP/turn data still
+  // arrives via the existing encounter SSE channel + refetch above, unchanged; this
+  // only adds the "why did this just change" signal for whoever's watching.
+  const liveActivity = useAiDmLiveActivity();
+  const [aiToasts, setAiToasts] = useState<Array<{ key: number; chip: ReturnType<typeof resolveToolActivity>; at: number }>>([]);
+  const lastToastAtRef = useRef<number | null>(null);
+  const toastSeq = useRef(0);
+  useEffect(() => {
+    const activity = liveActivity.encounterActivity;
+    if (!activity || activity.at === lastToastAtRef.current) return;
+    lastToastAtRef.current = activity.at;
+    // Re-resolve with THIS encounter's id so the chip can deep-link back here — tool
+    // events are id-only (#338), so the generic app-level resolution above couldn't
+    // know it. `lastToolEvent` is set in the same reducer step as `encounterActivity`
+    // whenever it was an encounter-resource event, so it's the same underlying event.
+    const chip =
+      liveActivity.lastToolEvent && Number.isFinite(eid)
+        ? resolveToolActivity(liveActivity.lastToolEvent, { campaignId: cid, encounterId: eid })
+        : activity.chip;
+    const key = ++toastSeq.current;
+    setAiToasts((prev) => [...prev, { key, chip, at: activity.at }].slice(-3));
+    const timer = setTimeout(() => setAiToasts((prev) => prev.filter((t) => t.key !== key)), 8000);
+    return () => clearTimeout(timer);
+  }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid]);
 
   const [actionError, setActionError] = useState<string | null>(null);
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
@@ -741,6 +771,9 @@ export default function RunSessionPage() {
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
+        {/* AI-DM presence chip (#344) — the seat is in Driver mode, so it may act on
+            this encounter from the Table page without anyone here having it open. */}
+        {liveActivity.mode === 'driver' && <AiDmPresenceTag turnActive={liveActivity.turnActive} />}
         <button
           type="button"
           className="btn btn-ghost"
@@ -803,6 +836,17 @@ export default function RunSessionPage() {
           </div>
         )}
       </div>
+
+      {/* Transient "the AI just acted on this encounter" row(s) (#344 point 2) — sourced
+          from `tool` stream events filtered to the encounter resource; the combatant/HP/
+          turn data itself already arrived via the encounter SSE refetch above. */}
+      {aiToasts.length > 0 && (
+        <div className="flex flex-col gap-1" style={{ paddingLeft: 2 }}>
+          {aiToasts.map((toast) => (
+            <AiDmToolActivityRow key={toast.key} chip={toast.chip} at={toast.at} />
+          ))}
+        </div>
+      )}
 
       {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
 
