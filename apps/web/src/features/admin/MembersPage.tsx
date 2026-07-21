@@ -479,7 +479,19 @@ function MemberRow({
     }
   }
 
-  const character = characters.find((c) => c.id === member.characterId);
+  // Two fields can describe "who plays this character": the membership pointer
+  // (campaignMembers.characterId) and character ownership (characters.ownerUserId).
+  // Ownership is authoritative app-wide — it drives edit rights, inventory and
+  // encounters, and it's what the character sheet's "played by …" shows. The
+  // membership pointer is normally kept in sync, but a direct DM ownerUserId change
+  // (PATCH /characters/:id) leaves it stale, which read as a contradiction (issue
+  // #274): sheet says "played by Pete" while Members said "— unlinked —". Fall back
+  // to the owned character so both surfaces agree.
+  const linkedCharacter = characters.find((c) => c.id === member.characterId);
+  const ownedCharacter = characters.find(
+    (c) => c.ownerUserId != null && c.ownerUserId === String(member.userId),
+  );
+  const character = linkedCharacter ?? ownedCharacter;
 
   return (
     <div className="flex items-center gap-2.5 py-2.5 flex-wrap" style={{ borderTop: '1px solid var(--color-divider)' }}>
@@ -507,7 +519,7 @@ function MemberRow({
       <select
         className="cf-select !min-h-0 !py-1 text-xs"
         style={{ width: 130 }}
-        value={member.characterId ?? ''}
+        value={character?.id ?? ''}
         disabled={savingChar}
         onChange={(e) => changeCharacter(e.target.value ? Number(e.target.value) : null)}
       >

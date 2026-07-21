@@ -54,12 +54,12 @@ export const Btn = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLButton
   },
 );
 
-export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className="cf-input" {...props} />;
+export function TextInput({ className = '', ...props }: InputHTMLAttributes<HTMLInputElement>) {
+  return <input className={`cf-input ${className}`} {...props} />;
 }
 
-export function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea className="cf-textarea" {...props} />;
+export function TextArea({ className = '', ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return <textarea className={`cf-textarea ${className}`} {...props} />;
 }
 
 export function HpBar({ current, max }: { current: number; max: number }) {

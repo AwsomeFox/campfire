@@ -268,7 +268,7 @@ export function JoinPage() {
         </div>
 
         <p className="text-center text-muted" style={{ fontSize: 11 }}>
-          Self-hosted with ❤️ · campfire v0.1.0
+          Self-hosted with ❤️ · campfire v{__APP_VERSION__}
         </p>
       </div>
     </div>
