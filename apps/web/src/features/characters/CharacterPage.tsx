@@ -18,7 +18,7 @@
  */
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
+import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, DiceRoll, SkillRank } from '@campfire/schema';
 import { xpForLevel, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
@@ -29,6 +29,8 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
+import { useAnnounce } from '../../components/Announcer';
+import { RolledDice } from '../dice/RolledDice';
 import { initials } from './avatar';
 
 const ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
@@ -86,6 +88,146 @@ function signed(n: number): string {
   return n >= 0 ? `+${n}` : `${n}`;
 }
 
+// ---------- click-to-roll (issue #258) ----------
+// The sheet already knows every number (Athletics +6, Longsword +5 / 1d8+3); these
+// helpers turn those into the SAME restricted dice expressions the Dice tray posts,
+// so a sheet roll lands in the shared campaign feed (POST /campaigns/:id/roll) with
+// no re-typing. Advantage/disadvantage reuse the tray's 2d20kh1 / 2d20kl1 keep-die
+// expressions (issue #130) — a d20 roll can be taken with advantage (shift-click) or
+// disadvantage (alt/ctrl-click); damage rolls ignore the modifier keys.
+
+type Adv = 'flat' | 'adv' | 'dis';
+
+/** How a modifier-key click maps to advantage/disadvantage on a d20 roll. */
+function advFromEvent(e: MouseEvent): Adv {
+  if (e.shiftKey) return 'adv';
+  if (e.altKey || e.ctrlKey || e.metaKey) return 'dis';
+  return 'flat';
+}
+
+/** d20 check/attack expression for a numeric modifier, honouring advantage/disadvantage. */
+function d20Expr(mod: number, adv: Adv): string {
+  const tail = mod === 0 ? '' : signed(mod);
+  if (adv === 'adv') return `2d20kh1${tail}`;
+  if (adv === 'dis') return `2d20kl1${tail}`;
+  return `1d20${tail}`;
+}
+
+/**
+ * Turn a free-text to-hit string ("+5", "5", "-1") into a d20 attack expression.
+ * Returns null when there's no number to roll.
+ */
+function toHitExpr(toHit: string, adv: Adv): string | null {
+  const m = toHit.match(/[+-]?\s*\d{1,3}/);
+  if (!m) return null;
+  const n = parseInt(m[0].replace(/\s+/g, ''), 10);
+  if (!Number.isFinite(n)) return null;
+  return d20Expr(n, adv);
+}
+
+/**
+ * Extract the first "NdM(+/-K)" dice group from a free-text damage string
+ * ("1d8+3 slashing" -> "1d8+3", "2d6 fire" -> "2d6"). Returns null when the damage
+ * field carries no dice (e.g. a flat "5 fire"), matching the server's single-group
+ * expression grammar.
+ */
+function damageExpr(damage: string): string | null {
+  const m = damage.match(/(\d{0,2})\s*d\s*(\d{1,3})\s*([+-]\s*\d{1,3})?/i);
+  if (!m) return null;
+  const count = m[1] ? parseInt(m[1], 10) : 1;
+  const sides = parseInt(m[2], 10);
+  if (!count || !sides) return null;
+  const mod = m[3] ? m[3].replace(/\s+/g, '') : '';
+  return `${count}d${sides}${mod}`;
+}
+
+export interface Roller {
+  /** POST the expression to the shared dice log with a character-attributed label. */
+  roll: (expr: string, label: string) => Promise<DiceRoll | null>;
+  rolling: boolean;
+}
+
+/**
+ * Posts sheet rolls to the exact endpoint the Dice tray / dashboard Dice card use
+ * (POST /campaigns/:id/roll — see SharedDiceLog.submitExpr), so a save/skill/attack
+ * rolled from the sheet appears in the same shared feed everyone at the table watches.
+ * There is no per-character roll field on the API, so the character name rides in the
+ * label ("Aldra · Athletics check") to attribute the roll; the user identity is still
+ * recorded server-side as the roller.
+ */
+function useRoller(campaignId: number, onError: (msg: string | null) => void): Roller & {
+  last: DiceRoll | null;
+  dismiss: () => void;
+} {
+  const [rolling, setRolling] = useState(false);
+  const [last, setLast] = useState<DiceRoll | null>(null);
+  const announce = useAnnounce();
+
+  const roll = useCallback(
+    async (expr: string, label: string): Promise<DiceRoll | null> => {
+      setRolling(true);
+      onError(null);
+      try {
+        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
+        setLast(result);
+        const crit = /\bd20\b/i.test(result.expr) && result.rolls.includes(20);
+        const fumble = /\bd20\b/i.test(result.expr) && result.rolls.includes(1);
+        announce(
+          `${result.label ? `${result.label}: ` : ''}rolled ${result.expr}, total ${result.total}` +
+            (crit ? ' — natural 20!' : fumble ? ' — natural 1.' : ''),
+        );
+        return result;
+      } catch (err) {
+        onError(err instanceof ApiError ? err.message : "Couldn't roll the dice.");
+        return null;
+      } finally {
+        setRolling(false);
+      }
+    },
+    [campaignId, onError, announce],
+  );
+
+  return { roll, rolling, last, dismiss: () => setLast(null) };
+}
+
+/**
+ * Ephemeral readout of the last sheet roll — the sheet has no dice log of its own, so
+ * this gives immediate feedback (label, dice, total, crit/fumble flavour) while the
+ * roll also flows to the shared feed. A natural 20 / natural 1 on a d20 gets the same
+ * gold/rose flourish as the shared log.
+ */
+function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismiss: () => void }) {
+  const isD20 = /\bd20\b/i.test(roll.expr);
+  const crit = isD20 && roll.rolls.includes(20);
+  const fumble = isD20 && roll.rolls.includes(1);
+  const totalColor = crit ? 'var(--cf-crit, #fbbf24)' : fumble ? 'var(--color-danger, #f87171)' : 'var(--color-accent)';
+  return (
+    <div className="cf-inset flex items-center gap-3 px-3.5 py-2" role="status">
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px] font-semibold truncate">{roll.label || roll.expr}</p>
+        <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
+          <span>{roll.expr}</span>
+          <RolledDice rolls={roll.rolls} kept={roll.kept} fontSize={11} />
+          {crit && <span style={{ color: totalColor }}>nat 20!</span>}
+          {fumble && <span style={{ color: totalColor }}>nat 1</span>}
+        </p>
+      </div>
+      <span className="font-heading leading-none" style={{ fontSize: 26, color: totalColor }}>
+        {roll.total}
+      </span>
+      <button
+        type="button"
+        aria-label="Dismiss roll result"
+        onClick={onDismiss}
+        className="text-slate-500 hover:text-slate-300 shrink-0"
+        style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 14 }}
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
   const cid = Number(campaignId);
@@ -105,6 +247,8 @@ export default function CharacterPage() {
   const [notFound, setNotFound] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [editingSheet, setEditingSheet] = useState(false);
+  // Shared dice-log roller for click-to-roll saves/skills/attacks (issue #258).
+  const roller = useRoller(cid, setActionError);
 
   const load = useCallback(async () => {
     setError(null);
@@ -212,6 +356,8 @@ export default function CharacterPage() {
 
       {(error || actionError) && <ErrorNote message={actionError ?? error ?? ''} onRetry={() => { setActionError(null); void load(); }} />}
 
+      {roller.last && <RollResultBanner roll={roller.last} onDismiss={roller.dismiss} />}
+
       <div className="flex items-center gap-3 flex-wrap">
         <div className="h-14 w-14 shrink-0 rounded-full bg-[var(--color-accent-900)] text-[var(--color-accent-200)] flex items-center justify-center text-[17px] font-semibold">
           {initials(character.name)}
@@ -287,11 +433,11 @@ export default function CharacterPage() {
 
           <XpCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
 
-          <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+          <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} roller={roller} />
 
-          <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
+          <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
 
-          <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
+          <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
 
           <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
 
@@ -685,7 +831,26 @@ type SheetCardProps = {
   onError: (msg: string | null) => void;
 };
 
-function SavingThrowsCard({ character, canEdit, onChange, onError, adapter }: SheetCardProps & { adapter: RuleSystemAdapter }) {
+/** A small "🎲 …" button that posts a roll to the shared dice log. */
+function RollChip({
+  label,
+  title,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  title: string;
+  onClick: (e: MouseEvent) => void;
+  disabled: boolean;
+}) {
+  return (
+    <Btn ghost type="button" className="!min-h-0 !py-1 text-xs" style={{ minHeight: 32 }} onClick={onClick} disabled={disabled} title={title}>
+      🎲 {label}
+    </Btn>
+  );
+}
+
+function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
   const pb = profBonus(character.level);
   const profs = new Set(character.saveProficiencies);
@@ -717,47 +882,50 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter }: Sh
         {ABILITY_KEYS.map((k) => {
           const proficient = profs.has(k);
           const mod = modOf(adapter, character, k) + (proficient ? pb : 0);
-          const inner = (
-            <>
-              <p className="text-[10px] tracking-wide text-slate-500">
-                {k}
-                {proficient && (
-                  <span className="ml-1" style={{ color: 'var(--color-accent-300)' }}>
+          return (
+            <div key={k} className="cf-inset text-center py-2 px-1.5 relative">
+              <button
+                type="button"
+                onClick={(e) => void roller.roll(d20Expr(mod, advFromEvent(e)), `${character.name} · ${k} save`)}
+                disabled={roller.rolling}
+                className="w-full"
+                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                title={`Roll ${k} save (${signed(mod)}) · shift-click for advantage · alt-click for disadvantage`}
+              >
+                <p className="text-[10px] tracking-wide text-slate-500">{k}</p>
+                <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
+              </button>
+              {canEdit ? (
+                <button
+                  type="button"
+                  onClick={() => void toggle(k)}
+                  disabled={busy}
+                  aria-pressed={proficient}
+                  className="absolute top-1 right-1"
+                  style={{ background: 'transparent', border: 0, padding: 2, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
+                  title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
+                >
+                  {proficient ? '●' : '○'}
+                </button>
+              ) : (
+                proficient && (
+                  <span className="absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
                     ●
                   </span>
-                )}
-              </p>
-              <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
-            </>
-          );
-          if (!canEdit) {
-            return (
-              <div key={k} className="cf-inset text-center py-2 px-1.5">
-                {inner}
-              </div>
-            );
-          }
-          return (
-            <button
-              key={k}
-              type="button"
-              onClick={() => toggle(k)}
-              disabled={busy}
-              className="cf-inset text-center py-2 px-1.5"
-              style={{ cursor: busy ? 'default' : 'pointer', font: 'inherit', color: 'inherit' }}
-              title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
-            >
-              {inner}
-            </button>
+                )
+              )}
+            </div>
           );
         })}
       </div>
-      {canEdit && <p className="text-[11px] text-slate-500">Tap an ability to toggle save proficiency.</p>}
+      <p className="text-[11px] text-slate-500">
+        Tap a save to roll a d20{canEdit ? '; tap the ● to toggle proficiency' : ''}. Shift-click for advantage, alt-click for disadvantage.
+      </p>
     </Card>
   );
 }
 
-function SkillsCard({ character, canEdit, onChange, onError, adapter }: SheetCardProps & { adapter: RuleSystemAdapter }) {
+function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
   const pb = profBonus(character.level);
 
@@ -784,46 +952,50 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter }: SheetCar
     <Card className="space-y-2">
       <div className="flex items-center gap-2">
         <p className="card-kicker mb-0">Skills</p>
-        {canEdit && <span className="text-[11px] text-slate-500">tap to cycle: none → proficient ● → expertise ★</span>}
+        <span className="text-[11px] text-slate-500">
+          tap a skill to roll{canEdit ? '; tap the ○/●/★ to cycle proficiency' : ''}
+        </span>
       </div>
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
         {SKILLS.map(({ name, ability }) => {
           const rank = character.skills[name];
           const mod = modOf(adapter, character, ability) + (rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0);
           const marker = rank === 'expertise' ? '★' : rank === 'proficient' ? '●' : '○';
-          const row = (
-            <>
-              <span
-                className="w-4 shrink-0 text-center"
-                style={{ color: rank ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
-                aria-hidden
-              >
-                {marker}
-              </span>
-              <span className="flex-1 text-left truncate">{name}</span>
-              <span className="text-[10px] text-slate-500">{ability}</span>
-              <span className="w-8 text-right font-semibold">{signed(mod)}</span>
-            </>
-          );
-          if (!canEdit) {
-            return (
-              <div key={name} className="flex items-center gap-1.5 text-[13px] py-0.5">
-                {row}
-              </div>
-            );
-          }
           return (
-            <button
-              key={name}
-              type="button"
-              onClick={() => cycle(name)}
-              disabled={busy}
-              className="flex items-center gap-1.5 text-[13px] py-0.5"
-              style={{ cursor: busy ? 'default' : 'pointer', background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit' }}
-              title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
-            >
-              {row}
-            </button>
+            <div key={name} className="flex items-center gap-1.5 text-[13px] py-0.5">
+              {canEdit ? (
+                <button
+                  type="button"
+                  onClick={() => void cycle(name)}
+                  disabled={busy}
+                  className="w-4 shrink-0 text-center"
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: rank ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
+                  title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
+                >
+                  {marker}
+                </button>
+              ) : (
+                <span
+                  className="w-4 shrink-0 text-center"
+                  style={{ color: rank ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
+                  aria-hidden
+                >
+                  {marker}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={(e) => void roller.roll(d20Expr(mod, advFromEvent(e)), `${character.name} · ${name} check`)}
+                disabled={roller.rolling}
+                className="flex-1 flex items-center gap-1.5 min-w-0"
+                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                title={`Roll ${name} (${signed(mod)}) · shift-click for advantage · alt-click for disadvantage`}
+              >
+                <span className="flex-1 text-left truncate">{name}</span>
+                <span className="text-[10px] text-slate-500">{ability}</span>
+                <span className="w-8 text-right font-semibold">{signed(mod)}</span>
+              </button>
+            </div>
           );
         })}
       </div>
@@ -831,7 +1003,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter }: SheetCar
   );
 }
 
-function ActionsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
+function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCardProps & { roller: Roller }) {
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState('');
@@ -895,48 +1067,73 @@ function ActionsCard({ character, canEdit, onChange, onError }: SheetCardProps) 
       </div>
       {character.actions.length === 0 && !adding && (
         <p className="text-xs text-slate-500">
-          No actions yet{canEdit ? ' — add attacks, spells, and features' : ''}. Dice already work: roll from the
-          dashboard's Dice card or an encounter's dice log.
+          No actions yet{canEdit ? ' — add attacks, spells, and features to roll them straight from the sheet' : ''}.
         </p>
       )}
-      {character.actions.map((action, i) => (
-        <div key={`${action.name}-${i}`} className="cf-inset px-3 py-2 flex items-start gap-2.5">
-          <div className="flex-1 min-w-0">
-            <p className="text-[13px] font-semibold flex items-center gap-1.5 flex-wrap">
-              {action.name}
-              {action.kind && (
-                <span className="tag tag-neutral" style={{ fontSize: 9 }}>
-                  {action.kind}
-                </span>
+      {character.actions.map((action, i) => {
+        const attackExpr = action.toHit ? toHitExpr(action.toHit, 'flat') : null;
+        const dmgExpr = action.damage ? damageExpr(action.damage) : null;
+        return (
+          <div key={`${action.name}-${i}`} className="cf-inset px-3 py-2 flex items-start gap-2.5">
+            <div className="flex-1 min-w-0">
+              <p className="text-[13px] font-semibold flex items-center gap-1.5 flex-wrap">
+                {action.name}
+                {action.kind && (
+                  <span className="tag tag-neutral" style={{ fontSize: 9 }}>
+                    {action.kind}
+                  </span>
+                )}
+              </p>
+              {(action.toHit || action.damage) && (
+                <div className="flex gap-2 flex-wrap items-center mt-1">
+                  {action.toHit &&
+                    (attackExpr ? (
+                      <RollChip
+                        label={`to hit ${action.toHit}`}
+                        title={`Roll ${action.name} attack (d20 ${action.toHit}) · shift-click for advantage · alt-click for disadvantage`}
+                        disabled={roller.rolling}
+                        onClick={(e) => void roller.roll(toHitExpr(action.toHit, advFromEvent(e))!, `${character.name} · ${action.name} to hit`)}
+                      />
+                    ) : (
+                      <span className="text-xs text-slate-400">to hit {action.toHit}</span>
+                    ))}
+                  {action.damage &&
+                    (dmgExpr ? (
+                      <RollChip
+                        label={action.damage}
+                        title={`Roll ${action.name} damage (${dmgExpr})`}
+                        disabled={roller.rolling}
+                        onClick={() => void roller.roll(dmgExpr, `${character.name} · ${action.name} damage`)}
+                      />
+                    ) : (
+                      <span className="text-xs text-slate-400">{action.damage}</span>
+                    ))}
+                </div>
               )}
-            </p>
-            <p className="text-xs text-slate-400 flex gap-3 flex-wrap">
-              {action.toHit && <span>to hit {action.toHit}</span>}
-              {action.damage && <span>{action.damage}</span>}
-            </p>
-            {action.notes && <p className="text-[11px] text-slate-500 mt-0.5">{action.notes}</p>}
+              {action.notes && <p className="text-[11px] text-slate-500 mt-0.5">{action.notes}</p>}
+            </div>
+            {canEdit && (
+              <button
+                type="button"
+                aria-label={`Remove ${action.name}`}
+                onClick={() => remove(i)}
+                disabled={busy}
+                style={{
+                  cursor: busy ? 'default' : 'pointer',
+                  opacity: 0.7,
+                  background: 'transparent',
+                  border: 0,
+                  padding: 0,
+                  font: 'inherit',
+                  color: 'inherit',
+                }}
+              >
+                ✕
+              </button>
+            )}
           </div>
-          {canEdit && (
-            <button
-              type="button"
-              aria-label={`Remove ${action.name}`}
-              onClick={() => remove(i)}
-              disabled={busy}
-              style={{
-                cursor: busy ? 'default' : 'pointer',
-                opacity: 0.7,
-                background: 'transparent',
-                border: 0,
-                padding: 0,
-                font: 'inherit',
-                color: 'inherit',
-              }}
-            >
-              ✕
-            </button>
-          )}
-        </div>
-      ))}
+        );
+      })}
       {adding && (
         <div className="space-y-2">
           <div className="grid grid-cols-2 gap-2.5">
