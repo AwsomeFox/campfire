@@ -10,7 +10,7 @@
  * When a `campaignId` is supplied the card becomes interactive (issue: wire actions
  * to dice): abilities, saves, skills, and attacks become click-to-roll and post to
  * the shared campaign dice feed with the same expressions the character sheet uses
- * (shift-click = advantage, alt/ctrl-click = disadvantage on d20s). A rolled damage
+ * (shift-click = advantage, alt/ctrl/⌘-click = disadvantage on d20s). A rolled damage
  * total is handed up via `onApplyDamage` so the encounter can apply it to a target.
  * Without a `campaignId` the card is read-only, so it stays reusable elsewhere.
  */
@@ -37,7 +37,7 @@ const NOOP = () => {};
 
 /** Shared style for a roll-me pill (button) vs. a static pill (span). */
 const PILL: CSSProperties = { fontSize: 10 };
-const ROLL_HINT = ' · shift-click for advantage · alt or ctrl-click for disadvantage';
+const ROLL_HINT = ' · shift-click for advantage · alt/ctrl/⌘-click for disadvantage';
 
 function StatChip({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
