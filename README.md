@@ -8,21 +8,32 @@ Design goals:
 
 - **Single Docker image, single volume** — SQLite, no external services
 - **Login via any OIDC provider** (built for [Authentik](https://goauthentik.io); roles map from groups: `dm` / `player` / `viewer`)
-- **AI-operable from day 1** — the same service layer is exposed as a REST API (OpenAPI) and an MCP server, so an AI assistant can maintain the campaign; AI writes can be routed through a DM-approved proposal queue
-- **Server-enforced secrecy** — DM-only fields and private notes are stripped in the API layer, never hidden client-side
+- **AI-operable from day 1** — the same service layer is exposed as a REST API (OpenAPI) and an MCP server (130+ tools), so an AI assistant can maintain — or run — the campaign; AI writes can be routed through a DM-approved proposal queue
+- **An AI in the DM seat (optional, experimental)** — a per-campaign AI-DM seat runs as a **co-DM** (proposes only; every change lands in the DM's approval queue) or a full **driver** (holds the seat and runs the session), with token budgets, a kill switch, and player recovery levers
+- **Server-enforced secrecy** — DM-only fields, hidden entities and private notes are stripped in the API layer, never hidden client-side
 
-> **Status: functional full-stack app**, still evolving. Both the API and the web
-> frontend are implemented end to end: local auth (setup/login/logout) plus
-> OIDC/SSO, campaigns with per-campaign membership roles (`dm`/`player`/`viewer`),
-> quests with objectives and subquests, NPCs, locations, characters, session
-> recaps, notes + the inbox, an encounter/combat tracker with initiative and dice
-> rolling, a compendium (rule packs imported from Open5e, searchable), a DM-approval
-> proposal queue for AI-suggested writes, and campaign export (JSON/Markdown zip).
+> **Status: functional full-stack app**, actively developed. The API and the web
+> frontend are implemented end to end:
+>
+> - **Core:** local auth (setup/login/logout) + OIDC/SSO, campaigns with per-campaign
+>   roles (`dm`/`player`/`viewer`), quests + objectives + subquests, NPCs, factions,
+>   locations, a living timeline, character sheets with at-table HP, session prep +
+>   auto-drafted recaps, per-user notes + the quick-capture inbox, and campaign export
+>   (JSON / Markdown zip).
+> - **At the table:** an encounter/combat tracker with initiative, dice rolling and
+>   click-to-roll, battle maps with tokens + fog of war (monster HP and hidden NPCs
+>   redacted to non-DMs), and a player-display screen.
+> - **Rules:** a searchable compendium with real rule systems installed from open
+>   sources — D&D 5e (Open5e), Pathfinder 2e (Archives of Nethys) and Open Legend live
+>   one-click, with PF1e / Starfinder / 13th Age / OSR importable from a mirror URL.
+> - **AI:** the DM-approval proposal queue, the full game-icons.net icon set, and the
+>   experimental **AI Dungeon Master** (co-DM / driver — see below), plus a scheduled
+>   **AI scribe** that drafts recaps into the proposal queue.
+>
 > The same service layer is exposed as a REST API (OpenAPI/Swagger) **and** an MCP
-> server with 36 tools, so any MCP-capable client (e.g. Claude, via `claude mcp add`)
-> can read and write a campaign directly — that's the "AI scribe" today: it works
-> through any MCP client already, there's no separate built-in automation/scheduler
-> yet. See [`design/`](design/) for the original approved mockups the UI was built from.
+> server with **134 tools**, so any MCP-capable client (e.g. Claude, via `claude mcp
+> add`) can read and write — or fully drive — a campaign directly. See
+> [`design/`](design/) for the original approved mockups the UI was built from.
 
 ## Project layout
 
@@ -200,9 +211,42 @@ an Authentik group (e.g. `campfire-dm`) to `OIDC_ADMIN_GROUP` so its members lan
 Campfire with the `dm` role. Campfire itself never needs a public port in this setup
 — only Traefik does; Campfire and Traefik talk over the Docker network.
 
+## AI Dungeon Master (experimental)
+
+Campfire can seat an AI at the table. It's **off by default** and gated two ways: a
+server admin flips the server-wide switch in the in-app **AI console** (`/admin/ai`),
+then a DM configures the seat per-campaign under **Settings → AI Dungeon Master**.
+
+**Two modes:**
+
+- **Co-DM** — the AI only *proposes*. Every change it makes lands in the DM's approval
+  queue to accept or reject; the human still runs the table. Recommended.
+- **Driver** — the AI holds the DM seat and runs the session (narration + tool calls).
+  It requires a positive token budget and a configured provider, and even here every
+  canon-writing tool is forced through the proposal path — it cannot silently overwrite
+  your world.
+
+**Bring your own model.** Campfire **never calls an LLM vendor from the server** — the
+shipped provider is a no-op scaffold. You get real narration one of two ways:
+
+1. **Over MCP** — connect any agent (e.g. Claude) with a **dm-scoped** personal access
+   token; it drives the campaign through the same 134 MCP tools, or
+2. **A per-campaign provider** — set a provider (OpenAI / Anthropic / a custom base URL)
+   and a **write-only** API key in the seat config, with an optional model allowlist.
+
+**Guardrails:** a per-campaign token budget + a server-wide cap, a one-click kill switch,
+tool-scoping (the driver can only touch live-play tools; admin/destructive/other-campaign
+writes are refused), player recovery levers (nudge, flag, table vote, request human
+takeover), and — like everything else — every action is audit-logged with actor + role.
+
 ## Roadmap
 
-Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (36 tools), media & maps (attachments), SRD rules search (compendium), encounter/combat tracker, AI scribe via any MCP client with a DM-approval proposal queue. Ahead: D&D Beyond sync, built-in scheduled/automated AI scribe runs (today it's client-driven — connect an MCP client and ask it to act), AI co-DM. Full plan lives in the repo wiki.
+Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (134 tools), media & maps
+(attachments) with fog of war, real rule systems from open sources (5e / PF2e / Open
+Legend live), encounter/combat tracker, the full game-icons.net icon set, a DM-approval
+proposal queue, the **AI Dungeon Master** (co-DM + driver) and a **scheduled AI scribe**
+that drafts recaps. Ahead: D&D Beyond sync, more first-party rule-system data sources,
+and deeper co-DM authoring. Full plan lives in the repo wiki.
 
 ## License
 
