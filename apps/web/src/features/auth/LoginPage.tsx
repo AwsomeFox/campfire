@@ -1,9 +1,11 @@
 /**
- * Sign-in screen. Mirrors design/claude-design/Campfire.dc.html's "Login"
- * screen: flame mark card on a radial-gradient ground, SSO-first when OIDC
- * is configured (design shows Authentik-first), local username/password
- * form always available — primary when OIDC is off, secondary/collapsible
- * when it's on.
+ * Sign-in + landing screen. A visitor's first impression of a Campfire server:
+ * an enticing hero (what Campfire is + what it does) beside the sign-in card.
+ * Mirrors design/claude-design/Campfire.dc.html's "Login" screen aesthetic —
+ * flame mark on a radial-gradient ground — extended into a two-column landing on
+ * wide screens (hero + auth) that stacks to a single column on phones. SSO-first
+ * when OIDC is configured; local username/password always available (primary when
+ * OIDC is off, secondary/collapsible when it's on).
  */
 import { useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
@@ -11,10 +13,11 @@ import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+import { GameIcon } from '../../components/GameIcon';
 
-function FlameMark() {
+function FlameMark({ size = 44 }: { size?: number }) {
   return (
-    <svg width="44" height="44" viewBox="0 0 24 24" fill="none">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
       <path
         d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
         stroke="var(--color-accent)"
@@ -28,6 +31,99 @@ function FlameMark() {
         strokeLinecap="round"
       />
     </svg>
+  );
+}
+
+/** The value-prop highlights shown on the landing hero. Icons degrade gracefully. */
+const FEATURES: { icon: string; title: string; body: string }[] = [
+  {
+    icon: 'rolling-dices',
+    title: 'An AI Dungeon Master',
+    body: 'Sit it in the DM seat as a full driver, or a co-DM that only proposes — it narrates, tracks combat, and never touches canon without approval.',
+  },
+  {
+    icon: 'treasure-map',
+    title: 'Battle maps & fog of war',
+    body: 'Grid maps, tokens, initiative and HP bands — with the monster HP and hidden NPCs only the DM can see.',
+  },
+  {
+    icon: 'open-book',
+    title: 'Real rule systems',
+    body: 'D&D 5e, Pathfinder 2e, Open Legend and more — statblocks, spells and rules lookups, installed from open sources.',
+  },
+  {
+    icon: 'quill-ink',
+    title: 'Your whole world, in one place',
+    body: 'Quests, NPCs, factions, locations, a living timeline, session prep and auto-drafted recaps.',
+  },
+  {
+    icon: 'processor',
+    title: 'Agent-operable over MCP',
+    body: 'Run an entire campaign from an AI agent with a scoped token — every action audited, every write role-gated.',
+  },
+  {
+    icon: 'shield',
+    title: 'Self-hosted & private',
+    body: 'Your table, your server, your data. No lock-in — export the whole campaign to JSON or Markdown anytime.',
+  },
+];
+
+function LandingHero() {
+  return (
+    <section className="flex flex-col gap-6 max-w-xl">
+      <div className="flex items-center gap-3">
+        <FlameMark size={40} />
+        <span style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.01em', color: 'var(--color-text)' }}>Campfire</span>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <h1
+          style={{
+            margin: 0,
+            fontSize: 'clamp(28px, 4vw, 42px)',
+            lineHeight: 1.08,
+            fontWeight: 800,
+            letterSpacing: '-0.02em',
+            color: 'var(--color-text)',
+          }}
+        >
+          Gather your whole campaign
+          <br />
+          around one fire.
+        </h1>
+        <p className="text-muted" style={{ margin: 0, fontSize: 'clamp(14px, 1.5vw, 16px)', lineHeight: 1.55, maxWidth: '46ch' }}>
+          The self-hosted home for your tabletop game — an AI DM, live battle maps, real rule systems and every quest, NPC
+          and session in one place. Bring your table; it runs on your server.
+        </p>
+      </div>
+
+      <div className="grid gap-x-5 gap-y-4 sm:grid-cols-2">
+        {FEATURES.map((f) => (
+          <div key={f.title} className="flex gap-3">
+            <span
+              className="shrink-0 grid place-items-center"
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 'var(--radius-md, 10px)',
+                background: 'var(--color-accent-900)',
+                border: '1px solid var(--color-divider)',
+              }}
+            >
+              <GameIcon slug={f.icon} size={19} className="text-[var(--color-accent)]" title={f.title} />
+            </span>
+            <div className="flex flex-col" style={{ gap: 2 }}>
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--color-text)' }}>{f.title}</span>
+              <span className="text-muted" style={{ fontSize: 12, lineHeight: 1.5 }}>{f.body}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+        Open-source and free to self-host · your data never leaves your server.
+      </p>
+    </section>
   );
 }
 
@@ -169,105 +265,117 @@ export function LoginPage() {
     && !window.matchMedia('(display-mode: standalone)').matches
     && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-  return (
-    <div
-      className="min-h-screen grid place-items-center p-6"
-      style={{
-        background:
-          'radial-gradient(80% 60% at 50% 0%, var(--color-neutral-900) 0%, var(--color-bg) 70%)',
-      }}
-    >
-      <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
-        <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
-          <FlameMark />
-          <div>
-            <h3 style={{ margin: 0 }}>Campfire</h3>
-            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
-              Self-hosted campaign server
-            </p>
-          </div>
-
-          {oidcEnabled ? (
-            <>
-              <a href={oidcLoginHref} className="btn btn-primary btn-block" style={{ minHeight: 44 }}>
-                Sign in with Authentik
-              </a>
-              <p className="text-muted" style={{ margin: '2px 0 0', fontSize: 11 }}>
-                One account for players, DM and viewers.
-                <br />
-                Roles come from your campaign groups.
-              </p>
-              {showLocalForm ? (
-                <div className="w-full flex flex-col gap-3" style={{ marginTop: 6 }}>
-                  <div className="hr" style={{ margin: 0 }} />
-                  <LocalLoginForm
-                    submitting={submitting}
-                    onSubmit={onSubmit}
-                    username={username}
-                    setUsername={setUsername}
-                    password={password}
-                    setPassword={setPassword}
-                    error={error}
-                    primary={false}
-                  />
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  style={{ fontSize: 12.5, marginTop: 2 }}
-                  onClick={() => setShowLocalForm(true)}
-                >
-                  Sign in with username &amp; password instead
-                </button>
-              )}
-            </>
-          ) : (
-            <div className="w-full">
-              <LocalLoginForm
-                submitting={submitting}
-                onSubmit={onSubmit}
-                username={username}
-                setUsername={setUsername}
-                password={password}
-                setPassword={setPassword}
-                error={error}
-                primary
-              />
-            </div>
-          )}
-
-          {signupEnabled && (
-            <Link to="/signup" className="btn btn-ghost" style={{ fontSize: 12.5, marginTop: 2 }}>
-              New here? Create an account
-            </Link>
-          )}
+  const authCard = (
+    <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
+      <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
+        <FlameMark />
+        <div>
+          <h3 style={{ margin: 0 }}>Campfire</h3>
+          <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
+            Self-hosted campaign server
+          </p>
         </div>
 
-        {installHint && (
-          <div
-            className="flex items-center gap-2.5 text-muted"
-            style={{
-              padding: '10px 14px',
-              border: '1px solid var(--color-divider)',
-              borderRadius: 'var(--radius-md)',
-              fontSize: 12,
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="shrink-0">
-              <path d="M12 15V4m0 0L8 8m4-4l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M5 14v5h14v-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            <span>
-              Installs like an app — open the browser menu and choose{' '}
-              <span style={{ color: 'var(--color-text)' }}>Add to Home Screen</span>.
-            </span>
+        {oidcEnabled ? (
+          <>
+            <a href={oidcLoginHref} className="btn btn-primary btn-block" style={{ minHeight: 44 }}>
+              Sign in with Authentik
+            </a>
+            <p className="text-muted" style={{ margin: '2px 0 0', fontSize: 11 }}>
+              One account for players, DM and viewers.
+              <br />
+              Roles come from your campaign groups.
+            </p>
+            {showLocalForm ? (
+              <div className="w-full flex flex-col gap-3" style={{ marginTop: 6 }}>
+                <div className="hr" style={{ margin: 0 }} />
+                <LocalLoginForm
+                  submitting={submitting}
+                  onSubmit={onSubmit}
+                  username={username}
+                  setUsername={setUsername}
+                  password={password}
+                  setPassword={setPassword}
+                  error={error}
+                  primary={false}
+                />
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ fontSize: 12.5, marginTop: 2 }}
+                onClick={() => setShowLocalForm(true)}
+              >
+                Sign in with username &amp; password instead
+              </button>
+            )}
+          </>
+        ) : (
+          <div className="w-full">
+            <LocalLoginForm
+              submitting={submitting}
+              onSubmit={onSubmit}
+              username={username}
+              setUsername={setUsername}
+              password={password}
+              setPassword={setPassword}
+              error={error}
+              primary
+            />
           </div>
         )}
 
-        <p className="text-center text-muted" style={{ fontSize: 11 }}>
-          Self-hosted with ❤️ · campfire v{__APP_VERSION__}
-        </p>
+        {signupEnabled && (
+          <Link to="/signup" className="btn btn-ghost" style={{ fontSize: 12.5, marginTop: 2 }}>
+            New here? Create an account
+          </Link>
+        )}
+      </div>
+
+      {installHint && (
+        <div
+          className="flex items-center gap-2.5 text-muted"
+          style={{
+            padding: '10px 14px',
+            border: '1px solid var(--color-divider)',
+            borderRadius: 'var(--radius-md)',
+            fontSize: 12,
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="shrink-0">
+            <path d="M12 15V4m0 0L8 8m4-4l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M5 14v5h14v-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span>
+            Installs like an app — open the browser menu and choose{' '}
+            <span style={{ color: 'var(--color-text)' }}>Add to Home Screen</span>.
+          </span>
+        </div>
+      )}
+
+      <p className="text-center text-muted" style={{ fontSize: 11 }}>
+        Self-hosted with ❤️ · campfire v{__APP_VERSION__}
+      </p>
+    </div>
+  );
+
+  return (
+    <div
+      className="min-h-screen w-full"
+      style={{
+        background: 'radial-gradient(90% 55% at 15% 0%, var(--color-neutral-900) 0%, var(--color-bg) 65%)',
+      }}
+    >
+      <div className="mx-auto w-full max-w-6xl px-6 py-10 min-h-screen grid items-center gap-12 lg:grid-cols-[1.15fr_minmax(320px,380px)]">
+        {/* Hero: full pitch on desktop; on phones it sits above the card so the
+            value prop is the first thing a new player sees, then they scroll to sign in. */}
+        <div className="order-1 lg:order-none">
+          <LandingHero />
+        </div>
+        <div className="order-2 lg:order-none justify-self-center lg:justify-self-end w-full grid place-items-center">
+          {authCard}
+        </div>
       </div>
     </div>
   );
