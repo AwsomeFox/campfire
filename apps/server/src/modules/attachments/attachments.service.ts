@@ -9,7 +9,7 @@ import {
   NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
-import { desc, eq, like, sql } from 'drizzle-orm';
+import { and, desc, eq, like, sql } from 'drizzle-orm';
 import type {
   Attachment,
   AttachmentKind,
@@ -18,7 +18,7 @@ import type {
   StorageStats,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters } from '../../db/schema';
+import { attachments, campaigns, characters, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -190,6 +190,22 @@ export class AttachmentsService {
   async getOrThrow(id: number): Promise<Attachment> {
     const row = await this.getRowOrThrow(id);
     return toDomain(row);
+  }
+
+  /**
+   * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
+   * `campaignId` (issue #259). A fogged encounter map stays hidden (DM-only) as a handout
+   * so it never appears raw on the player Handouts card, but the fogged encounter canvas
+   * still needs the underlying image for every member — so the file route serves an
+   * encounter map to non-DM players even though the attachment itself is hidden.
+   */
+  async isEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
+    const [row] = await this.db
+      .select({ id: encounters.id })
+      .from(encounters)
+      .where(and(eq(encounters.mapAttachmentId, attachmentId), eq(encounters.campaignId, campaignId)))
+      .limit(1);
+    return !!row;
   }
 
   /**
