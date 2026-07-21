@@ -560,3 +560,69 @@ describe('characters (e2e)', () => {
     });
   });
 });
+
+describe('dmControlsProgression flag gates XP/level-up (issue #270)', () => {
+  const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
+  const owner = { 'x-dev-role': 'player', 'x-dev-user': 'owner-1' };
+  let ctx: TestAppContext;
+  let server: import('http').Server;
+  let campaignId: number;
+  let characterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Progression Camp' });
+    campaignId = camp.body.id;
+    // Flag defaults to false.
+    expect(camp.body.dmControlsProgression).toBe(false);
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(owner)
+      .send({ name: 'Aspiring Hero', hpMax: 20, hpCurrent: 20 });
+    expect(char.status).toBe(201);
+    characterId = char.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('flag OFF (default): the owning player may self-award XP and level up', async () => {
+    const xp = await request(server).post(`/api/v1/characters/${characterId}/xp`).set(owner).send({ set: 900 });
+    expect(xp.status).toBe(201);
+    expect(xp.body.xp).toBe(900);
+    const lvl = await request(server).post(`/api/v1/characters/${characterId}/level-up`).set(owner).send({});
+    expect(lvl.status).toBe(201);
+    expect(lvl.body.level).toBe(2);
+  });
+
+  it('flag ON: a non-DM player is 403 on xp, level-up, and the general PATCH; the DM still succeeds', async () => {
+    const flip = await request(server)
+      .patch(`/api/v1/campaigns/${campaignId}`)
+      .set(dm)
+      .send({ dmControlsProgression: true });
+    expect(flip.status).toBe(200);
+    expect(flip.body.dmControlsProgression).toBe(true);
+
+    // Player is now blocked on every progression path.
+    const xpDenied = await request(server).post(`/api/v1/characters/${characterId}/xp`).set(owner).send({ set: 5000 });
+    expect(xpDenied.status).toBe(403);
+    const lvlDenied = await request(server).post(`/api/v1/characters/${characterId}/level-up`).set(owner).send({});
+    expect(lvlDenied.status).toBe(403);
+    const patchDenied = await request(server).patch(`/api/v1/characters/${characterId}`).set(owner).send({ xp: 5000 });
+    expect(patchDenied.status).toBe(403);
+
+    // Non-progression edits by the owner still work (HP), proving the gate is scoped.
+    const hpOk = await request(server).post(`/api/v1/characters/${characterId}/hp`).set(owner).send({ set: 15 });
+    expect(hpOk.status).toBe(201);
+
+    // The DM can still award XP + level up.
+    const dmXp = await request(server).post(`/api/v1/characters/${characterId}/xp`).set(dm).send({ set: 5000 });
+    expect(dmXp.status).toBe(201);
+    expect(dmXp.body.xp).toBe(5000);
+    const dmLvl = await request(server).post(`/api/v1/characters/${characterId}/level-up`).set(dm).send({});
+    expect(dmLvl.status).toBe(201);
+    expect(dmLvl.body.level).toBe(3);
+  });
+});

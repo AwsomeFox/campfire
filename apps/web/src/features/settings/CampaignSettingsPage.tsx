@@ -137,11 +137,16 @@ function GeneralCard({
   const [name, setName] = useState(campaign.name);
   const [description, setDescription] = useState(campaign.description);
   const [dangerLevel, setDangerLevel] = useState<DangerLevel>(campaign.dangerLevel);
+  const [dmControlsProgression, setDmControlsProgression] = useState(campaign.dmControlsProgression);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const dirty = name !== campaign.name || description !== campaign.description || dangerLevel !== campaign.dangerLevel;
+  const dirty =
+    name !== campaign.name ||
+    description !== campaign.description ||
+    dangerLevel !== campaign.dangerLevel ||
+    dmControlsProgression !== campaign.dmControlsProgression;
 
   async function save() {
     if (!name.trim()) {
@@ -156,6 +161,7 @@ function GeneralCard({
         name: name.trim(),
         description,
         dangerLevel,
+        dmControlsProgression,
       });
       onSaved(updated);
       setSaved(true);
@@ -198,6 +204,20 @@ function GeneralCard({
             </option>
           ))}
         </select>
+      </div>
+      <div className="field">
+        <label className="flex gap-2 items-center" style={{ cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={dmControlsProgression}
+            onChange={(e) => setDmControlsProgression(e.target.checked)}
+          />
+          <span>DM controls progression</span>
+        </label>
+        <p className="text-muted" style={{ fontSize: 12 }}>
+          When on, only the DM can award XP or level up characters. When off, players may
+          award XP and level up their own characters.
+        </p>
       </div>
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
