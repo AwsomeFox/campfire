@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, eq, inArray, isNotNull } from 'drizzle-orm';
+import JSZip from 'jszip';
 import type { z } from 'zod';
 import { CampaignClone, CampaignCreate, CampaignImport, CampaignUpdate } from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
@@ -56,6 +57,7 @@ import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
 
 /** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
 function uploadsRoot(): string {
@@ -63,10 +65,28 @@ function uploadsRoot(): string {
   return path.join(dataDir, 'uploads');
 }
 
+/** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
+const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
+
 type CampaignCreateInput = z.infer<typeof CampaignCreate>;
 type CampaignUpdateInput = z.infer<typeof CampaignUpdate>;
 type CampaignCloneInput = z.infer<typeof CampaignClone>;
 type CampaignImportInput = z.infer<typeof CampaignImport>;
+
+/**
+ * One attachment's bytes + metadata extracted from a zip export's uploads/ folder,
+ * to be recreated (row + on-disk file) under the freshly imported campaign. `srcId`
+ * is the attachment's id in the SOURCE document — the key every reference to it
+ * (campaign.mapAttachmentId, character.portraitUrl, encounter.mapAttachmentId) is
+ * remapped through. See importCampaign / importArchive (issue #236).
+ */
+export interface ImportAttachmentFile {
+  srcId: number;
+  kind: string;
+  filename: string;
+  mime: string;
+  bytes: Buffer;
+}
 
 // ---- defensive readers for an imported export document (issue #120) ----
 // The import body is a Campfire JSON export whose entities are validated only as
@@ -625,11 +645,13 @@ export class CampaignsService {
    *    come in unowned — a DM can re-assign them from the roster.
    *  - notes.authorUserId: reassigned to the importer (author ids are per-install);
    *    authorName is preserved from the document for provenance.
-   *  - attachments: the JSON export carries attachment METADATA only, never bytes
-   *    (only the mdzip export embeds files). We therefore do NOT recreate attachment
-   *    rows: mapAttachmentId comes in null and character.portraitUrl is dropped
-   *    (it points at a source-install route that wouldn't resolve). Importing the
-   *    mdzip's embedded bytes is deferred — see the issue's "deferred" note.
+   *  - attachments (issue #236): a JSON-only import has no bytes, so `attachmentFiles`
+   *    is empty — mapAttachmentId comes in null and character.portraitUrl is dropped
+   *    (the source-install route wouldn't resolve). When importing a ZIP export (via
+   *    importArchive), the embedded uploads/ bytes are passed in here: each attachment
+   *    row is recreated under the new campaign with a fresh id + its file written to
+   *    disk, and every reference to it — campaign.mapAttachmentId, character.portraitUrl,
+   *    encounter.mapAttachmentId — is remapped to that new id instead of being reset.
    *  - ruleSystem: kept only if that rule pack is installed on THIS server; otherwise
    *    cleared to '' so a dangling slug can't break compendium lookups.
    *  - status: forced to 'active' so a freshly imported campaign is editable even if
@@ -640,7 +662,11 @@ export class CampaignsService {
    * All writes run in one synchronous db.transaction() (better-sqlite3), so a
    * mid-import failure never leaves a half-created campaign behind.
    */
-  async importCampaign(input: CampaignImportInput, user: RequestUser): Promise<Campaign> {
+  async importCampaign(
+    input: CampaignImportInput,
+    user: RequestUser,
+    attachmentFiles: ImportAttachmentFile[] = [],
+  ): Promise<Campaign> {
     const doc = input;
     const campaignSrc = asRec(doc.campaign);
     const name = (str(input.name) || str(campaignSrc.name) || 'Imported Campaign').slice(0, 120);
@@ -665,6 +691,20 @@ export class CampaignsService {
     const importerId = String(user.id);
     const ts = nowIso();
 
+    // Attachment bytes are written to disk AFTER the transaction commits (a DB
+    // rollback can't un-write a file, so we defer the fs writes until the rows are
+    // durable). srcAttachmentId -> new attachment id, populated inside the tx.
+    const pendingWrites: { filePath: string; bytes: Buffer }[] = [];
+    const attMap = new Map<number, number>();
+    /** Rewrite a source portraitUrl (…/attachments/<srcId>/file) to point at the freshly imported attachment. */
+    const remapPortraitUrl = (url: unknown): string | null => {
+      if (typeof url !== 'string') return null;
+      const m = url.match(/\/attachments\/(\d+)\/file(?:[?#].*)?$/);
+      if (!m) return null;
+      const newId = attMap.get(Number(m[1]));
+      return newId != null ? `/api/v1/attachments/${newId}/file` : null;
+    };
+
     const newId = this.db.transaction((tx) => {
       const [campaignRow] = tx
         .insert(campaigns)
@@ -676,13 +716,38 @@ export class CampaignsService {
           dangerLevel: str(campaignSrc.dangerLevel, 'low'),
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           ruleSystem,
-          mapAttachmentId: null, // attachments (on-disk bytes) are not imported from JSON
+          mapAttachmentId: null, // remapped below once attachment rows have fresh ids
           createdAt: ts,
           updatedAt: ts,
         })
         .returning()
         .all();
       const cid = campaignRow.id;
+
+      // Attachments first (issue #236): every map/portrait ref downstream — character
+      // portraitUrl, encounter mapAttachmentId, the campaign map — remaps through attMap,
+      // so the rows must exist before those inserts. Empty for a JSON-only import.
+      for (const a of attachmentFiles) {
+        const [row] = tx
+          .insert(attachments)
+          .values({
+            campaignId: cid,
+            uploaderUserId: importerId,
+            kind: a.kind,
+            filename: a.filename,
+            mime: a.mime,
+            size: a.bytes.length,
+            // Secure default (#97): maps/images land DM-only, portraits stay player-visible.
+            hidden: a.kind !== 'portrait',
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        attMap.set(a.srcId, row.id);
+        const ext = ALLOWED_MIME_TO_EXT[a.mime] ?? 'bin';
+        pendingWrites.push({ filePath: path.join(uploadsRoot(), String(cid), `${row.id}.${ext}`), bytes: a.bytes });
+      }
 
       // Locations first (npcs, quests-via-npcs and currentLocationId point at them).
       // Two passes: insert all with parentId deferred, then remap the nesting parent —
@@ -808,7 +873,9 @@ export class CampaignsService {
             skills: jsonCol(c.skills, '{}'),
             actions: jsonCol(c.actions, '[]'),
             spellSlots: jsonCol(c.spellSlots, '{}'),
-            portraitUrl: null, // references a source-install attachment route — not imported
+            // Remapped to the freshly imported portrait attachment when a ZIP import
+            // carried its bytes; null for a JSON-only import (source route wouldn't resolve).
+            portraitUrl: remapPortraitUrl(c.portraitUrl),
             ddbId: typeof c.ddbId === 'string' ? c.ddbId : null,
             notes: str(c.notes),
             dmSecret: str(c.dmSecret),
@@ -885,6 +952,18 @@ export class CampaignsService {
             round: intOr(e.round, 0),
             turnIndex: intOr(e.turnIndex, 0),
             currentCombatantId: null, // remapped below once combatants have fresh ids
+            // Battle map (issue #39/#236): remap the map attachment to its imported id so an
+            // exported VTT encounter re-imports WITH its map, not as a mapless initiative list.
+            // The grid + fog overlay travel with the map (coordinate/scale data — no remap needed).
+            mapAttachmentId: (() => {
+              const src = intOrNull(e.mapAttachmentId);
+              return src != null ? (attMap.get(src) ?? null) : null;
+            })(),
+            gridSize: realOrNull(e.gridSize),
+            gridScale: realOrNull(e.gridScale),
+            gridUnit: typeof e.gridUnit === 'string' ? e.gridUnit : null,
+            gridSnap: boolOf(e.gridSnap),
+            fog: e.fog == null ? null : jsonCol(e.fog, ''),
             endedAt: typeof e.endedAt === 'string' ? e.endedAt : null,
             createdAt: ts,
             updatedAt: ts,
@@ -933,8 +1012,29 @@ export class CampaignsService {
         }
       }
 
+      // Campaign map (issue #236): point at the imported map attachment's fresh id.
+      const mapSrc = intOrNull(campaignSrc.mapAttachmentId);
+      if (mapSrc != null) {
+        const mapAttachmentId = attMap.get(mapSrc);
+        if (mapAttachmentId != null) {
+          tx.update(campaigns).set({ mapAttachmentId }).where(eq(campaigns.id, cid)).run();
+        }
+      }
+
       return cid;
     });
+
+    // Rows are durable — now write each imported attachment's bytes to disk under the
+    // new campaign's uploads dir. A failed write leaves a row-without-file (the #84
+    // tolerated shape: the GET route 404s that one file), never a broken import.
+    for (const w of pendingWrites) {
+      try {
+        fs.mkdirSync(path.dirname(w.filePath), { recursive: true });
+        fs.writeFileSync(w.filePath, w.bytes);
+      } catch {
+        /* best-effort — the DB row is the source of truth; a missing file is handled by #84 */
+      }
+    }
 
     // Same membership rule as create()/clone(): the caller becomes the new campaign's dm.
     if (!user.devRole) {
@@ -954,6 +1054,81 @@ export class CampaignsService {
       detail: `imported "${name}" from a Campfire export`,
     });
     return this.getOrThrow(newId);
+  }
+
+  /**
+   * Import a campaign from a ZIP export (issue #236) — the round-trip that finally
+   * carries maps and portraits across installs. A mdzip export (GET
+   * /campaigns/:id/export?format=mdzip) packs the structured document at campaign.json
+   * plus every attachment's bytes under uploads/<id>.<ext>. We read campaign.json as
+   * the import document, pull the embedded bytes named by its attachments[] manifest,
+   * and hand both to importCampaign — which recreates the rows AND remaps the
+   * map/portrait references to the new attachment ids (see that method's doc).
+   *
+   * The bytes are validated the same way an upload is (magic-byte sniff + size cap):
+   * a manifest entry with no file in the zip (a present=false / dangling reference) or
+   * bytes that aren't a real png/jpeg/webp are simply skipped, so a hand-tampered or
+   * partial archive imports its text without recreating a bogus attachment.
+   */
+  async importArchive(zipBuffer: Buffer, user: RequestUser, nameOverride?: string): Promise<Campaign> {
+    if (!Buffer.isBuffer(zipBuffer) || zipBuffer.length === 0) {
+      throw new BadRequestException('Empty upload — attach a Campfire .zip export.');
+    }
+    if (zipBuffer.length > MAX_IMPORT_ARCHIVE_BYTES) {
+      throw new BadRequestException('Import archive is too large.');
+    }
+
+    let zip: JSZip;
+    try {
+      zip = await JSZip.loadAsync(zipBuffer);
+    } catch {
+      throw new BadRequestException('That file is not a valid zip archive.');
+    }
+
+    const manifestFile = zip.file('campaign.json');
+    if (!manifestFile) {
+      throw new BadRequestException(
+        'This zip is not a Campfire export (campaign.json is missing). Re-export with format=mdzip, or import the JSON export instead (text only, no maps/portraits).',
+      );
+    }
+
+    let doc: unknown;
+    try {
+      doc = JSON.parse(await manifestFile.async('string'));
+    } catch {
+      throw new BadRequestException('campaign.json in the archive is not valid JSON.');
+    }
+
+    const parsed = CampaignImport.safeParse(doc);
+    if (!parsed.success) {
+      throw new BadRequestException('campaign.json is not a valid Campfire export document.');
+    }
+    const input: CampaignImportInput = nameOverride ? { ...parsed.data, name: nameOverride } : parsed.data;
+
+    // Pull the embedded attachment bytes named by the manifest's attachments[] entries.
+    const attachmentFiles: ImportAttachmentFile[] = [];
+    for (const a of asArr(asRec(doc).attachments)) {
+      const srcId = intOrNull(a.id);
+      const archivePath = str(a.file);
+      if (srcId == null || !archivePath) continue;
+      const entry = zip.file(archivePath);
+      if (!entry) continue; // present=false / dangling — no bytes were shipped
+      const bytes = await entry.async('nodebuffer');
+      if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) continue;
+      // Trust the bytes, not the manifest's declared mime: sniff exactly like an upload,
+      // so only genuine png/jpeg/webp are stored (and the on-disk extension is correct).
+      const mime = sniffImageMime(bytes);
+      if (!mime) continue;
+      attachmentFiles.push({
+        srcId,
+        kind: str(a.kind, 'image'),
+        filename: str(a.filename, `attachment-${srcId}`).slice(0, 255),
+        mime,
+        bytes,
+      });
+    }
+
+    return this.importCampaign(input, user, attachmentFiles);
   }
 
   /**
