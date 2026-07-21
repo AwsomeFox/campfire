@@ -8,7 +8,7 @@
     "build": "nest build",
     "start": "node dist/main.js",
     "test": "nest build && NODE_OPTIONS=--experimental-vm-modules jest",
-    "test:cov": "nest build && NODE_OPTIONS=\"--experimental-vm-modules --max-old-space-size=4096\" jest --coverage --maxWorkers=2 --workerIdleMemoryLimit=1024MB",
+    "test:cov": "nest build && NODE_OPTIONS=\"--experimental-vm-modules --max-old-space-size=4096\" jest --coverage --maxWorkers=1 --workerIdleMemoryLimit=1024MB",
     "test:watch": "NODE_OPTIONS=--experimental-vm-modules jest --watch"
   },
   "dependencies": {
