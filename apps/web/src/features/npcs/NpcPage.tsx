@@ -17,6 +17,9 @@ import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { GameIcon } from '../../components/GameIcon';
+import { IconPicker } from '../../components/IconPicker';
+import { getIcon } from '../../lib/icons';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -55,7 +58,8 @@ export default function NpcPage() {
   // to the DM's proposal queue (PATCH ?proposed=true) instead of writing canon directly.
   const [proposeMode, setProposeMode] = useState(false);
   const [proposeDone, setProposeDone] = useState(false);
-  const [form, setForm] = useState({ name: '', role: '', disposition: '', locationId: '' as string, factionId: '' as string, body: '', dmSecret: '', hidden: false });
+  const [form, setForm] = useState({ name: '', role: '', disposition: '', locationId: '' as string, factionId: '' as string, body: '', dmSecret: '', iconSlug: '', hidden: false });
+  const [pickingIcon, setPickingIcon] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -119,6 +123,7 @@ export default function NpcPage() {
       factionId: npc.factionId ? String(npc.factionId) : '',
       body: npc.body,
       dmSecret: npc.dmSecret,
+      iconSlug: npc.iconSlug ?? '',
       hidden: npc.hidden,
     });
     setSaveError(null);
@@ -174,6 +179,7 @@ export default function NpcPage() {
           locationId: form.locationId ? Number(form.locationId) : null,
           factionId: form.factionId ? Number(form.factionId) : null,
           body: form.body,
+          iconSlug: form.iconSlug,
         });
         setEditing(false);
         setProposeMode(false);
@@ -187,6 +193,7 @@ export default function NpcPage() {
           factionId: form.factionId ? Number(form.factionId) : null,
           body: form.body,
           dmSecret: form.dmSecret,
+          iconSlug: form.iconSlug,
           hidden: form.hidden,
           // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#233) instead
           // of silently overwriting the other author's work.
@@ -301,8 +308,12 @@ export default function NpcPage() {
       {!editing && (
         <>
           <div className="flex items-center gap-3 flex-wrap">
-            <div className="h-13 w-13 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0" style={{ height: 52, width: 52 }}>
-              {initials(npc.name)}
+            <div className="h-13 w-13 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0 overflow-hidden" style={{ height: 52, width: 52 }}>
+              {getIcon(npc.iconSlug) ? (
+                <GameIcon slug={npc.iconSlug} size={30} title={npc.name} className="text-[var(--color-accent)]" />
+              ) : (
+                initials(npc.name)
+              )}
             </div>
             <div className="min-w-0">
               <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{npc.name}</h1>
@@ -493,6 +504,26 @@ export default function NpcPage() {
             </div>
           </div>
           <div className="space-y-1">
+            <label className="text-[10px] text-slate-500 font-bold uppercase">Icon</label>
+            <div className="flex items-center gap-3">
+              <div className="h-11 w-11 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-sm text-[var(--color-neutral-400)] shrink-0 overflow-hidden">
+                {getIcon(form.iconSlug) ? (
+                  <GameIcon slug={form.iconSlug} size={26} title={getIcon(form.iconSlug)?.name} className="text-[var(--color-accent)]" />
+                ) : (
+                  initials(form.name || npc.name)
+                )}
+              </div>
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setPickingIcon(true)}>
+                {form.iconSlug ? 'Change icon' : 'Choose icon'}
+              </Btn>
+              {form.iconSlug && (
+                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setForm({ ...form, iconSlug: '' })}>
+                  Remove
+                </Btn>
+              )}
+            </div>
+          </div>
+          <div className="space-y-1">
             <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
             <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
           </div>
@@ -531,6 +562,16 @@ export default function NpcPage() {
             </div>
           </div>
         </Card>
+      )}
+      {pickingIcon && (
+        <IconPicker
+          value={form.iconSlug}
+          onSelect={(slug) => {
+            setForm((f) => ({ ...f, iconSlug: slug }));
+            setPickingIcon(false);
+          }}
+          onClose={() => setPickingIcon(false)}
+        />
       )}
       {confirmingDelete && (
         <ConfirmDialog
