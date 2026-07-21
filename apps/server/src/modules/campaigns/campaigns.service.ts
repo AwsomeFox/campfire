@@ -646,6 +646,7 @@ export class CampaignsService {
                 encounterId: row.id,
                 kind: c.kind,
                 characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
                 name: c.name,
                 initiative: c.initiative,
                 initMod: c.initMod,
@@ -1112,12 +1113,14 @@ export class CampaignsService {
         for (const c of asArr(e.combatants)) {
           const cSrcId = intOrNull(c.id);
           const charSrc = intOrNull(c.characterId);
+          const npcSrc = intOrNull(c.npcId);
           const [cRow] = tx
             .insert(combatants)
             .values({
               encounterId: row.id,
               kind: str(c.kind, 'monster'),
               characterId: charSrc != null ? (charMap.get(charSrc) ?? null) : null,
+              npcId: npcSrc != null ? (npcMap.get(npcSrc) ?? null) : null,
               name: str(c.name, 'Combatant'),
               initiative: intOrNull(c.initiative),
               initMod: intOr(c.initMod, 0),
