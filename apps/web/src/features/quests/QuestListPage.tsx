@@ -236,7 +236,11 @@ export default function QuestListPage() {
                 )}
                 <div style={{ flex: 1 }} />
                 {q.reward && (
-                  <span className="tag tag-neutral" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>
+                  <span
+                    className="tag tag-neutral"
+                    style={{ fontSize: 10, whiteSpace: 'normal', maxWidth: '100%', overflowWrap: 'anywhere', textAlign: 'left' }}
+                    title={q.reward}
+                  >
                     {q.reward}
                   </span>
                 )}
