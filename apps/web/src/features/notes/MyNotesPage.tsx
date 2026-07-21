@@ -281,7 +281,7 @@ export default function MyNotesPage() {
           <span className="inline-flex items-center gap-1"><GameIcon slug="meeple" size={12} /> Party</span>
         </FilterChip>
         <FilterChip active={filter === 'whisper'} variant="whisper" onClick={() => setFilter('whisper')}>
-          <span className="inline-flex items-center gap-1"><GameIcon slug="secret-book" size={12} /> Whisper</span>
+          <span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper</span>
         </FilterChip>
       </div>
 
@@ -322,7 +322,7 @@ export default function MyNotesPage() {
             <EntityPicker campaignId={cid} onChange={setAttach} resetKey={attachResetKey} disabled={saving} />
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500"><GameIcon slug="secret-book" size={12} /> Whisper to:</span>
+            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper to:</span>
             <select
               value={whisperTo}
               onChange={(e) => setWhisperTo(e.target.value)}
@@ -400,7 +400,7 @@ export default function MyNotesPage() {
       <p className="text-[11px] text-slate-600">
         Notes are per-user: the DM cannot read private notes (API-enforced). Sharing a note with the DM notifies them
         (it shows in their notification bell) and lands under their &quot;Shared with me&quot;; shared-with-party notes
-        appear on entity pages for everyone. A <GameIcon slug="secret-book" size={12} className="inline align-text-bottom" /> whisper reaches exactly one player (plus the DM) — the per-player
+        appear on entity pages for everyone. A <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} className="inline align-text-bottom" /> whisper reaches exactly one player (plus the DM) — the per-player
         secret channel for &quot;only the rogue notices the trap door&quot;.
       </p>
 
@@ -485,7 +485,7 @@ function NoteCard({
         {isWhisper ? (
           // No tap-to-cycle: a whisper is bound to its recipient, so the badge is a
           // static indicator (re-targeting happens in compose, not by cycling).
-          <Chip variant="whisper"><span className="inline-flex items-center gap-1"><GameIcon slug="secret-book" size={12} /> {whisperLabel}</span></Chip>
+          <Chip variant="whisper"><span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> {whisperLabel}</span></Chip>
         ) : editable ? (
           <button onClick={onCycleVisibility} className="cf-chip" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
             <Chip variant={meta.chip}><span className="inline-flex items-center gap-1"><GameIcon slug={meta.slug} size={12} /> {meta.label} · tap to change</span></Chip>

@@ -102,7 +102,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
             <Chip variant={visMeta[n.visibility].chip}>
               {n.visibility === 'whisper' ? (
                 <span className="inline-flex items-center gap-1">
-                  <GameIcon slug="secret-book" size={12} /> Whisper{n.recipientName ? ` → ${n.recipientName}` : ''}
+                  <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper{n.recipientName ? ` → ${n.recipientName}` : ''}
                 </span>
               ) : (
                 <VisLabel visibility={n.visibility} />
@@ -141,7 +141,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
         </div>
         {visibility === 'whisper' && (
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500"><GameIcon slug="secret-book" size={12} /> To:</span>
+            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> To:</span>
             <select
               value={whisperTo}
               onChange={(e) => setWhisperTo(e.target.value)}
