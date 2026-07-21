@@ -608,6 +608,7 @@ CREATE TABLE IF NOT EXISTS party_treasury (
 
 CREATE TABLE IF NOT EXISTS ai_dm_seats (
   campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+  mode TEXT NOT NULL DEFAULT 'off',
   enabled INTEGER NOT NULL DEFAULT 0,
   model TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '',

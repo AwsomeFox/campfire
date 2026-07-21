@@ -38,6 +38,7 @@ describe('ai-dm (e2e)', () => {
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm);
     expect(res.status).toBe(200);
     expect(res.body.campaignId).toBe(campaignId);
+    expect(res.body.mode).toBe('off'); // operating mode defaults to Off (issue #311)
     expect(res.body.enabled).toBe(false);
     expect(res.body.tokenBudget).toBe(0);
     expect(res.body.tokensUsed).toBe(0);
@@ -209,5 +210,98 @@ describe('ai-dm (e2e)', () => {
       .set(dm)
       .send({ enabled: true, bogusField: 'nope' });
     expect(res.status).toBe(400);
+  });
+});
+
+/**
+ * Operating modes: off / co_dm / driver (issue #311).
+ *
+ * The mode is a first-class seat field, round-trips through configure/read, and is
+ * NON-secret (players see it — the honest indicator of whether an AI is co-DMing or
+ * driving). Driver carries hard preconditions (positive budget + configured provider)
+ * enforced with a 409; Off and Co-DM do not.
+ */
+describe('ai-dm operating modes (e2e)', () => {
+  const modeDm = { 'x-dev-role': 'dm', 'x-dev-user': 'aidm-mode-dm' };
+  const modePlayer = { 'x-dev-role': 'player', 'x-dev-user': 'aidm-mode-player' };
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(modeDm).send({ name: 'AI Mode Campaign' });
+    campaignId = campRes.body.id;
+    // The whole feature (configure) needs the server experimental flag on.
+    await request(server).patch('/api/v1/settings').set(modeDm).send({ experimentalAiDm: true });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('mode round-trips through configure/read (off -> co_dm)', async () => {
+    const res = await request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(modeDm).send({ mode: 'co_dm' });
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('co_dm');
+
+    const seat = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(modeDm);
+    expect(seat.body.mode).toBe('co_dm');
+  });
+
+  it('the mode is visible to players — the honest co-DM/driver indicator (not redacted)', async () => {
+    const playerView = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(modePlayer);
+    expect(playerView.status).toBe(200);
+    expect(playerView.body.mode).toBe('co_dm');
+    // ...while the DM-authored steering prompt stays redacted (issue #261).
+    expect(playerView.body).not.toHaveProperty('instructions');
+  });
+
+  it('an unknown mode value is rejected (400)', async () => {
+    const res = await request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(modeDm).send({ mode: 'autopilot' });
+    expect(res.status).toBe(400);
+  });
+
+  it('Driver is 409 without a budget or provider, with a clear reason', async () => {
+    // No budget yet.
+    const noBudget = await request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(modeDm).send({ mode: 'driver' });
+    expect(noBudget.status).toBe(409);
+    expect(noBudget.text).toContain('budget');
+
+    // Budget set, but still no provider configured.
+    const noProvider = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-dm`)
+      .set(modeDm)
+      .send({ mode: 'driver', tokenBudget: 50_000 });
+    expect(noProvider.status).toBe(409);
+    expect(noProvider.text).toContain('provider');
+
+    // The failed writes did not flip the mode.
+    const seat = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(modeDm);
+    expect(seat.body.mode).toBe('co_dm');
+  });
+
+  it('Driver succeeds once a provider is configured and a budget is set', async () => {
+    // Configure a per-campaign provider (mock type needs no real network at test time).
+    const provRes = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(modeDm)
+      .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-test-key-1234' });
+    expect(provRes.status).toBe(200);
+
+    const res = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-dm`)
+      .set(modeDm)
+      .send({ mode: 'driver', tokenBudget: 50_000 });
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('driver');
+    expect(res.body.tokenBudget).toBe(50_000);
+  });
+
+  it('switching back to Off / Co-DM is always allowed (no preconditions)', async () => {
+    const off = await request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(modeDm).send({ mode: 'off' });
+    expect(off.status).toBe(200);
+    expect(off.body.mode).toBe('off');
   });
 });

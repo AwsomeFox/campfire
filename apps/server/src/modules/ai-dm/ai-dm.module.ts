@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
 import { SettingsModule } from '../settings/settings.module';
 import { RoleAccessModule } from '../membership/role-access.module';
+import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config.module';
 import { AiDmService } from './ai-dm.service';
 import { AiDmController } from './ai-dm.controller';
 import { AI_DM_PROVIDER, NoopAiDmProvider } from './ai-dm.provider';
@@ -15,7 +16,7 @@ import { AI_DM_PROVIDER, NoopAiDmProvider } from './ai-dm.provider';
  * (useClass/useFactory) — the metering, gating and audit around it are unchanged.
  */
 @Module({
-  imports: [AuditModule, SettingsModule, RoleAccessModule],
+  imports: [AuditModule, SettingsModule, RoleAccessModule, AiProviderConfigModule],
   controllers: [AiDmController],
   providers: [AiDmService, { provide: AI_DM_PROVIDER, useClass: NoopAiDmProvider }],
   exports: [AiDmService],
