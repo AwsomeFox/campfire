@@ -1,6 +1,17 @@
 import { BadRequestException, ForbiddenException, HttpException, Injectable, NotFoundException } from '@nestjs/common';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { zodToJsonSchema as zodToJsonSchemaRaw } from 'zod-to-json-schema';
+
+/**
+ * zodToJsonSchema with its deep conditional generics erased — the raw overloads
+ * trip TS2589 ("excessively deep") when handed a non-literal ZodObject. We only
+ * need a plain JSON-Schema object out, so cast the function to a simple signature.
+ */
+const zodToJsonSchema = zodToJsonSchemaRaw as unknown as (
+  schema: unknown,
+  options?: unknown,
+) => Record<string, unknown>;
 import {
   CampaignCreate,
   CampaignUpdate,
@@ -150,6 +161,39 @@ function fail(err: unknown): ToolResult {
   return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: { status, code, message } }) }] };
 }
 
+/**
+ * A single executable tool captured from the SAME registration path the MCP
+ * endpoint uses. The driver runtime (#312) consumes these to run a model's tool
+ * calls server-side without the MCP transport — so every call goes through the
+ * identical strict-parse + role/write-mode/proposal enforcement + ok/fail shaping
+ * a remote MCP client would hit. `inputSchema` is the tool's JSON Schema (offered
+ * to the provider via the neutral tool registry); `proposalCapable` mirrors
+ * writeTool()'s `propose`-arg detection so the runtime knows which canon writes to
+ * force down the proposal path.
+ */
+export interface DriverTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  proposalCapable: boolean;
+  invoke(args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
+}
+
+/** The full, executable tool registry for one principal (see McpToolsService.buildToolset). */
+export interface DriverToolset {
+  tools: DriverTool[];
+  get(name: string): DriverTool | undefined;
+  call(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
+}
+
+/**
+ * Symbol used to hand a collector Map to buildServer() so tool() records every
+ * registered tool alongside binding it on the McpServer — one registration path,
+ * two consumers (the MCP transport and the driver runtime). Kept off the public
+ * surface so it never collides with SDK properties.
+ */
+const TOOL_COLLECTOR = Symbol('driverToolCollector');
+
 const CampaignIdArg = z.number().int().positive().describe('Campaign id — from list_campaigns or get_campaign_summary');
 const ProposeArg = z
   .boolean()
@@ -245,7 +289,7 @@ export class McpToolsService {
     private readonly scribe: ScribeService,
   ) {}
 
-  buildServer(user: RequestUser): McpServer {
+  buildServer(user: RequestUser, collector?: Map<string, DriverTool>): McpServer {
     const server = new McpServer(SERVER_INFO, {
       instructions:
         'Campfire is a D&D-style campaign tracker. This server exposes the full REST surface as tools so an agent ' +
@@ -299,11 +343,42 @@ export class McpToolsService {
         'URI per accessible campaign). Prompts: recap-writer and session-prep, each taking a campaignId argument, ' +
         'return a ready-to-run message that drives the corresponding tools.',
     });
+    // When a collector is supplied (driver runtime), tool() records every tool onto it
+    // as it binds it on the server — so the driver executes the exact same callbacks.
+    if (collector) (server as unknown as { [TOOL_COLLECTOR]?: Map<string, DriverTool> })[TOOL_COLLECTOR] = collector;
     this.registerReadTools(server, user);
     this.registerWriteTools(server, user);
     this.registerResources(server, user);
     this.registerPrompts(server);
     return server;
+  }
+
+  /**
+   * Build the FULL, executable tool registry for `user` without the MCP transport —
+   * the seam the driver runtime (#312) drives a model's tool calls through. Reuses
+   * buildServer()'s exact registration (same strict-parse, same role checks, same
+   * write-mode/proposal gating, same ok/fail JSON), so a tool executed here behaves
+   * byte-for-byte like the same tool called over POST /mcp. The transient McpServer
+   * is never connected to a transport; it exists only to run the registration and
+   * populate the collector.
+   */
+  buildToolset(user: RequestUser): DriverToolset {
+    const collector = new Map<string, DriverTool>();
+    this.buildServer(user, collector);
+    return {
+      tools: [...collector.values()],
+      get: (name) => collector.get(name),
+      call: async (name, args) => {
+        const tool = collector.get(name);
+        if (!tool) {
+          return {
+            text: JSON.stringify({ error: { status: 404, code: 'unknown_tool', message: `No such tool: ${name}` } }),
+            isError: true,
+          };
+        }
+        return tool.invoke(args ?? {});
+      },
+    };
   }
 
   private tool(
@@ -338,14 +413,35 @@ export class McpToolsService {
       config: { description: string; inputSchema: z.ZodTypeAny },
       cb: (args: Record<string, unknown>) => Promise<ToolResult>,
     ) => void;
-    register(name, { description, inputSchema: strictShape }, async (args) => {
+    const cb = async (args: Record<string, unknown>): Promise<ToolResult> => {
       try {
         const validated = strictShape.parse(args ?? {}) as Record<string, unknown>;
         return ok(await handler(validated));
       } catch (err) {
         return fail(err);
       }
-    });
+    };
+    register(name, { description, inputSchema: strictShape }, cb);
+
+    // Driver runtime (#312): record this tool onto the collector (when one was passed
+    // to buildServer) so it can be executed off-transport through the identical cb.
+    const collector = (server as unknown as { [TOOL_COLLECTOR]?: Map<string, DriverTool> })[TOOL_COLLECTOR];
+    if (collector) {
+      collector.set(name, {
+        name,
+        description,
+        // JSON Schema for the neutral tool registry offered to the provider. $refStrategy
+        // 'none' inlines everything (real providers reject cross-property $refs), matching
+        // the inlineClone() rationale used for tools/list. `strictShape` is cast to the base
+        // zod type to avoid TS2589 (the deep conditional generics zodToJsonSchema infers).
+        inputSchema: zodToJsonSchema(strictShape, { $refStrategy: 'none' }),
+        proposalCapable: Object.prototype.hasOwnProperty.call(shape, 'propose'),
+        invoke: async (args) => {
+          const res = await cb(args);
+          return { text: res.content.map((c) => c.text).join('\n'), isError: res.isError === true };
+        },
+      });
+    }
   }
 
   /**

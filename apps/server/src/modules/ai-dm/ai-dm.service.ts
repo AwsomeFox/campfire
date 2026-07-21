@@ -343,4 +343,81 @@ export class AiDmService {
       seat: updatedSeat,
     };
   }
+
+  /**
+   * Assert the seat may run an autonomous driver turn (#312): the server-wide
+   * experimental flag is on, the seat exists AND is enabled, and it has budget
+   * remaining. Returns the seat. Same gates/messages as takeTurn(), factored out so
+   * the driver runtime (AiDriverService) reuses them without duplicating the policy.
+   */
+  async assertRunnable(campaignId: number): Promise<AiDmSeat> {
+    await this.assertExperimentalEnabled();
+    const existing = await this.findRow(campaignId);
+    const seat = existing ? toDomain(existing) : defaultSeat(campaignId);
+    if (!seat.enabled) {
+      throw new ForbiddenException(
+        'The AI Dungeon Master seat is not enabled for this campaign. Configure it first: PUT /campaigns/:id/ai-dm {enabled:true, tokenBudget:N}.',
+      );
+    }
+    if (seat.tokenBudget - seat.tokensUsed <= 0) {
+      throw new ForbiddenException(
+        `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
+      );
+    }
+    return seat;
+  }
+
+  /**
+   * Atomically meter ONE driver step's REAL token usage against the per-campaign
+   * budget and audit it (#312) — the same read-write-in-one-tx idiom takeTurn() uses
+   * for #272 (MIN(token_budget, ...) clamp so the counter never overshoots the cap).
+   * Returns the seat after metering + budget remaining. The driver calls this after
+   * every provider stream so a long session's budget is a HARD stop, step by step.
+   */
+  async meterTurn(
+    campaignId: number,
+    tokensUsed: number,
+    audit: { actor: string; action?: string; detail?: string },
+  ): Promise<{ seat: AiDmSeat; tokensUsed: number; budgetRemaining: number }> {
+    const cost = Math.max(0, Math.floor(tokensUsed));
+    const ts = nowIso();
+    const existing = await this.findRow(campaignId);
+    let newTokensUsed = 0;
+    let tokenBudget = 0;
+    if (existing) {
+      tokenBudget = existing.tokenBudget;
+      this.db.transaction((tx) => {
+        const [updated] = tx
+          .update(aiDmSeats)
+          .set({
+            tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${cost})`,
+            turnCount: sql`${aiDmSeats.turnCount} + 1`,
+            lastTurnAt: ts,
+            updatedAt: ts,
+          })
+          .where(eq(aiDmSeats.campaignId, campaignId))
+          .returning()
+          .all();
+        newTokensUsed = updated.tokensUsed;
+      });
+    } else {
+      // assertRunnable guarantees an enabled row upstream, but stay honest if called bare.
+      newTokensUsed = cost;
+    }
+
+    await this.audit.log({
+      actor: audit.actor,
+      actorRole: 'dm',
+      action: audit.action ?? 'ai-dm.driver.turn',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: audit.detail ?? `+${cost} tokens, ${newTokensUsed}/${tokenBudget}`,
+    });
+
+    return {
+      seat: await this.getSeat(campaignId),
+      tokensUsed: cost,
+      budgetRemaining: Math.max(0, tokenBudget - newTokensUsed),
+    };
+  }
 }
