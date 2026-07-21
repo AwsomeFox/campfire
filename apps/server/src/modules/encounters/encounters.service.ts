@@ -288,6 +288,24 @@ export class EncountersService {
     let list = sortCombatants(combatantRows.map(combatantToDomain), status);
     if (viewerRole !== undefined && viewerRole !== 'dm') {
       list = list.map(redactMonsterHp);
+      // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant
+      // linked to a HIDDEN NPC still leaked that NPC's identity to non-DMs via `npcId` + the
+      // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
+      // here we sever the identity link (null npcId) and mask the name — the token still shows
+      // in initiative (its position matters to play) but not who it is.
+      const linkedNpcIds = list.map((c) => c.npcId).filter((n): n is number => n !== null);
+      if (linkedNpcIds.length > 0) {
+        const hiddenRows = await this.db
+          .select({ id: npcs.id })
+          .from(npcs)
+          .where(and(inArray(npcs.id, linkedNpcIds), eq(npcs.hidden, true)));
+        const hiddenIds = new Set(hiddenRows.map((r) => r.id));
+        if (hiddenIds.size > 0) {
+          list = list.map((c) =>
+            c.npcId !== null && hiddenIds.has(c.npcId) ? { ...c, npcId: null, name: 'Unknown combatant' } : c,
+          );
+        }
+      }
       // Fog of war (issue #40): withhold the position of any token in an unrevealed region.
       const fog = parseFog(row.fog);
       if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
@@ -777,10 +795,26 @@ export class EncountersService {
     // statblock or be tracked with manual HP. Runs alongside (not instead of) the
     // ruleEntryId branch, so an NPC WITH a statblock resolves both.
     if (input.kind === 'npc' && input.npcId !== undefined) {
-      const [npc] = await this.db.select().from(npcs).where(eq(npcs.id, input.npcId)).limit(1);
+      // notDeleted (issue #374): a trashed/soft-deleted NPC must not be addable as a combatant.
+      const [npc] = await this.db
+        .select()
+        .from(npcs)
+        .where(and(eq(npcs.id, input.npcId), notDeleted(npcs.deletedAt)))
+        .limit(1);
       if (!npc) throw new BadRequestException(`NPC ${input.npcId} not found`);
       if (npc.campaignId !== encounterRow.campaignId) {
         throw new NotFoundException(`NPC ${input.npcId} not found in campaign ${encounterRow.campaignId}`);
+      }
+      // Uniqueness guard — the issue #51 pattern, extended to NPC combatants per #374: an NPC
+      // may appear at most once in an encounter. Without this, re-adding the same NPC forks it
+      // into two rows that then track HP independently. 409 rather than a silent duplicate.
+      const [dup] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npc.id)))
+        .limit(1);
+      if (dup) {
+        throw new ConflictException(`NPC ${npc.id} is already a combatant in encounter ${encounterId}`);
       }
       npcId = npc.id;
       name = name ?? npc.name;

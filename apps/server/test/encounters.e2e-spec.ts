@@ -1385,6 +1385,50 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     }
   });
 
+  it('the same NPC cannot be added as a combatant twice (#374 uniqueness guard)', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Twiceborn' })).body.id;
+    const first = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', npcId, hpMax: 10 });
+    expect(first.status).toBe(201);
+    const second = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', npcId, hpMax: 10 });
+    expect(second.status).toBe(409); // already a combatant — no silent duplicate row
+  });
+
+  it('a soft-deleted (trashed) NPC cannot be added as a combatant (#374)', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Ghosted' })).body.id;
+    const del = await request(server).delete(`/api/v1/npcs/${npcId}`).set(dm);
+    expect(del.status).toBeGreaterThanOrEqual(200);
+    expect(del.status).toBeLessThan(300);
+    const add = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', npcId, hpMax: 10 });
+    expect(add.status).toBe(400); // not found — a trashed NPC is not addable
+  });
+
+  it('a hidden NPC combatant hides its identity (npcId + name) from non-DMs (#374)', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'The Traitor', hidden: true })).body.id;
+    const combatantId = (
+      await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'npc', npcId, name: 'The Traitor', hpMax: 50 })
+    ).body.id;
+    // The DM still sees the real identity link + name.
+    const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const dmC = (dmRes.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((c) => c.id === combatantId)!;
+    expect(dmC.npcId).toBe(npcId);
+    expect(dmC.name).toBe('The Traitor');
+    // A non-DM sees the token in initiative but NOT who it is: identity link severed, name masked.
+    for (const headers of [player, viewer]) {
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
+      const c = (res.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((x) => x.id === combatantId)!;
+      expect(c).toBeTruthy();
+      expect(c.npcId).toBeNull();
+      expect(c.name).not.toBe('The Traitor');
+      expect(JSON.stringify(c)).not.toMatch(/Traitor/);
+    }
+  });
+
   it('character combatant HP stays exact for a non-DM viewer (party HP is shared)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
