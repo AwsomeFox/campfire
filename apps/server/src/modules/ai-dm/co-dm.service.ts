@@ -101,6 +101,9 @@ export class CoDmService {
         `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
       );
     }
+    // Server-wide admin token cap (#384/#315): a co-DM draft spends provider tokens too, so it
+    // must respect the global ceiling — a per-campaign budget with room doesn't override it.
+    await this.aiDm.assertWithinServerTokenCap();
 
     const count = MULTI_TARGETS.has(input.target) ? input.count ?? 1 : 1;
     const maxTokens = Math.min(DRAFT_MAX_TOKENS, remaining);

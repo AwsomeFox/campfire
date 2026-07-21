@@ -22,6 +22,7 @@ import { NotesService } from '../notes/notes.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
+import { AiDmService } from '../ai-dm/ai-dm.service';
 import { createAiProvider, type AiProvider } from '../ai-dm/providers';
 import { AI_DM_PROVIDER, type AiDmProvider } from '../ai-dm/ai-dm.provider';
 import { buildRecapDraft, type RecapDraftSource } from '../sessions/sessions.service';
@@ -112,6 +113,7 @@ export class ScribeService implements OnApplicationBootstrap {
     private readonly encounters: EncountersService,
     private readonly proposalRecords: ProposalRecordsService,
     private readonly providerConfig: AiProviderConfigService,
+    private readonly aiDm: AiDmService,
     @Inject(AI_DM_PROVIDER) private readonly fallbackProvider: AiDmProvider,
   ) {}
 
@@ -272,6 +274,17 @@ export class ScribeService implements OnApplicationBootstrap {
         sourceHash,
       });
     }
+    // Server-wide admin token cap (#384/#315): the scribe spends provider tokens, so it must
+    // respect the global ceiling too. Recorded as over_budget (not thrown) so a periodic sweep
+    // degrades gracefully rather than crashing when the server cap is hit.
+    try {
+      await this.aiDm.assertWithinServerTokenCap();
+    } catch (err) {
+      return this.record(campaignId, trigger, user, 'over_budget', {
+        detail: err instanceof Error ? err.message : 'server-wide AI token cap reached',
+        sourceHash,
+      });
+    }
 
     // 5. Resolve the provider (configured #310 -> #309 factory; else the injected seam).
     const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
@@ -350,6 +363,11 @@ export class ScribeService implements OnApplicationBootstrap {
     const title = source.encounters.find((e) => e.status === 'running' || e.status === 'ended')?.name
       ? `Recap: ${source.encounters.find((e) => e.status === 'running' || e.status === 'ended')!.name}`
       : 'Session recap (AI draft)';
+    // Attribute the recap to the AI scribe, not the human who triggered it (#383). An on-demand
+    // run passes the triggering DM as `user`; without this the proposal's proposer/proposerUserId
+    // would be that DM's name + id — affirmatively misattributing an AI-written recap to a human in
+    // the review queue and audit-facing proposer field, and excluding it from the AI-drafts filter.
+    // The `ai-dm:` prefix matches the same badge/filter the co-DM path uses.
     const proposal = await this.proposalRecords.create(
       campaignId,
       'session',
@@ -358,6 +376,7 @@ export class ScribeService implements OnApplicationBootstrap {
       { recap: text, title },
       user,
       'dm' as Role,
+      { proposer: `AI Scribe (${providerName})`, proposerUserId: `ai-dm:${campaignId}`, proposerToken: null },
     );
 
     await this.audit.log({

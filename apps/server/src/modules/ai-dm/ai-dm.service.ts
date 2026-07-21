@@ -89,8 +89,13 @@ export class AiDmService {
    * Enforce the server-wide token cap (issue #315). 0 = unlimited. When positive,
    * a turn is rejected once SUM(tokensUsed) across all seats reaches the cap. Read
    * from ServerSettings so an admin can raise/lower it live from the AI console.
+   *
+   * Public so the token-SPENDING paths that AiDmService doesn't own — the driver
+   * runtime (assertRunnable, below) and the co-DM / scribe pre-checks — all bound
+   * themselves by the same admin ceiling (#384). Previously only takeTurn() called
+   * it, so the driver (the path that actually burns provider tokens) ignored the cap.
    */
-  private async assertWithinServerTokenCap(): Promise<void> {
+  async assertWithinServerTokenCap(): Promise<void> {
     const { aiServerTokenCap: cap } = await this.settings.getAll();
     if (!cap || cap <= 0) return;
     const [agg] = await this.db
@@ -371,11 +376,23 @@ export class AiDmService {
         'The AI Dungeon Master seat is not enabled for this campaign. Configure it first: PUT /campaigns/:id/ai-dm {enabled:true, tokenBudget:N}.',
       );
     }
+    // The autonomous DRIVER loop may run ONLY in driver mode (#376). `enabled` alone must never
+    // arm it: choosing Co-DM (the propose-only mode) sets enabled=true, and an explicit
+    // {enabled:true, mode:'off'} is also enabled — neither may drive live-play writes. Co-DM and
+    // scribe are propose-only and have their own gates; only driver mode holds the DM seat.
+    if (seat.mode !== 'driver') {
+      throw new ForbiddenException(
+        `The AI Dungeon Master is in ${seat.mode === 'co_dm' ? 'Co-DM' : 'Off'} mode. The autonomous driver runs only in Driver mode — switch the mode to Driver (PUT /campaigns/:id/ai-dm {mode:'driver'}) to run turns.`,
+      );
+    }
     if (seat.tokenBudget - seat.tokensUsed <= 0) {
       throw new ForbiddenException(
         `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
       );
     }
+    // The driver is the path that actually spends provider tokens — bound it by the server-wide
+    // admin cap too (#384/#315), not just the per-campaign budget.
+    await this.assertWithinServerTokenCap();
     return seat;
   }
 

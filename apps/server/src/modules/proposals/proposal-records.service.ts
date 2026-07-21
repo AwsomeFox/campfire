@@ -82,6 +82,13 @@ export class ProposalRecordsService {
     // actual user (the normal member/PAT propose path).
     attribution?: { proposer: string; proposerUserId?: string; proposerToken?: string | null },
   ): Promise<Proposal> {
+    // AI provenance (issue #383): the driver seat carries its AI attribution on the principal
+    // (`user.proposalAttribution`) rather than passing it explicitly at every mcp tool call site.
+    // An explicit `attribution` argument (co-DM authoring) still wins; otherwise fall back to the
+    // principal's default so a driver-forced proposal badges as an AI author, never the seat's
+    // audit-actor id. Real users carry no proposalAttribution, so their path is unchanged.
+    const attr = attribution ?? user.proposalAttribution;
+
     // Capture the target's current state so the DM review UI can show a real
     // before/after diff (issue #3). Creates have no "before"; snapshot stays null.
     // Deletes snapshot too, so the DM can see exactly what would be removed.
@@ -101,9 +108,9 @@ export class ProposalRecordsService {
         // human-readable `proposer`, their stable id for the self-view filter — even
         // when the write arrives over a PAT (RequestUser resolves to the token's owning
         // user). The token name is kept as secondary provenance, never the identity.
-        proposer: attribution ? attribution.proposer : user.name,
-        proposerUserId: attribution?.proposerUserId ?? user.id,
-        proposerToken: attribution ? (attribution.proposerToken ?? null) : user.tokenContext ? user.tokenContext.name : null,
+        proposer: attr ? attr.proposer : user.name,
+        proposerUserId: attr?.proposerUserId ?? user.id,
+        proposerToken: attr ? (attr.proposerToken ?? null) : user.tokenContext ? user.tokenContext.name : null,
         status: 'pending',
         resolvedBy: '',
         note: '',

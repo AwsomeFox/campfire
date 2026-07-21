@@ -12,7 +12,7 @@ import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-drive
  * Fills the `#314 stuck` placeholder the harness spec left as `it.todo`.
  */
 
-const seat = { instructions: 'Be terse.', tokenBudget: 100_000 };
+const seat = { mode: 'driver' as const, instructions: 'Be terse.', tokenBudget: 100_000 };
 
 /** A scripted turn whose (unknown-)tool call errors → the driver stops with `tool_error`. */
 const TOOL_ERROR_TURN = {
@@ -65,7 +65,7 @@ describe('ai-dm stuck ladder — detection (e2e)', () => {
 
   it('#314 budget exhaustion → awaiting_players (retry is off the table; takeover/pause remain)', async () => {
     const campaignId = await h.createCampaign('Stuck Budget');
-    await h.configureSeat(campaignId, { tokenBudget: 200 });
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 200 });
 
     // Step 0 overruns the whole budget AND asks for another tool → the loop halts before step 1
     // (never consuming a 2nd scripted turn — so we script exactly one to keep the shared queue aligned).
