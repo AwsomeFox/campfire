@@ -345,9 +345,9 @@ h1, h2, h3, h4, h5, h6 {
    Tailwind's preflight strips list markers (`ul,ol{list-style:none}`) and the
    app's global `h1{…}` rule would balloon a markdown `#` heading, so rendered
    markdown — the compendium reader, quest/npc/location bodies, session recaps —
-   needs its own contained type scale. Everything is expressed in --color-*/
-   --cf-* / --space-* tokens so it tracks whatever theme is active (light or
-   dark) rather than hard-coding colors. */
+   needs its own contained type scale. Everything is expressed in the
+   --color-, --cf- and --space- custom-property families so it tracks whatever
+   theme is active (light or dark) rather than hard-coding colors. */
 .cf-prose {
   overflow-wrap: anywhere; /* long URLs / unbroken strings wrap, don't overflow */
   word-break: break-word;
