@@ -17,7 +17,7 @@
  * renders nothing" behaviour for callers that don't pass one.
  */
 import { useEffect, useState, type ReactNode } from 'react';
-import { getIcon, resolveIcon, ICON_VIEWBOX, type GameIconEntry } from '../lib/icons';
+import { getCachedIcon, resolveIcon, ICON_VIEWBOX, type GameIconEntry } from '../lib/icons';
 
 export function GameIcon({
   slug,
@@ -44,16 +44,19 @@ export function GameIcon({
    */
   reserveSpace?: boolean;
 }) {
-  const [icon, setIcon] = useState<GameIconEntry | undefined>(() => getIcon(slug));
+  // Seed from everything already in memory (curated OR a prior resolve's cache), so a
+  // previously-seen non-curated slug paints on the first render instead of flickering
+  // "no icon" for a tick on every remount (nav/tab bar/chips).
+  const [icon, setIcon] = useState<GameIconEntry | undefined>(() => getCachedIcon(slug));
   // Whether an async resolveIcon() is genuinely in flight — true from mount for a
-  // non-curated slug, false once it settles (resolved OR undefined). reserveSpace
-  // only holds a box while this is true, so a slug that resolves to `undefined`
-  // (unknown / offline shard fetch) collapses to nothing rather than a permanent
-  // blank square.
-  const [resolving, setResolving] = useState<boolean>(() => !!slug && !getIcon(slug));
+  // non-curated, not-yet-cached slug, false once it settles (resolved OR undefined).
+  // reserveSpace only holds a box while this is true, so a slug that resolves to
+  // `undefined` (unknown / offline shard fetch) collapses to nothing rather than a
+  // permanent blank square.
+  const [resolving, setResolving] = useState<boolean>(() => !!slug && !getCachedIcon(slug));
 
   useEffect(() => {
-    const cached = getIcon(slug);
+    const cached = getCachedIcon(slug);
     if (cached) {
       setIcon(cached);
       setResolving(false);

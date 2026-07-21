@@ -156,6 +156,25 @@ function loadShard(shard: number): Promise<Record<string, string>> {
 const resolvedCache = new Map<string, GameIconEntry>();
 
 /**
+ * Synchronous, no-network lookup across everything already in memory: the curated
+ * catalog first, then any full-set icon a prior `resolveIcon` has cached (fully
+ * resolved, or just its body from a fetched shard). Returns undefined when nothing
+ * is cached yet — callers fall back to the async `resolveIcon`. Lets `<GameIcon>`
+ * paint a previously-seen non-curated slug on the very first render (no flicker on
+ * remount for frequently-shown chrome), instead of only curated slugs.
+ */
+export function getCachedIcon(slug: string | null | undefined): GameIconEntry | undefined {
+  if (!slug) return undefined;
+  const curated = BY_SLUG.get(slug);
+  if (curated) return curated;
+  const resolved = resolvedCache.get(slug);
+  if (resolved) return resolved;
+  const body = shardBodyCache.get(slug);
+  if (body) return { slug, name: slug, category: '', artist: '', tags: [], body };
+  return undefined;
+}
+
+/**
  * Async counterpart to `getIcon`: resolves ANY icon in the full ~4,130-icon
  * set by slug, not just the curated one. Curated slugs resolve instantly
  * (no network); non-curated slugs trigger (deduped, cached) fetches of the
