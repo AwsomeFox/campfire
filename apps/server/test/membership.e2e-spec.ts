@@ -496,7 +496,7 @@ describe('user delete last-dm guard (e2e, real cookie sessions)', () => {
  * members list would otherwise join against a ghost id). Needs real users (member.userId
  * is a users.id integer), so this uses cookie-session auth like the suites above.
  */
-describe('character delete unlinks member (e2e, real cookie sessions, issue #96)', () => {
+describe('character soft-delete keeps member link (e2e, real cookie sessions, issue #96 / #116)', () => {
   let ctx: TestAppContext;
   let adminAgent: ReturnType<typeof request.agent>;
   let dmAgent: ReturnType<typeof request.agent>;
@@ -525,7 +525,7 @@ describe('character delete unlinks member (e2e, real cookie sessions, issue #96)
     await closeTestApp(ctx);
   });
 
-  it('deleting a linked character nulls the member.characterId link', async () => {
+  it('soft-deleting a linked character keeps the member.characterId link (reversible, issue #116)', async () => {
     const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Linked-then-deleted' });
     expect(charRes.status).toBe(201);
     const charId = charRes.body.id;
@@ -540,9 +540,18 @@ describe('character delete unlinks member (e2e, real cookie sessions, issue #96)
     const delRes = await dmAgent.delete(`/api/v1/characters/${charId}`);
     expect(delRes.status).toBe(200);
 
+    // Character hidden from normal reads (soft-delete)...
+    const charGone = await dmAgent.get(`/api/v1/characters/${charId}`);
+    expect(charGone.status).toBe(404);
+
+    // ...but the member's characterId link SURVIVES — the character row is trashed, not
+    // destroyed, so nothing dangles and a restore relights the link.
     const membersAfter = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
     const memberAfter = membersAfter.body.find((m: { id: number }) => m.id === memberId);
     expect(memberAfter).toBeDefined();
-    expect(memberAfter.characterId).toBeNull();
+    expect(memberAfter.characterId).toBe(charId);
+
+    const restoreRes = await dmAgent.post(`/api/v1/characters/${charId}/restore`);
+    expect(restoreRes.status).toBe(201);
   });
 });

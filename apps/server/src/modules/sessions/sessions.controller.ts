@@ -141,6 +141,15 @@ export class SessionsController {
     return this.sessions.remove(id, user, role);
   }
 
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed session', description: 'dm role required. Undo a soft-delete (issue #116) — the session (recap, attendance, share links) returns exactly as it was.' })
+  @ApiResponse({ status: 201, description: 'Restored session.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.sessions.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.sessions.restore(id, user, role);
+  }
+
   @Get(':id/attendance')
   @ApiOperation({
     summary: 'Get session attendance',

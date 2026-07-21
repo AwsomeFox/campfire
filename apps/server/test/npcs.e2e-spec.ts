@@ -184,10 +184,11 @@ describe('npcs (e2e)', () => {
     });
   });
 
-  // Issue #96: deleting an NPC must null out any quest that credits it as giver, so the
-  // quest never dangles on a deleted giverNpcId.
-  describe('delete cleanup: npc giver on quests (issue #96)', () => {
-    it('deleting an NPC nulls quests.giverNpcId', async () => {
+  // Issue #96 + #116: deleting an NPC is now a reversible SOFT-delete. The NPC vanishes
+  // from GET/list, but a quest that credits it as giver KEEPS the link — the NPC row still
+  // exists (just hidden), so nothing dangles and a restore relights the giver line.
+  describe('soft-delete cleanup: npc giver on quests (issue #96 / #116)', () => {
+    it('deleting an NPC hides it but preserves quests.giverNpcId; restore brings it back', async () => {
       const server = ctx.app.getHttpServer();
       const npcRes = await request(server)
         .post(`/api/v1/campaigns/${campaignId}/npcs`)
@@ -207,9 +208,19 @@ describe('npcs (e2e)', () => {
       const delRes = await request(server).delete(`/api/v1/npcs/${npcId}`).set(dm);
       expect(delRes.status).toBe(200);
 
+      // NPC hidden from normal reads...
+      const npcGone = await request(server).get(`/api/v1/npcs/${npcId}`).set(dm);
+      expect(npcGone.status).toBe(404);
+
+      // ...but the quest's giver link survives (reversible — restorable, no dangling ref).
       const questAfter = await request(server).get(`/api/v1/quests/${questId}`).set(dm);
       expect(questAfter.status).toBe(200);
-      expect(questAfter.body.giverNpcId).toBeNull();
+      expect(questAfter.body.giverNpcId).toBe(npcId);
+
+      const restoreRes = await request(server).post(`/api/v1/npcs/${npcId}/restore`).set(dm);
+      expect(restoreRes.status).toBe(201);
+      const npcBack = await request(server).get(`/api/v1/npcs/${npcId}`).set(dm);
+      expect(npcBack.status).toBe(200);
     });
   });
 });

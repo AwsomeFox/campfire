@@ -645,6 +645,31 @@ function migrateDiceRollsTableForKeepDrop(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before soft-delete / trash (issue #116): the trashable
+ * entities gained a nullable `deleted_at` timestamp — NULL means live, an ISO string
+ * means the row is in the trash (excluded from normal reads, restorable). Plain
+ * nullable ADD COLUMNs, each guarded independently by a PRAGMA table_info probe so
+ * this is idempotent and safe to re-run, same shape as migrateLocationsTableForParentId
+ * above. Existing rows come in with NULL (== live), which preserves today's behavior:
+ * nothing already visible suddenly disappears on upgrade. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares every column.
+ */
+function migrateSoftDeleteColumns(sqlite: Database.Database): void {
+  const addDeletedAt = (table: string): void => {
+    const exists = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+      .get(table);
+    if (!exists) return; // fresh DB — BOOTSTRAP_SQL creates it with the column.
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((c) => c.name === 'deleted_at')) return;
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
+  };
+  for (const table of ['campaigns', 'quests', 'npcs', 'locations', 'sessions', 'notes', 'characters']) {
+    addDeletedAt(table);
+  }
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -686,6 +711,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0026_locations_parent_id', run: migrateLocationsTableForParentId },
   { name: '0027_rule_entries_source', run: migrateRuleEntriesTableForSource },
   { name: '0028_dice_rolls_keep_drop', run: migrateDiceRollsTableForKeepDrop },
+  { name: '0029_soft_delete', run: migrateSoftDeleteColumns },
 ];
 
 /**

@@ -127,6 +127,15 @@ export class NotesController {
     return this.notes.remove(id, user, role);
   }
 
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed note', description: 'Requires membership + author ownership. Undo a soft-delete (issue #116) — the note returns exactly as it was.' })
+  @ApiResponse({ status: 201, description: 'Restored note.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.notes.getRowOrThrow(id, true);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    return this.notes.restore(id, user, role);
+  }
+
   @Post(':id/resolve')
   @ApiOperation({ summary: 'Resolve an inbox item', description: 'dm role required. Optionally link the entity the item became (entityType + entityId, provided together) — surfaced in the resolved history.' })
   @ApiResponse({ status: 201, description: 'Resolved inbox item.' })

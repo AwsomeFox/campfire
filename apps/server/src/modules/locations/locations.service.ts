@@ -4,8 +4,9 @@ import type { z } from 'zod';
 import { LocationCreate, LocationUpdate } from '@campfire/schema';
 import type { Location, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { locations, campaigns, npcs } from '../../db/schema';
+import { locations, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -67,7 +68,7 @@ export class LocationsService {
     const [row] = await this.db
       .select({ id: locations.id })
       .from(locations)
-      .where(and(eq(locations.id, parentId), eq(locations.campaignId, campaignId)))
+      .where(and(eq(locations.id, parentId), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)))
       .limit(1);
     if (!row) throw new BadRequestException(`parentId ${parentId} does not exist in this campaign`);
     if (excludeLocationId != null) {
@@ -93,21 +94,22 @@ export class LocationsService {
       const [row]: { parentId: number | null }[] = await this.db
         .select({ parentId: locations.parentId })
         .from(locations)
-        .where(and(eq(locations.id, cursor), eq(locations.campaignId, campaignId)))
+        .where(and(eq(locations.id, cursor), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)))
         .limit(1);
       cursor = row?.parentId ?? null;
     }
   }
 
   async listForCampaign(campaignId: number, role: Role): Promise<Location[]> {
-    const rows = await this.db.select().from(locations).where(eq(locations.campaignId, campaignId));
+    const rows = await this.db.select().from(locations).where(and(eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)));
     const visible = rows.filter((r) => !this.isHiddenFrom(r.status, role));
     return redactSecrets(visible.map(toDomain), role);
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(locations).where(eq(locations.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Location ${id} not found`);
+    // A trashed location (soft-deleted, #116) reads as nonexistent unless includeDeleted (restore).
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Location ${id} not found`);
     return row;
   }
 
@@ -123,7 +125,7 @@ export class LocationsService {
     const [row] = await this.db
       .select()
       .from(locations)
-      .where(and(eq(locations.campaignId, campaignId), sql`lower(${locations.name}) = lower(${name})`))
+      .where(and(eq(locations.campaignId, campaignId), sql`lower(${locations.name}) = lower(${name})`, notDeleted(locations.deletedAt)))
       .orderBy(locations.id)
       .limit(1);
     return row;
@@ -188,19 +190,17 @@ export class LocationsService {
     return redactSecret(toDomain(row), role);
   }
 
+  /**
+   * Soft-delete (trash) a location (issue #116) — reversible. Only stamps `deleted_at`;
+   * the location vanishes from normal reads (and from map/list queries) but every row
+   * survives for restore(). Unlike the old hard delete we deliberately DON'T null the
+   * NPCs pinned here, the campaign's currentLocationId, or re-parent child locations —
+   * all of those are irreversible mutations. Those inbound references simply resolve to
+   * a now-hidden location in the meantime, and light back up on restore.
+   */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    // Null out inbound references in the same transaction as the delete so nothing dangles
-    // on a deleted location: NPCs pinned here (npcs.locationId), the campaign's
-    // currentLocationId, and any child locations (locations.parentId → promoted to
-    // top-level, #99, mirroring how QuestsService reparents subquests to root rather
-    // than cascading the delete). Mirrors AttachmentsService/QuestsService cascade patterns.
-    this.db.transaction((tx) => {
-      tx.update(npcs).set({ locationId: null, updatedAt: nowIso() }).where(eq(npcs.locationId, id)).run();
-      tx.update(campaigns).set({ currentLocationId: null, updatedAt: nowIso() }).where(eq(campaigns.currentLocationId, id)).run();
-      tx.update(locations).set({ parentId: null, updatedAt: nowIso() }).where(eq(locations.parentId, id)).run();
-      tx.delete(locations).where(eq(locations.id, id)).run();
-    });
+    await this.db.update(locations).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(locations.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -208,7 +208,28 @@ export class LocationsService {
       entityType: 'location',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed location (issue #116) — clears `deleted_at`. 404 if it isn't trashed. */
+  async restore(id: number, user: RequestUser, role: Role): Promise<Location> {
+    const existing = await this.getRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Location ${id} is not in the trash`);
+    const [row] = await this.db
+      .update(locations)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(locations.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'location.restore',
+      entityType: 'location',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return redactSecret(toDomain(row), role);
   }
 
   /**
@@ -223,7 +244,7 @@ export class LocationsService {
       const previousCurrent = await this.db
         .select()
         .from(locations)
-        .where(and(eq(locations.campaignId, existing.campaignId), eq(locations.status, 'current')));
+        .where(and(eq(locations.campaignId, existing.campaignId), eq(locations.status, 'current'), notDeleted(locations.deletedAt)));
       for (const prev of previousCurrent) {
         if (prev.id !== id) {
           await this.db

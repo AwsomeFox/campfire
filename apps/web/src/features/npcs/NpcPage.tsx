@@ -15,6 +15,7 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -53,6 +54,7 @@ export default function NpcPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState(false);
   const [togglingHidden, setTogglingHidden] = useState(false);
 
   const load = useCallback(async () => {
@@ -145,12 +147,21 @@ export default function NpcPage() {
   async function remove() {
     setDeleting(true);
     try {
+      // Soft-delete (issue #116) — reversible; offer an Undo instead of navigating away.
       await api.delete(`${API}/npcs/${id}`);
-      navigate(`/c/${cid}/npcs`);
+      setConfirmingDelete(false);
+      setPendingUndo(true);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't delete this NPC.");
+    } finally {
       setDeleting(false);
     }
+  }
+
+  async function undoDelete() {
+    await api.post(`${API}/npcs/${id}/restore`);
+    setPendingUndo(false);
+    await load();
   }
 
   if (!Number.isFinite(cid) || !Number.isFinite(id)) {
@@ -359,11 +370,18 @@ export default function NpcPage() {
       {confirmingDelete && (
         <ConfirmDialog
           title={`Delete ${npc?.name}?`}
-          body="This cannot be undone."
+          body="This moves the NPC to the Trash — you can undo it, or restore it from the campaign Trash."
           confirmLabel={deleting ? 'Deleting…' : 'Delete NPC'}
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
+      {pendingUndo && (
+        <UndoSnackbar
+          message="NPC moved to Trash."
+          onUndo={undoDelete}
+          onExpire={() => navigate(`/c/${cid}/npcs`)}
         />
       )}
     </div>

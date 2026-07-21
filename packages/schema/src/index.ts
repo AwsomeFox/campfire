@@ -53,10 +53,15 @@ export const Campaign = z.object({
   // server admin via the storage console — NOT part of CampaignCreate/Update, so a
   // DM can never lift their own campaign's cap. Enforced on attachment upload.
   storageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
+  // Soft-delete / trash timestamp (issue #116). Non-null => the campaign is in the
+  // trash: excluded from normal listings but its rows + on-disk uploads survive for a
+  // grace period, restorable via POST /campaigns/:id/restore. A deliberate second
+  // step (DELETE /campaigns/:id/purge) is what finally hard-cascades + wipes the disk.
+  deletedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // Clone/template input — POST /campaigns/:id/clone.

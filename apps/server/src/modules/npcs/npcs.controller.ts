@@ -122,4 +122,13 @@ export class NpcsController {
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.npcs.remove(id, user, role);
   }
+
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed NPC', description: 'dm role required. Undo a soft-delete (issue #116) — the NPC returns exactly as it was.' })
+  @ApiResponse({ status: 201, description: 'Restored NPC.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.npcs.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.npcs.restore(id, user, role);
+  }
 }

@@ -6,6 +6,7 @@ import type { Quest, QuestObjective, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { quests, questObjectives, npcs, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -62,7 +63,7 @@ export class QuestsService {
     const rows = await this.db
       .select()
       .from(quests)
-      .where(eq(quests.campaignId, campaignId))
+      .where(and(eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)))
       .orderBy(asc(quests.sortOrder), asc(quests.id));
     // Drop hidden quests wholesale for non-DM BEFORE redacting dmSecret (issue #42).
     return redactSecrets(filterHidden(rows.map(toDomain), role), role);
@@ -98,7 +99,7 @@ export class QuestsService {
     const rows = await this.db
       .select({ playedAt: sessions.playedAt, createdAt: sessions.createdAt })
       .from(sessions)
-      .where(eq(sessions.campaignId, campaignId));
+      .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
     let latest: string | null = null;
     for (const r of rows) {
       const ref = r.playedAt ?? r.createdAt;
@@ -161,9 +162,11 @@ export class QuestsService {
     return rows.map(objectiveToDomain);
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(quests).where(eq(quests.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Quest ${id} not found`);
+    // A trashed quest (soft-deleted, #116) reads as nonexistent on every normal path;
+    // restore() passes includeDeleted to reach it.
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Quest ${id} not found`);
     return row;
   }
 
@@ -196,7 +199,7 @@ export class QuestsService {
     const [row] = await this.db
       .select({ id: quests.id })
       .from(quests)
-      .where(and(eq(quests.id, parentId), eq(quests.campaignId, campaignId)))
+      .where(and(eq(quests.id, parentId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)))
       .limit(1);
     if (!row) throw new BadRequestException(`parentId ${parentId} does not exist in this campaign`);
     // Reject cycles: setting quest `excludeQuestId`'s parent to `parentId` must not
@@ -238,7 +241,7 @@ export class QuestsService {
     const [row] = await this.db
       .select({ id: npcs.id })
       .from(npcs)
-      .where(and(eq(npcs.id, giverNpcId), eq(npcs.campaignId, campaignId)))
+      .where(and(eq(npcs.id, giverNpcId), eq(npcs.campaignId, campaignId), notDeleted(npcs.deletedAt)))
       .limit(1);
     if (!row) throw new BadRequestException(`giverNpcId ${giverNpcId} does not exist in this campaign`);
   }
@@ -298,17 +301,18 @@ export class QuestsService {
     return redactSecret(toDomain(row), role);
   }
 
+  /**
+   * Soft-delete (trash) a quest (issue #116) — reversible. We only stamp `deleted_at`:
+   * the quest (and its objectives, which read through it) vanish from normal reads but
+   * every row survives, so restore() brings it back exactly as it was. Unlike the old
+   * hard delete we deliberately DON'T re-parent subquests or drop objectives — those
+   * mutations would be irreversible, defeating the trash. A subquest whose parent is
+   * trashed simply reads as top-level in the meantime (the board groups by an absent
+   * parent), and re-nests under the parent on restore.
+   */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    // Promote any subquests to top level (parentId=null) in the same
-    // transaction as the delete, so a quest's children never dangle on a
-    // deleted parentId — mirrors how the design's quest board expects
-    // orphaned subquests to resurface as top-level quests, not vanish.
-    this.db.transaction((tx) => {
-      tx.update(quests).set({ parentId: null, updatedAt: nowIso() }).where(eq(quests.parentId, id)).run();
-      tx.delete(questObjectives).where(eq(questObjectives.questId, id)).run();
-      tx.delete(quests).where(eq(quests.id, id)).run();
-    });
+    await this.db.update(quests).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(quests.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -316,7 +320,28 @@ export class QuestsService {
       entityType: 'quest',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed quest (issue #116) — clears `deleted_at`. 404 if it isn't trashed. */
+  async restore(id: number, user: RequestUser, role: Role): Promise<Quest> {
+    const existing = await this.getRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Quest ${id} is not in the trash`);
+    const [row] = await this.db
+      .update(quests)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(quests.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'quest.restore',
+      entityType: 'quest',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return redactSecret(toDomain(row), role);
   }
 
   async setStatus(id: number, patch: QuestStatusPatchInput, user: RequestUser, role: Role): Promise<Quest> {

@@ -152,6 +152,15 @@ export class QuestsController {
     return this.quests.remove(id, user, role);
   }
 
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed quest', description: 'dm role required. Undo a soft-delete (issue #116) — the quest returns exactly as it was.' })
+  @ApiResponse({ status: 201, description: 'Restored quest.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.quests.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.quests.restore(id, user, role);
+  }
+
   @Post(':id/status')
   @ApiOperation({ summary: 'Set a quest\'s status', description: 'dm role required.' })
   @ApiResponse({ status: 201, description: 'Updated quest.' })

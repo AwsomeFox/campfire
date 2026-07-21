@@ -490,7 +490,8 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
       {!open ? (
         <div className="flex items-center gap-2">
           <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-            Deleting a campaign removes it and everything in it. This cannot be undone.
+            Deleting a campaign moves it to the Trash — it's hidden and restorable. Nothing is
+            permanently removed until you purge it from the Trash on your campaigns page.
           </p>
           <div className="flex-1" />
           <button className="btn btn-ghost" style={{ fontSize: 12.5, color: '#f87171' }} onClick={() => setOpen(true)}>
@@ -500,7 +501,7 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
       ) : (
         <div className="flex flex-col gap-2">
           <p style={{ margin: 0, fontSize: 12.5, color: 'var(--color-neutral-200)' }}>
-            Type <strong>{campaign.name}</strong> to confirm deletion.
+            Type <strong>{campaign.name}</strong> to move it to the Trash (you can restore it later).
           </p>
           <input
             className="input"
@@ -529,7 +530,7 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
               disabled={!canDelete || deleting}
               onClick={remove}
             >
-              {deleting ? 'Deleting…' : 'Delete campaign'}
+              {deleting ? 'Moving…' : 'Move to Trash'}
             </button>
           </div>
         </div>
