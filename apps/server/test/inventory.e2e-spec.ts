@@ -282,6 +282,24 @@ describe('inventory & treasury (e2e)', () => {
       expect(getRes.body.sp).toBe(20);
     });
 
+    it('sequential deltas compose without losing an update (atomic patch, issue #272)', async () => {
+      const server = ctx.app.getHttpServer();
+      const otherCampRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Coin Purse' });
+      const camp = otherCampRes.body.id;
+
+      // A run of add/spend deltas — each must read the latest committed balance and apply
+      // onto it (read+compute+write happen in one transaction), so the final total is the
+      // exact running sum rather than a clobbered read-modify-write.
+      const deltas = [{ gp: 100 }, { gp: 25, sp: 10 }, { gp: -40 }, { sp: -3 }];
+      for (const delta of deltas) {
+        const res = await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(dm).send({ delta });
+        expect(res.status).toBe(200);
+      }
+      const getRes = await request(server).get(`/api/v1/campaigns/${camp}/treasury`).set(dm);
+      expect(getRes.body.gp).toBe(85); // 100 + 25 - 40
+      expect(getRes.body.sp).toBe(7); // 10 - 3
+    });
+
     it('set is absolute and only touches the given denominations', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server)

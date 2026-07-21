@@ -213,29 +213,43 @@ export class InventoryService {
   }
 
   async patchTreasury(campaignId: number, patch: TreasuryPatchInput, user: RequestUser, role: Role): Promise<Treasury> {
-    const current = await this.getTreasury(campaignId);
+    // Guarantee the coin row exists (lazy-creates a zeroed row on first access) BEFORE
+    // the transaction, so the read+compute+write below can assume it's present.
+    await this.getTreasury(campaignId);
 
-    const next: Record<(typeof COINS)[number], number> = { cp: current.cp, sp: current.sp, ep: current.ep, gp: current.gp, pp: current.pp };
-    if ('delta' in patch) {
-      for (const coin of COINS) {
-        const d = patch.delta[coin];
-        if (d === undefined) continue;
-        const value = next[coin] + d;
-        if (value < 0) throw new BadRequestException(`Treasury cannot go negative (${coin}: ${next[coin]} ${d >= 0 ? '+' : ''}${d})`);
-        next[coin] = value;
+    // Read the CURRENT committed balances, compute the next values, and write them in ONE
+    // synchronous better-sqlite3 transaction (issue #272). The old shape read via a
+    // separate awaited getTreasury and then wrote across the await, so two concurrent
+    // patches (e.g. two players spending coin) could each read the same balance and the
+    // second write would clobber the first — a lost update on a get-then-set. better-sqlite3
+    // serializes the whole sync callback, so a delta always composes onto the latest value.
+    // A negative-going delta throws inside the callback, which rolls the transaction back.
+    let row!: typeof partyTreasury.$inferSelect;
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(partyTreasury).where(eq(partyTreasury.campaignId, campaignId)).limit(1).all();
+      const next: Record<(typeof COINS)[number], number> = { cp: fresh.cp, sp: fresh.sp, ep: fresh.ep, gp: fresh.gp, pp: fresh.pp };
+      if ('delta' in patch) {
+        for (const coin of COINS) {
+          const d = patch.delta[coin];
+          if (d === undefined) continue;
+          const value = next[coin] + d;
+          if (value < 0) throw new BadRequestException(`Treasury cannot go negative (${coin}: ${next[coin]} ${d >= 0 ? '+' : ''}${d})`);
+          next[coin] = value;
+        }
+      } else {
+        for (const coin of COINS) {
+          const v = patch.set[coin];
+          if (v !== undefined) next[coin] = v;
+        }
       }
-    } else {
-      for (const coin of COINS) {
-        const v = patch.set[coin];
-        if (v !== undefined) next[coin] = v;
-      }
-    }
-
-    const [row] = await this.db
-      .update(partyTreasury)
-      .set({ ...next, updatedAt: nowIso() })
-      .where(eq(partyTreasury.campaignId, campaignId))
-      .returning();
+      const [updated] = tx
+        .update(partyTreasury)
+        .set({ ...next, updatedAt: nowIso() })
+        .where(eq(partyTreasury.campaignId, campaignId))
+        .returning()
+        .all();
+      row = updated;
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
