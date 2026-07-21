@@ -26,6 +26,7 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { SchedulePanel } from './SchedulePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
 export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -189,6 +190,7 @@ export default function SessionsPage() {
             Trash
           </Link>
         )}
+        {isDm && tab === 'log' && <DraftWithAiButton campaignId={cid} target="recap" label="Draft a recap with AI" />}
         {isDm && tab === 'log' && (
           <Btn
             className="!min-h-0 !py-1.5 text-xs"
