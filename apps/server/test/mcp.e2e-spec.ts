@@ -525,10 +525,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const enc = parseResult(
       await dmC.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'Secret Ambush' } }),
     ) as { id: number };
-    await dmC.callTool({
+    const added = await dmC.callTool({
       name: 'add_combatant',
       arguments: { encounterId: enc.id, kind: 'monster', name: 'Hidden Ogre', hpMax: 59 },
     });
+    expect(added.isError).toBeFalsy();
 
     // The DM sees exact HP…
     const dmView = parseResult(
