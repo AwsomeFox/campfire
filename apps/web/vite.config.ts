@@ -73,6 +73,24 @@ export default defineConfig({
               cacheableResponse: { statuses: [0, 200] },
             },
           },
+          {
+            // Full game-icons.net catalog body shards (issue #349) —
+            // apps/web/public/icons/shards/shard-NNN.json, fetched on demand by
+            // lib/icons/index.ts#resolveIcon for any non-curated icon. These are
+            // static/content-addressed by build (regenerated wholesale, not
+            // patched), so cache-as-you-go (CacheFirst) is correct: once a shard
+            // is fetched, every icon in it renders offline from then on, with no
+            // repeat network cost. Deliberately NOT in globPatterns above, so a
+            // fresh install/update never downloads the ~6 MB of shards up front —
+            // only icons a user actually views ever get fetched.
+            urlPattern: ({ url }) => url.pathname.startsWith("/icons/shards/"),
+            handler: "CacheFirst",
+            options: {
+              cacheName: "campfire-icon-shards",
+              expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
         ],
       },
       devOptions: {

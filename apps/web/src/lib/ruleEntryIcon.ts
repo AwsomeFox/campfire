@@ -13,7 +13,6 @@
  * nothing for an unknown slug, so a shrunk catalog degrades gracefully to no icon.
  */
 import type { RuleEntry, RuleEntryType } from '@campfire/schema';
-import { isKnownIcon } from './icons';
 
 /** Fallback glyph per entry type when no more specific hint is available. */
 const TYPE_DEFAULT: Record<RuleEntryType, string> = {
@@ -104,14 +103,18 @@ function firstMatch(haystack: string, table: Array<[string, string]>): string | 
 }
 
 /**
- * The bundled-catalog slug to show for an entry. A DM's manual override
- * (`entry.iconSlug`) wins; otherwise a default is derived from type + dataJson.
- * Returns '' only when nothing sensible resolves (never happens for the enum types
- * above, but keeps the return type honest) — callers pass the result straight to
- * <GameIcon>, which renders nothing for '' / unknown slugs.
+ * The icon slug to show for an entry. A DM's manual override (`entry.iconSlug`)
+ * wins whenever set — trusted as-is (not just the curated ~180: the full
+ * game-icons.net set is reachable via <GameIcon>'s async resolution, issue
+ * #349, so gating on the curated-only `isKnownIcon` here would silently
+ * discard a valid non-curated pick); otherwise a default is derived from
+ * type + dataJson. Returns '' only when nothing sensible resolves (never
+ * happens for the enum types above, but keeps the return type honest) —
+ * callers pass the result straight to <GameIcon>, which renders nothing for
+ * '' / genuinely unknown slugs.
  */
 export function ruleEntryIconSlug(entry: Pick<RuleEntry, 'type' | 'dataJson' | 'iconSlug' | 'name'>): string {
-  if (entry.iconSlug && isKnownIcon(entry.iconSlug)) return entry.iconSlug;
+  if (entry.iconSlug) return entry.iconSlug;
 
   const data = readData(entry.dataJson);
   let slug: string | null = null;
