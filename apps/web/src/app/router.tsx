@@ -152,6 +152,12 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/encounters/RunSessionPage')),
           },
           {
+            // Player-facing AI-DM Table (issue #339) — the shared transcript + composer
+            // where a Driver-mode session with the AI DM is actually played.
+            path: '/c/:campaignId/table',
+            element: lazyPage(() => import('../features/ai-dm/AiTablePage')),
+          },
+          {
             path: '/c/:campaignId/search',
             element: lazyPage(() => import('../features/search/SearchPage')),
           },
