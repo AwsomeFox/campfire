@@ -2297,6 +2297,10 @@ export const InventoryItem = z.object({
   name: z.string().min(1).max(200),
   qty: z.number().int().min(0).default(1),
   notes: z.string().max(5_000).default(''),
+  // Optional explicit game-icons.net slug (issue #307) overriding the type-derived
+  // default icon. '' means "no override" — the UI falls back to a name/type
+  // heuristic. Same bundled icon library as NPCs (#302); see apps/web/src/lib/icons.
+  iconSlug: z.string().max(80).default(''),
   ...timestamps,
 });
 export type InventoryItem = z.infer<typeof InventoryItem>;
