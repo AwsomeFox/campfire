@@ -42,6 +42,7 @@ const VIS_CYCLE: Record<'private' | 'dm_shared' | 'party_shared', Note['visibili
 const entityRoute: Record<EntityTypeValue, string | null> = {
   quest: 'quests',
   npc: 'npcs',
+  faction: 'factions',
   location: 'locations',
   character: 'characters',
   session: 'sessions',
@@ -52,6 +53,7 @@ const entityRoute: Record<EntityTypeValue, string | null> = {
 const entityIcon: Record<EntityTypeValue, string> = {
   quest: '📜',
   npc: '🤝',
+  faction: '🏴',
   location: '🗺',
   character: '🛡',
   session: '📓',

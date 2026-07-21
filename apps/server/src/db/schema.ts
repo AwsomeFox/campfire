@@ -174,11 +174,31 @@ export const npcs = sqliteTable('npcs', {
   role: text('role').notNull().default(''),
   disposition: text('disposition').notNull().default('neutral'),
   locationId: integer('location_id'),
+  // Faction/organization membership (issue #221). Nullable/absent in older DBs
+  // pre-migration; see db/db.module.ts migrateNpcsTableForFactionId().
+  factionId: integer('faction_id'),
   body: text('body').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
   // Entity-level secrecy (issue #42) — see quests.hidden. Migrated via
   // migrateNpcsTableForHidden() in db/db.module.ts.
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Faction/organization entity (issue #221). Mirrors npcs: dmSecret + hidden secrecy,
+// plus a party-reputation model (numeric reputation score + coarse standing label).
+export const factions = sqliteTable('factions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  name: text('name').notNull(),
+  kind: text('kind').notNull().default(''),
+  body: text('body').notNull().default(''),
+  goals: text('goals').notNull().default(''),
+  dmSecret: text('dm_secret').notNull().default(''),
+  hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  reputation: integer('reputation').notNull().default(0),
+  standing: text('standing').notNull().default('neutral'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

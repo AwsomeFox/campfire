@@ -26,6 +26,8 @@ const ALL_TOOLS = [
   'get_beat',
   'get_npc',
   'list_npcs',
+  'get_faction',
+  'list_factions',
   'get_location',
   'list_locations',
   'get_character',
@@ -73,6 +75,9 @@ const ALL_TOOLS = [
   'remove_branch',
   'upsert_npc',
   'delete_npc',
+  'upsert_faction',
+  'set_faction_reputation',
+  'delete_faction',
   'upsert_location',
   'delete_location',
   'set_location_discovery',
@@ -189,7 +194,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(97);
+    expect(tools).toHaveLength(102);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -840,6 +845,49 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // A genuinely different name still creates a new NPC.
     const other = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'A Different NPC' } });
     expect((parseResult(other) as { id: number }).id).not.toBe(npc1.id);
+  });
+
+  it('#221: faction tools — upsert, list/get with members, reputation, delete', async () => {
+    const client = await mcpClient(dmToken);
+
+    // Create a faction via upsert (no id).
+    const created = parseResult(
+      await client.callTool({ name: 'upsert_faction', arguments: { campaignId, name: 'MCP Guild', kind: 'guild', reputation: 5 } }),
+    ) as { id: number; reputation: number; standing: string };
+    expect(created.reputation).toBe(5);
+
+    // Idempotent re-run by name updates in place (no duplicate).
+    const again = parseResult(
+      await client.callTool({ name: 'upsert_faction', arguments: { campaignId, name: 'mcp guild', kind: 'crime syndicate' } }),
+    ) as { id: number; kind: string };
+    expect(again.id).toBe(created.id);
+    expect(again.kind).toBe('crime syndicate');
+
+    // Link an NPC to the faction, then get_faction surfaces it as a member.
+    const npc = parseResult(
+      await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'MCP Guildmaster', factionId: created.id } }),
+    ) as { id: number };
+    const withMembers = parseResult(await client.callTool({ name: 'get_faction', arguments: { factionId: created.id } })) as {
+      members: { id: number }[];
+    };
+    expect(withMembers.members.some((m) => m.id === npc.id)).toBe(true);
+
+    // set_faction_reputation: delta bump ("the party burned the guildhall").
+    const dropped = parseResult(
+      await client.callTool({ name: 'set_faction_reputation', arguments: { factionId: created.id, delta: -25, standing: 'hostile' } }),
+    ) as { reputation: number; standing: string };
+    expect(dropped.reputation).toBe(-20);
+    expect(dropped.standing).toBe('hostile');
+
+    // list_factions includes it.
+    const list = parseResult(await client.callTool({ name: 'list_factions', arguments: { campaignId } })) as { id: number }[];
+    expect(list.some((f) => f.id === created.id)).toBe(true);
+
+    // Delete unlinks the member NPC (not deletes it).
+    const del = await client.callTool({ name: 'delete_faction', arguments: { factionId: created.id } });
+    expect(del.isError).toBeFalsy();
+    const npcAfter = parseResult(await client.callTool({ name: 'get_npc', arguments: { npcId: npc.id } })) as { factionId: number | null };
+    expect(npcAfter.factionId).toBeNull();
   });
 
   it('#159: a second identical upsert_location updates in place instead of duplicating', async () => {

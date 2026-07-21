@@ -25,6 +25,7 @@ type ViewValue = 'open' | 'history';
 const entityRoute: Record<EntityTypeValue, string | null> = {
   quest: 'quests',
   npc: 'npcs',
+  faction: 'factions',
   location: 'locations',
   character: 'characters',
   session: 'sessions',
@@ -35,6 +36,7 @@ const entityRoute: Record<EntityTypeValue, string | null> = {
 const entityIcon: Record<EntityTypeValue, string> = {
   quest: '📜',
   npc: '🤝',
+  faction: '🏴',
   location: '🗺',
   character: '🛡',
   session: '📓',

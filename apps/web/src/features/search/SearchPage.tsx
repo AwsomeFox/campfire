@@ -13,6 +13,7 @@ import { Card, EmptyState, ErrorNote, Skeleton, TextInput } from '../../componen
 const typeLabel: Record<SearchResult['type'], string> = {
   quest: 'Quests',
   npc: 'NPCs',
+  faction: 'Factions',
   location: 'Locations',
   character: 'Characters',
   session: 'Sessions',
@@ -22,6 +23,7 @@ const typeLabel: Record<SearchResult['type'], string> = {
 const typeIcon: Record<SearchResult['type'], string> = {
   quest: '📜',
   npc: '🧑',
+  faction: '🏴',
   location: '🗺️',
   character: '🛡️',
   session: '📖',
@@ -31,6 +33,7 @@ const typeIcon: Record<SearchResult['type'], string> = {
 const typeRoute: Record<SearchResult['type'], string> = {
   quest: 'quests',
   npc: 'npcs',
+  faction: 'factions',
   location: 'locations',
   character: 'characters',
   session: 'sessions',

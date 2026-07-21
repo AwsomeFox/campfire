@@ -5,6 +5,7 @@ import { CampaignsModule } from '../campaigns/campaigns.module';
 import { QuestsModule } from '../quests/quests.module';
 import { StorylinesModule } from '../storylines/storylines.module';
 import { NpcsModule } from '../npcs/npcs.module';
+import { FactionsModule } from '../factions/factions.module';
 import { LocationsModule } from '../locations/locations.module';
 import { SessionsModule } from '../sessions/sessions.module';
 import { CharactersModule } from '../characters/characters.module';
@@ -30,6 +31,7 @@ import { McpController } from './mcp.controller';
     QuestsModule,
     StorylinesModule,
     NpcsModule,
+    FactionsModule,
     LocationsModule,
     SessionsModule,
     CharactersModule,

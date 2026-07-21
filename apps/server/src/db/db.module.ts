@@ -687,6 +687,28 @@ function migrateCombatantsTableForTokenSize(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before first-class factions (issue #221): `npcs.faction_id`
+ * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same shape as
+ * migrateLocationsTableForParentId above. The `factions` table itself is created by
+ * BOOTSTRAP_SQL's CREATE TABLE IF NOT EXISTS on every boot, so no migration is needed
+ * for it. Existing NPCs get NULL (no faction), preserving the pre-migration behavior;
+ * the DM opts an NPC into a faction by setting factionId. The declared REFERENCES clause
+ * is omitted here (added only for fresh DBs via bootstrap) per the #69 convention —
+ * SQLite cannot ADD a foreign key to an existing table. New DBs never hit this path.
+ */
+function migrateNpcsTableForFactionId(sqlite: Database.Database): void {
+  const hasNpcsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='npcs'")
+    .get();
+  if (!hasNpcsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(npcs)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'faction_id')) return;
+
+  sqlite.exec('ALTER TABLE npcs ADD COLUMN faction_id INTEGER');
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -730,6 +752,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0028_dice_rolls_keep_drop', run: migrateDiceRollsTableForKeepDrop },
   { name: '0029_encounters_vtt_grid_fog', run: migrateEncountersTableForVtt },
   { name: '0030_combatants_token_size', run: migrateCombatantsTableForTokenSize },
+  { name: '0031_npcs_faction_id', run: migrateNpcsTableForFactionId },
 ];
 
 /**

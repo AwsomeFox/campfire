@@ -19,6 +19,7 @@ const MentionsContext = createContext<MentionsValue>({ campaignId: undefined, ta
 export const mentionRoute: Record<MentionTarget['type'], string> = {
   quest: 'quests',
   npc: 'npcs',
+  faction: 'factions',
   location: 'locations',
   character: 'characters',
   session: 'sessions',

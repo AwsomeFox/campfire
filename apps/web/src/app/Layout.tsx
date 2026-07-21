@@ -339,6 +339,7 @@ export function Layout() {
         { key: 'quests', label: t('nav.quests'), to: `/c/${campaignId}/quests` },
         { key: 'world', label: t('nav.world'), to: `/c/${campaignId}/locations` },
         { key: 'npcs', label: t('nav.npcs'), to: `/c/${campaignId}/npcs` },
+        { key: 'factions', label: t('nav.factions'), to: `/c/${campaignId}/factions` },
         { key: 'party', label: t('nav.party'), to: `/c/${campaignId}/party` },
         { key: 'inventory', label: t('nav.inventory'), to: `/c/${campaignId}/inventory` },
         { key: 'sessions', label: t('nav.sessions'), to: `/c/${campaignId}/sessions` },

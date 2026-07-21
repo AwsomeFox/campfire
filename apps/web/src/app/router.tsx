@@ -104,6 +104,14 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/npcs/NpcPage')),
           },
           {
+            path: '/c/:campaignId/factions',
+            element: lazyPage(() => import('../features/factions/FactionListPage')),
+          },
+          {
+            path: '/c/:campaignId/factions/:factionId',
+            element: lazyPage(() => import('../features/factions/FactionPage')),
+          },
+          {
             path: '/c/:campaignId/locations',
             element: lazyPage(() => import('../features/locations/LocationListPage')),
           },
