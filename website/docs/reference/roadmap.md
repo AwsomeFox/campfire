@@ -27,7 +27,7 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 - ✅ **Encounters / run-session** — initiative (auto-rolled d20+DEX), turn order, next-turn, at-table HP & conditions, **temp HP**, the 5e **death-save** lifecycle (dying → stable/dead, plus overkill), adding several identical monsters at once (auto-numbered) and renaming combatants, add monsters from the compendium, HP writes back to sheets on end
 - ✅ **Battle maps / VTT** (#39/#40) — a grid the DM configures (size, scale, unit, snap), draggable **tokens** with sizes, a **measure/ruler** tool, and **fog of war**: the DM reveals rectangular regions and a non-DM viewer never learns the position of a token hidden in the dark (the server redacts unrevealed token coordinates)
 - ✅ **Dice roller** — server-side, audited, on the dashboard and in combat, with a campaign-shared roll log every member sees; supports keep/drop notation (`khN`/`klN`/`dhN`/`dlN`, i.e. advantage/disadvantage and 4d6-drop-lowest) and an optional DC + label so a roll records success/failure
-- ✅ **Compendium** — Open5e SRD import **plus generic open-licensed dataset upload** (any system, license-gated), installs run as non-blocking background jobs with per-section progress, and a DM (not just the server admin) can install; exact-name-first full-text search and a reader
+- ✅ **Compendium** — **multi-source** rule packs from a per-source picker: **live one-click** imports for D&D 5e (Open5e), Pathfinder 2e (Archives of Nethys) and Open Legend, **mirror-URL / JSON upload** for Pathfinder 1e, Starfinder, 13th Age and OSR retroclones, **plus a generic open-licensed dataset upload** for anything else (license-gated). Installs run as non-blocking background jobs with per-section progress, and a DM (not just the server admin) can install; exact-name-first full-text search and a reader
 - ✅ **Campaign search & @-mentions** — campaign-wide search across entities, with @-mention link targets
 - ✅ **Proposals** — AI/collab writes queue for DM approval, with before/after diffs against current state
 - ✅ **Notifications** — recap posted, note reply, added to a campaign, next session — with an in-app bell
@@ -51,7 +51,7 @@ The end-to-end tabletop loop is complete and covered by an automated test suite.
 
 An AI agent can run an entire campaign over MCP alone — verified end-to-end:
 
-- ✅ **Full MCP parity — ~85 tools** covering campaign lifecycle, characters (incl. XP awards & level-up), story arcs/beats/branches, the whole combat loop (including dealing damage to combatants), the session-zero charter, members, rule packs, deletes, and read-back; tool schemas serialize inline (no broken `$ref`s) and strict-schema violations return the documented `{error}` JSON
+- ✅ **Full MCP parity — 134 tools** covering campaign lifecycle, characters (incl. XP awards & level-up), story arcs/beats/branches, the whole combat loop (including dealing damage to combatants), the session-zero charter, the AI Dungeon Master seat, members, rule packs, deletes, and read-back; tool schemas serialize inline (no broken `$ref`s) and strict-schema violations return the documented `{error}` JSON
 - ✅ **MCP resources & prompts** — read surfaces are also exposed as MCP resources, plus prep/recap prompts, beyond the tool set
 - ✅ **Strict schemas & structured errors** — unknown args are rejected with named keys; errors are machine-parseable `{status, code, message}` JSON
 - ✅ **Headless agent auth** — `POST /auth/token` (credentials → PAT) and an admin "mint a token for a user", so agents and whole tables bootstrap without a browser
@@ -70,8 +70,9 @@ The operator and the storyteller are kept distinct
 
 Honest rough edges that exist but aren't finished:
 
-- 🟡 **AI scribe automation** — the proposal queue is real, but there's no built-in scheduled/automatic scribe; today it's client-driven (connect an MCP client and ask it to act)
-- 🟡 **Multi-system rule packs** — Open5e (D&D 5e SRD) has a built-in importer, and any other system can be added via the **generic open-licensed dataset upload**; no other system ships with a one-click importer yet, so non-5e content means bringing your own dataset
+- 🟡 **Combat mechanical depth** — the tracker covers initiative, turns, HP (incl. temp HP and 5e death saves) and conditions, but deeper 5e mechanics (concentration, legendary/lair actions, automated condition effects) aren't modelled — fine for a tracker, a limit for crunchy tables
+- 🟡 **Mobile live-combat nav** — the run-session screen works on a phone, but reaching it is a couple of taps deep in the "More" menu and the "Live" chip only surfaces on the dashboard
+- 🟡 **Published-adventure import** — you can clone/template a campaign and import a Campfire JSON export, but there's no importer for third-party published adventures/modules
 
 ## Planned ⬜
 
@@ -94,14 +95,14 @@ who hits them. Grouped by theme:
 - ✅ **Campaign archive** — a real read-only "completed" state, enforced server-wide
 - ✅ **Campaign templates / cloning / import** — full or template (prep-only) duplication, plus import of a Campfire JSON export (round-trips the export)
 - ✅ **D&D Beyond import** — pull a **public** D&D Beyond character sheet by id or URL (unofficial, read-only)
-- ✅ **Multi-system rule packs** — other systems via **uploaded open-licensed datasets** (license-gated), alongside the built-in Open5e (D&D 5e SRD) importer
+- ✅ **Multi-system rule packs** — **live one-click** importers for D&D 5e (Open5e), Pathfinder 2e (Archives of Nethys) and Open Legend; **mirror-URL / JSON upload** for Pathfinder 1e, Starfinder, 13th Age and OSR retroclones; and a **generic open-licensed dataset upload** for anything else (all license-gated)
 - ✅ **DM-installable content** — a DM (not just the server admin) can install rule packs, and install runs as a non-blocking background job with per-section progress
 
 **Operator confidence**
 
 - ✅ **Backup & restore** — WAL-safe whole-server backup (`VACUUM INTO` + uploads) and restore over the API, plus opt-in scheduled on-disk backups (`BACKUP_SCHEDULE_ENABLED`) — see [Backups & upgrades](../administration/operations.md)
 - ✅ **In-app OIDC config & test** — configure OIDC from **Admin → OIDC single sign-on** with a **Test connection** check, alongside (and overridable by) env vars
-- ✅ **Admin observability** — a server-admin metrics snapshot at **Admin → Metrics** (`/admin/metrics`): entity counts, on-disk DB size, uptime, running version, and recent activity
+- ✅ **Admin observability** — a server-admin metrics snapshot on the **Admin overview** (`/admin`): entity counts, on-disk DB size, uptime, running version, and recent activity
 - ✅ **Server-wide audit** — a server-admin audit trail at **Admin → Audit** (`/admin/audit`) of admin actions not tied to any one campaign, alongside the existing per-campaign audit
 - ✅ **Storage management** — a server-admin storage console at **Admin → Storage** (`/admin/storage`): total upload bytes, a per-campaign breakdown with **quotas** and over-quota flags (uploads past a cap are rejected with `413`), the real on-disk total, and an orphan summary (rows-without-file, files-without-row) for cleanup
 
@@ -116,8 +117,9 @@ who hits them. Grouped by theme:
 **AI depth**
 
 - ✅ **MCP resources & prompts** — read surfaces are exposed as MCP resources, with prep/recap prompts, beyond the tool set
-- 🟡 **AI Dungeon Master seat** (issue #28, experimental) — a per-campaign "DM seat" with an admin-gated server-wide opt-in, per-campaign token budget/metering, an `ai_dm_narrate` MCP tool, and full audit. The **shipped default provider is a no-op scaffold that makes no vendor call** — so in a stock install the connected MCP agent authors the narration and drives the tools; a self-hoster can bind their own `AI_DM_PROVIDER` for server-side generation. There is no web UI and no built-in API-key storage. See [AI capabilities](../ai/capabilities.md)
-- ⬜ **AI co-DM** — generated NPCs, encounters, maps, and story beats, always routed through the approval queue
+- ✅ **AI Dungeon Master seat** (issue #28, still experimental & admin-gated) — a per-campaign "DM seat" with a full **web UI** (**Settings → AI Dungeon Master**) and an **operating mode**: **off**, **co-DM** (proposes only → the approval queue), or **driver** (holds the seat and runs the live session). Even a driver's **canon writes are forced through proposals**, and it's **tool-scoped to live-play tools** with cross-campaign and admin/destructive tools refused. The UI configures provider (OpenAI/Anthropic/mock) + a **write-only, encrypted API key** (only last-4 shown), a model allowlist, a token budget, and steering instructions; a server admin gets an **AI console** at `/admin/ai` (kill switch, server-wide token cap, provider health). The **shipped default provider is still a no-op that makes no vendor call** — Campfire never calls an LLM vendor from the server by default; narration comes from a connected MCP agent (dm-scoped PAT) or a provider you configure. Players can **nudge / flag / table-vote / request a human takeover** on a stuck driver. All turns are metered against the budget and **audited**. See [AI capabilities](../ai/capabilities.md)
+- ✅ **AI co-DM** — the seat's **co-DM mode**: generated NPCs, encounters, recaps, and story beats always routed through the **approval queue**, never written to canon directly
+- ✅ **Scheduled AI scribe** — an opt-in scribe that drafts session recaps (after a scheduled session ends, or on a per-campaign cron) and files each **as a proposal** for the DM to approve; same experimental gating and token budget as the seat
 
 ## How this list is kept
 
