@@ -44,10 +44,16 @@ export class RulesController {
    */
   @Post('packs/install')
   @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: 'Install a rule pack from Open5e (background job)', description: 'Server admin or DM of any campaign. Returns 202 with an install job to poll.' })
+  @ApiOperation({
+    summary: 'Install a rule pack from an open source (background job)',
+    description: "Server admin or DM of any campaign. `source` selects the importer: 'open5e' (D&D 5e, default) or 'pf2e' (Pathfinder 2e, issue #295). Returns 202 with an install job to poll.",
+  })
   @ApiResponse({ status: 202, description: 'Install job accepted; poll packs/install-jobs/:id.' })
   async install(@Body() body: RulePackInstallDto, @CurrentUser() user: RequestUser) {
     await this.assertCanInstall(user);
+    // Dispatch by source — the generalizable seam for adding open-content importers
+    // (issue #295, and #296-300): each new system is a new `source` + a runXInstall path.
+    if (body.source === 'pf2e') return this.rules.enqueuePf2eInstall(body, user);
     return this.rules.enqueueOpen5eInstall(body, user);
   }
 

@@ -11,6 +11,10 @@ import type { Character, InventoryItem, Treasury } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
+import { IconPicker } from '../../components/IconPicker';
+import { getIcon } from '../../lib/icons';
+import { itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
 
 const COINS = [
   { key: 'pp', label: 'Platinum' },
@@ -264,8 +268,13 @@ function TreasuryCard({
         <div className="grid grid-cols-3 md:grid-cols-5 gap-3">
           {COINS.map(({ key, label }) => (
             <div key={key} className="text-center rounded-md py-2" style={{ background: 'var(--color-neutral-800)' }}>
-              <p className="text-lg font-extrabold text-white">{treasury[key]}</p>
-              <p className="text-[11px] text-slate-500 uppercase tracking-wide">
+              <div className="flex items-center justify-center gap-1.5">
+                <span className="inline-flex shrink-0" style={{ color: COIN_COLORS[key] }}>
+                  <GameIcon slug={COIN_ICON} size={16} title={`${label} coins`} />
+                </span>
+                <p className="text-lg font-extrabold text-white leading-none">{treasury[key]}</p>
+              </div>
+              <p className="text-[11px] text-slate-500 uppercase tracking-wide mt-1">
                 {label} ({key})
               </p>
             </div>
@@ -333,6 +342,7 @@ function ItemRow({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickingIcon, setPickingIcon] = useState(false);
 
   async function patch(body: Record<string, unknown>) {
     setBusy(true);
@@ -373,8 +383,27 @@ function ItemRow({
 
   const currentOwnerValue = item.ownerType === 'party' ? 'party' : String(item.characterId ?? '');
 
+  const iconSlug = itemIconSlug(item);
+  const hasOverride = !!(item.iconSlug && item.iconSlug.trim());
+
   return (
     <li className="py-2 flex items-start gap-3">
+      {editable ? (
+        <button
+          type="button"
+          onClick={() => setPickingIcon(true)}
+          disabled={busy}
+          title={hasOverride ? `Icon: ${getIcon(iconSlug)?.name ?? 'custom'} — click to change` : 'Auto icon — click to override'}
+          aria-label={`Change icon for ${item.name}`}
+          className="shrink-0 mt-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent-700)]"
+        >
+          <GameIcon slug={iconSlug} size={22} title={item.name} />
+        </button>
+      ) : (
+        <span className="shrink-0 mt-0.5 text-[var(--color-accent)]">
+          <GameIcon slug={iconSlug} size={22} title={item.name} />
+        </span>
+      )}
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-white truncate">
           {item.name}
@@ -433,6 +462,17 @@ function ItemRow({
           </Btn>
         </div>
       )}
+      {pickingIcon && (
+        <IconPicker
+          value={item.iconSlug ?? ''}
+          onSelect={(slug) => {
+            setPickingIcon(false);
+            // '' clears the override, reverting the row to its name-derived default.
+            if ((item.iconSlug ?? '') !== slug) void patch({ iconSlug: slug });
+          }}
+          onClose={() => setPickingIcon(false)}
+        />
+      )}
     </li>
   );
 }
@@ -452,8 +492,14 @@ function AddItemForm({
   const [qty, setQty] = useState('1');
   const [owner, setOwner] = useState('party');
   const [notes, setNotes] = useState('');
+  const [iconSlug, setIconSlug] = useState('');
+  const [pickingIcon, setPickingIcon] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Live preview: the DM's explicit pick, else the name-derived default so they
+  // see what the row will show before saving.
+  const previewSlug = itemIconSlug({ name, iconSlug });
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -465,6 +511,7 @@ function AddItemForm({
         name: name.trim(),
         qty: Math.max(0, Math.trunc(Number(qty) || 1)),
         notes: notes.trim(),
+        iconSlug, // '' keeps the auto (name-derived) default
       };
       if (owner !== 'party') {
         body.ownerType = 'character';
@@ -499,6 +546,20 @@ function AddItemForm({
           </select>
           <TextInput placeholder="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
         </div>
+        <div className="flex items-center gap-3">
+          <span className="inline-flex h-10 w-10 items-center justify-center rounded-md text-[var(--color-accent)] shrink-0" style={{ background: 'var(--color-neutral-800)' }}>
+            <GameIcon slug={previewSlug} size={24} title={getIcon(previewSlug)?.name} />
+          </span>
+          <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={() => setPickingIcon(true)}>
+            {iconSlug ? 'Change icon' : 'Choose icon'}
+          </Btn>
+          {iconSlug && (
+            <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={() => setIconSlug('')}>
+              Auto
+            </Btn>
+          )}
+          {!iconSlug && <span className="text-[11px] text-slate-500">Auto from name</span>}
+        </div>
         <div className="flex gap-2 justify-end">
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>
             Cancel
@@ -508,6 +569,16 @@ function AddItemForm({
           </Btn>
         </div>
       </form>
+      {pickingIcon && (
+        <IconPicker
+          value={iconSlug}
+          onSelect={(slug) => {
+            setIconSlug(slug);
+            setPickingIcon(false);
+          }}
+          onClose={() => setPickingIcon(false)}
+        />
+      )}
     </Card>
   );
 }

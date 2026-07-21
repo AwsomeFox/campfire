@@ -881,6 +881,26 @@ function migrateRuleEntriesTableForIconSlug(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before inventory items could carry a bundled entity
+ * icon (issue #307): `inventory_items.icon_slug` didn't exist. Plain ADD COLUMN
+ * with a '' default — same idiom as migrateNpcsTableForIconSlug (0037). Existing
+ * items get '' (no override), so the UI keeps deriving a default icon from the
+ * item's name/type; a DM opts an item into an explicit icon by picking one. New
+ * DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateInventoryItemsTableForIconSlug(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'icon_slug')) return;
+
+  sqlite.exec("ALTER TABLE inventory_items ADD COLUMN icon_slug TEXT NOT NULL DEFAULT ''");
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -932,6 +952,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0036_story_beats_links', run: migrateStoryBeatsTableForLinks },
   { name: '0037_npcs_icon_slug', run: migrateNpcsTableForIconSlug },
   { name: '0038_rule_entries_icon_slug', run: migrateRuleEntriesTableForIconSlug },
+  { name: '0039_inventory_items_icon_slug', run: migrateInventoryItemsTableForIconSlug },
 ];
 
 /**

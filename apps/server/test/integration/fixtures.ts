@@ -232,6 +232,19 @@ export function writeOldSchemaDb(dataDir: string): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    -- inventory_items: no icon_slug (issue #307, migration 0039).
+    CREATE TABLE inventory_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL,
+      owner_type TEXT NOT NULL DEFAULT 'party',
+      character_id INTEGER,
+      name TEXT NOT NULL,
+      qty INTEGER NOT NULL DEFAULT 1,
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   // Seed one row per table so migrations must preserve real data, not just an empty schema.
@@ -270,6 +283,9 @@ export function writeOldSchemaDb(dataDir: string): void {
   ).run(now, now);
   sqlite.prepare(
     "INSERT INTO rule_entries (pack_id, slug, name, type, summary, body, created_at, updated_at) VALUES (1, 'legacy-fireball', 'Legacy Fireball', 'spell', 'a bright streak', 'boom', ?, ?)",
+  ).run(now, now);
+  sqlite.prepare(
+    "INSERT INTO inventory_items (campaign_id, owner_type, name, qty, notes, created_at, updated_at) VALUES (1, 'party', 'Legacy Longsword', 1, '', ?, ?)",
   ).run(now, now);
 
   sqlite.close();

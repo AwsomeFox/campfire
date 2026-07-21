@@ -718,6 +718,7 @@ export const inventoryItems = sqliteTable('inventory_items', {
   name: text('name').notNull(),
   qty: integer('qty').notNull().default(1),
   notes: text('notes').notNull().default(''),
+  iconSlug: text('icon_slug').notNull().default(''), // optional game-icons override (issue #307)
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

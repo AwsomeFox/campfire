@@ -25,6 +25,7 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     name: row.name,
     qty: row.qty,
     notes: row.notes,
+    iconSlug: row.iconSlug,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -119,6 +120,7 @@ export class InventoryService {
         name: input.name,
         qty: input.qty ?? 1,
         notes: input.notes ?? '',
+        iconSlug: input.iconSlug ?? '',
         createdAt: ts,
         updatedAt: ts,
       })
@@ -162,6 +164,7 @@ export class InventoryService {
     if (input.name !== undefined) update.name = input.name;
     if (input.qty !== undefined) update.qty = input.qty;
     if (input.notes !== undefined) update.notes = input.notes;
+    if (input.iconSlug !== undefined) update.iconSlug = input.iconSlug;
     if (moved) {
       update.ownerType = finalOwnerType;
       update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;

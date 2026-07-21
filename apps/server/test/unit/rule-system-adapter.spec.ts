@@ -117,7 +117,8 @@ describe('RuleSystemAdapter — registry resolution', () => {
     expect(Dnd5eAdapter.id).toBe('dnd5e');
   });
 
-  it('falls back to 5e for an unrecognized rule system (no second system yet)', () => {
+  it('falls back to 5e for an unrecognized rule-system slug (PF2e is registered under pf2e-srd, not this)', () => {
     expect(ruleSystemAdapter('pathfinder-2e')).toBe(Dnd5eAdapter);
+    expect(ruleSystemAdapter('some-homebrew-pack')).toBe(Dnd5eAdapter);
   });
 });
