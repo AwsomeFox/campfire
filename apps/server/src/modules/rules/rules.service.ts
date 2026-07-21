@@ -24,6 +24,14 @@ import {
   type ImportedEntry,
   type Open5eSection,
 } from './open5e-importer';
+import {
+  ALL_OPEN_LEGEND_SECTIONS,
+  OL_MAX_ENTRIES_PER_SECTION,
+  OPEN_LEGEND_DEFAULT_BASE_URL,
+  fetchOpenLegendSection,
+  type OpenLegendSection,
+} from './open-legend-importer';
+import { OPEN_LEGEND_PACK_SLUG } from '@campfire/schema';
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -336,6 +344,55 @@ export class RulesService {
       allEntries,
       user,
       `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs the Open Legend SRD/community codex rule pack (issue #299), or incrementally
+   * adds any not-yet-present entries if "open-legend-srd" is already installed. Mirrors
+   * installFromOpen5e exactly — same concurrent-fresh-install race guard, same dedupe-by-
+   * (slug,type), same persistence path — but pulls Open Legend's attribute-based content
+   * (creatures/banes/boons/feats/items) instead of Open5e's. Banes and boons both import as
+   * 'condition' entries, distinguished by dataJson.kind. Bulk ingest runs through the same
+   * background install-job machinery as Open5e once a controller enqueues it (the job-source
+   * enum widening is left to the #275 ruleset program so sibling systems land theirs together).
+   */
+  async installFromOpenLegend(
+    input: { url?: string; sections?: OpenLegendSection[] },
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? OPEN_LEGEND_DEFAULT_BASE_URL;
+    const sections: OpenLegendSection[] = input.sections?.length ? input.sections : ALL_OPEN_LEGEND_SECTIONS;
+    const slug = OPEN_LEGEND_PACK_SLUG;
+
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchOpenLegendSection(baseUrl, s);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Open Legend import returned no entries for the requested sections');
+    }
+    if (totalSkipped > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[open-legend-importer] install "${slug}": ${allEntries.length} entries imported across ${sections.length} section(s), ${totalSkipped} row(s) skipped total (see per-section warnings above)`,
+      );
+    }
+
+    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
+    const license = licenses.size > 0 ? [...licenses].join(', ') : 'OGL';
+
+    return this.persistPack(
+      { slug, name: 'Open Legend SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
+      allEntries,
+      user,
+      `(cap ${OL_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
     );
   }
 
