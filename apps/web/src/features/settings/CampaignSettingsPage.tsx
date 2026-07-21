@@ -15,6 +15,7 @@ import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
+import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
 import AiDmCard from './AiDmCard';
 
 const DANGER_LEVELS: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
@@ -339,13 +340,12 @@ function RuleSystemCard({
     };
   }, []);
 
-  async function changeRuleSystem(value: string) {
-    setSelected(value);
+  async function applyRuleSystem() {
     setSaving(true);
     setError(null);
     try {
       const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, {
-        ruleSystem: value,
+        ruleSystem: selected,
       });
       onSaved(updated);
     } catch (err) {
@@ -355,7 +355,21 @@ function RuleSystemCard({
     }
   }
 
-  const currentPack = packs?.find((p) => p.slug === campaign.ruleSystem);
+  const currentSlug = campaign.ruleSystem ?? '';
+  const currentPack = packs?.find((p) => p.slug === currentSlug);
+  // A campaign can point at a slug whose pack has since been uninstalled (#348). Uninstall
+  // now clears the slug server-side, but a stale reference (older data, or a race) still
+  // resolves to the D&D 5e adapter for combat — surface that plainly rather than a bare slug.
+  const dangling = !!currentSlug && !!packs && !currentPack;
+  const currentMechanics = currentSlug ? mechanicsForPackSlug(currentSlug) : undefined;
+
+  // The pending switch — what mechanically changes if the admin applies `selected` (#348).
+  const dirty = selected !== currentSlug;
+  const targetPack = packs?.find((p) => p.slug === selected);
+  const targetLabel = selected ? targetPack?.name ?? selected : 'None / homebrew';
+  const targetMechanics = selected
+    ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected)} combat math.`
+    : 'No installed rules — dice, sheets and notes still work; combat uses D&D 5e defaults.';
 
   return (
     <div className="card elev-sm">
@@ -366,8 +380,10 @@ function RuleSystemCard({
             <span className="tag tag-accent-2" style={{ fontSize: 10 }}>{currentPack.name}</span>
             <span className="tag tag-accent" style={{ fontSize: 10 }}>pack installed</span>
           </>
-        ) : campaign.ruleSystem ? (
-          <span className="tag tag-neutral" style={{ fontSize: 10 }}>{campaign.ruleSystem}</span>
+        ) : dangling ? (
+          <span className="tag tag-neutral" style={{ fontSize: 10 }}>
+            {currentSlug} · pack no longer installed
+          </span>
         ) : (
           <span className="tag tag-neutral" style={{ fontSize: 10 }}>None / homebrew</span>
         )}
@@ -380,12 +396,19 @@ function RuleSystemCard({
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         Powers the compendium, character math, statblocks and AI rules lookups. Packs install server-wide from open
-        sources; switching systems re-validates every sheet.
+        sources; switching systems keeps existing sheets and combatant stats and only re-interprets them.
       </p>
-      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Supported today: D&amp;D 5e SRD via Open5e. More systems are planned — Pathfinder needs a manual pack,
-        coming later.
-      </p>
+      {currentPack && currentMechanics && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          <strong>Current rules:</strong> {currentMechanics}
+        </p>
+      )}
+      {dangling && (
+        <p style={{ margin: 0, fontSize: 11.5, color: '#fbbf24' }}>
+          The pack <strong>{currentSlug}</strong> is no longer installed on this server — this campaign is using D&amp;D
+          5e defaults for combat math. Pick an installed system below (or None / homebrew) to clear the stale reference.
+        </p>
+      )}
       {packs && packs.length > 0 && (
         <div className="field" style={{ maxWidth: 320 }}>
           <label htmlFor="settings-rulesystem">Change rule system</label>
@@ -394,7 +417,7 @@ function RuleSystemCard({
             className="input"
             value={selected}
             disabled={saving}
-            onChange={(e) => void changeRuleSystem(e.target.value)}
+            onChange={(e) => setSelected(e.target.value)}
           >
             <option value="">None / homebrew</option>
             {packs.map((pack) => (
@@ -403,6 +426,41 @@ function RuleSystemCard({
               </option>
             ))}
           </select>
+        </div>
+      )}
+      {dirty && packs && packs.length > 0 && (
+        <div
+          style={{
+            border: '1px solid var(--color-divider)',
+            borderRadius: 'var(--radius-md)',
+            padding: '10px 12px',
+            fontSize: 11.5,
+          }}
+          className="flex flex-col gap-1.5"
+        >
+          <p style={{ margin: 0, color: 'var(--color-text)' }}>
+            Switch to <strong>{targetLabel}</strong>?
+          </p>
+          <p className="text-muted" style={{ margin: 0 }}>
+            {targetMechanics}
+          </p>
+          <p className="text-muted" style={{ margin: 0 }}>
+            Existing encounters and combatants keep their stored numbers — only the interpretation (initiative,
+            DC model, condition list, degrees of success) changes at read time. Nothing is recalculated or lost.
+          </p>
+          <div className="flex gap-2 items-center" style={{ marginTop: 4 }}>
+            <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={applyRuleSystem}>
+              {saving ? 'Applying…' : 'Apply change'}
+            </button>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12.5 }}
+              disabled={saving}
+              onClick={() => setSelected(currentSlug)}
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
       {packs && packs.length === 0 && (

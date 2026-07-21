@@ -20,6 +20,7 @@ export function ConfirmDialog({
   cancelLabel = 'Cancel',
   danger = true,
   busy = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: {
@@ -29,6 +30,8 @@ export function ConfirmDialog({
   cancelLabel?: string;
   danger?: boolean;
   busy?: boolean;
+  /** Disables the confirm button without the busy spinner — e.g. an un-ticked acknowledgement. */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -61,7 +64,7 @@ export function ConfirmDialog({
           <Btn ghost ref={cancelRef} onClick={onCancel} disabled={busy}>
             {cancelLabel}
           </Btn>
-          <Btn danger={danger} onClick={onConfirm} disabled={busy}>
+          <Btn danger={danger} onClick={onConfirm} disabled={busy || confirmDisabled}>
             {busy ? 'Working…' : confirmLabel}
           </Btn>
         </div>

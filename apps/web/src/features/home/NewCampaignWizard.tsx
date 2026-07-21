@@ -12,6 +12,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { Campaign, RulePack } from '@campfire/schema';
+import { mechanicsForPackSlug } from '../../lib/rules';
 
 type Step = 'details' | 'system';
 
@@ -221,6 +222,11 @@ export function NewCampaignWizard({
                         <span className="text-muted" style={{ display: 'block', fontSize: 11.5, marginTop: 2 }}>
                           v{pack.version} · {pack.license} · {pack.entryCount} entries
                         </span>
+                        {mechanicsForPackSlug(pack.slug) && (
+                          <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2, opacity: 0.85 }}>
+                            {mechanicsForPackSlug(pack.slug)}
+                          </span>
+                        )}
                       </span>
                     </button>
                   ))}
