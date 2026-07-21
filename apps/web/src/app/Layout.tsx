@@ -15,6 +15,7 @@ import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
 import { NotificationsBell } from '../features/notifications/NotificationsBell';
+import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 
 function initials(name: string): string {
   const trimmed = name.trim();
@@ -244,6 +245,15 @@ export function Layout() {
   // trusting a once-per-session flag.
   const staleCheckedIdRef = useRef<number | undefined>(undefined);
 
+  // Single app-wide AI-DM stream subscription (#344, building on #338's shared
+  // useAiDmStream + toolActivity map). Mounted here — the campaign chrome every
+  // campaign-scoped page renders inside — so the combat tracker, dashboard, and
+  // any future Table page (#339) all read off ONE connection via the context
+  // below instead of each opening their own. Opens only when the seat is in
+  // Driver mode (checked inside the hook via useAiDmSeat); everything else
+  // (mode off/co_dm, or no campaign in view) leaves it closed and inert.
+  const liveActivity = useAiDmLiveActivityState(campaignId);
+
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
 
@@ -304,6 +314,19 @@ export function Layout() {
       cancelled = true;
     };
   }, [campaignId, isDm, location.pathname]);
+
+  // Bump the proposals badge the MOMENT the AI files one (#344 point 3), rather than
+  // waiting for the next route change to re-poll above. `proposalFiledCount` is
+  // monotonic (see useAiDmLiveActivity), so diffing it against the previous render
+  // tells us exactly how many landed since — survives StrictMode's double-invoke and
+  // any reconnect replay without double-counting. The route-change effect above still
+  // owns reconciling against server truth (e.g. another DM already approved one).
+  const prevProposalFiledCountRef = useRef(0);
+  useEffect(() => {
+    const delta = liveActivity.proposalFiledCount - prevProposalFiledCountRef.current;
+    prevProposalFiledCountRef.current = liveActivity.proposalFiledCount;
+    if (delta > 0 && isDm) setPendingProposals((n) => n + delta);
+  }, [liveActivity.proposalFiledCount, isDm]);
 
   // me.memberships is fetched once at login, so it's stale the moment a DM changes
   // someone's access mid-session. Once the campaign list has loaded, if this campaign
@@ -438,6 +461,7 @@ export function Layout() {
   }
 
   return (
+    <AiDmLiveActivityProvider value={liveActivity}>
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
       {/* Desktop sidebar */}
       {(campaignId !== undefined || onAdminRoute) && (
@@ -693,6 +717,7 @@ export function Layout() {
 
       {showPasswordModal && <ChangePasswordModal onClose={() => setShowPasswordModal(false)} />}
     </div>
+    </AiDmLiveActivityProvider>
   );
 }
 
