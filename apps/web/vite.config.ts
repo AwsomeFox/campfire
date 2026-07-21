@@ -44,14 +44,24 @@ export default defineConfig({
         cleanupOutdatedCaches: true,
         runtimeCaching: [
           {
-            // Read-only GETs (e.g. campaign summary) stay available offline
-            // by serving the last successful response from cache.
+            // Read-only GETs (e.g. campaign summary) stay available offline by
+            // serving the last successful response from cache — but ONLY as a
+            // fallback. NetworkFirst here means: whenever the network can be
+            // reached the live response wins and the render reflects the API;
+            // the cache is consulted solely when the fetch genuinely fails
+            // (offline). We deliberately do NOT set `networkTimeoutSeconds`: a
+            // timeout would let a slow-but-online backend (e.g. a cold server
+            // right after a login/seed) fall back to a stale cached body and
+            // render it as truth for a full page view (issue #268). Waiting for
+            // the real response is the correct trade — fresh data over fast-but-wrong.
+            // The `campfire-api` bucket is global across sign-ins, so it is
+            // purged at every auth-identity change (see lib/swCache.ts) to keep
+            // one account's data from ever bleeding into another's.
             urlPattern: ({ url, request }) =>
               url.pathname.startsWith("/api/") && request.method === "GET",
             handler: "NetworkFirst",
             options: {
               cacheName: "campfire-api",
-              networkTimeoutSeconds: 5,
               expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 7 },
               cacheableResponse: { statuses: [0, 200] },
             },
