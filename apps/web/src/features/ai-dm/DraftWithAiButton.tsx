@@ -20,6 +20,8 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAiDmSeat } from '../../lib/query';
 import { Btn, TextArea } from '../../components/ui';
+import { isKnownAiGate } from './aiGate';
+import { AiGateExplainer } from './AiSetupChecklist';
 
 /** Targets that support drafting N items at once (mirrors CoDmService's MULTI_TARGETS). */
 const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
@@ -89,6 +91,9 @@ function DraftWithAiModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorIsForbidden, setErrorIsForbidden] = useState(false);
+  // The raw error, so a known AI gate renders the shared explainer + precise deep link
+  // (aiGate.ts / #343) instead of a bare 403 string.
+  const [gateErr, setGateErr] = useState<unknown>(null);
   const [result, setResult] = useState<CoDmDraftResult | null>(null);
 
   const multi = MULTI_TARGETS.has(target);
@@ -99,13 +104,16 @@ function DraftWithAiModal({
     setBusy(true);
     setError(null);
     setErrorIsForbidden(false);
+    setGateErr(null);
     try {
       const body: Record<string, unknown> = { target, prompt: prompt.trim() };
       if (multi) body.count = count;
       const draft = await api.post<CoDmDraftResult>(`${API}/campaigns/${campaignId}/ai-dm/draft`, body);
       setResult(draft);
     } catch (err) {
-      if (err instanceof ApiError) {
+      if (isKnownAiGate(err)) {
+        setGateErr(err);
+      } else if (err instanceof ApiError) {
         setError(err.message);
         setErrorIsForbidden(err.status === 403);
       } else {
@@ -181,11 +189,16 @@ function DraftWithAiModal({
               </div>
             )}
 
+            {gateErr != null && (
+              <div className="rounded-[var(--radius-md)] border border-rose-500/30 bg-rose-500/10 p-2.5">
+                <AiGateExplainer err={gateErr} campaignId={campaignId} />
+              </div>
+            )}
             {error && (
               <div className="rounded-[var(--radius-md)] border border-rose-500/30 bg-rose-500/10 p-2.5 space-y-1.5">
                 <p className="text-xs text-rose-300 m-0 whitespace-pre-wrap">{error}</p>
                 {errorIsForbidden && (
-                  <Link to={`/c/${campaignId}/settings`} className="text-[11px] text-purple-400 hover:underline">
+                  <Link to={`/c/${campaignId}/settings#ai-dm`} className="text-[11px] text-purple-400 hover:underline">
                     Open AI DM settings →
                   </Link>
                 )}

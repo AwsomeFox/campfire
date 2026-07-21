@@ -1,0 +1,106 @@
+{
+  "aiOnboarding": {
+    "checklist": {
+      "title": "Set up the AI Dungeon Master",
+      "intro": "Four steps take a campaign from no AI to a working AI DM. Each step below reads its real state and links straight to the control that changes it.",
+      "progress": "{{done}} of {{total}} steps done",
+      "allDoneTitle": "The AI DM is ready",
+      "allDoneDriver": "The AI holds the DM seat. Players join at the Table tab.",
+      "allDoneCoDm": "The AI is co-DMing — it drafts proposals for you to approve. Nothing lands in canon until you say so.",
+      "loading": "Checking setup…",
+      "actorAdmin": "Server admin",
+      "actorDm": "You (the DM)",
+      "completedBy": "Done by {{actor}}",
+      "todoBy": "Needs {{actor}}",
+      "fixServerAi": "Open AI console",
+      "fixProvider": "Configure provider",
+      "fixMode": "Choose a mode",
+      "fixBudget": "Set a budget",
+      "openTable": "Open the Table",
+      "steps": {
+        "flag": {
+          "title": "Server AI enabled",
+          "onAdmin": "The server-wide AI switch is on. Any campaign can now use an AI DM.",
+          "offAdmin": "The server-wide AI switch is off. Turn it on in the AI console to allow any AI participation.",
+          "askAdmin": "Server-side AI is experimental and off by default. A server admin must enable it before this campaign's AI DM can run.",
+          "copyRequest": "Please enable experimental AI (Server admin → AI console → Server-wide AI) so I can run an AI DM in my campaign.",
+          "copy": "Copy request",
+          "copied": "Copied"
+        },
+        "provider": {
+          "title": "AI provider configured",
+          "done": "A provider and API key are stored for this campaign ({{model}}).",
+          "todo": "Choose a provider (OpenAI, Anthropic, or the mock provider for testing) and store an API key. Test the connection before moving on."
+        },
+        "mode": {
+          "title": "Operating mode chosen",
+          "doneCoDm": "Mode is Co-DM — the AI only proposes; you approve every change.",
+          "doneDriver": "Mode is Driver — the AI runs the session at the Table.",
+          "todo": "Pick how the AI participates. Co-DM (recommended) drafts proposals for your review; Driver hands it the DM seat."
+        },
+        "budget": {
+          "title": "Token budget set",
+          "done": "A hard budget of {{budget}} tokens is set. Turns stop when it is reached.",
+          "todo": "Set a positive token budget. It is a hard cap on spend and is required before Driver mode will run."
+        },
+        "table": {
+          "title": "Players know where to play",
+          "driver": "In Driver mode, players join the shared session at the Table tab in the sidebar. Share that with your table.",
+          "notYet": "Once Driver mode is on, a Table tab appears for every member — that's where the session is played."
+        }
+      }
+    },
+    "dashboard": {
+      "hintTitle": "Try the AI Dungeon Master",
+      "hintBody": "This campaign can run an AI co-DM or a fully AI-run Driver session. A few settings turn it on.",
+      "setUp": "Set it up",
+      "hide": "Not now",
+      "dismiss": "Dismiss"
+    },
+    "badge": {
+      "coDm": "AI: Co-DM",
+      "driver": "AI: Driver",
+      "coDmAria": "An AI is co-DMing this campaign — what that means",
+      "driverAria": "An AI is running this campaign — open the Table"
+    },
+    "transparency": {
+      "title": "What the AI sees",
+      "body": "The AI DM is given this campaign's summary and its session-zero charter — never any other campaign's data. In Co-DM mode it can only propose changes, which the DM must approve; canon never changes without a human. In Driver mode it runs the session, and the DM (and the table) can pause it or take over at any time from the Table page."
+    },
+    "gate": {
+      "openFix": "Fix this",
+      "flagDisabled": {
+        "title": "Server AI is turned off",
+        "body": "AI features are experimental and disabled server-wide. A server admin must enable them before the AI DM can run."
+      },
+      "seatDisabled": {
+        "title": "The AI DM isn't switched on",
+        "body": "This campaign's AI DM seat is off. Choose a mode (Co-DM or Driver) and enable it in campaign settings."
+      },
+      "budgetExhausted": {
+        "title": "Token budget used up",
+        "body": "The AI DM has spent its token budget. Raise the budget (or reset usage) to continue."
+      },
+      "serverCap": {
+        "title": "Server AI budget reached",
+        "body": "The server-wide AI token cap has been reached. A server admin must raise it in the AI console."
+      },
+      "needBudget": {
+        "title": "Driver mode needs a budget",
+        "body": "Driver mode requires a positive token budget. Set one, then switch the mode to Driver."
+      },
+      "needProvider": {
+        "title": "Driver mode needs a provider",
+        "body": "Driver mode requires a configured AI provider with an API key. Set one, then switch the mode to Driver."
+      },
+      "paused": {
+        "title": "The AI DM is paused",
+        "body": "The session is paused. The DM can resume it from the Table."
+      },
+      "humanControl": {
+        "title": "A human holds the seat",
+        "body": "A human has taken over the DM seat. The AI won't act until control is handed back."
+      }
+    }
+  }
+}
