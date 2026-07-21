@@ -18,6 +18,11 @@ const typeLabel: Record<SearchResult['type'], string> = {
   character: 'Characters',
   session: 'Sessions',
   note: 'Notes',
+  timeline: 'Timeline',
+  item: 'Inventory',
+  comment: 'Comments',
+  arc: 'Story Arcs',
+  beat: 'Story Beats',
 };
 
 const typeIcon: Record<SearchResult['type'], string> = {
@@ -28,6 +33,11 @@ const typeIcon: Record<SearchResult['type'], string> = {
   character: '🛡️',
   session: '📖',
   note: '📝',
+  timeline: '🕰️',
+  item: '🎒',
+  comment: '💬',
+  arc: '🌿',
+  beat: '🎬',
 };
 
 const typeRoute: Record<SearchResult['type'], string> = {
@@ -38,18 +48,33 @@ const typeRoute: Record<SearchResult['type'], string> = {
   character: 'characters',
   session: 'sessions',
   note: 'notes',
+  timeline: 'timeline',
+  item: 'inventory',
+  comment: 'comments',
+  arc: 'storylines',
+  beat: 'storylines',
 };
 
-/** Where a result links to. Notes anchored to an entity link to that entity. */
+/** Types rendered as list-only pages: a hit deep-links to the list, not a per-id page. */
+const listOnlyRoute: Partial<Record<SearchResult['type'], string>> = {
+  session: 'sessions',
+  timeline: 'timeline',
+  item: 'inventory',
+  arc: 'storylines',
+  beat: 'storylines',
+};
+
+/** Where a result links to. Notes/comments anchored to an entity link to that entity. */
 function resultHref(campaignId: number, r: SearchResult): string {
-  if (r.type === 'note') {
+  if (r.type === 'note' || r.type === 'comment') {
     if (r.entityType && r.entityType !== 'campaign' && r.entityId != null) {
       const sub = r.entityType === 'session' ? 'sessions' : `${r.entityType}s`;
       return `/c/${campaignId}/${sub}/${r.entityId}`;
     }
-    return `/c/${campaignId}/notes`;
+    return `/c/${campaignId}/${r.type === 'comment' ? '' : 'notes'}`;
   }
-  if (r.type === 'session') return `/c/${campaignId}/sessions`;
+  const listRoute = listOnlyRoute[r.type];
+  if (listRoute) return `/c/${campaignId}/${listRoute}`;
   return `/c/${campaignId}/${typeRoute[r.type]}/${r.id}`;
 }
 
@@ -101,7 +126,20 @@ export default function SearchPage() {
     return groups;
   }, [data]);
 
-  const order: SearchResult['type'][] = ['quest', 'npc', 'location', 'character', 'session', 'note'];
+  const order: SearchResult['type'][] = [
+    'quest',
+    'npc',
+    'faction',
+    'location',
+    'character',
+    'session',
+    'timeline',
+    'arc',
+    'beat',
+    'item',
+    'comment',
+    'note',
+  ];
 
   return (
     <div className="max-w-3xl mx-auto px-4 mt-6 space-y-4">

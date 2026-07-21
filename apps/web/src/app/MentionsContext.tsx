@@ -23,6 +23,11 @@ export const mentionRoute: Record<MentionTarget['type'], string> = {
   location: 'locations',
   character: 'characters',
   session: 'sessions',
+  // List-only pages (no per-id route): a mention links to the list, matching the
+  // existing session behaviour.
+  timeline: 'timeline',
+  arc: 'storylines',
+  beat: 'storylines',
 };
 
 export function MentionsProvider({ campaignId, children }: { campaignId: number | undefined; children: ReactNode }) {

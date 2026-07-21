@@ -67,6 +67,54 @@ export class CommentsService {
    * anchor 404s for everyone (a comment can only hang off a live entity in its own
    * campaign). The 404 message is uniform so a hidden entity is byte-for-byte a missing one.
    */
+  /**
+   * Boolean form of {@link assertAnchorVisible} used by campaign-wide reads
+   * (search). Returns false where assert would 404, so a hidden-entity thread is
+   * silently dropped from an aggregate list instead of throwing.
+   */
+  private async isAnchorVisible(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+    role: Role,
+  ): Promise<boolean> {
+    try {
+      await this.assertAnchorVisible(campaignId, entityType, entityId, role);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Every comment in the campaign the caller may SEE — flattened across all
+   * threads — for campaign-wide search (issue #265). A comment inherits its
+   * anchor entity's visibility (issue #230): comments on a hidden quest/npc/
+   * faction or an unexplored location are dropped for non-DM, so search can never
+   * leak a secret entity's discussion. Anchor visibility is resolved once per
+   * distinct (entityType, entityId) to keep this a bounded number of checks.
+   */
+  async listForCampaign(campaignId: number, role: Role): Promise<Comment[]> {
+    const rows = await this.db
+      .select()
+      .from(comments)
+      .where(eq(comments.campaignId, campaignId))
+      .orderBy(asc(comments.id));
+    const visibleAnchor = new Map<string, boolean>();
+    const out: Comment[] = [];
+    for (const row of rows) {
+      const entityType = row.entityType as EntityTypeValue;
+      const key = `${entityType}:${row.entityId}`;
+      let visible = visibleAnchor.get(key);
+      if (visible === undefined) {
+        visible = await this.isAnchorVisible(campaignId, entityType, row.entityId, role);
+        visibleAnchor.set(key, visible);
+      }
+      if (visible) out.push(toDomain(row));
+    }
+    return out;
+  }
+
   private async assertAnchorVisible(
     campaignId: number,
     entityType: EntityTypeValue,
