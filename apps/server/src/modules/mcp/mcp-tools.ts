@@ -249,6 +249,57 @@ function inlineClone<T extends z.ZodTypeAny>(schema: T): T {
 }
 
 /**
+ * #371: give nullable numeric FK fields a concrete TOP-LEVEL `type` in the
+ * generated JSON Schema.
+ *
+ * An optional numeric FK such as `giverNpcId: Id.nullable().default(null)` (Id =
+ * `z.number().int().positive()`) serializes to
+ *   {"anyOf":[{"type":"integer","exclusiveMinimum":0},{"type":"null"}],"default":null}
+ * — a union with NO top-level `type`. zod-to-json-schema is forced into this
+ * `anyOf` shape (instead of the flat `{"type":["integer","null"]}`) by
+ * `strictUnions:true` whenever the numeric branch carries constraints
+ * (`.int()`/`.positive()` → `type:"integer"` + `exclusiveMinimum`). Some MCP
+ * clients only inspect a property's top-level `type`; finding none they treat the
+ * field as untyped and send it as a string, so the server's numeric validator then
+ * rejects it ("Expected number, received string") and the relationship can't be set
+ * over MCP at all. (Distinct from the sibling-`$ref` artifact fixed by inlineClone /
+ * issue #31 — this is the *untyped-union* half of the same family of FK fields.)
+ *
+ * Flatten every `anyOf:[<numeric>, {type:"null"}]` (in either order) back into a
+ * single node with a top-level `type:[<numeric>,"null"]`, carrying the numeric
+ * branch's own constraints (e.g. `exclusiveMinimum`) and the outer node's
+ * `default`/`description` up with it. Recurses through the whole schema so nested
+ * objects/arrays are covered too. Non-nullable numeric FKs (`{"type":"integer"}`)
+ * and already-flat nullable numbers (`{"type":["number","null"]}`, e.g. location
+ * `mapX`/`mapY`) are left untouched.
+ */
+export function flattenNullableNumericFks(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(flattenNullableNumericFks);
+  if (!node || typeof node !== 'object') return node;
+  const next: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    next[key] = flattenNullableNumericFks(value);
+  }
+  const { anyOf } = next;
+  if (Array.isArray(anyOf) && anyOf.length === 2) {
+    const nullIndex = anyOf.findIndex(
+      (opt) => opt !== null && typeof opt === 'object' && (opt as { type?: unknown }).type === 'null',
+    );
+    if (nullIndex !== -1) {
+      const numeric = anyOf[1 - nullIndex] as Record<string, unknown> | undefined;
+      const numericType = numeric?.type;
+      if (numeric && (numericType === 'number' || numericType === 'integer')) {
+        const merged: Record<string, unknown> = { ...numeric, type: [numericType, 'null'] };
+        // Lift the union's own metadata (default, description) onto the flattened node.
+        for (const [key, value] of Object.entries(next)) if (key !== 'anyOf') merged[key] = value;
+        return merged;
+      }
+    }
+  }
+  return next;
+}
+
+/**
  * Builds a per-request McpServer whose tools are bound to the authenticated
  * RequestUser. Stateless: one server + transport per POST /mcp.
  *
@@ -350,7 +401,36 @@ export class McpToolsService {
     this.registerWriteTools(server, user);
     this.registerResources(server, user);
     this.registerPrompts(server);
+    this.patchListToolsSchemas(server);
     return server;
+  }
+
+  /**
+   * #371: post-process the `tools/list` response so nullable numeric FK fields carry
+   * a concrete top-level `type`. The MCP SDK owns tools/list JSON-Schema generation
+   * (McpServer serializes each tool's zod inputSchema with zod-to-json-schema under
+   * `strictUnions:true`), which emits nullable constrained-number FKs as an untyped
+   * `anyOf` union — see flattenNullableNumericFks(). We can't change the SDK's
+   * converter, so wrap its already-registered ListTools handler and flatten each
+   * tool's inputSchema on the way out. Defensive: if the SDK's internals ever move,
+   * we simply leave the handler untouched rather than break tools/list.
+   */
+  private patchListToolsSchemas(server: McpServer): void {
+    const low = (server as unknown as { server?: { _requestHandlers?: Map<string, unknown> } }).server;
+    const handlers = low?._requestHandlers;
+    const original = handlers?.get('tools/list') as
+      | ((request: unknown, extra: unknown) => Promise<{ tools?: { inputSchema?: unknown }[] }>)
+      | undefined;
+    if (!handlers || !original) return;
+    handlers.set('tools/list', async (request: unknown, extra: unknown) => {
+      const result = await original(request, extra);
+      if (result && Array.isArray(result.tools)) {
+        for (const tool of result.tools) {
+          if (tool && tool.inputSchema) tool.inputSchema = flattenNullableNumericFks(tool.inputSchema);
+        }
+      }
+      return result;
+    });
   }
 
   /**
@@ -434,7 +514,12 @@ export class McpToolsService {
         // 'none' inlines everything (real providers reject cross-property $refs), matching
         // the inlineClone() rationale used for tools/list. `strictShape` is cast to the base
         // zod type to avoid TS2589 (the deep conditional generics zodToJsonSchema infers).
-        inputSchema: zodToJsonSchema(strictShape, { $refStrategy: 'none' }),
+        // #371: flatten nullable numeric FK unions to a top-level numeric type so the
+        // provider tool registry advertises the same concrete types as tools/list.
+        inputSchema: flattenNullableNumericFks(zodToJsonSchema(strictShape, { $refStrategy: 'none' })) as Record<
+          string,
+          unknown
+        >,
         proposalCapable: Object.prototype.hasOwnProperty.call(shape, 'propose'),
         invoke: async (args) => {
           const res = await cb(args);
