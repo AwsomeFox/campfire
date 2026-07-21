@@ -26,12 +26,14 @@ export class AiDmController {
   @Get()
   @ApiOperation({
     summary: 'Get the AI Dungeon Master seat for a campaign',
-    description: 'Requires campaign membership. Returns the seat config + metering (defaults when never configured).',
+    description:
+      'Requires campaign membership. Returns the seat config + metering (defaults when never configured). ' +
+      "The DM-authored `instructions` (steering prompt / plot secrets) are omitted for non-DM callers (issue #261).",
   })
-  @ApiResponse({ status: 200, description: 'The AI DM seat.' })
+  @ApiResponse({ status: 200, description: 'The AI DM seat (instructions omitted unless the caller is the DM).' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireMember(user, id);
-    return this.aiDm.getSeat(id);
+    const role = await this.access.requireMember(user, id);
+    return this.aiDm.getSeatForRole(id, role);
   }
 
   @Put()
