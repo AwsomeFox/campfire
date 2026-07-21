@@ -89,15 +89,24 @@ COPY --from=build /app/packages/schema/dist packages/schema/dist
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/web/dist web-dist
 
-# Run as the unprivileged `node` user (uid 1000) the official Node image ships, rather
-# than root (issue #118): the process handles untrusted input (uploads, Open5e imports,
-# the MCP JSON-RPC endpoint), so an RCE/path-traversal must not land as root-in-container,
-# and files written to the /data bind mount should not end up root-owned on the host.
-# chown /data (the VOLUME) and /app so both stay writable / readable as `node`.
-# NOTE for existing deployments: an already-populated /data volume is still root-owned —
-# run a one-time `chown -R 1000:1000 /data` (or `chown -R node:node`) on the host after upgrading.
-RUN mkdir -p /data && chown -R node:node /data /app
-USER node
+# The app runs as the unprivileged `node` user (uid 1000), not root (issue #118): it
+# handles untrusted input (uploads, Open5e imports, the MCP JSON-RPC endpoint), so an
+# RCE/path-traversal must not land as root-in-container, and files written to the /data
+# bind mount should stay uid-1000 on the host. We do NOT set `USER node` here, though:
+# a /data volume created by a pre-non-root release is root-owned, and a hard `USER node`
+# leaves the container unable to write it ("attempt to write a readonly database" crash
+# loop). Instead the entrypoint starts as root, chowns /data, then drops to `node` via
+# gosu — so only the tiny bootstrap is privileged and the Node process itself is never root.
+# gosu is a lightweight, setuid-safe privilege-drop helper.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && gosu nobody true \
+    && mkdir -p /data && chown -R node:node /data /app
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 VOLUME ["/data"]
 EXPOSE 8080
