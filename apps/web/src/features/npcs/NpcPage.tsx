@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { Location, Npc, Quest } from '@campfire/schema';
+import type { Faction, Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
@@ -43,13 +43,14 @@ export default function NpcPage() {
 
   const [npc, setNpc] = useState<Npc | null>(null);
   const [locations, setLocations] = useState<Location[]>([]);
+  const [factions, setFactions] = useState<Faction[]>([]);
   const [quests, setQuests] = useState<Quest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
 
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: '', role: '', disposition: '', locationId: '' as string, body: '', dmSecret: '', hidden: false });
+  const [form, setForm] = useState({ name: '', role: '', disposition: '', locationId: '' as string, factionId: '' as string, body: '', dmSecret: '', hidden: false });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -62,13 +63,15 @@ export default function NpcPage() {
     setError(null);
     setNotFound(false);
     try {
-      const [npcData, locationsData, questsData] = await Promise.all([
+      const [npcData, locationsData, factionsData, questsData] = await Promise.all([
         api.get<Npc>(`${API}/npcs/${id}`),
         api.get<Location[]>(`${API}/campaigns/${cid}/locations`),
+        api.get<Faction[]>(`${API}/campaigns/${cid}/factions`),
         api.get<Quest[]>(`${API}/campaigns/${cid}/quests`),
       ]);
       setNpc(npcData);
       setLocations(locationsData);
+      setFactions(factionsData);
       setQuests(questsData);
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
@@ -91,6 +94,10 @@ export default function NpcPage() {
   );
 
   const connectedQuests = useMemo(() => quests.filter((q) => q.giverNpcId === id), [quests, id]);
+  const factionName = useMemo(
+    () => (npc?.factionId ? factions.find((f) => f.id === npc.factionId)?.name : null),
+    [npc, factions],
+  );
 
   function startEdit() {
     if (!npc) return;
@@ -99,6 +106,7 @@ export default function NpcPage() {
       role: npc.role,
       disposition: npc.disposition,
       locationId: npc.locationId ? String(npc.locationId) : '',
+      factionId: npc.factionId ? String(npc.factionId) : '',
       body: npc.body,
       dmSecret: npc.dmSecret,
       hidden: npc.hidden,
@@ -131,6 +139,7 @@ export default function NpcPage() {
         role: form.role.trim(),
         disposition: form.disposition.trim() || 'neutral',
         locationId: form.locationId ? Number(form.locationId) : null,
+        factionId: form.factionId ? Number(form.factionId) : null,
         body: form.body,
         dmSecret: form.dmSecret,
         hidden: form.hidden,
@@ -283,6 +292,24 @@ export default function NpcPage() {
                   <span>{npc.disposition || 'Neutral'}</span>
                 </div>
                 <div className="flex justify-between gap-2 text-[13px]">
+                  <span className="text-muted">Faction</span>
+                  {factionName ? (
+                    <a
+                      href={`/c/${cid}/factions/${npc.factionId}`}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigate(`/c/${cid}/factions/${npc.factionId}`);
+                      }}
+                      className="text-[13px]"
+                      style={{ color: 'var(--color-accent)' }}
+                    >
+                      {factionName}
+                    </a>
+                  ) : (
+                    <span className="text-muted">None</span>
+                  )}
+                </div>
+                <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Last seen</span>
                   {locationName ? (
                     <a
@@ -335,6 +362,21 @@ export default function NpcPage() {
                 {locations.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] text-slate-500 font-bold uppercase">Faction</label>
+              <select
+                className="cf-select"
+                value={form.factionId}
+                onChange={(e) => setForm({ ...form, factionId: e.target.value })}
+              >
+                <option value="">None</option>
+                {factions.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name}
                   </option>
                 ))}
               </select>

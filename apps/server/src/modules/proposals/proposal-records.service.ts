@@ -19,8 +19,9 @@ import { toDomain as characterToDomain } from '../characters/characters.service'
 
 // Encounters (issue #126) join EntityType for note-pinning, but combat state is not a
 // proposable entity — exclude it alongside 'campaign' so the proposal schemas/snapshot
-// maps stay exhaustive over exactly the entity types that CAN be proposed.
-export type ProposableEntityType = Exclude<EntityType, 'campaign' | 'encounter'>;
+// maps stay exhaustive over exactly the entity types that CAN be proposed. Factions
+// (issue #221) are likewise note-pinnable but not proposable in v1 (DM-write only).
+export type ProposableEntityType = Exclude<EntityType, 'campaign' | 'encounter' | 'faction'>;
 
 const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character'];
 

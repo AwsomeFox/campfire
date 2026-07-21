@@ -28,6 +28,7 @@ import { CharactersModule } from './modules/characters/characters.module';
 import { QuestsModule } from './modules/quests/quests.module';
 import { StorylinesModule } from './modules/storylines/storylines.module';
 import { NpcsModule } from './modules/npcs/npcs.module';
+import { FactionsModule } from './modules/factions/factions.module';
 import { LocationsModule } from './modules/locations/locations.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
 import { NotesModule } from './modules/notes/notes.module';
@@ -139,6 +140,7 @@ function serveStaticImports(): DynamicModule[] {
     QuestsModule,
     StorylinesModule,
     NpcsModule,
+    FactionsModule,
     LocationsModule,
     SessionsModule,
     NotesModule,

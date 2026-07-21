@@ -16,6 +16,7 @@ type EntityType = Proposal['entityType'];
 const entityRoute: Record<EntityType, string | null> = {
   quest: 'quests',
   npc: 'npcs',
+  faction: 'factions',
   location: 'locations',
   character: 'characters',
   session: 'sessions',
@@ -42,6 +43,7 @@ function targetHref(entityType: EntityType, entityId: number | null, campaignId:
 const entityIcon: Record<EntityType, string> = {
   quest: '📜',
   npc: '🤝',
+  faction: '🏴',
   location: '🗺',
   character: '🛡',
   session: '📓',

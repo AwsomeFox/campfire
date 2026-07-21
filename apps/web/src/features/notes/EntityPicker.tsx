@@ -19,6 +19,7 @@ export type EntityLink = { entityType: EntityTypeValue; entityId: number };
 const ATTACHABLE: { value: EntityTypeValue; label: string; listPath: string }[] = [
   { value: 'quest', label: '📜 Quest', listPath: 'quests' },
   { value: 'npc', label: '🤝 NPC', listPath: 'npcs' },
+  { value: 'faction', label: '🏴 Faction', listPath: 'factions' },
   { value: 'location', label: '🗺 Location', listPath: 'locations' },
   { value: 'session', label: '📓 Session', listPath: 'sessions' },
   { value: 'character', label: '🛡 Character', listPath: 'characters' },

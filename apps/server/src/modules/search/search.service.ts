@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultType } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
 import { NpcsService } from '../npcs/npcs.service';
+import { FactionsService } from '../factions/factions.service';
 import { QuestsService } from '../quests/quests.service';
 import { LocationsService } from '../locations/locations.service';
 import { CharactersService } from '../characters/characters.service';
@@ -58,6 +59,7 @@ export class SearchService {
   constructor(
     private readonly quests: QuestsService,
     private readonly npcs: NpcsService,
+    private readonly factions: FactionsService,
     private readonly locations: LocationsService,
     private readonly characters: CharactersService,
     private readonly sessions: SessionsService,
@@ -68,9 +70,10 @@ export class SearchService {
     const needle = q.trim().toLowerCase();
     if (!needle) return { query: q, results: [] };
 
-    const [quests, npcs, locations, characters, sessions, notes] = await Promise.all([
+    const [quests, npcs, factions, locations, characters, sessions, notes] = await Promise.all([
       this.quests.listForCampaign(campaignId, role),
       this.npcs.listForCampaign(campaignId, role),
+      this.factions.listForCampaign(campaignId, role),
       this.locations.listForCampaign(campaignId, role),
       this.characters.listForCampaign(campaignId, role),
       this.sessions.listForCampaign(campaignId, role),
@@ -107,6 +110,15 @@ export class SearchService {
         { field: 'role', text: npc.role },
         { field: 'body', text: npc.body },
         { field: 'dmSecret', text: npc.dmSecret },
+      ]);
+    }
+    for (const faction of factions) {
+      push('faction', faction.id, faction.name, [
+        { field: 'name', text: faction.name },
+        { field: 'kind', text: faction.kind },
+        { field: 'body', text: faction.body },
+        { field: 'goals', text: faction.goals },
+        { field: 'dmSecret', text: faction.dmSecret },
       ]);
     }
     for (const loc of locations) {
@@ -156,9 +168,10 @@ export class SearchService {
    * `Session N` when they have no explicit title.
    */
   async mentions(campaignId: number, role: Role): Promise<MentionTarget[]> {
-    const [quests, npcs, locations, characters, sessions] = await Promise.all([
+    const [quests, npcs, factions, locations, characters, sessions] = await Promise.all([
       this.quests.listForCampaign(campaignId, role),
       this.npcs.listForCampaign(campaignId, role),
+      this.factions.listForCampaign(campaignId, role),
       this.locations.listForCampaign(campaignId, role),
       this.characters.listForCampaign(campaignId, role),
       this.sessions.listForCampaign(campaignId, role),
@@ -166,6 +179,7 @@ export class SearchService {
     return [
       ...quests.map((q) => ({ type: 'quest' as const, id: q.id, name: q.title })),
       ...npcs.map((n) => ({ type: 'npc' as const, id: n.id, name: n.name })),
+      ...factions.map((f) => ({ type: 'faction' as const, id: f.id, name: f.name })),
       ...locations.map((l) => ({ type: 'location' as const, id: l.id, name: l.name })),
       ...characters.map((c) => ({ type: 'character' as const, id: c.id, name: c.name })),
       ...sessions.map((s) => ({ type: 'session' as const, id: s.id, name: s.title || `Session ${s.number}` })),

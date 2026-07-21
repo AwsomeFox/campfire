@@ -171,10 +171,26 @@ CREATE TABLE IF NOT EXISTS npcs (
   role TEXT NOT NULL DEFAULT '',
   disposition TEXT NOT NULL DEFAULT 'neutral',
   location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
+  faction_id INTEGER REFERENCES factions(id) ON DELETE SET NULL,
   body TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
   deleted_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS factions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  goals TEXT NOT NULL DEFAULT '',
+  dm_secret TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0,
+  reputation INTEGER NOT NULL DEFAULT 0,
+  standing TEXT NOT NULL DEFAULT 'neutral',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

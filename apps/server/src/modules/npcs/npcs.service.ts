@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { NpcCreate, NpcUpdate } from '@campfire/schema';
 import type { Npc, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { npcs, locations } from '../../db/schema';
+import { npcs, locations, quests, factions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
@@ -24,6 +24,7 @@ export function toDomain(row: typeof npcs.$inferSelect): Npc {
     role: row.role,
     disposition: row.disposition,
     locationId: row.locationId,
+    factionId: row.factionId,
     body: row.body,
     dmSecret: row.dmSecret,
     hidden: row.hidden,
@@ -51,6 +52,16 @@ export class NpcsService {
     // A trashed NPC (soft-deleted, #116) reads as nonexistent unless includeDeleted (restore).
     if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`NPC ${id} not found`);
     return row;
+  }
+
+  /**
+   * The NPCs that belong to a faction (issue #221) — role-filtered/redacted exactly
+   * like listForCampaign, so a hidden member NPC never leaks to a non-DM even when the
+   * faction itself is visible.
+   */
+  async listForFaction(factionId: number, role: Role): Promise<Npc[]> {
+    const rows = await this.db.select().from(npcs).where(eq(npcs.factionId, factionId));
+    return redactSecrets(filterHidden(rows.map(toDomain), role), role);
   }
 
   /**
@@ -95,8 +106,24 @@ export class NpcsService {
     if (!row) throw new BadRequestException(`locationId ${locationId} does not exist in this campaign`);
   }
 
+  /**
+   * factionId (factions.id) is an FK-shaped field (issue #221) — same guard as
+   * validateLocationRef: a nonexistent id, or another campaign's faction id, must
+   * not silently pin the NPC to an unresolvable faction.
+   */
+  private async validateFactionRef(factionId: number | null | undefined, campaignId: number): Promise<void> {
+    if (factionId == null) return;
+    const [row] = await this.db
+      .select({ id: factions.id })
+      .from(factions)
+      .where(and(eq(factions.id, factionId), eq(factions.campaignId, campaignId)))
+      .limit(1);
+    if (!row) throw new BadRequestException(`factionId ${factionId} does not exist in this campaign`);
+  }
+
   async create(campaignId: number, input: NpcCreateInput, user: RequestUser, role: Role): Promise<Npc> {
     await this.validateLocationRef(input.locationId, campaignId);
+    await this.validateFactionRef(input.factionId, campaignId);
     const ts = nowIso();
     const [row] = await this.db
       .insert(npcs)
@@ -106,6 +133,7 @@ export class NpcsService {
         role: input.role ?? '',
         disposition: input.disposition ?? 'neutral',
         locationId: input.locationId ?? null,
+        factionId: input.factionId ?? null,
         body: input.body ?? '',
         dmSecret: input.dmSecret ?? '',
         hidden: input.hidden ?? false,
@@ -135,6 +163,7 @@ export class NpcsService {
     // Optimistic concurrency (#157): 409 on a stale expectedUpdatedAt before any write.
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
     await this.validateLocationRef(input.locationId, existing.campaignId);
+    await this.validateFactionRef(input.factionId, existing.campaignId);
     // Snapshot the PRIOR body into revision history when it changes (#157).
     if (input.body !== undefined && input.body !== existing.body) {
       await this.revisions.record({
