@@ -278,14 +278,15 @@ const TINY_PNG = Buffer.from(
 );
 
 /**
- * Full cascade delete (punch list item 1). Builds a "rich" campaign touching every
- * child table the old single-row DELETE left orphaned — quest+objective, npc, location,
- * character, encounter+combatant, note, proposal, a second member, a campaign-bound API
- * token, and an uploaded attachment (DB row + on-disk file) — then deletes the campaign
- * and verifies every child 404s, the ex-member is locked out everywhere, and the
- * attachment's upload directory is gone from disk.
+ * Full cascade PURGE (punch list item 1; now the deliberate 2nd step under issue #116).
+ * Builds a "rich" campaign touching every child table the old single-row DELETE left
+ * orphaned — quest+objective, npc, location, character, encounter+combatant, note,
+ * proposal, a second member, a campaign-bound API token, and an uploaded attachment
+ * (DB row + on-disk file) — then soft-deletes (verifying the uploads survive) and finally
+ * PURGES the campaign, verifying every child 404s, the ex-member is locked out everywhere,
+ * and the attachment's upload directory is gone from disk.
  */
-describe('campaign delete cascade (e2e)', () => {
+describe('campaign purge cascade (e2e)', () => {
   let ctx: TestAppContext;
   let dmAgent: ReturnType<typeof request.agent>;
   let memberAgent: ReturnType<typeof request.agent>;
@@ -374,12 +375,18 @@ describe('campaign delete cascade (e2e)', () => {
     await closeTestApp(ctx);
   });
 
-  it('dm deletes the campaign', async () => {
-    const res = await dmAgent.delete(`/api/v1/campaigns/${campaignId}`);
+  it('dm trashes then permanently purges the campaign (the hard cascade is now the deliberate 2nd step, issue #116)', async () => {
+    // Soft-delete first (the default DELETE) — rows + uploads must still be intact here.
+    const softRes = await dmAgent.delete(`/api/v1/campaigns/${campaignId}`);
+    expect(softRes.status).toBe(200);
+    const uploadDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
+    expect(fs.existsSync(uploadDir)).toBe(true); // still on disk after a soft-delete
+    // Now the explicit purge runs the real hard-cascade + fs.rm.
+    const res = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/purge`);
     expect(res.status).toBe(200);
   });
 
-  it('campaign itself is gone (403 — the cascade removed the membership row, and admin ≠ auto-DM means no implicit fallback)', async () => {
+  it('campaign itself is gone (403 — the purge cascade removed the membership row, and admin ≠ auto-DM means no implicit fallback)', async () => {
     // Pre-issue-#9 this was a 404: the deleting dm here is the setup ADMIN, whose
     // implicit dm-everywhere role passed requireMember and hit getOrThrow's 404.
     // Now membership is the only path in, so a deleted campaign answers exactly
@@ -463,5 +470,146 @@ describe('campaign delete cascade (e2e)', () => {
     const addRes = await dmAgent.post(`/api/v1/campaigns/${newCampaignId}/members`).send({ userId: memberUserId, role: 'player' });
     expect(addRes.status).toBe(201);
     expect(addRes.body.id).not.toBe(memberRowId);
+  });
+});
+
+/**
+ * Soft-delete / trash / restore / purge (issue #116). The headline data-safety change:
+ * DELETE /campaigns/:id no longer hard-cascades + wipes the disk. It moves the campaign
+ * to the trash (rows + on-disk uploads intact, absent from listings, restorable); only
+ * the deliberate DELETE /campaigns/:id/purge destroys data and files.
+ */
+describe('campaign soft-delete + trash/restore/purge (e2e, issue #116)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let uploadDir: string;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Trashable Campaign' });
+    campaignId = campRes.body.id;
+    // Give it an on-disk upload so we can prove files survive a soft-delete and only die on purge.
+    const uploadRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(dm)
+      .field('kind', 'image')
+      .attach('file', TINY_PNG, { filename: 'keepsake.png', contentType: 'image/png' });
+    expect(uploadRes.status).toBe(201);
+    uploadDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
+    expect(fs.existsSync(uploadDir)).toBe(true);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('DELETE soft-deletes: campaign leaves the list + GET 404s, but rows + uploads survive and it shows in the trash', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const del = await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(del.status).toBe(200);
+
+    // Absent from the normal listing and GET 404s (indistinguishable from nonexistent).
+    const list = await request(server).get('/api/v1/campaigns').set(dm);
+    expect(list.body.some((c: { id: number }) => c.id === campaignId)).toBe(false);
+    const get = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(get.status).toBe(404);
+
+    // But it's in the trash, carrying a deletedAt stamp...
+    const trash = await request(server).get('/api/v1/campaigns/trash').set(dm);
+    expect(trash.status).toBe(200);
+    const trashed = trash.body.find((c: { id: number }) => c.id === campaignId);
+    expect(trashed).toBeDefined();
+    expect(typeof trashed.deletedAt).toBe('string');
+
+    // ...and the on-disk uploads are untouched (the catastrophic wipe did NOT run).
+    expect(fs.existsSync(uploadDir)).toBe(true);
+  });
+
+  it('restore brings it back to the list with uploads intact', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const restore = await request(server).post(`/api/v1/campaigns/${campaignId}/restore`).set(dm);
+    expect(restore.status).toBe(201);
+    expect(restore.body.deletedAt).toBeNull();
+
+    const list = await request(server).get('/api/v1/campaigns').set(dm);
+    expect(list.body.some((c: { id: number }) => c.id === campaignId)).toBe(true);
+    const get = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(get.status).toBe(200);
+    // No longer in the trash.
+    const trash = await request(server).get('/api/v1/campaigns/trash').set(dm);
+    expect(trash.body.some((c: { id: number }) => c.id === campaignId)).toBe(false);
+    expect(fs.existsSync(uploadDir)).toBe(true);
+  });
+
+  it('purge permanently removes the campaign AND wipes its on-disk uploads', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Trash then purge (purge also works on a live campaign, but this mirrors the UI flow).
+    await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
+    const purge = await request(server).delete(`/api/v1/campaigns/${campaignId}/purge`).set(dm);
+    expect(purge.status).toBe(200);
+
+    // Gone from the trash and the disk directory is removed.
+    const trash = await request(server).get('/api/v1/campaigns/trash').set(dm);
+    expect(trash.body.some((c: { id: number }) => c.id === campaignId)).toBe(false);
+    const get = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
+    expect(get.status).toBe(404);
+    expect(fs.existsSync(uploadDir)).toBe(false);
+  });
+});
+
+/**
+ * Entity soft-delete + restore round-trip (issue #116) — a quest here stands in for the
+ * shared convention across quests/npcs/locations/sessions/notes/characters: DELETE hides
+ * the row from normal reads, POST :id/restore brings it back exactly as it was.
+ */
+describe('entity soft-delete + restore round-trip (e2e, issue #116)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo Campaign' });
+    campaignId = campRes.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('deleting a quest hides it from GET + list; restore round-trips it back', async () => {
+    const server = ctx.app.getHttpServer();
+    const q = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Reversible Quest' });
+    expect(q.status).toBe(201);
+    const questId = q.body.id;
+
+    const del = await request(server).delete(`/api/v1/quests/${questId}`).set(dm);
+    expect(del.status).toBe(200);
+
+    // Absent from normal reads.
+    const getGone = await request(server).get(`/api/v1/quests/${questId}`).set(dm);
+    expect(getGone.status).toBe(404);
+    const listGone = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(dm);
+    expect(listGone.body.some((row: { id: number }) => row.id === questId)).toBe(false);
+
+    // Restore round-trips it.
+    const restore = await request(server).post(`/api/v1/quests/${questId}/restore`).set(dm);
+    expect(restore.status).toBe(201);
+    const getBack = await request(server).get(`/api/v1/quests/${questId}`).set(dm);
+    expect(getBack.status).toBe(200);
+    expect(getBack.body.title).toBe('Reversible Quest');
+    const listBack = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(dm);
+    expect(listBack.body.some((row: { id: number }) => row.id === questId)).toBe(true);
+  });
+
+  it('restoring a live (non-trashed) quest 404s', async () => {
+    const server = ctx.app.getHttpServer();
+    const q = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Never Trashed' });
+    const restore = await request(server).post(`/api/v1/quests/${q.body.id}/restore`).set(dm);
+    expect(restore.status).toBe(404);
   });
 });

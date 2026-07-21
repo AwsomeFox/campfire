@@ -6,6 +6,7 @@ import type { Note, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaignMembers, campaigns, characters, encounters, factions, locations, notes, npcs, quests, sessions, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { applyPage } from '../../common/pagination';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
@@ -106,6 +107,7 @@ export class NotesService {
           eq(notes.kind, 'note'),
           eq(notes.entityType, row.entityType),
           eq(notes.entityId, row.entityId),
+          notDeleted(notes.deletedAt),
         ),
       );
     const roles = await this.notifications.memberRoles(row.campaignId);
@@ -270,7 +272,7 @@ export class NotesService {
     visibility.push(and(eq(notes.visibility, 'whisper'), eq(notes.recipientUserId, user.id))!);
     if (role === 'dm') visibility.push(eq(notes.visibility, 'whisper'));
 
-    const conds: SQL[] = [eq(notes.campaignId, campaignId), eq(notes.kind, 'note'), or(...visibility)!];
+    const conds: SQL[] = [eq(notes.campaignId, campaignId), eq(notes.kind, 'note'), notDeleted(notes.deletedAt), or(...visibility)!];
     if (filters.entityType) conds.push(eq(notes.entityType, filters.entityType));
     if (filters.entityId !== undefined) conds.push(eq(notes.entityId, filters.entityId));
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
@@ -329,32 +331,34 @@ export class NotesService {
     type: EntityTypeValue,
     ids: number[],
   ): Promise<Array<{ id: number; name: string }>> {
+    // A trashed (soft-deleted, #116) target resolves to no name — same as a hard-deleted
+    // one did — so an anchored note shows entityName: null while its target is in the trash.
     switch (type) {
       case 'quest':
         return this.db
           .select({ id: quests.id, name: quests.title })
           .from(quests)
-          .where(and(eq(quests.campaignId, campaignId), inArray(quests.id, ids)));
+          .where(and(eq(quests.campaignId, campaignId), inArray(quests.id, ids), notDeleted(quests.deletedAt)));
       case 'npc':
         return this.db
           .select({ id: npcs.id, name: npcs.name })
           .from(npcs)
-          .where(and(eq(npcs.campaignId, campaignId), inArray(npcs.id, ids)));
+          .where(and(eq(npcs.campaignId, campaignId), inArray(npcs.id, ids), notDeleted(npcs.deletedAt)));
       case 'location':
         return this.db
           .select({ id: locations.id, name: locations.name })
           .from(locations)
-          .where(and(eq(locations.campaignId, campaignId), inArray(locations.id, ids)));
+          .where(and(eq(locations.campaignId, campaignId), inArray(locations.id, ids), notDeleted(locations.deletedAt)));
       case 'character':
         return this.db
           .select({ id: characters.id, name: characters.name })
           .from(characters)
-          .where(and(eq(characters.campaignId, campaignId), inArray(characters.id, ids)));
+          .where(and(eq(characters.campaignId, campaignId), inArray(characters.id, ids), notDeleted(characters.deletedAt)));
       case 'session': {
         const rows = await this.db
           .select({ id: sessions.id, title: sessions.title, number: sessions.number })
           .from(sessions)
-          .where(and(eq(sessions.campaignId, campaignId), inArray(sessions.id, ids)));
+          .where(and(eq(sessions.campaignId, campaignId), inArray(sessions.id, ids), notDeleted(sessions.deletedAt)));
         return rows.map((r) => ({ id: r.id, name: r.title || `Session ${r.number}` }));
       }
       case 'campaign':
@@ -385,9 +389,10 @@ export class NotesService {
     return toDomain(row, entityNameFor(row, names), this.recipientNameFor(row, recipientNames));
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(notes).where(eq(notes.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Note ${id} not found`);
+    // A trashed note (soft-deleted, #116) reads as nonexistent unless includeDeleted (restore).
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Note ${id} not found`);
     return row;
   }
 
@@ -490,13 +495,18 @@ export class NotesService {
     return this.toDomainWithEntityName(row);
   }
 
+  /**
+   * Soft-delete (trash) a note (issue #116) — reversible. Only the author may delete
+   * (unchanged). We stamp `deleted_at` instead of removing the row: the note vanishes
+   * from every read but survives for restore(). Same author-only gate applies to restore.
+   */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
     if (!canSee(existing, user, role)) throw new NotFoundException(`Note ${id} not found`);
     if (existing.authorUserId !== user.id) {
       throw new ForbiddenException('Only the author may delete this note');
     }
-    await this.db.delete(notes).where(eq(notes.id, id));
+    await this.db.update(notes).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(notes.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -504,7 +514,34 @@ export class NotesService {
       entityType: 'note',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /**
+   * Restore a trashed note (issue #116) — clears `deleted_at`. Only the author may
+   * restore. 404 if the note isn't in the trash.
+   */
+  async restore(id: number, user: RequestUser, role: Role): Promise<Note> {
+    const existing = await this.getRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Note ${id} is not in the trash`);
+    if (existing.authorUserId !== user.id) {
+      throw new ForbiddenException('Only the author may restore this note');
+    }
+    const [row] = await this.db
+      .update(notes)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(notes.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'note.restore',
+      entityType: 'note',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return this.toDomainWithEntityName(row);
   }
 
   /**
@@ -556,7 +593,7 @@ export class NotesService {
     let q = this.db
       .select()
       .from(notes)
-      .where(and(eq(notes.campaignId, campaignId), eq(notes.kind, 'inbox'), eq(notes.resolved, resolved)))
+      .where(and(eq(notes.campaignId, campaignId), eq(notes.kind, 'inbox'), eq(notes.resolved, resolved), notDeleted(notes.deletedAt)))
       .orderBy(resolved ? desc(notes.updatedAt) : asc(notes.id))
       .$dynamic();
     q = applyPage(q, page);

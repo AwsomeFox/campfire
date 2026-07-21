@@ -511,11 +511,11 @@ describe('characters (e2e)', () => {
     });
   });
 
-  // Issue #96: deleting a character must unlink any combatant that references it, so
-  // combatants.characterId never dangles (combat HP-sync silently no-ops on a ghost id).
-  // The combatant stays in the fight — only the link is cleared.
-  describe('delete cleanup: character↔combatant (issue #96)', () => {
-    it('deleting a character nulls combatants.characterId but keeps the combatant', async () => {
+  // Issue #96 + #116: deleting a character is now a reversible SOFT-delete. The character
+  // vanishes from GET/list, but any combatant that references it KEEPS the link — the row
+  // still exists (just hidden), so nothing dangles and a restore relights the combat sync.
+  describe('soft-delete cleanup: character↔combatant (issue #96 / #116)', () => {
+    it('deleting a character hides it but keeps the combatant + its link; restore brings it back', async () => {
       const server = ctx.app.getHttpServer();
       const delCampRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Delete Combatant Campaign' });
       const delCampId = delCampRes.body.id;
@@ -539,13 +539,24 @@ describe('characters (e2e)', () => {
       const delRes = await request(server).delete(`/api/v1/characters/${doomedId}`).set(dm);
       expect(delRes.status).toBe(200);
 
+      // Character hidden from normal reads...
+      const charGone = await request(server).get(`/api/v1/characters/${doomedId}`).set(dm);
+      expect(charGone.status).toBe(404);
+
+      // ...but the combatant survives with its link intact (reversible — no dangling ref).
       const encAfter = await request(server).get(`/api/v1/encounters/${encId}`).set(dm);
       expect(encAfter.status).toBe(200);
       const combatantAfter = (encAfter.body.combatants as Array<{ id: number; characterId: number | null }>).find(
         (c) => c.id === combatant!.id,
       );
       expect(combatantAfter).toBeDefined();
-      expect(combatantAfter!.characterId).toBeNull();
+      expect(combatantAfter!.characterId).toBe(doomedId);
+
+      // Restore relights the character.
+      const restoreRes = await request(server).post(`/api/v1/characters/${doomedId}/restore`).set(dm);
+      expect(restoreRes.status).toBe(201);
+      const charBack = await request(server).get(`/api/v1/characters/${doomedId}`).set(dm);
+      expect(charBack.status).toBe(200);
     });
   });
 });

@@ -18,6 +18,7 @@ import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { attachmentFileUrl } from '../../components/ImageUpload';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 
 const statusLabel: Record<Location['status'], string> = {
   unexplored: 'Unexplored',
@@ -61,6 +62,7 @@ export default function LocationPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState(false);
 
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [statusSaving, setStatusSaving] = useState(false);
@@ -185,12 +187,21 @@ export default function LocationPage() {
   async function remove() {
     setDeleting(true);
     try {
+      // Soft-delete (issue #116) — reversible; offer an Undo instead of navigating away.
       await api.delete(`${API}/locations/${id}`);
-      navigate(`/c/${cid}/locations`);
+      setConfirmingDelete(false);
+      setPendingUndo(true);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't delete this location.");
+    } finally {
       setDeleting(false);
     }
+  }
+
+  async function undoDelete() {
+    await api.post(`${API}/locations/${id}/restore`);
+    setPendingUndo(false);
+    await load();
   }
 
   async function setStatus(status: Location['status']) {
@@ -563,11 +574,18 @@ export default function LocationPage() {
       {confirmingDelete && (
         <ConfirmDialog
           title={`Delete ${location?.name}?`}
-          body="This cannot be undone."
+          body="This moves the location to the Trash — you can undo it, or restore it from the campaign Trash."
           confirmLabel={deleting ? 'Deleting…' : 'Delete location'}
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
+      {pendingUndo && (
+        <UndoSnackbar
+          message="Location moved to Trash."
+          onUndo={undoDelete}
+          onExpire={() => navigate(`/c/${cid}/locations`)}
         />
       )}
     </div>

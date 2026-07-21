@@ -226,8 +226,8 @@ describe('issue #72 — batched hot paths (e2e)', () => {
     });
   });
 
-  describe('campaign delete cascade', () => {
-    it('deletes quests+objectives and encounters+combatants with one child DELETE each', async () => {
+  describe('campaign purge cascade', () => {
+    it('purges quests+objectives and encounters+combatants with one child DELETE each', async () => {
       const server = ctx.app.getHttpServer();
       const campaignId = await newCampaign('Delete Batch');
 
@@ -241,7 +241,9 @@ describe('issue #72 — batched hot paths (e2e)', () => {
       await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'E2' });
 
       probe.reset();
-      const delRes = await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
+      // The batched child DELETEs run on the deliberate purge (issue #116) — the default
+      // DELETE is now a single-row soft-delete UPDATE.
+      const delRes = await request(server).delete(`/api/v1/campaigns/${campaignId}/purge`).set(dm);
       expect(delRes.status).toBe(200);
 
       // One DELETE for quest_objectives (was one per quest) and one for combatants
