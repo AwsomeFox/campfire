@@ -566,9 +566,11 @@ export default function RunSessionPage() {
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
   }
 
-  // A character card rolled damage — surface the one-tap "apply to target" bar.
+  // A character card rolled damage — surface the one-tap "apply to target" bar. A
+  // non-positive total (a 0/negative damage expr) has nothing to apply, so clear any
+  // prior pending amount rather than leaving a stale bar from an earlier roll.
   const onApplyDamageRolled = useCallback((amount: number, label: string) => {
-    if (amount > 0) setPendingApply({ amount, label });
+    setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
   const reportError = useCallback(

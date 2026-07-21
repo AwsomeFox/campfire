@@ -14,7 +14,7 @@
  * total is handed up via `onApplyDamage` so the encounter can apply it to a target.
  * Without a `campaignId` the card is read-only, so it stays reusable elsewhere.
  */
-import { useState } from 'react';
+import { useState, type CSSProperties, type ReactNode } from 'react';
 import type { Character } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
 import {
@@ -36,7 +36,7 @@ import { RollResultBanner } from './RollResultBanner';
 const NOOP = () => {};
 
 /** Shared style for a roll-me pill (button) vs. a static pill (span). */
-const PILL: React.CSSProperties = { fontSize: 10 };
+const PILL: CSSProperties = { fontSize: 10 };
 const ROLL_HINT = ' · shift-click for advantage · alt or ctrl-click for disadvantage';
 
 function StatChip({ label, value, title }: { label: string; value: string; title?: string }) {
@@ -62,7 +62,7 @@ function StatChip({ label, value, title }: { label: string; value: string; title
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span className="card-kicker" style={{ margin: 0 }}>
@@ -270,7 +270,9 @@ export function CharacterStatCard({
                                 title={`Roll ${a.name} damage${onApplyDamage ? ' — then apply to a target' : ''}`}
                                 onClick={async () => {
                                   const res = await roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`);
-                                  if (res && onApplyDamage) onApplyDamage(res.total, `${a.name} (${character.name})`);
+                                  // Normalize to a non-negative amount — a damage expr
+                                  // like 1d4-1 can net 0/negative; damage is never < 0.
+                                  if (res && onApplyDamage) onApplyDamage(Math.max(0, res.total), `${a.name} (${character.name})`);
                                 }}
                                 style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer', color: 'var(--color-accent)', font: 'inherit' }}
                               >
