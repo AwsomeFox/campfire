@@ -52,7 +52,11 @@ import { NpcsService } from '../npcs/npcs.service';
 import { LocationsService } from '../locations/locations.service';
 import { CharactersService } from '../characters/characters.service';
 import { SessionsService } from '../sessions/sessions.service';
+import { SchedulingService } from '../sessions/scheduling.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { CommentsService } from '../comments/comments.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { auditActor } from '../../common/user.types';
@@ -140,7 +144,11 @@ export class CampaignsService {
     private readonly locations: LocationsService,
     private readonly characters: CharactersService,
     private readonly sessions: SessionsService,
+    private readonly scheduling: SchedulingService,
     private readonly encounters: EncountersService,
+    private readonly inventory: InventoryService,
+    private readonly timeline: TimelineService,
+    private readonly comments: CommentsService,
     private readonly roleResolver: RoleResolver,
     private readonly members: MembersService,
   ) {}
@@ -1540,14 +1548,22 @@ export class CampaignsService {
   async summary(id: number, role: Role): Promise<CampaignSummary> {
     const campaign = await this.getOrThrow(id);
 
-    const [questList, npcList, locationList, characterList, sessionList, encounterDigest] = await Promise.all([
-      this.quests.listForCampaignWithObjectives(id, role),
-      this.npcs.listForCampaign(id, role),
-      this.locations.listForCampaign(id, role),
-      this.characters.listForCampaign(id, role),
-      this.sessions.listForCampaign(id, role),
-      this.encounters.digestForCampaign(id, role),
-    ]);
+    const [questList, npcList, locationList, characterList, sessionList, encounterDigest, timelineList, treasury, inventoryList, commentList, nextSession] =
+      await Promise.all([
+        this.quests.listForCampaignWithObjectives(id, role),
+        this.npcs.listForCampaign(id, role),
+        this.locations.listForCampaign(id, role),
+        this.characters.listForCampaign(id, role),
+        this.sessions.listForCampaign(id, role),
+        this.encounters.digestForCampaign(id, role),
+        // Newer systems (issue #257): each applies its own role redaction (timeline strips
+        // dmSecret + drops hidden for non-DM; comments inherit anchor-entity visibility).
+        this.timeline.listEvents(id, role),
+        this.inventory.getTreasury(id),
+        this.inventory.listForCampaign(id),
+        this.comments.listForCampaign(id, role),
+        this.scheduling.nextForCampaign(id),
+      ]);
 
     const currentLocation = campaign.currentLocationId
       ? (locationList.find((l) => l.id === campaign.currentLocationId) ?? null)
@@ -1569,6 +1585,11 @@ export class CampaignsService {
       characters: characterList,
       sessions: sessionList,
       encounters: encounterDigest,
+      timeline: timelineList,
+      treasury: { cp: treasury.cp, sp: treasury.sp, ep: treasury.ep, gp: treasury.gp, pp: treasury.pp },
+      inventoryCount: inventoryList.length,
+      commentCount: commentList.length,
+      nextSession,
       openInboxCount,
     };
   }
