@@ -2291,7 +2291,22 @@ export type StorageCleanupResult = z.infer<typeof StorageCleanupResult>;
 // EntityType is deliberately excluded — a campaign never searches its own row,
 // only the entities inside it — and `note` is added (notes are searchable but
 // aren't a mention/link target).
-export const SearchResultType = z.enum(['quest', 'npc', 'location', 'character', 'session', 'faction', 'note']);
+export const SearchResultType = z.enum([
+  'quest',
+  'npc',
+  'location',
+  'character',
+  'session',
+  'faction',
+  'note',
+  // Newer content types now indexed (issue #265): timeline events, inventory
+  // items, threaded discussion comments, and DM-only story arcs/beats.
+  'timeline',
+  'item',
+  'comment',
+  'arc',
+  'beat',
+]);
 export type SearchResultType = z.infer<typeof SearchResultType>;
 
 // A single hit. The service ONLY ever builds these from role-filtered lists
@@ -2318,10 +2333,12 @@ export const SearchResponse = z.object({
 });
 export type SearchResponse = z.infer<typeof SearchResponse>;
 
-// @-mention cross-linking: the set of named, page-backed entities a member may
-// link to (and that the Markdown renderer may auto-link by name). Notes are
-// excluded — they have no standalone page — so this is SearchResultType minus 'note'.
-export const MentionTargetType = z.enum(['quest', 'npc', 'location', 'character', 'session', 'faction']);
+// @-mention cross-linking: the set of named entities a member may link to (and
+// that the Markdown renderer may auto-link by name). Notes/inventory items/
+// comments are excluded — a comment has no name to match, and notes/items are
+// not narrative link targets. Timeline events and (DM-only) story arcs/beats are
+// named narrative entities and ARE linkable (issue #265).
+export const MentionTargetType = z.enum(['quest', 'npc', 'location', 'character', 'session', 'faction', 'timeline', 'arc', 'beat']);
 export type MentionTargetType = z.infer<typeof MentionTargetType>;
 
 export const MentionTarget = z.object({

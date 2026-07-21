@@ -15,6 +15,14 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
   let visibleQuestId: number;
   let hiddenQuestId: number;
   let sessionId: number;
+  let factionId: number;
+  let visibleEventId: number;
+  let hiddenEventId: number;
+  let itemId: number;
+  let visibleCommentId: number;
+  let hiddenAnchorCommentId: number;
+  let arcId: number;
+  let beatId: number;
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -79,6 +87,67 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       .post(`/api/v1/campaigns/${campaignId}/notes`)
       .set(dm)
       .send({ body: 'Vex secret backstory only the DM knows.', visibility: 'private' });
+
+    // ---- newer content types (issue #265) ----
+
+    // A faction: proves faction hits are returned (the UI faction-render bug is web-side).
+    factionId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/factions`)
+        .set(dm)
+        .send({ name: 'The Vex Cartel', kind: 'guild', body: 'A smuggling ring.' })
+    ).body.id;
+
+    // A visible + a hidden timeline event, both matching "Vex".
+    visibleEventId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/timeline`)
+        .set(dm)
+        .send({ title: 'The Vex Uprising', inWorldDate: 'Year 90 DR', body: 'The cartel rose to power.' })
+    ).body.id;
+    hiddenEventId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/timeline`)
+        .set(dm)
+        .send({ title: 'The Vex Betrayal (secret)', hidden: true })
+    ).body.id;
+
+    // An inventory item matching "Vex" (member-visible, no secrecy).
+    itemId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Vex signet ring', ownerType: 'party', qty: 1 })
+    ).body.id;
+
+    // A comment on the VISIBLE npc (player can see it) and one on the HIDDEN quest
+    // (player must NOT — anchor gating, issue #230).
+    visibleCommentId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(player)
+        .send({ entityType: 'npc', entityId: visibleNpcId, body: 'Is Vex trustworthy?' })
+    ).body.id;
+    hiddenAnchorCommentId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(dm)
+        .send({ entityType: 'quest', entityId: hiddenQuestId, body: 'Vex conspiracy notes for the DM.' })
+    ).body.id;
+
+    // A DM-only story arc + beat matching "Vex".
+    arcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/arcs`)
+        .set(dm)
+        .send({ title: 'The Vex Gambit', summary: 'The cartel arc.' })
+    ).body.id;
+    beatId = (
+      await request(server)
+        .post(`/api/v1/arcs/${arcId}/beats`)
+        .set(dm)
+        .send({ title: 'Vex makes their move', body: 'The betrayal is revealed.' })
+    ).body.id;
   });
 
   afterAll(async () => {
@@ -97,6 +166,15 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(has('session', sessionId)).toBe(true);
     expect(results.some((r) => r.type === 'location')).toBe(true);
     expect(results.some((r) => r.type === 'note')).toBe(true);
+    // Newer content types (issue #265) — DM sees them all, including hidden/DM-only.
+    expect(has('faction', factionId)).toBe(true);
+    expect(has('timeline', visibleEventId)).toBe(true);
+    expect(has('timeline', hiddenEventId)).toBe(true); // hidden — DM sees it
+    expect(has('item', itemId)).toBe(true);
+    expect(has('comment', visibleCommentId)).toBe(true);
+    expect(has('comment', hiddenAnchorCommentId)).toBe(true); // anchor visible to DM
+    expect(has('arc', arcId)).toBe(true);
+    expect(has('beat', beatId)).toBe(true);
   });
 
   it('player search finds visible entities but excludes every hidden one', async () => {
@@ -116,6 +194,19 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(results.some((r) => r.type === 'location' && /Smugglers/i.test(r.title))).toBe(false);
     // The explored location IS visible
     expect(results.some((r) => r.type === 'location' && /Vexwood/i.test(r.title))).toBe(true);
+
+    // Newer content types (issue #265): a player sees the member-visible ones…
+    expect(has('faction', factionId)).toBe(true);
+    expect(has('timeline', visibleEventId)).toBe(true);
+    expect(has('item', itemId)).toBe(true);
+    expect(has('comment', visibleCommentId)).toBe(true); // comment on a visible npc
+
+    // …but NOT the hidden timeline event, the comment on a hidden quest, or any
+    // DM-only story arc/beat (secrecy respected per type).
+    expect(has('timeline', hiddenEventId)).toBe(false);
+    expect(has('comment', hiddenAnchorCommentId)).toBe(false);
+    expect(results.some((r) => r.type === 'arc')).toBe(false);
+    expect(results.some((r) => r.type === 'beat')).toBe(false);
   });
 
   it('dmSecret is never matched or leaked to a player', async () => {
@@ -170,5 +261,24 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(targets.some((t) => t.type === 'session' && t.id === sessionId)).toBe(true);
     // Notes are not link targets.
     expect(targets.some((t) => t.type === 'note')).toBe(false);
+
+    // Timeline events are linkable; a hidden one is not; story arcs/beats are DM-only.
+    expect(targets.some((t) => t.type === 'timeline' && t.id === visibleEventId)).toBe(true);
+    expect(targets.some((t) => t.type === 'timeline' && t.id === hiddenEventId)).toBe(false);
+    expect(targets.some((t) => t.type === 'arc')).toBe(false);
+    expect(targets.some((t) => t.type === 'beat')).toBe(false);
+    // Inventory items and comments are not mention link targets.
+    expect(targets.some((t) => t.type === 'item')).toBe(false);
+    expect(targets.some((t) => t.type === 'comment')).toBe(false);
+  });
+
+  it('mentions expose DM-only story arcs/beats to a DM', async () => {
+    const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/mentions`).set(dm);
+    expect(res.status).toBe(200);
+    const targets: Array<{ type: string; id: number; name: string }> = res.body;
+    expect(targets.some((t) => t.type === 'timeline' && t.id === visibleEventId)).toBe(true);
+    expect(targets.some((t) => t.type === 'timeline' && t.id === hiddenEventId)).toBe(true);
+    expect(targets.some((t) => t.type === 'arc' && t.id === arcId)).toBe(true);
+    expect(targets.some((t) => t.type === 'beat' && t.id === beatId)).toBe(true);
   });
 });
