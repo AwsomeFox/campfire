@@ -1125,6 +1125,9 @@ function BattleMap({
   // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
+  // Natural pixel size of the loaded map image, used to compute its letterboxed
+  // (object-contain) rendered rect so the grid overlay can be clipped to it (issue #273b).
+  const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const { w: surfaceW, h: surfaceH } = useElementSize(surfaceRef);
 
@@ -1142,6 +1145,38 @@ function BattleMap({
   // Distance readout needs both a cell size (px) and a real-world scale.
   const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
   const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
+
+  // A new map starts with unknown natural size until its <img> fires onLoad.
+  useEffect(() => {
+    setImgNatural(null);
+  }, [mapImageUrl]);
+
+  // Rendered rect of the map image inside the 16:9 surface. `object-contain` letterboxes a
+  // non-16:9 image, leaving dark bands the grid must not draw over (issue #273b). Until the
+  // natural size is known we fall back to the full surface (no clipping regression).
+  const mapRect = useMemo(() => {
+    if (surfaceW <= 0 || surfaceH <= 0) return null;
+    if (!imgNatural || imgNatural.w <= 0 || imgNatural.h <= 0) {
+      return { left: 0, top: 0, width: surfaceW, height: surfaceH };
+    }
+    const scale = Math.min(surfaceW / imgNatural.w, surfaceH / imgNatural.h);
+    const width = imgNatural.w * scale;
+    const height = imgNatural.h * scale;
+    return { left: (surfaceW - width) / 2, top: (surfaceH - height) / 2, width, height };
+  }, [surfaceW, surfaceH, imgNatural]);
+
+  // Heal grid config that shows placeholder defaults but stores null (issue #273a): the panel
+  // *displays* scale 5 / unit ft even when `gridScale`/`gridUnit` are null, which leaves Measure
+  // disabled ("Set a grid scale first"). Once the grid is on, commit those shown defaults so the
+  // values are real, persist, and enable Measure. DM-only — players can't PATCH the encounter.
+  useEffect(() => {
+    if (!isDm || !gridOn) return;
+    if (encounter.gridScale != null && encounter.gridUnit != null) return;
+    const patch: Partial<Pick<EncounterWithCombatants, 'gridScale' | 'gridUnit'>> = {};
+    if (encounter.gridScale == null) patch.gridScale = 5;
+    if (encounter.gridUnit == null) patch.gridUnit = 'ft';
+    onSetGrid(patch);
+  }, [isDm, gridOn, encounter.gridScale, encounter.gridUnit, onSetGrid]);
 
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
@@ -1442,7 +1477,15 @@ function BattleMap({
                 <input
                   type="checkbox"
                   checked={gridOn}
-                  onChange={(e) => onSetGrid({ gridSize: e.target.checked ? (gridSize ?? 8) : null })}
+                  onChange={(e) =>
+                    onSetGrid(
+                      e.target.checked
+                        ? // Enabling the grid commits real scale/unit alongside the size so the
+                          // shown defaults are never phantom and Measure is usable (issue #273a).
+                          { gridSize: gridSize ?? 8, gridScale: gridScale ?? 5, gridUnit }
+                        : { gridSize: null },
+                    )
+                  }
                 />
                 Grid
               </label>
@@ -1543,26 +1586,49 @@ function BattleMap({
             onPointerCancel={onSurfacePointerUp}
             onLostPointerCapture={onSurfacePointerUp}
           >
-            <img src={mapImageUrl} alt="Battle map" className="absolute inset-0 w-full h-full object-contain" style={{ background: 'rgba(15,23,42,.4)' }} />
+            <img
+              src={mapImageUrl}
+              alt="Battle map"
+              className="absolute inset-0 w-full h-full object-contain"
+              style={{ background: 'rgba(15,23,42,.4)' }}
+              onLoad={(e) => setImgNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+            />
 
-            {/* Grid overlay (issue #40 / #238) — a square CSS grid, or a pointy-top hex SVG. */}
-            {gridOn && gridType === 'square' && cellPx > 1 && (
+            {/* Grid overlay (issue #40 / #238) — a square CSS grid, or a pointy-top hex SVG.
+                Both are clipped to the map image's letterboxed rendered rect (issue #273b) so the
+                grid never bleeds onto the dark object-contain bands. The inner layer stays anchored
+                to the surface origin (offset by -mapRect) so grid lines keep aligning with token
+                snapping, which works in surface coordinates. */}
+            {gridOn && gridType === 'square' && cellPx > 1 && mapRect && (
               <div
-                className="absolute inset-0"
-                style={{
-                  pointerEvents: 'none',
-                  backgroundImage:
-                    `repeating-linear-gradient(to right, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px),` +
-                    `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
-                }}
-              />
+                className="absolute"
+                style={{ pointerEvents: 'none', overflow: 'hidden', left: mapRect.left, top: mapRect.top, width: mapRect.width, height: mapRect.height }}
+              >
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: -mapRect.left,
+                    top: -mapRect.top,
+                    width: surfaceW,
+                    height: surfaceH,
+                    backgroundImage:
+                      `repeating-linear-gradient(to right, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px),` +
+                      `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
+                  }}
+                />
+              </div>
             )}
-            {gridOn && gridType === 'hex' && hexCells.length > 0 && (
-              <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none' }} width={surfaceW} height={surfaceH}>
-                {hexCells.map((pts, i) => (
-                  <polygon key={i} points={pts} fill="none" stroke="rgba(148,163,184,.35)" strokeWidth={1} />
-                ))}
-              </svg>
+            {gridOn && gridType === 'hex' && hexCells.length > 0 && mapRect && (
+              <div
+                className="absolute"
+                style={{ pointerEvents: 'none', overflow: 'hidden', left: mapRect.left, top: mapRect.top, width: mapRect.width, height: mapRect.height }}
+              >
+                <svg style={{ position: 'absolute', left: -mapRect.left, top: -mapRect.top }} width={surfaceW} height={surfaceH}>
+                  {hexCells.map((pts, i) => (
+                    <polygon key={i} points={pts} fill="none" stroke="rgba(148,163,184,.35)" strokeWidth={1} />
+                  ))}
+                </svg>
+              </div>
             )}
 
             {placed.map((c) => {
