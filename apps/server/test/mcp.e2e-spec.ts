@@ -261,6 +261,55 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(addCombatant!.inputSchema.additionalProperties).toBe(false);
   });
 
+  it('tools/list gives every optional numeric FK field a concrete numeric type (issue #371)', async () => {
+    const client = await mcpClient(dmToken);
+    const { tools } = await client.listTools();
+
+    // A JSON-Schema node "carries a numeric type" iff its top-level `type` is (or
+    // includes) number/integer. Nullable FKs must NOT be advertised as a bare untyped
+    // union with no top-level type — that's exactly what broke MCP clients (#371).
+    const numericTypes = new Set(['number', 'integer']);
+    const hasTopLevelNumericType = (schema: { type?: unknown }): boolean => {
+      const t = schema.type;
+      return typeof t === 'string' ? numericTypes.has(t) : Array.isArray(t) && t.some((x) => numericTypes.has(x as string));
+    };
+
+    // Every property of every tool must advertise SOME concrete type — no bare `{}`.
+    for (const tool of tools) {
+      const props = (tool.inputSchema.properties ?? {}) as Record<string, Record<string, unknown>>;
+      for (const [name, schema] of Object.entries(props)) {
+        const typed =
+          'type' in schema || 'enum' in schema || 'const' in schema || 'anyOf' in schema || 'oneOf' in schema || 'allOf' in schema || '$ref' in schema;
+        expect(typed).toBe(true);
+      }
+    }
+
+    // The specific nullable FK fields called out in the issue now carry a top-level
+    // numeric type (previously untyped `{}` / an untyped `anyOf` union).
+    const fkFields: Record<string, string[]> = {
+      update_quest: ['giverNpcId', 'parentId'],
+      create_quest: ['giverNpcId', 'parentId'],
+      upsert_npc: ['factionId', 'locationId'],
+      upsert_location: ['parentId', 'mapX', 'mapY'],
+      create_beat: ['questId', 'encounterId', 'sessionId'],
+    };
+    for (const [toolName, fields] of Object.entries(fkFields)) {
+      const tool = tools.find((t) => t.name === toolName);
+      expect(tool).toBeDefined();
+      const props = tool!.inputSchema.properties as Record<string, { type?: unknown }>;
+      for (const field of fields) {
+        expect(props[field]).toBeDefined();
+        expect(hasTopLevelNumericType(props[field])).toBe(true);
+      }
+    }
+
+    // The integer FK constraint survives the flattening (still a positive integer).
+    const updateQuest = tools.find((t) => t.name === 'update_quest');
+    const giver = updateQuest!.inputSchema.properties!.giverNpcId as { type?: unknown; exclusiveMinimum?: unknown };
+    expect(giver.type).toEqual(['integer', 'null']);
+    expect(giver.exclusiveMinimum).toBe(0);
+  });
+
   it('get_campaign_summary works with a dm-scoped PAT', async () => {
     const client = await mcpClient(dmToken);
     const result = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
@@ -291,6 +340,51 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       (a: { action: string; entityId: number }) => a.action === 'quest.create' && a.entityId === quest.id,
     );
     expect(entry.actor).toBe('token:mcp-dm-token');
+  });
+
+  it('update_quest / upsert_* are partial merges: omitted fields unchanged, explicit null clears (issue #372)', async () => {
+    const client = await mcpClient(dmToken);
+
+    // A quest with a non-default status AND a giver NPC link.
+    const npc = parseResult(
+      await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'Quest Giver 372' } }),
+    ) as { id: number };
+    const created = parseResult(
+      await client.callTool({
+        name: 'create_quest',
+        arguments: { campaignId, title: 'The Smoking Mountain', status: 'active', giverNpcId: npc.id, body: 'original body' },
+      }),
+    ) as { id: number; status: string; giverNpcId: number | null };
+    expect(created.status).toBe('active');
+    expect(created.giverNpcId).toBe(npc.id);
+
+    // Editing only `body` must NOT reset the omitted status/giverNpcId to their
+    // schema defaults (the data-loss the issue reports).
+    const afterBody = parseResult(
+      await client.callTool({ name: 'update_quest', arguments: { questId: created.id, body: 'edited body only' } }),
+    ) as { status: string; giverNpcId: number | null; body: string };
+    expect(afterBody.body).toBe('edited body only');
+    expect(afterBody.status).toBe('active');
+    expect(afterBody.giverNpcId).toBe(npc.id);
+
+    // Intended-clear semantics: an EXPLICIT null does clear the giver (present-but-null
+    // is distinct from omitted).
+    const afterClear = parseResult(
+      await client.callTool({ name: 'update_quest', arguments: { questId: created.id, giverNpcId: null } }),
+    ) as { status: string; giverNpcId: number | null };
+    expect(afterClear.giverNpcId).toBeNull();
+    expect(afterClear.status).toBe('active');
+
+    // upsert_location: a name-only edit must not reset an explored location to unexplored.
+    const loc = parseResult(
+      await client.callTool({ name: 'upsert_location', arguments: { campaignId, name: 'Cinder & Ash Inn', status: 'explored' } }),
+    ) as { id: number; status: string };
+    expect(loc.status).toBe('explored');
+    const afterRename = parseResult(
+      await client.callTool({ name: 'upsert_location', arguments: { campaignId, locationId: loc.id, name: 'The Cinder & Ash Inn' } }),
+    ) as { status: string; name: string };
+    expect(afterRename.name).toBe('The Cinder & Ash Inn');
+    expect(afterRename.status).toBe('explored');
   });
 
   it('storylines: create_arc -> create_beat x2 -> add_branch -> set_beat_status -> list_arcs graph, DM-only (issue #27)', async () => {
