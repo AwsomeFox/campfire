@@ -5,7 +5,7 @@ import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, Encount
 import { z as zod } from 'zod';
 import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
+import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo } from '../../common/redact';
@@ -86,6 +86,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     encounterId: row.encounterId,
     kind: row.kind as Combatant['kind'],
     characterId: row.characterId,
+    npcId: row.npcId,
     name: row.name,
     initiative: row.initiative,
     initMod: row.initMod,
@@ -119,15 +120,15 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
 }
 
 /**
- * Issue #43: non-DM viewers must not see a monster's exact HP — a player polling
- * the run-session view would otherwise read the boss at an exact `3/150`, a live
- * secrets leak (and the same view a shared screen shows). For monster combatants
- * we replace hpCurrent/hpMax with a coarse status band and null the exact numbers.
- * Character combatants keep exact HP for everyone: party HP is shared table
- * knowledge and a player already sees their own character sheet.
+ * Issue #43: non-DM viewers must not see a monster's (or DM-controlled NPC's) exact
+ * HP — a player polling the run-session view would otherwise read the boss at an
+ * exact `3/150`, a live secrets leak (and the same view a shared screen shows). For
+ * monster AND npc combatants we replace hpCurrent/hpMax with a coarse status band and
+ * null the exact numbers. Character combatants keep exact HP for everyone: party HP
+ * is shared table knowledge and a player already sees their own character sheet.
  */
 function redactMonsterHp(c: Combatant): Combatant {
-  if (c.kind !== 'monster' || c.hpCurrent === null || c.hpMax === null) return c;
+  if ((c.kind !== 'monster' && c.kind !== 'npc') || c.hpCurrent === null || c.hpMax === null) return c;
   // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
   // temp-HP buffed monster doesn't leak numbers through the redaction.
   return { ...c, hpBand: hpBandFor(c.hpCurrent, c.hpMax), hpCurrent: null, hpMax: null, hpTemp: null };
@@ -287,6 +288,24 @@ export class EncountersService {
     let list = sortCombatants(combatantRows.map(combatantToDomain), status);
     if (viewerRole !== undefined && viewerRole !== 'dm') {
       list = list.map(redactMonsterHp);
+      // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant
+      // linked to a HIDDEN NPC still leaked that NPC's identity to non-DMs via `npcId` + the
+      // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
+      // here we sever the identity link (null npcId) and mask the name — the token still shows
+      // in initiative (its position matters to play) but not who it is.
+      const linkedNpcIds = list.map((c) => c.npcId).filter((n): n is number => n !== null);
+      if (linkedNpcIds.length > 0) {
+        const hiddenRows = await this.db
+          .select({ id: npcs.id })
+          .from(npcs)
+          .where(and(inArray(npcs.id, linkedNpcIds), eq(npcs.hidden, true)));
+        const hiddenIds = new Set(hiddenRows.map((r) => r.id));
+        if (hiddenIds.size > 0) {
+          list = list.map((c) =>
+            c.npcId !== null && hiddenIds.has(c.npcId) ? { ...c, npcId: null, name: 'Unknown combatant' } : c,
+          );
+        }
+      }
       // Fog of war (issue #40): withhold the position of any token in an unrevealed region.
       const fog = parseFog(row.fog);
       if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
@@ -768,6 +787,38 @@ export class EncountersService {
     // unconditionally here, so a bogus/deleted ruleEntryId silently got stored).
     let ruleEntryId: number | null = null;
     let characterId: number | null = null;
+    let npcId: number | null = null;
+
+    // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
+    // it as the default name. HP/initiative still come from a linked statblock
+    // (ruleEntryId, resolved below) or an explicit hpMax — so an NPC can borrow a monster
+    // statblock or be tracked with manual HP. Runs alongside (not instead of) the
+    // ruleEntryId branch, so an NPC WITH a statblock resolves both.
+    if (input.kind === 'npc' && input.npcId !== undefined) {
+      // notDeleted (issue #374): a trashed/soft-deleted NPC must not be addable as a combatant.
+      const [npc] = await this.db
+        .select()
+        .from(npcs)
+        .where(and(eq(npcs.id, input.npcId), notDeleted(npcs.deletedAt)))
+        .limit(1);
+      if (!npc) throw new BadRequestException(`NPC ${input.npcId} not found`);
+      if (npc.campaignId !== encounterRow.campaignId) {
+        throw new NotFoundException(`NPC ${input.npcId} not found in campaign ${encounterRow.campaignId}`);
+      }
+      // Uniqueness guard — the issue #51 pattern, extended to NPC combatants per #374: an NPC
+      // may appear at most once in an encounter. Without this, re-adding the same NPC forks it
+      // into two rows that then track HP independently. 409 rather than a silent duplicate.
+      const [dup] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npc.id)))
+        .limit(1);
+      if (dup) {
+        throw new ConflictException(`NPC ${npc.id} is already a combatant in encounter ${encounterId}`);
+      }
+      npcId = npc.id;
+      name = name ?? npc.name;
+    }
 
     if (input.kind === 'character' && input.characterId !== undefined) {
       const [character] = await this.db.select().from(characters).where(eq(characters.id, input.characterId)).limit(1);
@@ -836,7 +887,7 @@ export class EncountersService {
     // order (the docs' "three goblins" example). count is meaningless for a
     // character add (a PC is unique and uniqueness-guarded above), so it's ignored
     // there — the characterId branch never sets count>1 in practice.
-    const count = input.characterId !== undefined ? 1 : Math.max(1, input.count ?? 1);
+    const count = input.characterId !== undefined || input.npcId !== undefined ? 1 : Math.max(1, input.count ?? 1);
     const names = count > 1 ? Array.from({ length: count }, (_, i) => `${name} ${i + 1}`) : [name];
 
     // Issue #86: derive sortOrder in SQL (MAX(sort_order)+1) instead of from a
@@ -852,6 +903,7 @@ export class EncountersService {
           encounterId,
           kind: input.kind,
           characterId,
+          npcId,
           name: n,
           initiative: null,
           initMod,
@@ -1082,7 +1134,7 @@ export class EncountersService {
     // dropping to 0 HP (monsters don't roll saves; 0 HP is simply "down").
     if (afterDeath === 'dead' && beforeDeath !== 'dead') {
       await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'died' });
-    } else if (existing.kind === 'monster' && afterHp <= 0 && beforeHp > 0) {
+    } else if ((existing.kind === 'monster' || existing.kind === 'npc') && afterHp <= 0 && beforeHp > 0) {
       await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'dropped to 0 HP' });
     }
 
