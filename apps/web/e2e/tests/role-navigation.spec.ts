@@ -23,10 +23,10 @@ test.describe('DM navigation', () => {
 
   test('DM sees the Dungeon master section and role badge', async ({ page }) => {
     await openCampaign(page);
-    // Match the sidebar "Dungeon master" section header exactly — a loose match now
-    // also hits the AI-DM onboarding card's "Try the AI Dungeon Master" (issue #360),
-    // which resolves to 2 elements and trips Playwright strict mode.
-    await expect(page.getByText('Dungeon master', { exact: true }).first()).toBeVisible();
+    // exact:true so this matches ONLY the sidebar "Dungeon master" section label —
+    // the dashboard also carries an "AI Dungeon Master" onboarding nudge (#343), which
+    // a substring match would ambiguously also hit (Playwright strict-mode violation).
+    await expect(page.getByText('Dungeon master', { exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Members' })).toBeVisible();
     await expect(page.getByText('DM', { exact: true }).first()).toBeVisible();
   });

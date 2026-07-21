@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
-import type { RuleEntryType } from '@campfire/schema';
+import { listRulePackSources, type RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
@@ -37,6 +37,23 @@ export class RulesController {
   }
 
   /**
+   * Honesty metadata for every install source (issue #346): whether each system has a real
+   * open source wired (`sourceKind: 'api'`, installs with no `url`) or has none and must be
+   * uploaded (`sourceKind: 'manual-upload'`). The install picker (#347) uses this to offer a
+   * one-click import where possible and steer to the upload path otherwise — rather than
+   * showing a source that would fail. Open to any authenticated user (read-only).
+   */
+  @Get('sources')
+  @ApiOperation({
+    summary: 'List rule-pack install sources with honesty metadata',
+    description: "Any authenticated user. Each source reports its sourceKind ('api' | 'manual-upload'), whether it installs without a `url`, its license, and (for manual-upload) a documented candidate source.",
+  })
+  @ApiResponse({ status: 200, description: 'Install sources and their metadata.' })
+  listSources() {
+    return listRulePackSources();
+  }
+
+  /**
    * Kicks off an open-content import as a background job and returns 202 with the job (issue
    * #20). The UI polls GET packs/install-jobs/:id for per-section progress and the final
    * result; `outcome` on the completed job is 'created' (fresh) or 'updated' (incremental
@@ -50,8 +67,9 @@ export class RulesController {
       "Server admin or DM of any campaign. `source` selects the importer: 'open5e' (D&D 5e, default), " +
       "'pf2e' (Pathfinder 2e), 'pf1e' (Pathfinder 1e), 'starfinder', 'archmage' (13th Age), 'open-legend', " +
       "or 'osr' (retroclones — pass `system` to pick the variant, e.g. 'basic-fantasy'). Sections are " +
-      'validated per-source (a foreign section is rejected 400). Sources without a verified live default ' +
-      'API (pf1e/starfinder/archmage/osr, see #346) require an explicit `url`. Returns 202 with a job to poll.',
+      'validated per-source (a foreign section is rejected 400). open5e/pf2e/open-legend have a wired live ' +
+      'open source and install with no `url`; pf1e/starfinder/archmage/osr have no open source (#346, see ' +
+      'GET /rules/sources) — install those via POST /rules/packs/upload or pass an explicit `url`. Returns 202 with a job to poll.',
   })
   @ApiResponse({ status: 202, description: 'Install job accepted; poll packs/install-jobs/:id.' })
   @ApiResponse({ status: 400, description: 'Rejected — a section invalid for the source, or a required `url` was missing.' })
