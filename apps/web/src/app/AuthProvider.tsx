@@ -2,9 +2,11 @@
  * Implements the AuthState contract declared in ./auth.tsx.
  * On mount: GET /me. 401 -> me:null. Exposes ready/isAdmin/roleIn/refresh/logout.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Me, Role, TextSize } from '@campfire/schema';
 import { api, ApiError, API } from '../lib/api';
+import { queryClient } from '../lib/query';
+import { clearApiCache } from '../lib/swCache';
 import { AuthContext, type AuthState } from './auth';
 
 /**
@@ -54,10 +56,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [ready, setReady] = useState(false);
   const [connectionError, setConnectionError] = useState(false);
+  // Last authenticated user id we've seen this page-session. Lets us detect a
+  // change of identity (first sign-in or an account switch) so we can drop any
+  // cached campaign data belonging to a prior session before it renders.
+  const lastUserIdRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const nextMe = await api.get<Me>(`${API}/me`);
+      if (navigator.onLine && lastUserIdRef.current !== nextMe.user.id) {
+        // Auth identity resolved to a (new) user while online: a fresh sign-in or
+        // an account switch. Purge the SW's global /api cache and the in-memory
+        // Query cache so a previous session's — or a pre-seed — HP, members and
+        // quests can never render as truth for this user (issue #268); the reads
+        // that follow simply refill from the live API.
+        //
+        // The `navigator.onLine` guard matters because /me is itself an /api GET
+        // and can therefore resolve from the SW cache when offline. Without it, an
+        // OFFLINE reload of a returning session would trip this branch and wipe the
+        // very offline-fallback cache the SW exists to preserve. When offline we
+        // leave the cache untouched and keep showing last-known state.
+        lastUserIdRef.current = nextMe.user.id;
+        await clearApiCache();
+        queryClient.clear();
+      }
       setMe(nextMe);
       setConnectionError(false);
       applyAccentColor(nextMe.user.accentColor);
@@ -87,6 +109,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     await api.post(`${API}/auth/logout`);
     setMe(null);
+    // Drop this account's cached campaign data so the next person to sign in on
+    // this device never inherits it (issue #268).
+    lastUserIdRef.current = null;
+    await clearApiCache();
+    queryClient.clear();
   }, []);
 
   const isAdmin = me?.user.serverRole === 'admin';
