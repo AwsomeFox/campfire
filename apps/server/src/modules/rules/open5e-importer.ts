@@ -99,6 +99,8 @@ export interface ImportedEntry {
   license: string;
   /** Human-readable source/document label (Open5e `document.name`), e.g. "System Reference Document 5.1". */
   source: string;
+  /** Optional bundled game-icons.net slug to seed the entry's icon override (issue #305). Open5e imports leave this unset — the web app derives a default from type/dataJson. */
+  iconSlug?: string;
 }
 
 /** Minimal structured logger so a summary can be asserted on in tests without console spying. */

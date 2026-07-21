@@ -507,6 +507,13 @@ export const Npc = z.object({
   factionId: Id.nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
+  // Optional on-theme icon (issue #302): the slug of a bundled game-icons.net
+  // entity icon (see apps/web/src/lib/icons) shown in place of the initials
+  // avatar. '' means "no icon — fall back to initials". The web app validates
+  // the slug against its bundled catalog; the server stores it opaquely (an
+  // unknown slug simply renders as no icon), so the field stays forward-compatible
+  // as the curated set grows. Shared mechanism reused by #305/#307.
+  iconSlug: z.string().max(80).default(''),
   // Entity-level secrecy (issue #42) — see Quest.hidden. A hidden NPC is dropped
   // wholesale from every non-DM read until the DM reveals it (hidden=false).
   hidden: z.boolean().default(false),
@@ -1021,19 +1028,40 @@ export const RuleEntry = z.object({
   // distinguishable and the reader can attribute the real source/license (issue #143).
   // '' for older imports/uploads that predate the column — the reader falls back to the pack name.
   source: z.string().max(200).default(''),
+  // Optional manual icon override (issue #305): the slug of a bundled game-icons.net
+  // entity icon (see apps/web/src/lib/icons) shown in the compendium list + reader in
+  // place of the type/school-derived default. '' means "no override — the web app
+  // derives a sensible default from `type` + `dataJson` (spell school, monster type,
+  // item category, condition)". Stored opaquely (an unknown slug simply falls back to
+  // the default), mirroring Npc.iconSlug from #302 so the field stays forward-compatible
+  // as the curated set grows.
+  iconSlug: z.string().max(80).default(''),
   ...timestamps,
 });
 export type RuleEntry = z.infer<typeof RuleEntry>;
 
 /**
+ * DM-editable fields on an already-imported rule entry (issue #305). The compendium's
+ * entries come from importers/uploads, not a manual create form, so the only mutable
+ * field a DM sets by hand is the icon override — a small PATCH surface (mirrors the
+ * shape of NpcUpdate, which also carries iconSlug). Widen this object if more per-entry
+ * homebrew edits are added later.
+ */
+export const RuleEntryUpdate = z.object({
+  iconSlug: z.string().max(80),
+}).partial();
+export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
+
+/**
  * Importer registry for the /rules/packs/install endpoint (issue #70). Was a bare
  * `z.literal('open5e')`, welding the install path to a single importer. Widened to a
  * small enum so a second importer can be added without rewriting the schema — 'open5e'
- * stays the built-in API importer, 'other' is a placeholder for a future/generic
- * importer. The existing Open5e path is unchanged: callers still pass `source: 'open5e'`.
- * (Generic JSON uploads take the separate RulePackUpload path, `source: 'upload'`.)
+ * stays the built-in API importer, 'pf2e' is the Pathfinder 2e importer (issue #295), and
+ * 'other' is a placeholder for a future/generic importer. The existing Open5e path is
+ * unchanged: callers still pass `source: 'open5e'`. (Generic JSON uploads take the separate
+ * RulePackUpload path, `source: 'upload'`.)
  */
-export const RulePackInstallSource = z.enum(['open5e', 'other']);
+export const RulePackInstallSource = z.enum(['open5e', 'pf2e', 'other']);
 export type RulePackInstallSource = z.infer<typeof RulePackInstallSource>;
 
 export const RulePackInstall = z.object({
@@ -1361,9 +1389,235 @@ export function rollActionDice(score: number, roll: (sides: number) => number): 
   return { score: pool.score, pool: pool.dice, dice, disadvantage: false, total: sum(dice) };
 }
 
+// ---------- Pathfinder 2e adapter (issue #295) ----------
+// PF2e is the flagship non-5e rule system and the pattern the other Tier-1 systems
+// (#296-300) follow: a system-specific adapter object that (a) satisfies the shared
+// RuleSystemAdapter seam so the combat/statblock code routes through it unchanged, and
+// (b) exposes the system's own pure math (degrees of success, level-based DCs,
+// proficiency) as extra members that callers holding the PF2e adapter can reach for.
+// Everything here is pure and unit-tested — it has no data-source dependency, so it is
+// the durable, correct core even before any PF2e content is imported.
+
+/** Stable family id of the Pathfinder 2e adapter (not a pack slug). */
+export const PF2E_ADAPTER_ID = 'pf2e';
 /**
- * Registry of rule-system adapters, keyed by family id. Only 5e exists today; a second
- * system is added here (not by editing the combat/statblock code).
+ * Pack slug the PF2e importer installs under. Registered in ADAPTERS so a campaign whose
+ * `ruleSystem` is this slug routes its combat math through Pf2eAdapter (the importer and
+ * the adapter share this one constant rather than hardcoding the string in two places).
+ */
+export const PF2E_PACK_SLUG = 'pf2e-srd';
+
+/** PF2e proficiency ranks, lowest to highest. */
+export const PF2E_PROFICIENCY_RANKS = ['untrained', 'trained', 'expert', 'master', 'legendary'] as const;
+export type Pf2eProficiencyRank = (typeof PF2E_PROFICIENCY_RANKS)[number];
+
+/** Rank bonus added on top of level when trained or better. */
+const PF2E_RANK_BONUS: Record<Pf2eProficiencyRank, number> = {
+  untrained: 0,
+  trained: 2,
+  expert: 4,
+  master: 6,
+  legendary: 8,
+};
+
+/**
+ * PF2e proficiency bonus: your level plus a rank bonus (trained +2 … legendary +8) — this
+ * "add your level" scaling is the core mechanical departure from 5e's fixed proficiency.
+ * Untrained is a flat +0: you do NOT add your level (Player Core, "Proficiency").
+ */
+export function pf2eProficiencyBonus(level: number, rank: Pf2eProficiencyRank): number {
+  if (rank === 'untrained') return 0;
+  return Math.max(0, Math.trunc(level)) + PF2E_RANK_BONUS[rank];
+}
+
+/**
+ * Level-based DC (GM Core, "DCs by Level") — the DC to set for a task of a given level.
+ * The table isn't a clean linear formula (it steps by an extra +1 roughly every third
+ * level and by +2 above 20th), so it is encoded exactly for levels 0–25 and clamped
+ * outside that range rather than approximated.
+ */
+const PF2E_LEVEL_DC = [
+  14, 15, 16, 18, 19, 20, 22, 23, 24, 26, 27, 28, 30, 31, 32, 34, 35, 36, 38, 39, 40, 42, 44, 46, 48, 50,
+];
+export function pf2eLevelBasedDC(level: number): number {
+  const l = Math.trunc(level);
+  if (l <= 0) return PF2E_LEVEL_DC[0];
+  if (l >= PF2E_LEVEL_DC.length) return PF2E_LEVEL_DC[PF2E_LEVEL_DC.length - 1];
+  return PF2E_LEVEL_DC[l];
+}
+
+/** Simple DCs keyed by the required proficiency rank (GM Core): untrained 10 … legendary 40. */
+const PF2E_SIMPLE_DC: Record<Pf2eProficiencyRank, number> = {
+  untrained: 10,
+  trained: 15,
+  expert: 20,
+  master: 30,
+  legendary: 40,
+};
+export function pf2eSimpleDC(rank: Pf2eProficiencyRank): number {
+  return PF2E_SIMPLE_DC[rank];
+}
+
+/** The four PF2e degrees of success, worst to best. */
+export const PF2E_DEGREES = ['criticalFailure', 'failure', 'success', 'criticalSuccess'] as const;
+export type Pf2eDegreeOfSuccess = (typeof PF2E_DEGREES)[number];
+
+/**
+ * PF2e degree of success (Player Core, "Checks"). Compare the check total to the DC:
+ *   ≥ DC+10 → critical success; ≥ DC → success; ≤ DC−10 → critical failure; else failure.
+ * Then a natural 20 shifts the result one degree BETTER and a natural 1 one degree WORSE
+ * (a critical success can't improve further, a critical failure can't worsen further).
+ * Pass `naturalRoll` (the raw d20 face) to apply that step; omit it to compare totals only.
+ */
+export function pf2eDegreeOfSuccess(total: number, dc: number, naturalRoll?: number): Pf2eDegreeOfSuccess {
+  let step: number;
+  if (total >= dc + 10) step = 3;
+  else if (total >= dc) step = 2;
+  else if (total <= dc - 10) step = 0;
+  else step = 1;
+  if (naturalRoll === 20) step = Math.min(3, step + 1);
+  else if (naturalRoll === 1) step = Math.max(0, step - 1);
+  return PF2E_DEGREES[step];
+}
+
+/**
+ * PF2e condition vocabulary (remaster / ORC). A distinct vocabulary from the 5e list —
+ * e.g. clumsy, enfeebled, frightened, off-guard (the remaster's name for legacy
+ * "flat-footed"). Condition names are open game content, not Product Identity. Offered as
+ * the combat-UI condition chips for a PF2e campaign.
+ */
+export const PF2E_CONDITIONS = [
+  'Blinded',
+  'Clumsy',
+  'Concealed',
+  'Confused',
+  'Controlled',
+  'Dazzled',
+  'Deafened',
+  'Doomed',
+  'Drained',
+  'Dying',
+  'Encumbered',
+  'Enfeebled',
+  'Fascinated',
+  'Fatigued',
+  'Fleeing',
+  'Frightened',
+  'Grabbed',
+  'Hidden',
+  'Immobilized',
+  'Invisible',
+  'Observed',
+  'Off-Guard',
+  'Paralyzed',
+  'Persistent Damage',
+  'Petrified',
+  'Prone',
+  'Quickened',
+  'Restrained',
+  'Sickened',
+  'Slowed',
+  'Stunned',
+  'Stupefied',
+  'Unconscious',
+  'Undetected',
+  'Unnoticed',
+  'Wounded',
+] as const;
+export type Pf2eConditionName = (typeof PF2E_CONDITIONS)[number];
+
+/**
+ * PF2e adapter surface — the shared RuleSystemAdapter seam plus the PF2e-only pure math a
+ * caller that knows it holds the PF2e adapter can use directly. The extra members live
+ * here (not on the shared interface) so 5e stays clean; systems #296-300 follow the same
+ * "conform to the seam, extend with your own math" shape.
+ */
+export interface Pf2eRuleSystemAdapter extends RuleSystemAdapter {
+  proficiencyBonus(level: number, rank: Pf2eProficiencyRank): number;
+  levelBasedDC(level: number): number;
+  simpleDC(rank: Pf2eProficiencyRank): number;
+  degreeOfSuccess(total: number, dc: number, naturalRoll?: number): Pf2eDegreeOfSuccess;
+}
+
+export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
+  id: PF2E_ADAPTER_ID,
+  label: 'Pathfinder 2e',
+  // PF2e ability modifiers use the same floor((score-10)/2) mapping as 5e.
+  abilityModifier(score: number): number {
+    return Math.floor((score - 10) / 2);
+  },
+  initiativeDie: 20,
+  // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
+  // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
+  // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
+  // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
+  // back to the WIS modifier. Returns 0 when neither is present/numeric.
+  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+    if (!abilities) return 0;
+    const perception = abilities.perception ?? abilities.Perception;
+    if (typeof perception === 'number') return perception;
+    const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
+    if (typeof wisScore === 'number') return this.abilityModifier(wisScore);
+    return 0;
+  },
+  conditions: PF2E_CONDITIONS,
+  mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
+    // PF2e statblocks list ability MODIFIERS (Str +4), not scores; the importer stores them
+    // under `abilityMods`. Surface those under the seam's `abilityScores` field, and fold in
+    // the flat Perception modifier so initiativeModifier (above) can read it back out.
+    const mods = (d.abilityMods ?? d.ability_mods ?? d.abilityScores ?? d.abilities) as
+      | Record<string, unknown>
+      | undefined;
+    const perception = d.perception ?? d.perceptionMod;
+    const abilityScores =
+      mods && typeof mods === 'object'
+        ? typeof perception === 'number'
+          ? { ...mods, perception }
+          : { ...mods }
+        : typeof perception === 'number'
+          ? { perception }
+          : undefined;
+    return {
+      size: d.size,
+      // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits).
+      creatureType: d.creatureType ?? d.type ?? (Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits),
+      // PF2e has no CR — a creature's LEVEL is its difficulty rating; surface it in the CR slot.
+      challengeRating: d.level ?? d.challengeRating ?? d.cr,
+      armorClass: d.ac ?? d.armorClass ?? d.armor_class,
+      hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
+      speed: d.speed ?? d.speeds,
+      abilityScores,
+      specialAbilities: d.specialAbilities ?? d.special ?? d.abilities_special,
+      actions: d.actions ?? d.attacks,
+    };
+  },
+  monsterHitPoints(d: Record<string, unknown>): number | null {
+    const hp = d.hp ?? d.hitPoints ?? d.hit_points;
+    return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
+  },
+  proficiencyBonus: pf2eProficiencyBonus,
+  levelBasedDC: pf2eLevelBasedDC,
+  simpleDC: pf2eSimpleDC,
+  degreeOfSuccess: pf2eDegreeOfSuccess,
+};
+
+// Sibling ruleset adapters (issues #296-300) live in their own files (type-only imports
+// from here, so no runtime cycle) and register below. Adding a system is one import + one
+// ADAPTERS entry, never a sweep across the combat code.
+import { Pathfinder1eAdapter, PF1E_PACK_SLUG } from './pathfinder1e';
+export * from './pathfinder1e';
+import { StarfinderAdapter, STARFINDER_ADAPTER_ID } from './starfinder-adapter';
+export * from './starfinder-adapter';
+import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
+export * from './adapters/archmage';
+import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS } from './osr-adapter';
+export * from './osr-adapter';
+
+/**
+ * Registry of rule-system adapters, keyed by family id (and, for a system with its own
+ * importer, its pack slug too — so `campaign.ruleSystem`, which stores the pack slug,
+ * resolves straight to the adapter). 5e is the default; PF2e (issue #295) is the first
+ * registered second system. A further system is added here, not by editing combat code.
  */
 const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [DND5E_ADAPTER_ID]: Dnd5eAdapter,
@@ -1372,7 +1626,16 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   // system — an installed Open Legend campaign stores the pack slug, which must resolve here).
   [OPEN_LEGEND_ADAPTER_ID]: OpenLegendAdapter,
   [OPEN_LEGEND_PACK_SLUG]: OpenLegendAdapter,
+  [PF2E_ADAPTER_ID]: Pf2eAdapter,
+  // Pack slug the PF2e importer installs under — campaigns store the slug in `ruleSystem`.
+  [PF2E_PACK_SLUG]: Pf2eAdapter,
+  [PF1E_PACK_SLUG]: Pathfinder1eAdapter, // Pathfinder 1e (issue #296)
+  [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
+  [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
+  'archmage-srd': Archmage13aAdapter, // …and its installed rule-pack slug
 };
+// OSR pack (issue #300): one shared adapter resolves several retroclone slugs.
+for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
 
 /**
  * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
@@ -1420,6 +1683,26 @@ export function isOpenLicense(license: string): boolean {
   return OPEN_LICENSE_KEYWORDS.some((k) => l.includes(k));
 }
 
+/**
+ * Whether a license string carries a Creative Commons NonCommercial (NC) or NoDerivatives
+ * (ND) restriction, which forbids the redistribution/re-serving that bundling a map into a
+ * campaign entails. This is the failure mode for battle-map content specifically (issue
+ * #303): nearly every 'free map' pack is CC-BY-NC-ND, and — because `isOpenLicense` is a
+ * permissive substring match — the string "CC-BY-NC-ND" itself sneaks past that gate on the
+ * "cc-by" substring. This is an ADDITIVE guard layered on top of `isOpenLicense` (it does
+ * not change that shared gate's behaviour): content-import paths that redistribute the bytes
+ * must reject anything this flags, even when `isOpenLicense` returns true. Matches the "nc"/
+ * "nd" tokens in CC short-forms ("by-nc", "by-nc-nd", "by-nd", "noncommercial",
+ * "no derivatives") but not incidental substrings of unrelated words.
+ */
+export function licenseForbidsRedistribution(license: string): boolean {
+  const l = (license ?? '').trim().toLowerCase();
+  if (!l) return false;
+  if (/\bnoncommercial\b|\bnon-commercial\b|\bno[\s-]?deriv\w*/.test(l)) return true;
+  // CC short-form tokens: an "-nc" or "-nd" segment, or a bare "nc"/"nd" token.
+  return /(^|[\s-])n[cd]([\s-]|$)/.test(l);
+}
+
 export const RulePackUploadEntry = z.object({
   slug: z.string().min(1).max(160),
   name: z.string().min(1).max(200),
@@ -1429,6 +1712,7 @@ export const RulePackUploadEntry = z.object({
   dataJson: z.string().max(100_000).nullable().optional(), // raw structured fields, JSON-encoded
   license: z.string().max(120).optional(), // per-entry license; falls back to the pack license
   source: z.string().max(200).optional(), // per-entry source/document label; falls back to the pack name
+  iconSlug: z.string().max(80).optional(), // optional bundled game-icons.net slug to seed the entry's icon (issue #305)
 });
 export type RulePackUploadEntry = z.infer<typeof RulePackUploadEntry>;
 
@@ -1465,7 +1749,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),
@@ -2188,6 +2472,135 @@ export const EncounterUpdate = z.object({
   hidden: z.boolean().optional(),
 });
 
+// ---------- procedural battle-map generation (issue #306) ----------
+
+/**
+ * First-party procedural battle-map generator (issue #306). Because there is no
+ * bundle-able, license-clean open battle-map dataset (#303), Campfire generates its
+ * OWN maps server-side — deterministic (seeded), offline, no external calls — and saves
+ * the result as a normal attachment (kind='map') that flows through the existing VTT
+ * grid/fog (#40) and handout-visibility (#97/#259) machinery.
+ *
+ * `kind` selects the generator:
+ *  - 'dungeon'    — classic room-and-corridor dungeon (v1 primary).
+ *  - 'cave'       — organic cellular-automata cavern.
+ *  - 'wilderness' — open ground scattered with terrain blobs (light).
+ * ('building' is deferred to a later phase — see the issue.)
+ */
+export const MapKind = z.enum(['dungeon', 'cave', 'wilderness']);
+export type MapKind = z.infer<typeof MapKind>;
+
+/** Overall map footprint. Bounded cell dimensions (guardrail against huge blobs). */
+export const MapSize = z.enum(['small', 'medium', 'large']);
+export type MapSize = z.infer<typeof MapSize>;
+
+/** Palette theme for the rendered SVG. Purely cosmetic; does not change layout. */
+export const MapTheme = z.enum(['stone', 'cavern', 'forest', 'crypt']);
+export type MapTheme = z.infer<typeof MapTheme>;
+
+/**
+ * Parameters for a generate-map request. All optional except that the generator
+ * defaults kind='dungeon', size='medium'. `seed` makes generation reproducible — the
+ * same seed + params always yields byte-identical output; omit it and the server picks a
+ * random seed and returns it so the DM can reproduce the map. `complexity` (0..1) scales
+ * room count / carve density. `gridScale`/`gridUnit` describe one cell's real-world size
+ * (default 5 ft) for the VTT ruler; the percent-of-width `gridSize` is DERIVED from the
+ * generated cell dimensions so the overlay lines up exactly.
+ */
+export const GenerateMapParams = z.object({
+  kind: MapKind.default('dungeon'),
+  size: MapSize.default('medium'),
+  complexity: z.number().min(0).max(1).optional(),
+  seed: z.string().min(1).max(64).optional(),
+  theme: MapTheme.optional(),
+  gridScale: z.number().positive().max(1000).optional(),
+  gridUnit: z.string().min(1).max(12).optional(),
+});
+export type GenerateMapParams = z.infer<typeof GenerateMapParams>;
+
+/** The grid geometry a generated map hands back, ready to set on the encounter. */
+export const MapGridConfig = z.object({
+  gridSize: z.number().min(1).max(100), // one cell's edge as a percent of map width
+  gridScale: z.number().positive(), // real-world size of one cell
+  gridUnit: z.string().max(12),
+  gridType: GridType,
+});
+export type MapGridConfig = z.infer<typeof MapGridConfig>;
+
+/** Result of a generate-map call: the created attachment id + reproducibility info. */
+export const GeneratedMapResult = z.object({
+  attachmentId: Id,
+  seed: z.string(),
+  kind: MapKind,
+  widthCells: z.number().int().positive(),
+  heightCells: z.number().int().positive(),
+  roomCount: z.number().int().nonnegative(),
+  gridConfig: MapGridConfig,
+});
+export type GeneratedMapResult = z.infer<typeof GeneratedMapResult>;
+
+// ---------- open map SOURCES (issue #303) ----------
+// Complements the first-party procedural generator (#306) with EXTERNAL, license-clean
+// ways for a DM to get a map. The hard reality (#303): there is no bulk dataset of open
+// battle maps to bundle — nearly every 'free' map pack is CC-BY-NC-ND (no commercial use,
+// no modification, no redistribution), so Campfire can't legally re-serve them. What IS
+// clean and surfaced here:
+//   - map *generators* the DM runs themselves and imports the output of (Watabou, donjon),
+//   - the first-party #306 procedural generator, and
+//   - the One Page Dungeon Contest entries (CC-BY-SA 3.0), importable WITH attribution.
+// This is a curated catalog only — nothing here is bundled/re-served; external generators
+// are linked, and CC-BY-SA content is imported by the DM via the attributed-import path
+// (which stamps the attribution required by the licence, mirroring the per-source
+// attribution the rules importer records, #143).
+export const MapSourceKind = z.enum([
+  'generator-builtin', // the first-party procedural generator (#306) — no external site
+  'generator-external', // a third-party generator the DM runs client-side, then imports
+  'importable-collection', // an open-licensed collection the DM imports individual maps from
+]);
+export type MapSourceKind = z.infer<typeof MapSourceKind>;
+
+/**
+ * One curated entry in the "get a map" affordance (issue #303). Purely informational —
+ * the server never fetches these on the DM's behalf (Watabou/donjon maps are generated
+ * client-side, and CC-BY-SA collections are downloaded by the DM), so there is no bundling
+ * and no NC/ND content can leak in. `attributionRequired` maps and `licence`/`licenseUrl`
+ * spell out exactly what the DM must preserve when importing, keeping the flow license-clean.
+ */
+export const MapSource = z.object({
+  id: z.string().min(1).max(60), // stable slug, e.g. 'watabou-one-page-dungeon'
+  name: z.string().min(1).max(120),
+  kind: MapSourceKind,
+  description: z.string().max(400),
+  /** Where the DM goes to generate/download a map. Omitted for the built-in generator. */
+  url: z.string().max(500).optional(),
+  /** Human-readable licence label, e.g. 'CC-BY-SA 3.0', 'CC0', 'free for commercial use'. */
+  license: z.string().min(1).max(120),
+  licenseUrl: z.string().max(500).optional(),
+  /** True when the licence obliges the DM to credit the author on import (CC-BY / CC-BY-SA). */
+  attributionRequired: z.boolean(),
+  /** What this source is best for — 'town', 'dungeon', 'wilderness', 'battle map', etc. */
+  goodFor: z.array(z.string().max(40)).max(12),
+  /** True when Campfire has a first-party import path for this source (One Page Dungeon). */
+  importable: z.boolean(),
+});
+export type MapSource = z.infer<typeof MapSource>;
+
+/**
+ * Attribution the DM supplies when importing an open-licensed external map (issue #303) —
+ * e.g. a One Page Dungeon Contest entry (CC-BY-SA 3.0). The licence string is validated
+ * server-side against `isOpenLicense` (the same gate that rejects NC/ND rule packs, #19)
+ * so a proprietary/NC map can never be imported through this path. The attribution is
+ * stamped onto the stored map (its filename) so the credit travels with the artifact.
+ */
+export const ImportMapAttribution = z.object({
+  title: z.string().min(1).max(160), // the map/entry title, e.g. 'The Sunken Abbey'
+  author: z.string().min(1).max(160), // who to credit
+  license: z.string().min(1).max(120).default('CC-BY-SA 3.0'),
+  sourceUrl: z.string().max(500).optional(), // link back to the entry (CC-BY-SA attribution)
+  sourceId: z.string().max(60).optional(), // the MapSource.id this came from, when known
+});
+export type ImportMapAttribution = z.infer<typeof ImportMapAttribution>;
+
 // ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
 // Computed (read-only) difficulty band for an encounter: the party's summed 5e XP
 // thresholds vs the total adjusted monster XP (monster CR->XP with the standard
@@ -2211,6 +2624,98 @@ export const EncounterDifficulty = z.object({
   adjustedXp: z.number().int().nonnegative(), // totalMonsterXp * multiplier, compared to thresholds
 });
 export type EncounterDifficulty = z.infer<typeof EncounterDifficulty>;
+
+// ---------- encounter generator (issue #304) ----------
+// First-party, offline & deterministic encounter builder. There is no open dataset of
+// prebuilt encounters to import, but Campfire already ships the two ingredients — a
+// monster compendium (rule_entries) and the 5e difficulty-band math (#58) — so we assemble
+// a themed monster group from installed rule packs to hit a target difficulty band for the
+// party. Generation is a read-only *suggestion* (no persistence); committing goes through
+// the normal encounter-create write path, so write-mode (#158)/proposals (#124) and
+// secrecy (#262) all still apply.
+
+/**
+ * The requested "shape" of a generated group — a loose action-economy silhouette that
+ * bounds the monster count: solo (1), pair (2), group (a small band, 3–6), horde (a
+ * swarm, 7+). Omitting it lets the generator pick whatever count best fits the budget.
+ */
+export const EncounterShape = z.enum(['solo', 'pair', 'group', 'horde']);
+export type EncounterShape = z.infer<typeof EncounterShape>;
+
+/** Optional filters narrowing which compendium monsters the generator may pick from. */
+export const EncounterGenerateFilters = z.object({
+  // Creature type / tag substring match against the statblock's type (e.g. "undead",
+  // "dragon", "fiend"). Case-insensitive.
+  creatureType: z.string().min(1).max(60).optional(),
+  // Environment/terrain substring match against the statblock's environments (e.g.
+  // "forest", "underdark") when the source data carries them. Case-insensitive.
+  environment: z.string().min(1).max(60).optional(),
+  // Inclusive CR range. Fractional CRs allowed (0.25). A monster with an unparseable CR
+  // is excluded whenever either bound is set.
+  minCr: z.number().min(0).max(30).optional(),
+  maxCr: z.number().min(0).max(30).optional(),
+  // Restrict to a single installed rule pack by slug (list_rule_packs). Omitting spans
+  // every installed pack.
+  packSlug: z.string().min(1).max(160).optional(),
+});
+export type EncounterGenerateFilters = z.infer<typeof EncounterGenerateFilters>;
+
+/**
+ * Request body for POST /campaigns/:id/encounters/generate (and the generate_encounter
+ * MCP tool). `difficulty` is the TARGET band to hit. Party is auto-inferred from the
+ * campaign's active PCs unless an explicit `party` (list of PC levels) is supplied.
+ * `seed` makes the (otherwise seeded-random) selection reproducible.
+ */
+export const EncounterGenerate = z.object({
+  difficulty: DifficultyBand, // target band (trivial → deadly)
+  // Explicit party PC levels; when omitted the generator infers them from the campaign's
+  // active characters (issue #115 lifecycle).
+  party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
+  filters: EncounterGenerateFilters.optional(),
+  // Upper bound on the number of monsters (before the shape's own bound). Defaults to 12.
+  count: z.number().int().min(1).max(30).optional(),
+  shape: EncounterShape.optional(),
+  // Deterministic seed. Omit to have the server mint one (returned in the suggestion so
+  // the same group can be reproduced or re-rolled with a new seed).
+  seed: z.number().int().nonnegative().max(4294967295).optional(),
+  // Commit-only fields — used solely when the REST endpoint is called with ?commit=true
+  // (they run through the create write path). Ignored by the non-mutating generate.
+  name: z.string().min(1).max(120).optional(),
+  locationId: Id.nullable().optional(),
+  questId: Id.nullable().optional(),
+  // Created encounters default hidden (DM-only prep, #262). Pass false to create it visible.
+  hidden: z.boolean().optional(),
+});
+export type EncounterGenerate = z.infer<typeof EncounterGenerate>;
+
+/** One suggested monster line (a stack of `count` identical statblocks). */
+export const EncounterSuggestionCombatant = z.object({
+  ruleEntryId: Id, // compendium statblock id — feed straight to add_combatant
+  name: z.string(),
+  cr: z.number().nullable(), // numeric CR (null if the statblock's CR was unparseable)
+  xp: z.number().int().nonnegative(), // per-monster XP (5e CR→XP table)
+  hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it
+  count: z.number().int().min(1), // how many of this monster to add
+});
+export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
+
+/**
+ * Read-only result of a generation: the selected monster lines, the computed 5e
+ * difficulty (reusing the #58 math), the adjusted total XP, and the seed that produced
+ * it. Nothing is persisted — the caller commits via create_encounter + add_combatant.
+ */
+export const EncounterSuggestion = z.object({
+  combatants: z.array(EncounterSuggestionCombatant),
+  targetBand: DifficultyBand, // what was asked for
+  difficulty: EncounterDifficulty, // what was produced (band may differ if unachievable)
+  totalXp: z.number().int().nonnegative(), // adjusted monster XP (post number-multiplier)
+  shape: EncounterShape, // the resolved shape of the produced group
+  seed: z.number().int().nonnegative(), // reproduce with this seed; re-roll with a new one
+  // True when the produced band matches the target; false when the compendium couldn't
+  // field a group in the requested band (a best-effort closest group is still returned).
+  matchedBand: z.boolean(),
+});
+export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
 
 export const CombatantKind = z.enum(['character', 'monster']);
 export type CombatantKind = z.infer<typeof CombatantKind>;
@@ -2359,6 +2864,10 @@ export const InventoryItem = z.object({
   name: z.string().min(1).max(200),
   qty: z.number().int().min(0).default(1),
   notes: z.string().max(5_000).default(''),
+  // Optional explicit game-icons.net slug (issue #307) overriding the type-derived
+  // default icon. '' means "no override" — the UI falls back to a name/type
+  // heuristic. Same bundled icon library as NPCs (#302); see apps/web/src/lib/icons.
+  iconSlug: z.string().max(80).default(''),
   ...timestamps,
 });
 export type InventoryItem = z.infer<typeof InventoryItem>;

@@ -43,6 +43,7 @@ import { McpModule } from './modules/mcp/mcp.module';
 import { OAuthModule } from './modules/oauth/oauth.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
+import { MapsModule } from './modules/maps/maps.module';
 import { EventsModule } from './modules/events/events.module';
 import { RollsModule } from './modules/rolls/rolls.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -153,6 +154,7 @@ function serveStaticImports(): DynamicModule[] {
     OAuthModule,
     AttachmentsModule,
     EncountersModule,
+    MapsModule,
     EventsModule,
     RollsModule,
     NotificationsModule,

@@ -39,6 +39,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(columnNames(sqlite, 'quests')).toContain('hidden');
       expect(columnNames(sqlite, 'npcs')).toContain('hidden');
+      expect(columnNames(sqlite, 'npcs')).toContain('icon_slug'); // 0037 (issue #302)
+      expect(columnNames(sqlite, 'rule_entries')).toContain('icon_slug'); // 0038 (issue #305)
       expect(columnNames(sqlite, 'sessions')).toContain('dm_secret');
       expect(columnNames(sqlite, 'api_tokens')).toContain('admin_enabled');
       expect(columnNames(sqlite, 'proposals')).toContain('snapshot');
@@ -49,6 +51,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures']),
       );
       expect(columnNames(sqlite, 'attachments')).toContain('hidden');
+      expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
     } finally {
       sqlite.close();
     }
@@ -77,6 +80,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
 
       expect((sqlite.prepare('SELECT hidden FROM quests WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
       expect((sqlite.prepare('SELECT hidden FROM npcs WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
+      // 0039 (issue #307): icon_slug ADD COLUMN backfills the pre-existing item with ''.
+      expect((sqlite.prepare('SELECT icon_slug FROM inventory_items WHERE id = 1').get() as { icon_slug: string }).icon_slug).toBe('');
       expect((sqlite.prepare('SELECT admin_enabled FROM api_tokens WHERE id = 1').get() as { admin_enabled: number }).admin_enabled).toBe(0);
       expect((sqlite.prepare('SELECT snapshot FROM proposals WHERE id = 1').get() as { snapshot: unknown }).snapshot).toBeNull();
 
@@ -86,8 +91,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(combatant.death_save_successes).toBe(0);
       expect(combatant.death_save_failures).toBe(0);
 
+      // rule_entries icon_slug (0038, issue #305): ADD COLUMN default backfills the row.
+      const ruleEntry = sqlite.prepare('SELECT * FROM rule_entries WHERE id = 1').get() as Record<string, unknown>;
+      expect(ruleEntry).toMatchObject({ name: 'Legacy Fireball', type: 'spell', icon_slug: '' });
+
       // Every seeded table kept exactly its one row (nothing dropped by the rebuild).
-      for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'proposals', 'encounters', 'combatants', 'attachments']) {
+      for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'proposals', 'encounters', 'combatants', 'attachments', 'rule_entries', 'inventory_items']) {
         expect(countRows(sqlite, table)).toBe(1);
       }
     } finally {

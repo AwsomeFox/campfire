@@ -18,6 +18,72 @@ export function attachmentFileUrl(attachmentId: number): string {
   return `${API}/attachments/${attachmentId}/file`;
 }
 
+/** Dev-auth headers (mirrors the JSON api client) for the multipart helpers below. */
+function devAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const devRole = localStorage.getItem('cf.devRole');
+  const devUser = localStorage.getItem('cf.devUser');
+  if (devRole) headers['x-dev-role'] = devRole;
+  if (devUser) headers['x-dev-user'] = devUser;
+  return headers;
+}
+
+/** Parse a non-ok fetch Response into an ApiError with the server's message. */
+async function toApiError(res: Response): Promise<ApiError> {
+  let message = res.statusText;
+  try {
+    const body = await res.json();
+    message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
+  } catch {
+    /* non-json error body */
+  }
+  return new ApiError(res.status, message);
+}
+
+/** Attribution the DM supplies when importing an open-licensed external map (issue #303). */
+export interface MapImportAttribution {
+  title: string;
+  author: string;
+  license?: string;
+  sourceUrl?: string;
+  sourceId?: string;
+}
+
+/** Result of a maps/import call: the stored map attachment + the stamped attribution. */
+export interface ImportedMapResult {
+  attachment: Attachment;
+  attribution: { title: string; author: string; license: string; sourceUrl?: string };
+}
+
+/**
+ * Import an open-licensed external map with attribution (issue #303) — a One Page Dungeon
+ * (CC-BY-SA) entry or a Watabou/donjon export the DM downloaded. Multipart POST to
+ * /campaigns/:id/maps/import; the server validates the licence, saves the map hidden
+ * (DM-only), and stamps the credit onto the filename.
+ */
+export async function importMapWithAttribution(
+  campaignId: number,
+  attribution: MapImportAttribution,
+  file: File,
+): Promise<ImportedMapResult> {
+  const form = new FormData();
+  form.append('title', attribution.title);
+  form.append('author', attribution.author);
+  if (attribution.license) form.append('license', attribution.license);
+  if (attribution.sourceUrl) form.append('sourceUrl', attribution.sourceUrl);
+  if (attribution.sourceId) form.append('sourceId', attribution.sourceId);
+  form.append('file', file);
+
+  const res = await fetch(`${API}/campaigns/${campaignId}/maps/import`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: devAuthHeaders(),
+    body: form,
+  });
+  if (!res.ok) throw await toApiError(res);
+  return (await res.json()) as ImportedMapResult;
+}
+
 /** Multipart upload helper — exported so callers that need a bare upload (no dropzone UI, e.g. the "Replace map" button) can reuse it. */
 export async function uploadAttachment(campaignId: number, kind: AttachmentKind, file: File): Promise<Attachment> {
   const form = new FormData();

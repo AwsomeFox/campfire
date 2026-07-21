@@ -49,6 +49,7 @@ describe('inventory & treasury (e2e)', () => {
       expect(createRes.body.characterId).toBeNull();
       expect(createRes.body.qty).toBe(1);
       expect(createRes.body.notes).toBe('');
+      expect(createRes.body.iconSlug).toBe(''); // issue #307 — no override by default
 
       const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(viewer);
       expect(listRes.status).toBe(200);
@@ -57,6 +58,35 @@ describe('inventory & treasury (e2e)', () => {
       const getRes = await request(server).get(`/api/v1/inventory/${createRes.body.id}`).set(player);
       expect(getRes.status).toBe(200);
       expect(getRes.body.name).toBe('Rope (50 ft)');
+    });
+
+    it('icon override round-trips: create with iconSlug -> list/get -> patch -> clear (issue #307)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Create carries an explicit icon slug.
+      const createRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Flaming Longsword', iconSlug: 'sword-brandish' });
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.iconSlug).toBe('sword-brandish');
+      const itemId = createRes.body.id;
+
+      // Survives read paths (get + list).
+      const getRes = await request(server).get(`/api/v1/inventory/${itemId}`).set(player);
+      expect(getRes.body.iconSlug).toBe('sword-brandish');
+      const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(viewer);
+      expect(listRes.body.find((i: { id: number }) => i.id === itemId).iconSlug).toBe('sword-brandish');
+
+      // Patch to a different slug.
+      const patchRes = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ iconSlug: 'flanged-mace' });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.iconSlug).toBe('flanged-mace');
+
+      // Clearing the override ('') reverts to the auto default on the client.
+      const clearRes = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ iconSlug: '' });
+      expect(clearRes.status).toBe(200);
+      expect(clearRes.body.iconSlug).toBe('');
     });
 
     it('viewer cannot create/update/delete items', async () => {

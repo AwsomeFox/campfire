@@ -201,6 +201,11 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/preferences/PreferencesPage')),
           },
           {
+            // Open-content attributions (issue #302) — game-icons.net CC-BY credits.
+            path: '/credits',
+            element: lazyPage(() => import('../features/credits/CreditsPage')),
+          },
+          {
             path: '*',
             element: page(<NotFoundPage />),
           },

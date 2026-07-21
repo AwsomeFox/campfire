@@ -14,6 +14,7 @@ import { ProposalRecordsModule } from '../proposals/proposal-records.module';
 import { ProposalsModule } from '../proposals/proposals.module';
 import { RulesModule } from '../rules/rules.module';
 import { EncountersModule } from '../encounters/encounters.module';
+import { MapsModule } from '../maps/maps.module';
 import { AuditModule } from '../audit/audit.module';
 import { ExportModule } from '../export/export.module';
 import { AiDmModule } from '../ai-dm/ai-dm.module';
@@ -43,6 +44,7 @@ import { McpController } from './mcp.controller';
     ProposalsModule,
     RulesModule,
     EncountersModule,
+    MapsModule,
     AuditModule,
     ExportModule,
     AiDmModule,

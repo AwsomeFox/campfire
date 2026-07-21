@@ -88,6 +88,50 @@ describe('npcs (e2e)', () => {
     expect(badUpdate.status).toBe(400);
   });
 
+  // Bundled entity icon (issue #302): iconSlug is an optional, opaque string that
+  // round-trips through create + update and defaults to '' when unset. The web app
+  // validates the slug against its bundled game-icons.net catalog; the server just
+  // stores it, so #305/#307 can reuse the exact same field on other entities.
+  it('npc iconSlug round-trips through create/update and defaults to empty', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Defaults to '' when omitted.
+    const noIcon = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'Iconless Ivan' });
+    expect(noIcon.status).toBe(201);
+    expect(noIcon.body.iconSlug).toBe('');
+
+    // Set on create and read back verbatim.
+    const withIcon = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'Sir Broadsword', iconSlug: 'broadsword' });
+    expect(withIcon.status).toBe(201);
+    expect(withIcon.body.iconSlug).toBe('broadsword');
+    const npcId = withIcon.body.id;
+
+    // GET reflects the stored slug.
+    const got = await request(server).get(`/api/v1/npcs/${npcId}`).set(dm);
+    expect(got.body.iconSlug).toBe('broadsword');
+
+    // PATCH updates it, and can clear it back to ''.
+    const changed = await request(server)
+      .patch(`/api/v1/npcs/${npcId}`)
+      .set(dm)
+      .send({ iconSlug: 'crossed-swords' });
+    expect(changed.status).toBe(200);
+    expect(changed.body.iconSlug).toBe('crossed-swords');
+
+    const cleared = await request(server)
+      .patch(`/api/v1/npcs/${npcId}`)
+      .set(dm)
+      .send({ iconSlug: '' });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.iconSlug).toBe('');
+  });
+
   // Entity-level secrecy (issue #42): a hidden NPC is excluded WHOLESALE from
   // non-DM reads, and the DM reveals it by patching hidden=false.
   it('hidden npc is absent for player/viewer, visible to dm, and reveal makes it appear', async () => {

@@ -44,6 +44,7 @@ const ALL_TOOLS = [
   'get_rule_entry',
   'get_encounter',
   'get_encounter_difficulty',
+  'generate_encounter',
   'list_encounters',
   'list_members',
   'list_notes',
@@ -122,6 +123,7 @@ const ALL_TOOLS = [
   'create_encounter',
   'update_encounter',
   'reveal_map_region',
+  'generate_map',
   'add_combatant',
   'update_combatant',
   'remove_combatant',
@@ -224,7 +226,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(130);
+    expect(tools).toHaveLength(132);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -387,6 +389,38 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       name: 'add_inventory_item',
       arguments: { campaignId, name: 'Contraband' },
     });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('403');
+  });
+
+  it('generate_map (issue #306): dm generates a deterministic hidden map; viewer is denied', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    const genRes = await dmClient.callTool({
+      name: 'generate_map',
+      arguments: { campaignId, kind: 'dungeon', size: 'small', seed: 'mcp-seed' },
+    });
+    expect(genRes.isError).toBeFalsy();
+    const gen = parseResult(genRes) as {
+      attachmentId: number;
+      seed: string;
+      kind: string;
+      widthCells: number;
+      gridConfig: { gridSize: number; gridType: string };
+    };
+    expect(gen.attachmentId).toBeGreaterThan(0);
+    expect(gen.seed).toBe('mcp-seed');
+    expect(gen.kind).toBe('dungeon');
+    expect(gen.widthCells).toBe(20);
+    expect(gen.gridConfig.gridType).toBe('square');
+
+    // Default hidden (#97/#259): a viewer PAT's get_attachment 404s the generated map.
+    const hidden = await viewerClient.callTool({ name: 'get_attachment', arguments: { attachmentId: gen.attachmentId } });
+    expect(hidden.isError).toBe(true);
+
+    // A viewer-scoped PAT cannot generate (dm role required).
+    const denied = await viewerClient.callTool({ name: 'generate_map', arguments: { campaignId, kind: 'cave' } });
     expect(denied.isError).toBe(true);
     expect((denied.content as TextContent[])[0].text).toContain('403');
   });
@@ -1338,6 +1372,70 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const getAfter = await client.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } });
     const afterRemoval = parseResult(getAfter) as { combatants: Array<{ id: number }> };
     expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(false);
+  });
+
+  it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {
+    const client = await mcpClient(dmToken);
+
+    const encountersBefore = parseResult(
+      await client.callTool({ name: 'list_encounters', arguments: { campaignId } }),
+    ) as Array<{ id: number }>;
+
+    // Explicit level-1 party so the 5e budget math is meaningful; the fake Open5e pack ships
+    // an Owlbear (CR3, 700 XP) which is deadly as a solo vs four level-1 PCs (deadly=400).
+    const genArgs = { campaignId, difficulty: 'deadly', party: [1, 1, 1, 1], seed: 42 };
+    const gen = await client.callTool({ name: 'generate_encounter', arguments: genArgs });
+    expect(gen.isError).toBeFalsy();
+    const suggestion = parseResult(gen) as {
+      combatants: Array<{ ruleEntryId: number; count: number; xp: number }>;
+      difficulty: { band: string };
+      targetBand: string;
+      matchedBand: boolean;
+      seed: number;
+    };
+    expect(suggestion.targetBand).toBe('deadly');
+    expect(suggestion.matchedBand).toBe(true);
+    expect(suggestion.difficulty.band).toBe('deadly');
+    expect(suggestion.combatants.length).toBeGreaterThan(0);
+    expect(suggestion.combatants.every((c) => c.xp > 0)).toBe(true);
+    expect(suggestion.seed).toBe(42);
+
+    // Reproducible by seed — same suggestion twice.
+    const again = parseResult(await client.callTool({ name: 'generate_encounter', arguments: genArgs })) as { combatants: unknown };
+    expect(again.combatants).toEqual(suggestion.combatants);
+
+    // Non-mutating: the preview persisted no encounter.
+    const encountersAfter = parseResult(
+      await client.callTool({ name: 'list_encounters', arguments: { campaignId } }),
+    ) as Array<{ id: number }>;
+    expect(encountersAfter.length).toBe(encountersBefore.length);
+
+    // Commit via the EXISTING write tools (write-mode honored there, not re-invented here).
+    const enc = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Generated Fight', hidden: true } }),
+    ) as { id: number; hidden: boolean; status: string };
+    expect(enc.hidden).toBe(true);
+    expect(enc.status).toBe('preparing');
+    for (const line of suggestion.combatants) {
+      const add = await client.callTool({
+        name: 'add_combatant',
+        arguments: { encounterId: enc.id, kind: 'monster', ruleEntryId: line.ruleEntryId, count: line.count },
+      });
+      expect(add.isError).toBeFalsy();
+    }
+    const built = parseResult(
+      await client.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { combatants: Array<{ kind: string }> };
+    expect(built.combatants.filter((c) => c.kind === 'monster').length).toBeGreaterThan(0);
+  });
+
+  it('generate_encounter is a non-mutating read tool a viewer-scoped PAT can call (issue #304)', async () => {
+    const viewerClient = await mcpClient(viewerToken);
+    const gen = await viewerClient.callTool({ name: 'generate_encounter', arguments: { campaignId, difficulty: 'easy', party: [1, 1, 1, 1], seed: 1 } });
+    expect(gen.isError).toBeFalsy();
+    const suggestion = parseResult(gen) as { targetBand: string; seed: number };
+    expect(suggestion.targetBand).toBe('easy');
+    expect(suggestion.seed).toBe(1);
   });
 
   it('get_session_recaps / read_audit_log push limit/offset into SQL (issue #71)', async () => {
