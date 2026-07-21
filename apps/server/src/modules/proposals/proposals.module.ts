@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { QuestsModule } from '../quests/quests.module';
 import { NpcsModule } from '../npcs/npcs.module';
@@ -13,6 +14,7 @@ import { CampaignProposalsController, ProposalsController } from './proposals.co
 @Module({
   imports: [
     AuditModule,
+    NotificationsModule,
     RoleAccessModule,
     ProposalRecordsModule,
     QuestsModule,

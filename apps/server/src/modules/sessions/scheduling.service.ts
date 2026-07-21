@@ -8,6 +8,7 @@ import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { buildCampaignIcs } from './ics.util';
@@ -59,7 +60,13 @@ export class SchedulingService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  /** Human label for a scheduled game night — its title, or a date fallback. */
+  private scheduleLabel(row: typeof scheduledSessions.$inferSelect): string {
+    return row.title?.trim() ? row.title.trim() : 'the next session';
+  }
 
   // ----- scheduled sessions -----
 
@@ -132,6 +139,14 @@ export class SchedulingService {
       entityId: row.id,
       campaignId,
     });
+    // Tell the party a game night was put on the calendar (issue #263). Best-effort;
+    // no entity deep-link (scheduled sessions aren't an EntityType — the bell routes
+    // session_scheduled to the sessions page, which hosts the schedule panel).
+    await this.notifications.notifyCampaign(campaignId, user, {
+      type: 'session_scheduled',
+      title: `${this.scheduleLabel(row)} scheduled for ${row.scheduledAt.slice(0, 10)}`,
+      actorName: user.name,
+    });
     return { ...toDomain(row), rsvps: [] };
   }
 
@@ -152,6 +167,16 @@ export class SchedulingService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    // Re-notify the party only when the game night actually MOVES (issue #263) —
+    // a title/location/notes tweak isn't worth a ping. Mirrors sessions.service's
+    // playedAt-changed guard so an unrelated edit doesn't spam the schedule.
+    if (patch.scheduledAt !== undefined && patch.scheduledAt !== existing.scheduledAt) {
+      await this.notifications.notifyCampaign(existing.campaignId, user, {
+        type: 'session_scheduled',
+        title: `${this.scheduleLabel(existing)} rescheduled for ${patch.scheduledAt.slice(0, 10)}`,
+        actorName: user.name,
+      });
+    }
     return this.getWithRsvps(id);
   }
 
@@ -207,6 +232,18 @@ export class SchedulingService {
       campaignId: schedule.campaignId,
       detail: input.status,
     });
+    // Let the DM(s) know availability changed (issue #263) — they own scheduling, so
+    // an RSVP is theirs to see. Fan out to every dm-role member except the actor (a DM
+    // marking their own availability shouldn't ping themselves). Best-effort.
+    const roles = await this.notifications.memberRoles(schedule.campaignId);
+    for (const [memberId, memberRole] of roles) {
+      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+      await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
+        type: 'session_rsvp',
+        title: `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`,
+        actorName: user.name,
+      });
+    }
     return this.getWithRsvps(scheduleId);
   }
 

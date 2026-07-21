@@ -19,7 +19,16 @@ function targetPath(n: Notification): string {
   switch (n.type) {
     case 'recap_posted':
     case 'session_scheduled':
+    case 'session_rsvp':
+      // Scheduling + RSVPs live in the schedule panel on the sessions page.
       return `/c/${n.campaignId}/sessions`;
+    case 'quest_updated':
+      return n.entityType === 'quest' && n.entityId
+        ? `/c/${n.campaignId}/quests?quest=${n.entityId}`
+        : `/c/${n.campaignId}/quests`;
+    case 'proposal_submitted':
+    case 'proposal_resolved':
+      return `/c/${n.campaignId}/proposals`;
     case 'note_reply':
     case 'note_shared':
       return `/c/${n.campaignId}/notes`;
@@ -49,6 +58,14 @@ function typeIcon(type: Notification['type']): string {
       return '🏕️';
     case 'session_scheduled':
       return '🗓️';
+    case 'session_rsvp':
+      return '✋';
+    case 'quest_updated':
+      return '📜';
+    case 'proposal_submitted':
+      return '📝';
+    case 'proposal_resolved':
+      return '⚖️';
     default:
       return '🔔';
   }
