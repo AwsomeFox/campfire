@@ -3,9 +3,9 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
+import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
+import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo } from '../../common/redact';
@@ -16,10 +16,11 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { advanceTurn, applyCombatantHp, computeEncounterDifficulty, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
-import type { CombatantHpState } from './encounters.logic';
+import { advanceTurn, applyCombatantHp, computeEncounterDifficulty, crToXp, generateEncounterGroup, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
+import type { CombatantHpState, GeneratorCandidate } from './encounters.logic';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
+type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
@@ -550,6 +551,157 @@ export class EncountersService {
     const monsterCrs = monsterCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
 
     return computeEncounterDifficulty(partyLevels, monsterCrs);
+  }
+
+  /**
+   * Resolve the party's PC levels for a generation (issue #304): the explicit `party`
+   * override when given, otherwise the campaign's ACTIVE characters' sheet levels (issue
+   * #115 — dead/retired PCs don't set the budget). Empty when a fresh campaign has no PCs,
+   * which the generator handles (it can only produce `trivial` against an empty party).
+   */
+  private async resolvePartyLevels(campaignId: number, explicit?: number[]): Promise<number[]> {
+    if (explicit && explicit.length > 0) return explicit;
+    const rows = await this.db
+      .select({ level: characters.level })
+      .from(characters)
+      .where(and(eq(characters.campaignId, campaignId), eq(characters.status, 'active'), notDeleted(characters.deletedAt)));
+    return rows.map((r) => r.level);
+  }
+
+  /**
+   * Load the compendium monsters a generation may pick from (issue #304), scored for the
+   * 5e budget math. Reads rule_entries of type 'monster' (installed packs only — that's all
+   * rule_entries ever contains), maps each statblock via the campaign's RuleSystemAdapter
+   * (#70) to a CR/HP, computes per-monster XP from the #58 CR→XP table, and applies the
+   * optional creature-type / environment / CR-range / pack filters. Never persists.
+   */
+  private async loadMonsterCandidates(
+    adapter: RuleSystemAdapter,
+    filters: EncounterGenerateInput['filters'],
+  ): Promise<GeneratorCandidate[]> {
+    // Optional single-pack scoping: resolve the slug to a pack id, or short-circuit to no
+    // candidates if the slug isn't installed (mirrors RulesService.search's pack filter).
+    let packId: number | undefined;
+    if (filters?.packSlug) {
+      const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, filters.packSlug)).limit(1);
+      if (!pack) return [];
+      packId = pack.id;
+    }
+
+    const where = packId !== undefined ? and(eq(ruleEntries.type, 'monster'), eq(ruleEntries.packId, packId)) : eq(ruleEntries.type, 'monster');
+    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
+
+    const typeNeedle = filters?.creatureType?.trim().toLowerCase();
+    const envNeedle = filters?.environment?.trim().toLowerCase();
+
+    const candidates: GeneratorCandidate[] = [];
+    for (const row of rows) {
+      const data = fromJsonText<Record<string, unknown>>(row.dataJson, {});
+      const mapped = adapter.mapStatblock(data);
+      const cr = parseCr(mapped.challengeRating);
+
+      // CR-range filter: a monster with an unparseable CR is excluded when either bound is set.
+      if (filters?.minCr !== undefined || filters?.maxCr !== undefined) {
+        if (cr === null) continue;
+        if (filters.minCr !== undefined && cr < filters.minCr) continue;
+        if (filters.maxCr !== undefined && cr > filters.maxCr) continue;
+      }
+      // Creature-type substring filter (e.g. "undead", "dragon").
+      if (typeNeedle) {
+        const t = typeof mapped.creatureType === 'string' ? mapped.creatureType.toLowerCase() : '';
+        if (!t.includes(typeNeedle)) continue;
+      }
+      // Environment substring filter — best-effort over the raw statblock's environments,
+      // which the canonical MonsterStatblockData doesn't carry (Open5e ships `environments`).
+      if (envNeedle) {
+        const raw = (data.environments ?? data.environment) as unknown;
+        const envs = Array.isArray(raw) ? raw.map((e) => String(e).toLowerCase()) : typeof raw === 'string' ? [raw.toLowerCase()] : [];
+        if (!envs.some((e) => e.includes(envNeedle))) continue;
+      }
+
+      candidates.push({ ruleEntryId: row.id, name: row.name, cr, xp: crToXp(cr), hpMax: adapter.monsterHitPoints(data) });
+    }
+    return candidates;
+  }
+
+  /**
+   * Generate (but do NOT persist) a balanced monster group for a party + target difficulty
+   * (issue #304). Read-only "suggestion": assembles a group from the installed compendium
+   * to hit the requested #58 band, deterministic by `seed`. Any campaign member (or AI) may
+   * preview — committing is the separate create write path (create + addCombatant), so
+   * write-mode (#158)/proposals (#124)/secrecy (#262) all apply there, not here.
+   *
+   * `viewerRole` is accepted for parity with the other reads but a suggestion is derived
+   * data over the shared compendium — there's no hidden per-encounter row to redact yet
+   * (the encounter doesn't exist until commit).
+   */
+  async generateEncounter(campaignId: number, input: EncounterGenerateInput, _viewerRole?: Role): Promise<EncounterSuggestion> {
+    const adapter = await this.adapterForCampaign(campaignId);
+    const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+
+    // Mint a seed when the caller didn't supply one, so the result is reproducible: the
+    // returned seed round-trips back through `seed` to rebuild the identical group.
+    const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
+    const maxCount = input.count ?? 12;
+
+    const result = generateEncounterGroup({
+      partyLevels,
+      targetBand: input.difficulty,
+      candidates,
+      shape: input.shape,
+      maxCount,
+      seed,
+    });
+
+    return {
+      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
+      targetBand: input.difficulty,
+      difficulty: result.difficulty,
+      totalXp: result.difficulty.adjustedXp,
+      shape: result.shape,
+      seed: result.seed,
+      matchedBand: result.matchedBand,
+    };
+  }
+
+  /**
+   * Convenience commit path for POST .../generate?commit=true (issue #304): run the
+   * read-only generator, then persist the suggestion as a real encounter through the normal
+   * write path — create() (auto-adds the party) followed by addCombatant() per monster line
+   * (each with its `count`). The caller (controller) has already passed the dm + write-mode
+   * guard, so this stays behind the same authz as any other encounter write. Created hidden
+   * (DM-only prep, #262) and `preparing` by default, so nothing leaks to players pre-spring.
+   * Returns the created encounter with its combatants plus the suggestion that seeded it.
+   */
+  async generateAndCreateEncounter(
+    campaignId: number,
+    input: EncounterGenerateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ encounter: EncounterWithCombatants; suggestion: EncounterSuggestion }> {
+    const suggestion = await this.generateEncounter(campaignId, input, role);
+
+    const name = input.name ?? `Generated ${input.difficulty} encounter`;
+    const encounter = await this.create(
+      campaignId,
+      {
+        name,
+        locationId: input.locationId ?? undefined,
+        questId: input.questId ?? undefined,
+        // Default hidden (DM prep, #262) unless the caller explicitly opts out.
+        hidden: input.hidden ?? true,
+      },
+      user,
+      role,
+    );
+
+    for (const line of suggestion.combatants) {
+      await this.addCombatant(encounter.id, { kind: 'monster', ruleEntryId: line.ruleEntryId, count: line.count }, user, role);
+    }
+
+    const withCombatants = await this.getWithCombatantsOrThrow(encounter.id, role);
+    return { encounter: withCombatants, suggestion };
   }
 
   /**

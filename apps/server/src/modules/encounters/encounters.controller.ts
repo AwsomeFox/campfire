@@ -1,11 +1,11 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { EncounterStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
 
 @ApiTags('encounters')
 @Controller('campaigns/:campaignId/encounters')
@@ -25,6 +25,41 @@ export class CampaignEncountersController {
   ) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.encounters.create(campaignId, body, user, role);
+  }
+
+  @Post('generate')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Generate an encounter from the compendium (issue #304)',
+    description:
+      'Assembles a balanced monster group from installed rule packs to hit a target 5e difficulty band for the ' +
+      'party (issue #58 math). Deterministic — pass `seed` to reproduce, omit it to get a fresh group (the seed is ' +
+      'returned so you can re-roll or reproduce). Party is inferred from the campaign\'s active PCs unless `party` ' +
+      '(explicit PC levels) is given. Read-only by default (200, requires membership — any member/AI may preview): ' +
+      'nothing is persisted, so commit the returned monsters via POST /encounters + add-combatant (the normal write ' +
+      'path). Pass ?commit=true to run generate→create in one call — that branch requires the dm role + write mode ' +
+      'and lands a hidden, `preparing` encounter (issue #262).',
+  })
+  @ApiQuery({ name: 'commit', required: false, type: Boolean, description: 'When true, persist the suggestion as a real (hidden, preparing) encounter — requires dm + write mode.' })
+  @ApiResponse({ status: 200, description: 'Read-only suggestion (monster lines + difficulty + seed), OR { encounter, suggestion } when commit=true.' })
+  @ApiResponse({ status: 403, description: 'commit=true requires the dm role.' })
+  async generate(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Query('commit') commit: string | undefined,
+    @Body() body: EncounterGenerateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    // Commit runs generate→create through the write path: dm role + write mode, exactly
+    // like POST /encounters. The read-only preview requires only membership, so any member
+    // or AI can generate + reroll before committing (issue #304).
+    if (commit === 'true' || commit === '1') {
+      // requireRole asserts writability by default (it IS the write gate) — an archived
+      // campaign takes no new encounters, exactly like POST /encounters.
+      const role = await this.access.requireRole(user, campaignId, 'dm');
+      return this.encounters.generateAndCreateEncounter(campaignId, body, user, role);
+    }
+    const role = await this.access.requireMember(user, campaignId);
+    return this.encounters.generateEncounter(campaignId, body, role);
   }
 
   @Get()

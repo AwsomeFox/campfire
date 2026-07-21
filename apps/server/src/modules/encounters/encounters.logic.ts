@@ -1,5 +1,5 @@
 import { Dnd5eAdapter } from '@campfire/schema';
-import type { Combatant, CombatantKind, DeathState, DifficultyBand, EncounterDifficulty, EncounterStatus, HpBand } from '@campfire/schema';
+import type { Combatant, CombatantKind, DeathState, DifficultyBand, EncounterDifficulty, EncounterShape, EncounterStatus, HpBand } from '@campfire/schema';
 
 /**
  * Pure combat-order / HP-band math for encounters, extracted from
@@ -186,6 +186,176 @@ export function computeEncounterDifficulty(partyLevels: number[], monsterCrs: (n
     totalMonsterXp,
     multiplier,
     adjustedXp,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// First-party encounter generator (issue #304).
+//
+// No open dataset of prebuilt encounters exists to import, but the two ingredients are
+// already here — the monster compendium (rule_entries) and the 5e difficulty-band math
+// above (#58). These pure functions assemble a themed monster group from a supplied
+// candidate list to hit a target difficulty band for the party. Fully offline and
+// deterministic: a `seed` reproduces the exact same group. No DB, no `this` — unit-tested
+// in encounters-logic.spec.ts. The service layer supplies the candidates (queried from the
+// compendium) and persists nothing here; committing is the normal create write path.
+// ---------------------------------------------------------------------------
+
+/** A compendium monster the generator may pick from (pre-scored by the service). */
+export interface GeneratorCandidate {
+  ruleEntryId: number;
+  name: string;
+  cr: number | null;
+  xp: number;
+  hpMax: number | null;
+}
+
+/** One selected monster line — a candidate plus the quantity to field. */
+export interface GeneratorPick extends GeneratorCandidate {
+  count: number;
+}
+
+export interface GenerateGroupOptions {
+  partyLevels: number[];
+  targetBand: DifficultyBand;
+  candidates: GeneratorCandidate[];
+  shape?: EncounterShape;
+  maxCount: number;
+  seed: number;
+}
+
+export interface GenerateGroupResult {
+  picks: GeneratorPick[];
+  difficulty: EncounterDifficulty;
+  shape: EncounterShape;
+  seed: number;
+  matchedBand: boolean;
+}
+
+/**
+ * mulberry32 — a tiny, fast, well-distributed seedable PRNG. Deterministic: the same
+ * 32-bit seed always yields the same sequence, which is what makes generation
+ * reproducible by `seed` (issue #304 acceptance criterion). Returns floats in [0, 1).
+ */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Deterministic Fisher–Yates shuffle driven by a seeded RNG (returns a new array). */
+function seededShuffle<T>(items: T[], rng: () => number): T[] {
+  const a = [...items];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/** Inclusive [min, max] monster-count window for a requested shape, clamped to maxCount. */
+function shapeCountRange(shape: EncounterShape | undefined, maxCount: number): [number, number] {
+  const cap = Math.max(1, maxCount);
+  switch (shape) {
+    case 'solo':
+      return [1, 1];
+    case 'pair':
+      return [Math.min(2, cap), Math.min(2, cap)];
+    case 'group':
+      return [Math.min(3, cap), Math.min(6, cap)];
+    case 'horde':
+      return [Math.min(7, cap), Math.min(12, cap)];
+    default:
+      return [1, cap];
+  }
+}
+
+/** Classify a produced count into the shape bucket it best represents (for the result). */
+function shapeForCount(count: number): EncounterShape {
+  if (count <= 1) return 'solo';
+  if (count === 2) return 'pair';
+  if (count <= 6) return 'group';
+  return 'horde';
+}
+
+const BAND_ORDER: DifficultyBand[] = ['trivial', 'easy', 'medium', 'hard', 'deadly'];
+
+/** How many bands apart two difficulty bands are — the closeness score for best-effort fits. */
+function bandDistance(a: DifficultyBand, b: DifficultyBand): number {
+  return Math.abs(BAND_ORDER.indexOf(a) - BAND_ORDER.indexOf(b));
+}
+
+/**
+ * Assemble a monster group hitting `targetBand` for `partyLevels` from `candidates`
+ * (issue #304). Deterministic given `seed`.
+ *
+ * Strategy: seed-shuffle the usable candidates (xp > 0), then for each monster try every
+ * count in the shape's window, classifying the resulting all-identical group via the SAME
+ * #58 difficulty math (computeEncounterDifficulty) — so the group-size multiplier and CR→XP
+ * table are reused, never re-derived. The first (in seeded order) group whose band equals
+ * the target wins, giving reproducibility. If nothing lands exactly on the band (e.g. the
+ * compendium can't field it for this party), the closest group by band distance — then by
+ * how near its adjusted XP sits to the target threshold — is returned as best effort with
+ * matchedBand:false. A homogeneous group ("Goblin ×4") is intentional for v1: it maps
+ * cleanly onto add_combatant's `count`, reads as a themed encounter, and is easy to test.
+ */
+export function generateEncounterGroup(opts: GenerateGroupOptions): GenerateGroupResult {
+  const { partyLevels, targetBand, candidates, shape, maxCount, seed } = opts;
+  const rng = mulberry32(seed);
+  const usable = candidates.filter((c) => c.xp > 0);
+  const [countMin, countMax] = shapeCountRange(shape, maxCount);
+
+  const empty = (): GenerateGroupResult => ({
+    picks: [],
+    difficulty: computeEncounterDifficulty(partyLevels, []),
+    shape: shape ?? 'solo',
+    seed,
+    matchedBand: targetBand === 'trivial',
+  });
+  if (usable.length === 0) return empty();
+
+  const shuffled = seededShuffle(usable, rng);
+  // Target XP the band's threshold represents — used only to rank best-effort near-misses
+  // toward the low edge of the band (a "medium" that just clears the medium threshold).
+  const thresholds = computeEncounterDifficulty(partyLevels, []).thresholds;
+  const targetXp =
+    targetBand === 'trivial' ? Math.max(1, Math.floor(thresholds.easy / 2)) : thresholds[targetBand as 'easy' | 'medium' | 'hard' | 'deadly'];
+
+  let best: { pick: GeneratorPick; difficulty: EncounterDifficulty; score: number; xpGap: number } | null = null;
+
+  for (const m of shuffled) {
+    for (let n = countMin; n <= countMax; n++) {
+      const crs: (number | null)[] = Array.from({ length: n }, () => m.cr);
+      const difficulty = computeEncounterDifficulty(partyLevels, crs);
+      if (difficulty.band === targetBand) {
+        return {
+          picks: [{ ...m, count: n }],
+          difficulty,
+          shape: shape ?? shapeForCount(n),
+          seed,
+          matchedBand: true,
+        };
+      }
+      const score = bandDistance(difficulty.band, targetBand);
+      const xpGap = Math.abs(difficulty.adjustedXp - targetXp);
+      if (best === null || score < best.score || (score === best.score && xpGap < best.xpGap)) {
+        best = { pick: { ...m, count: n }, difficulty, score, xpGap };
+      }
+    }
+  }
+
+  if (best === null) return empty();
+  return {
+    picks: [best.pick],
+    difficulty: best.difficulty,
+    shape: shape ?? shapeForCount(best.pick.count),
+    seed,
+    matchedBand: false,
   };
 }
 
