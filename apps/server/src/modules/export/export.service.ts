@@ -196,6 +196,13 @@ export class ExportService {
     const data = await this.buildExport(campaignId, user);
     const zip = new JSZip();
 
+    // Machine-readable manifest (issue #236): embed the full structured export as
+    // campaign.json so the zip is round-trippable. The markdown files below are for
+    // humans; campaign.json is what POST /campaigns/import/archive reads to recreate
+    // every row, and it names each attachment's bytes under uploads/ (attachments[].file)
+    // so maps/portraits come back with their references remapped rather than dropped.
+    zip.file('campaign.json', JSON.stringify(data));
+
     zip.file('campaign.md', this.campaignMarkdown(data.campaign, data.notes));
 
     const questsFolder = zip.folder('quests')!;
