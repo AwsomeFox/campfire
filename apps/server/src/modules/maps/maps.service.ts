@@ -1,13 +1,28 @@
 import crypto from 'node:crypto';
-import { Injectable } from '@nestjs/common';
-import type { GenerateMapParams, GeneratedMapResult, Role } from '@campfire/schema';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import type {
+  Attachment,
+  GenerateMapParams,
+  GeneratedMapResult,
+  ImportMapAttribution,
+  MapSource,
+  Role,
+} from '@campfire/schema';
+import { isOpenLicense, licenseForbidsRedistribution } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
-import { AttachmentsService } from '../attachments/attachments.service';
+import { AttachmentsService, sniffImageMime } from '../attachments/attachments.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { generateMap } from './map-generator';
+import { OPEN_MAP_SOURCES } from './map-sources';
 
 /** Content type + on-disk format for every generated map (see AttachmentsService.filePath). */
 const MAP_MIME = 'image/svg+xml';
+
+/** Result of an attributed import: the stored map attachment plus the credit stamped onto it. */
+export interface ImportedMapResult {
+  attachment: Attachment;
+  attribution: { title: string; author: string; license: string; sourceUrl?: string };
+}
 
 /**
  * Procedural battle-map generation (issue #306). Wires the pure, deterministic generator
@@ -103,4 +118,89 @@ export class MapsService {
     );
     return result;
   }
+
+  /**
+   * The curated catalog of open, license-clean external map sources (issue #303) — the
+   * data behind the DM's "get a map" affordance. Static and offline: generator entries are
+   * links the DM runs client-side (Watabou, donjon), plus the built-in generator (#306) and
+   * the One Page Dungeon Contest (CC-BY-SA), which is importable via importAttributedMap.
+   */
+  listSources(): readonly MapSource[] {
+    return OPEN_MAP_SOURCES;
+  }
+
+  /**
+   * Import an open-licensed external map (issue #303) — e.g. a One Page Dungeon Contest
+   * entry (CC-BY-SA 3.0) the DM downloaded, or a Watabou/donjon export. Saves it as a
+   * hidden (#97/#259) 'map' attachment so it never auto-leaks to players, with the required
+   * attribution stamped onto the stored filename so the credit travels with the artifact.
+   *
+   * License-clean by construction:
+   *  - the claimed licence is validated against `isOpenLicense` (the same gate that rejects
+   *    NC/ND rule packs, #19), so a proprietary/NC/ND map is refused with a 400 — we don't
+   *    weaken the gate;
+   *  - the bytes are sniffed (magic-byte) and must be a real png/jpeg/webp image, exactly
+   *    like a normal upload, so a mislabelled or non-image file can't be stored as a map.
+   */
+  async importAttributedMap(
+    campaignId: number,
+    attribution: ImportMapAttribution,
+    file: { buffer: Buffer },
+    user: RequestUser,
+    role: Role,
+  ): Promise<ImportedMapResult> {
+    // Two layers, because importing re-serves the bytes to the whole table:
+    //  1. must NAME an open licence (the #19 gate), and
+    //  2. must NOT carry an NC/ND restriction. Layer 2 is essential here and not redundant:
+    //     `isOpenLicense` is a permissive substring match, so "CC-BY-NC-ND" sneaks past it on
+    //     the "cc-by" substring — yet NC/ND is exactly the 'free map' pack licence Campfire
+    //     may not redistribute (issue #303). We reject those explicitly rather than weakening
+    //     the shared gate.
+    if (!isOpenLicense(attribution.license) || licenseForbidsRedistribution(attribution.license)) {
+      throw new BadRequestException(
+        `Refusing to import a map under the licence "${attribution.license}". ` +
+          'Only openly-redistributable content (e.g. CC-BY-SA, CC-BY, CC0, OGL) can be imported — ' +
+          "non-commercial (NC) or no-derivatives (ND) 'free map' packs can't be re-served.",
+      );
+    }
+
+    const mime = sniffImageMime(file.buffer);
+    if (!mime) {
+      throw new BadRequestException(
+        'Imported map is not a supported image — allowed: image/png, image/jpeg, image/webp.',
+      );
+    }
+
+    // Stamp the attribution onto the filename so the CC-BY-SA credit is carried by the
+    // artifact itself (surfaces in the attachment list + Content-Disposition). Kept within
+    // the 255-char column via createGenerated's own slice.
+    const ext = mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : 'webp';
+    const filename = sanitizeFilename(
+      `${attribution.title} — ${attribution.author} (${attribution.license})`,
+    ).slice(0, 240) + `.${ext}`;
+
+    const attachment = await this.attachments.createGenerated(
+      campaignId,
+      'map',
+      { filename, mime, bytes: file.buffer },
+      user,
+      role,
+    );
+
+    return {
+      attachment,
+      attribution: {
+        title: attribution.title,
+        author: attribution.author,
+        license: attribution.license,
+        sourceUrl: attribution.sourceUrl,
+      },
+    };
+  }
+}
+
+/** Collapse newlines/slashes/control chars so an attribution string is a safe single-line filename. */
+function sanitizeFilename(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[ -/\\]+/g, ' ').replace(/\s+/g, ' ').trim();
 }

@@ -1455,6 +1455,26 @@ export function isOpenLicense(license: string): boolean {
   return OPEN_LICENSE_KEYWORDS.some((k) => l.includes(k));
 }
 
+/**
+ * Whether a license string carries a Creative Commons NonCommercial (NC) or NoDerivatives
+ * (ND) restriction, which forbids the redistribution/re-serving that bundling a map into a
+ * campaign entails. This is the failure mode for battle-map content specifically (issue
+ * #303): nearly every 'free map' pack is CC-BY-NC-ND, and — because `isOpenLicense` is a
+ * permissive substring match — the string "CC-BY-NC-ND" itself sneaks past that gate on the
+ * "cc-by" substring. This is an ADDITIVE guard layered on top of `isOpenLicense` (it does
+ * not change that shared gate's behaviour): content-import paths that redistribute the bytes
+ * must reject anything this flags, even when `isOpenLicense` returns true. Matches the "nc"/
+ * "nd" tokens in CC short-forms ("by-nc", "by-nc-nd", "by-nd", "noncommercial",
+ * "no derivatives") but not incidental substrings of unrelated words.
+ */
+export function licenseForbidsRedistribution(license: string): boolean {
+  const l = (license ?? '').trim().toLowerCase();
+  if (!l) return false;
+  if (/\bnoncommercial\b|\bnon-commercial\b|\bno[\s-]?deriv\w*/.test(l)) return true;
+  // CC short-form tokens: an "-nc" or "-nd" segment, or a bare "nc"/"nd" token.
+  return /(^|[\s-])n[cd]([\s-]|$)/.test(l);
+}
+
 export const RulePackUploadEntry = z.object({
   slug: z.string().min(1).max(160),
   name: z.string().min(1).max(200),
@@ -2290,6 +2310,68 @@ export const GeneratedMapResult = z.object({
   gridConfig: MapGridConfig,
 });
 export type GeneratedMapResult = z.infer<typeof GeneratedMapResult>;
+
+// ---------- open map SOURCES (issue #303) ----------
+// Complements the first-party procedural generator (#306) with EXTERNAL, license-clean
+// ways for a DM to get a map. The hard reality (#303): there is no bulk dataset of open
+// battle maps to bundle — nearly every 'free' map pack is CC-BY-NC-ND (no commercial use,
+// no modification, no redistribution), so Campfire can't legally re-serve them. What IS
+// clean and surfaced here:
+//   - map *generators* the DM runs themselves and imports the output of (Watabou, donjon),
+//   - the first-party #306 procedural generator, and
+//   - the One Page Dungeon Contest entries (CC-BY-SA 3.0), importable WITH attribution.
+// This is a curated catalog only — nothing here is bundled/re-served; external generators
+// are linked, and CC-BY-SA content is imported by the DM via the attributed-import path
+// (which stamps the attribution required by the licence, mirroring the per-source
+// attribution the rules importer records, #143).
+export const MapSourceKind = z.enum([
+  'generator-builtin', // the first-party procedural generator (#306) — no external site
+  'generator-external', // a third-party generator the DM runs client-side, then imports
+  'importable-collection', // an open-licensed collection the DM imports individual maps from
+]);
+export type MapSourceKind = z.infer<typeof MapSourceKind>;
+
+/**
+ * One curated entry in the "get a map" affordance (issue #303). Purely informational —
+ * the server never fetches these on the DM's behalf (Watabou/donjon maps are generated
+ * client-side, and CC-BY-SA collections are downloaded by the DM), so there is no bundling
+ * and no NC/ND content can leak in. `attributionRequired` maps and `licence`/`licenseUrl`
+ * spell out exactly what the DM must preserve when importing, keeping the flow license-clean.
+ */
+export const MapSource = z.object({
+  id: z.string().min(1).max(60), // stable slug, e.g. 'watabou-one-page-dungeon'
+  name: z.string().min(1).max(120),
+  kind: MapSourceKind,
+  description: z.string().max(400),
+  /** Where the DM goes to generate/download a map. Omitted for the built-in generator. */
+  url: z.string().max(500).optional(),
+  /** Human-readable licence label, e.g. 'CC-BY-SA 3.0', 'CC0', 'free for commercial use'. */
+  license: z.string().min(1).max(120),
+  licenseUrl: z.string().max(500).optional(),
+  /** True when the licence obliges the DM to credit the author on import (CC-BY / CC-BY-SA). */
+  attributionRequired: z.boolean(),
+  /** What this source is best for — 'town', 'dungeon', 'wilderness', 'battle map', etc. */
+  goodFor: z.array(z.string().max(40)).max(12),
+  /** True when Campfire has a first-party import path for this source (One Page Dungeon). */
+  importable: z.boolean(),
+});
+export type MapSource = z.infer<typeof MapSource>;
+
+/**
+ * Attribution the DM supplies when importing an open-licensed external map (issue #303) —
+ * e.g. a One Page Dungeon Contest entry (CC-BY-SA 3.0). The licence string is validated
+ * server-side against `isOpenLicense` (the same gate that rejects NC/ND rule packs, #19)
+ * so a proprietary/NC map can never be imported through this path. The attribution is
+ * stamped onto the stored map (its filename) so the credit travels with the artifact.
+ */
+export const ImportMapAttribution = z.object({
+  title: z.string().min(1).max(160), // the map/entry title, e.g. 'The Sunken Abbey'
+  author: z.string().min(1).max(160), // who to credit
+  license: z.string().min(1).max(120).default('CC-BY-SA 3.0'),
+  sourceUrl: z.string().max(500).optional(), // link back to the entry (CC-BY-SA attribution)
+  sourceId: z.string().max(60).optional(), // the MapSource.id this came from, when known
+});
+export type ImportMapAttribution = z.infer<typeof ImportMapAttribution>;
 
 // ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
 // Computed (read-only) difficulty band for an encounter: the party's summed 5e XP

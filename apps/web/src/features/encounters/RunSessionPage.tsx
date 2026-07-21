@@ -41,6 +41,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
+import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useAnnounce } from '../../components/Announcer';
@@ -1403,6 +1404,9 @@ function BattleMap({
             onUploaded={(a) => onSetMap(a.id)}
             onError={onError}
           />
+          {/* Open, license-clean map sources (issue #303): generator links + One Page Dungeon
+              (CC-BY-SA) import. Complements the built-in procedural generator (#306). */}
+          <GetAMapPanel campaignId={campaignId} onImported={(id) => onSetMap(id)} onError={onError} />
         </div>
       )}
 
