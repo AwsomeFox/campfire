@@ -2,7 +2,7 @@ import { ConflictException, Inject, Injectable, NotFoundException } from '@nestj
 import { and, desc, eq } from 'drizzle-orm';
 import type { EntityRevision, Role, RevisionEntityType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { entityRevisions, locations, npcs, quests, sessions } from '../../db/schema';
+import { entityRevisions, factions, locations, npcs, quests, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { auditActor } from '../../common/user.types';
@@ -36,6 +36,7 @@ const PROSE_FIELD: Record<RevisionEntityType, 'recap' | 'body'> = {
   quest: 'body',
   npc: 'body',
   location: 'body',
+  faction: 'body',
 };
 
 @Injectable()
@@ -146,6 +147,10 @@ export class RevisionsService {
         const [row] = await this.db.select().from(locations).where(eq(locations.id, entityId)).limit(1);
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
+      case 'faction': {
+        const [row] = await this.db.select().from(factions).where(eq(factions.id, entityId)).limit(1);
+        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
+      }
     }
   }
 
@@ -163,6 +168,9 @@ export class RevisionsService {
         return;
       case 'location':
         await this.db.update(locations).set({ body: prose, updatedAt: ts }).where(eq(locations.id, entityId));
+        return;
+      case 'faction':
+        await this.db.update(factions).set({ body: prose, updatedAt: ts }).where(eq(factions.id, entityId));
         return;
     }
   }

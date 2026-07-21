@@ -21,6 +21,9 @@ import {
   NoteVisibility,
   NpcCreate,
   NpcUpdate,
+  FactionCreate,
+  FactionUpdate,
+  FactionStanding,
   QuestCreate,
   QuestStatus,
   QuestUpdate,
@@ -47,6 +50,7 @@ import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
 import { StorylinesService } from '../storylines/storylines.service';
 import { NpcsService } from '../npcs/npcs.service';
+import { FactionsService } from '../factions/factions.service';
 import { LocationsService } from '../locations/locations.service';
 import { SessionsService, buildRecapDraft } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
@@ -195,6 +199,7 @@ export class McpToolsService {
     private readonly quests: QuestsService,
     private readonly storylines: StorylinesService,
     private readonly npcs: NpcsService,
+    private readonly factions: FactionsService,
     private readonly locations: LocationsService,
     private readonly sessions: SessionsService,
     private readonly characters: CharactersService,
@@ -442,6 +447,23 @@ export class McpToolsService {
     this.tool(server, 'list_npcs', 'List NPCs in a campaign.', { campaignId: CampaignIdArg }, async ({ campaignId }) => {
       const role = await this.access.requireMember(user, campaignId as number);
       return this.npcs.listForCampaign(campaignId as number, role);
+    });
+
+    this.tool(
+      server,
+      'get_faction',
+      'Get a faction/organization by id, WITH its member NPCs embedded. Ids come from list_factions.',
+      { factionId: Id.describe('Faction id') },
+      async ({ factionId }) => {
+        const row = await this.factions.getRowOrThrow(factionId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.factions.getWithMembersOrThrow(factionId as number, role);
+      },
+    );
+
+    this.tool(server, 'list_factions', 'List factions/organizations in a campaign (guilds, cults, governments…) with their party reputation.', { campaignId: CampaignIdArg }, async ({ campaignId }) => {
+      const role = await this.access.requireMember(user, campaignId as number);
+      return this.factions.listForCampaign(campaignId as number, role);
     });
 
     this.tool(
@@ -1187,6 +1209,86 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.npcs.remove(npcId as number, user, role);
         return { ok: true, npcId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'upsert_faction',
+      'Create or update a faction/organization (guild, cult, government, syndicate). Pass factionId to update a ' +
+        'specific faction; omit it and an existing faction with the same name (case-insensitive, same campaign) is ' +
+        'updated in place — a true upsert, so an identical re-run is idempotent rather than duplicating. A genuinely ' +
+        'new name creates a new faction. DM only. Supports a dmSecret field (DM-only text, stripped from non-DM reads), ' +
+        'a hidden flag (true = excluded WHOLESALE from every non-DM read until revealed), `goals`, a numeric ' +
+        '`reputation` (-100 hostile → +100 allied) and a `standing` label. To ADJUST reputation by a delta rather than ' +
+        'set it, use set_faction_reputation. Link NPCs to a faction via upsert_npc\'s factionId.',
+      {
+        campaignId: CampaignIdArg,
+        factionId: Id.optional().describe('Existing faction id (update); omit to create'),
+        expectedUpdatedAt: ExpectedUpdatedAt,
+        ...FactionUpdate.shape,
+      },
+      async ({ campaignId, factionId, expectedUpdatedAt, ...fields }) => {
+        if (factionId !== undefined) {
+          const row = await this.factions.getRowOrThrow(factionId as number);
+          if (row.campaignId !== (campaignId as number)) {
+            throw new BadRequestException(`Faction ${factionId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
+          }
+          const validated = FactionUpdate.parse(fields);
+          const role = await this.access.requireRole(user, row.campaignId, 'dm');
+          return this.factions.update(factionId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
+        }
+        const validated = FactionCreate.parse(fields); // name required on create
+        // Real upsert (#159 semantics): with no factionId, match an existing faction by
+        // (campaignId, name) case-insensitively and UPDATE it instead of duplicating.
+        const existingByName = await this.factions.findRowByName(campaignId as number, validated.name);
+        if (existingByName) {
+          const role = await this.access.requireRole(user, existingByName.campaignId, 'dm');
+          return this.factions.update(existingByName.id, validated, user, role);
+        }
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.factions.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_faction_reputation',
+      'Adjust a faction\'s party standing (DM). The AI-scribe entry point — e.g. "the party burned the guildhall, drop ' +
+        'Guild reputation by 20". Pass `delta` to bump the current score, `reputation` to set an absolute score ' +
+        '(-100 hostile → +100 allied), and/or `standing` to set the label (hostile/unfriendly/neutral/friendly/allied). ' +
+        'At least one of the three is required.',
+      {
+        factionId: Id.describe('Faction id'),
+        delta: z.number().int().min(-200).max(200).optional().describe('Amount to add to the current reputation score (clamped to [-100, 100])'),
+        reputation: z.number().int().min(-100).max(100).optional().describe('Absolute reputation score to set (overrides delta)'),
+        standing: FactionStanding.optional().describe('Standing label to set'),
+      },
+      async ({ factionId, delta, reputation, standing }) => {
+        const row = await this.factions.getRowOrThrow(factionId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.factions.adjustReputation(
+          factionId as number,
+          { delta: delta as number | undefined, reputation: reputation as number | undefined, standing: standing as FactionStanding | undefined },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'delete_faction',
+      'Delete a faction/organization (DM). NPCs pinned to it are unlinked (their factionId is nulled), not deleted.',
+      { factionId: Id.describe('Faction id') },
+      async ({ factionId }) => {
+        const row = await this.factions.getRowOrThrow(factionId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.factions.remove(factionId as number, user, role);
+        return { ok: true, factionId };
       },
     );
 

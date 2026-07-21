@@ -458,6 +458,12 @@ export const Npc = z.object({
   role: z.string().max(120).default(''), // "Townmaster", "Midwife"…
   disposition: z.string().max(40).default('neutral'),
   locationId: Id.nullable().default(null),
+  // Faction/organization membership (issue #221): the guild/cult/government this
+  // NPC belongs to, or null. A single nullable FK (not a join table) — one NPC
+  // belongs to at most one faction, which satisfies the v1 use case ("which NPCs
+  // belong to the Zhentarim") without many-to-many machinery. FK-validated against
+  // the same campaign's factions on write.
+  factionId: Id.nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
   // Entity-level secrecy (issue #42) — see Quest.hidden. A hidden NPC is dropped
@@ -468,6 +474,43 @@ export const Npc = z.object({
 export type Npc = z.infer<typeof Npc>;
 export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
 export const NpcUpdate = NpcCreate.partial();
+
+// ---------- faction / organization (issue #221) ----------
+// A first-class group entity — Thieves' Guild, the Crown, a cult, a merchant
+// consortium. Mirrors the NPC entity's secrecy machinery (dmSecret redaction +
+// wholesale `hidden` gating) and adds a party-reputation model: a numeric
+// `reputation` score the DM (or the AI scribe) can bump, plus a human `standing`
+// label on the hostile→allied scale. NPCs link to a faction via npcs.factionId.
+export const FactionStanding = z.enum(['hostile', 'unfriendly', 'neutral', 'friendly', 'allied']);
+export type FactionStanding = z.infer<typeof FactionStanding>;
+
+export const Faction = z.object({
+  id: Id,
+  campaignId: Id,
+  name: z.string().min(1).max(120),
+  // Free-ish organization type: "guild", "cult", "government", "crime syndicate"…
+  kind: z.string().max(60).default(''),
+  body: z.string().max(50_000).default(''), // markdown description
+  goals: z.string().max(20_000).default(''), // the faction's aims/agenda
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
+  // Entity-level secrecy (issue #42) — see Npc.hidden. A hidden faction is dropped
+  // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  hidden: z.boolean().default(false),
+  // Party standing/reputation. `reputation` is a numeric score (-100 hostile →
+  // +100 allied, 0 neutral) the DM/scribe bumps; `standing` is the coarse label.
+  reputation: z.number().int().min(-100).max(100).default(0),
+  standing: FactionStanding.default('neutral'),
+  ...timestamps,
+});
+export type Faction = z.infer<typeof Faction>;
+export const FactionCreate = Faction.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+export const FactionUpdate = FactionCreate.partial();
+
+// A faction with its member NPCs embedded (the detail read — issue #221 "surface
+// a faction's members"). Members are the campaign's NPCs whose factionId points here,
+// role-filtered/redacted like any other NPC read.
+export const FactionWithMembers = Faction.extend({ members: z.array(Npc) });
+export type FactionWithMembers = z.infer<typeof FactionWithMembers>;
 
 // ---------- location ----------
 // Entity-level secrecy (issue #42) reuses `status` rather than adding a separate
@@ -732,7 +775,7 @@ export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 // author-only, dm_shared flows up to the DM, party_shared broadcasts to everyone.
 export const NoteVisibility = z.enum(['private', 'dm_shared', 'party_shared', 'whisper']);
 export const NoteKind = z.enum(['note', 'inbox']);
-export const EntityType = z.enum(['quest', 'npc', 'location', 'session', 'character', 'campaign', 'encounter']);
+export const EntityType = z.enum(['quest', 'npc', 'location', 'session', 'character', 'campaign', 'encounter', 'faction']);
 
 export const Note = z.object({
   id: Id,
@@ -800,7 +843,7 @@ export const InboxResolve = z
 // Notes get optimistic concurrency (ExpectedUpdatedAt) but not this history layer:
 // their per-note visibility/author-only-edit model makes a generic revision endpoint a
 // redaction hazard.
-export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location']);
+export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location', 'faction']);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
 
 export const EntityRevision = z.object({
@@ -2169,7 +2212,7 @@ export type StorageCleanupResult = z.infer<typeof StorageCleanupResult>;
 // EntityType is deliberately excluded — a campaign never searches its own row,
 // only the entities inside it — and `note` is added (notes are searchable but
 // aren't a mention/link target).
-export const SearchResultType = z.enum(['quest', 'npc', 'location', 'character', 'session', 'note']);
+export const SearchResultType = z.enum(['quest', 'npc', 'location', 'character', 'session', 'faction', 'note']);
 export type SearchResultType = z.infer<typeof SearchResultType>;
 
 // A single hit. The service ONLY ever builds these from role-filtered lists
@@ -2199,7 +2242,7 @@ export type SearchResponse = z.infer<typeof SearchResponse>;
 // @-mention cross-linking: the set of named, page-backed entities a member may
 // link to (and that the Markdown renderer may auto-link by name). Notes are
 // excluded — they have no standalone page — so this is SearchResultType minus 'note'.
-export const MentionTargetType = z.enum(['quest', 'npc', 'location', 'character', 'session']);
+export const MentionTargetType = z.enum(['quest', 'npc', 'location', 'character', 'session', 'faction']);
 export type MentionTargetType = z.infer<typeof MentionTargetType>;
 
 export const MentionTarget = z.object({
