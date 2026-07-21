@@ -20,6 +20,21 @@ export interface Roller {
   rolling: boolean;
 }
 
+/**
+ * Crit/fumble flavour for a d20 roll. Matches `d20` even when preceded by a die
+ * count (`1d20+3`, `2d20kh1`) — a `\bd20\b` boundary fails there because a digit is
+ * a word char — while excluding `d200` via the negative lookahead. Checks the KEPT
+ * die when a keep/drop clause is present (advantage/disadvantage), so a nat-20/nat-1
+ * reflects the die that actually counted, not any rolled die.
+ */
+export function d20Flavor(r: DiceRoll): 'crit' | 'fumble' | null {
+  if (!/d20(?!\d)/i.test(r.expr)) return null;
+  const dice = r.kept && r.kept.length > 0 ? r.kept : r.rolls;
+  if (dice.includes(20)) return 'crit';
+  if (dice.includes(1)) return 'fumble';
+  return null;
+}
+
 export function useRoller(campaignId: number, onError: (msg: string | null) => void): Roller & {
   last: DiceRoll | null;
   dismiss: () => void;
@@ -35,11 +50,10 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
         setLast(result);
-        const crit = /\bd20\b/i.test(result.expr) && result.rolls.includes(20);
-        const fumble = /\bd20\b/i.test(result.expr) && result.rolls.includes(1);
+        const flavor = d20Flavor(result);
         announce(
           `${result.label ? `${result.label}: ` : ''}rolled ${result.expr}, total ${result.total}` +
-            (crit ? ' — natural 20!' : fumble ? ' — natural 1.' : ''),
+            (flavor === 'crit' ? ' — natural 20!' : flavor === 'fumble' ? ' — natural 1.' : ''),
         );
         return result;
       } catch (err) {

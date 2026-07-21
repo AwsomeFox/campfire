@@ -7,11 +7,12 @@
  */
 import type { DiceRoll } from '@campfire/schema';
 import { RolledDice } from '../features/dice/RolledDice';
+import { d20Flavor } from '../lib/useRoller';
 
 export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismiss: () => void }) {
-  const isD20 = /\bd20\b/i.test(roll.expr);
-  const crit = isD20 && roll.rolls.includes(20);
-  const fumble = isD20 && roll.rolls.includes(1);
+  const flavor = d20Flavor(roll);
+  const crit = flavor === 'crit';
+  const fumble = flavor === 'fumble';
   const totalColor = crit ? 'var(--cf-crit, #fbbf24)' : fumble ? 'var(--color-danger, #f87171)' : 'var(--color-accent)';
   return (
     <div className="cf-inset flex items-center gap-3 px-3.5 py-2" role="status">

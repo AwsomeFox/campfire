@@ -2018,13 +2018,12 @@ function ApplyDamageBar({
         <span style={{ fontWeight: 700, color: 'var(--color-text)' }}>{amount}</span>
         <span className="text-muted"> — {label}</span>
       </span>
-      <div className="seg inline-flex" role="tablist" aria-label="Apply as">
+      <div className="seg inline-flex" role="group" aria-label="Apply as">
         {(['damage', 'heal'] as const).map((m) => (
           <button
             key={m}
             type="button"
-            role="tab"
-            aria-selected={mode === m}
+            aria-pressed={mode === m}
             onClick={() => setMode(m)}
             style={{
               padding: '4px 10px',
@@ -2054,7 +2053,7 @@ function ApplyDamageBar({
               type="button"
               className="btn btn-secondary"
               style={{ minHeight: 30, fontSize: 11.5, padding: '3px 10px' }}
-              title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} ${mode === 'heal' ? 'to' : 'to'} ${c.name}`}
+              title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}`}
               onClick={() => onApply(c.id, delta)}
             >
               {c.name}

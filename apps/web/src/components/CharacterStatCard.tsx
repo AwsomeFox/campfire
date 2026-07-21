@@ -37,7 +37,7 @@ const NOOP = () => {};
 
 /** Shared style for a roll-me pill (button) vs. a static pill (span). */
 const PILL: React.CSSProperties = { fontSize: 10 };
-const ROLL_HINT = ' · shift-click for advantage · alt-click for disadvantage';
+const ROLL_HINT = ' · shift-click for advantage · alt or ctrl-click for disadvantage';
 
 function StatChip({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
