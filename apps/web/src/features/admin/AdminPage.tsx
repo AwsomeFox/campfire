@@ -506,13 +506,17 @@ function ResetPasswordRow({
           <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Reset password</p>
           {done ? (
             <div className="flex items-center justify-between">
-              <p className="text-sm text-emerald-400">Password updated.</p>
+              <p className="text-sm text-emerald-400">Password updated. Signed out of all sessions and revoked all access tokens.</p>
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose}>
                 Close
               </Btn>
             </div>
           ) : (
             <>
+              <p className="text-xs text-muted">
+                This is an incident-response reset: it signs the user out of every session and revokes all their access
+                tokens, so no pre-existing credential survives.
+              </p>
               <div className="grid sm:grid-cols-3 gap-2">
                 <TextInput
                   className="!min-h-0 !py-2 text-sm sm:col-span-2"
