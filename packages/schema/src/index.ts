@@ -118,6 +118,16 @@ export const CampaignImport = z
     sessions: z.array(ImportedEntity).optional(),
     notes: z.array(ImportedEntity).optional(),
     encounters: z.array(ImportedEntity).optional(),
+    // Issue #266: entity types the export previously dropped and now round-trips.
+    // Arrays are loose objects (remapped defensively in the service); the two
+    // single-row records (calendar, charter) and treasury are loose objects too.
+    factions: z.array(ImportedEntity).optional(),
+    storyArcs: z.array(ImportedEntity).optional(), // each arc nests beats -> branches
+    timelineEvents: z.array(ImportedEntity).optional(),
+    timelineCalendar: ImportedEntity.optional(),
+    sessionZero: ImportedEntity.optional(),
+    inventory: z.array(ImportedEntity).optional(),
+    treasury: ImportedEntity.optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
