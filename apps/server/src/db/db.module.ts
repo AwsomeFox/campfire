@@ -859,6 +859,42 @@ function migrateNpcsTableForIconSlug(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before AI provider config storage (issue #310): the
+ * `ai_provider_configs` table didn't exist. This is a NEW table (not an ADD COLUMN),
+ * so — like the `factions` table (see migrateNpcsTableForFactionId's note) —
+ * BOOTSTRAP_SQL's CREATE TABLE IF NOT EXISTS would create it on the next boot
+ * regardless. It is registered as an explicit, recorded migration (issue #69) for an
+ * auditable schema history and so the table exists BEFORE the bootstrap pass. Fully
+ * idempotent: CREATE TABLE / CREATE INDEX IF NOT EXISTS. The declared FK REFERENCES is
+ * safe to include even on a fresh DB where `campaigns` doesn't exist yet — SQLite
+ * resolves FK targets at write time, not CREATE TABLE time (see bootstrap.sql.ts). This
+ * runs with foreign_keys OFF (openDatabase enables enforcement only afterwards), so the
+ * CREATE never trips a constraint. New DBs record this as applied even though the
+ * subsequent bootstrap owns the canonical DDL.
+ */
+function migrateAiProviderConfigTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_provider_configs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+      provider_type TEXT NOT NULL,
+      base_url TEXT,
+      model TEXT NOT NULL DEFAULT '',
+      params TEXT NOT NULL DEFAULT '{}',
+      encrypted_api_key TEXT,
+      key_last4 TEXT,
+      allowed_models TEXT NOT NULL DEFAULT '[]',
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server ON ai_provider_configs(scope) WHERE scope = 'server';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign ON ai_provider_configs(campaign_id) WHERE campaign_id IS NOT NULL;
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -909,6 +945,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0035_encounters_hidden', run: migrateEncountersTableForHidden },
   { name: '0036_story_beats_links', run: migrateStoryBeatsTableForLinks },
   { name: '0037_npcs_icon_slug', run: migrateNpcsTableForIconSlug },
+  { name: '0040_ai_provider_config', run: migrateAiProviderConfigTable },
 ];
 
 /**

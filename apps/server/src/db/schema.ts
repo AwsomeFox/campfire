@@ -745,6 +745,29 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// AI provider config storage (issue #310): provider selection + ENCRYPTED API key
+// at two scopes — 'server' (one row, admin default) and 'campaign' (per-campaign
+// override, DM-managed, cascades on campaign delete). `encrypted_api_key` holds an
+// aes-256-gcm ciphertext (see common/crypto.ts encryptSecret); the plaintext key is
+// NEVER stored/returned/logged/exported — reads expose only `key_last4`. Unique
+// partial indexes enforce exactly one server row and one row per campaign (see
+// db.module.ts bootstrap + migrateAiProviderConfigTable).
+export const aiProviderConfigs = sqliteTable('ai_provider_configs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  scope: text('scope').notNull(), // 'server' | 'campaign'
+  campaignId: integer('campaign_id'), // null for the server default; FK->campaigns ON DELETE CASCADE (fresh DBs)
+  providerType: text('provider_type').notNull(), // 'openai' | 'anthropic' | 'mock'
+  baseUrl: text('base_url'),
+  model: text('model').notNull().default(''),
+  params: text('params').notNull().default('{}'), // JSON-encoded AiProviderParams
+  encryptedApiKey: text('encrypted_api_key'), // aes-256-gcm ciphertext; null = no key stored
+  keyLast4: text('key_last4'), // masked display indicator only — never the key
+  allowedModels: text('allowed_models').notNull().default('[]'), // JSON string[] admin allowlist (server scope)
+  createdBy: text('created_by').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),

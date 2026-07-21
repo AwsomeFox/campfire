@@ -1770,6 +1770,68 @@ export const AiDmTurnResult = z.object({
 });
 export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 
+// ── AI provider config: encrypted API-key + provider storage (issue #310) ────
+// Feeds the vendor-neutral provider factory (#309) with the credentials/config it
+// needs, at TWO scopes: a `server` default (admin-managed) and an optional
+// per-`campaign` override (DM-managed) that FALLS BACK to the server default.
+//
+// The API key is stored ENCRYPTED at rest (aes-256-gcm) and is WRITE-ONLY: it is
+// accepted on write but NEVER returned by any read/export/log/audit. A read exposes
+// only a `configured` flag + the last-4 chars (`keyLast4`) — never the key. The
+// decrypted key is materialized in-process only at call time (the effective-config
+// resolver hands it straight to createAiProvider) and is never serialized to a client.
+export const AiProviderConfigType = z.enum(['openai', 'anthropic', 'mock']);
+export type AiProviderConfigType = z.infer<typeof AiProviderConfigType>;
+
+// Sampling / limit params carried alongside the provider selection.
+export const AiProviderParams = z.object({
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().min(1).max(200_000).optional(),
+});
+export type AiProviderParams = z.infer<typeof AiProviderParams>;
+
+// Write payload (PUT /settings/ai-provider | /campaigns/:id/ai-provider).
+// `apiKey` is WRITE-ONLY: omit to KEEP the stored key, pass a value to set/ROTATE
+// it, pass '' to CLEAR it. `allowedModels` is honored only for the SERVER scope —
+// it is the admin model allowlist; when non-empty a campaign override's `model`
+// must be one of the listed values (enforced server-side).
+export const AiProviderConfigUpdate = z.object({
+  providerType: AiProviderConfigType,
+  model: z.string().min(1).max(120),
+  baseUrl: z.string().trim().max(2048).optional(),
+  params: AiProviderParams.optional(),
+  apiKey: z.string().max(4096).optional(),
+  allowedModels: z.array(z.string().min(1).max(120)).max(200).optional(),
+});
+export type AiProviderConfigUpdate = z.infer<typeof AiProviderConfigUpdate>;
+
+// Redacted read (GET). NEVER carries the API key — only `configured` + `keyLast4`.
+export const AiProviderConfigView = z.object({
+  scope: z.enum(['server', 'campaign']),
+  campaignId: Id.nullable(), // set for the campaign scope; null for the server default
+  providerType: AiProviderConfigType,
+  model: z.string(),
+  baseUrl: z.string().nullable(),
+  params: AiProviderParams,
+  configured: z.boolean(), // an encrypted API key is stored for this scope
+  keyLast4: z.string().nullable(), // masked indicator only — never the key
+  allowedModels: z.array(z.string()), // admin model allowlist (server scope); [] = unrestricted
+  createdBy: z.string(),
+  ...timestamps,
+});
+export type AiProviderConfigView = z.infer<typeof AiProviderConfigView>;
+
+// Result of POST .../ai-provider/test — a live connection probe through the
+// effective (decrypted, server-side) config. Never echoes any credential.
+export const AiProviderTestResult = z.object({
+  ok: z.boolean(),
+  scope: z.enum(['server', 'campaign']),
+  providerType: AiProviderConfigType,
+  model: z.string(),
+  error: z.string().nullable().default(null),
+});
+export type AiProviderTestResult = z.infer<typeof AiProviderTestResult>;
+
 // ---------- attachments (uploaded images: character portraits, campaign maps) ----------
 export const AttachmentKind = z.enum(['portrait', 'map', 'image']);
 
