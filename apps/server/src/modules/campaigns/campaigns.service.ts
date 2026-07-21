@@ -1003,6 +1003,7 @@ export class CampaignsService {
             name: str(item.name, 'Item'),
             qty: intOr(item.qty, 1),
             notes: str(item.notes),
+            iconSlug: str(item.iconSlug), // issue #307 — preserve icon override on import
             createdAt: ts,
             updatedAt: ts,
           })
