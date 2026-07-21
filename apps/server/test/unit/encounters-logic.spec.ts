@@ -11,7 +11,10 @@ import {
   xpThresholdsForLevel,
   encounterMultiplier,
   computeEncounterDifficulty,
+  mulberry32,
+  generateEncounterGroup,
 } from '../../src/modules/encounters/encounters.logic';
+import type { GeneratorCandidate } from '../../src/modules/encounters/encounters.logic';
 import type { CombatantHpState } from '../../src/modules/encounters/encounters.logic';
 
 /**
@@ -401,6 +404,93 @@ describe('encounter difficulty (issue #58)', () => {
       expect(d.monsterCount).toBe(0);
       expect(d.adjustedXp).toBe(0);
       expect(d.band).toBe('trivial');
+    });
+  });
+});
+
+describe('encounter generator (issue #304)', () => {
+  /** Candidate factory — XP defaults to the 5e CR→XP table so tests read in CR terms. */
+  function cand(over: Partial<GeneratorCandidate> & { ruleEntryId: number; cr: number }): GeneratorCandidate {
+    return { name: `m${over.ruleEntryId}`, xp: crToXp(over.cr), hpMax: 10, ...over };
+  }
+
+  describe('mulberry32', () => {
+    it('is deterministic: the same seed yields the same sequence', () => {
+      const a = mulberry32(42);
+      const b = mulberry32(42);
+      const seqA = [a(), a(), a()];
+      const seqB = [b(), b(), b()];
+      expect(seqA).toEqual(seqB);
+      expect(seqA[0]).toBeGreaterThanOrEqual(0);
+      expect(seqA[0]).toBeLessThan(1);
+    });
+    it('different seeds diverge', () => {
+      expect(mulberry32(1)()).not.toBe(mulberry32(2)());
+    });
+  });
+
+  describe('generateEncounterGroup', () => {
+    const party = [5, 5, 5, 5]; // thresholds easy 1000 / medium 2000 / hard 3000 / deadly 4400
+
+    it('hits the target band using compendium monsters (medium via CR2 goblins)', () => {
+      const candidates = [cand({ ruleEntryId: 1, cr: 2 })]; // xp 450
+      const r = generateEncounterGroup({ partyLevels: party, targetBand: 'medium', candidates, maxCount: 12, seed: 7 });
+      expect(r.matchedBand).toBe(true);
+      expect(r.difficulty.band).toBe('medium');
+      expect(r.picks).toHaveLength(1);
+      // 3 x CR2 = 1350 * x2 multiplier = 2700 -> medium (>=2000, <3000).
+      expect(r.picks[0].count).toBe(3);
+      expect(r.picks[0].ruleEntryId).toBe(1);
+      expect(r.difficulty.adjustedXp).toBe(2700);
+    });
+
+    it('is reproducible by seed and re-rolls with a different seed', () => {
+      const candidates = [cand({ ruleEntryId: 1, cr: 1 }), cand({ ruleEntryId: 2, cr: 2 }), cand({ ruleEntryId: 3, cr: 3 })];
+      const a = generateEncounterGroup({ partyLevels: party, targetBand: 'hard', candidates, maxCount: 12, seed: 12345 });
+      const b = generateEncounterGroup({ partyLevels: party, targetBand: 'hard', candidates, maxCount: 12, seed: 12345 });
+      expect(b.picks).toEqual(a.picks);
+      expect(b.difficulty.band).toBe(a.difficulty.band);
+      // Every exact-band result is genuinely on-band.
+      if (a.matchedBand) expect(a.difficulty.band).toBe('hard');
+    });
+
+    it('respects shape=solo (a single monster)', () => {
+      const candidates = [cand({ ruleEntryId: 1, cr: 2 }), cand({ ruleEntryId: 2, cr: 10 })]; // CR10 xp 5900 -> deadly solo
+      const r = generateEncounterGroup({ partyLevels: party, targetBand: 'deadly', candidates, shape: 'solo', maxCount: 12, seed: 3 });
+      expect(r.picks).toHaveLength(1);
+      expect(r.picks[0].count).toBe(1);
+      expect(r.shape).toBe('solo');
+      expect(r.matchedBand).toBe(true);
+      expect(r.difficulty.band).toBe('deadly');
+    });
+
+    it('respects shape=horde count window (7+)', () => {
+      const candidates = [cand({ ruleEntryId: 1, cr: 0.25 })]; // weak mob
+      const r = generateEncounterGroup({ partyLevels: party, targetBand: 'deadly', candidates, shape: 'horde', maxCount: 12, seed: 9 });
+      expect(r.picks[0].count).toBeGreaterThanOrEqual(7);
+      expect(r.picks[0].count).toBeLessThanOrEqual(12);
+      expect(r.shape).toBe('horde');
+    });
+
+    it('empty candidate list yields an empty group (no monsters to pick)', () => {
+      const r = generateEncounterGroup({ partyLevels: party, targetBand: 'medium', candidates: [], maxCount: 12, seed: 1 });
+      expect(r.picks).toHaveLength(0);
+      expect(r.matchedBand).toBe(false); // medium is unachievable with nothing
+      expect(r.difficulty.band).toBe('trivial');
+    });
+
+    it('best-effort when the band is unachievable (only a weak monster, target deadly, solo)', () => {
+      const candidates = [cand({ ruleEntryId: 1, cr: 0.25 })]; // xp 50, can never reach deadly solo
+      const r = generateEncounterGroup({ partyLevels: party, targetBand: 'deadly', candidates, shape: 'solo', maxCount: 12, seed: 5 });
+      expect(r.matchedBand).toBe(false);
+      expect(r.picks).toHaveLength(1); // returns the closest group rather than nothing
+      expect(r.difficulty.band).not.toBe('deadly');
+    });
+
+    it('candidates with 0 XP (unparseable CR) are skipped', () => {
+      const candidates = [cand({ ruleEntryId: 1, cr: 2, xp: 0 })];
+      const r = generateEncounterGroup({ partyLevels: party, targetBand: 'medium', candidates, maxCount: 12, seed: 2 });
+      expect(r.picks).toHaveLength(0);
     });
   });
 });
