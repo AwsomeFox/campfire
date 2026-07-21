@@ -737,6 +737,23 @@ function migrateCombatantsTableForTokenSize(sqlite: Database.Database): void {
 }
 
 /**
+ * Adds `combatants.npc_id` (nullable) so a combatant of kind='npc' can link back to
+ * the campaign NPC it represents (identity/icon). A plain ADD COLUMN can't attach the
+ * inline `REFERENCES npcs(id)` FK on an existing table — the FK exists only for fresh
+ * DBs via BOOTSTRAP_SQL, exactly as character_id/rule_entry_id already do.
+ */
+function migrateCombatantsTableForNpcId(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'npc_id')) return;
+  sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_id INTEGER');
+}
+
+/**
  * Migration for DBs created before hex grids + shared AoE templates (issue #238):
  * `encounters` gained `grid_type` (NOT NULL DEFAULT 'square' — existing encounters backfill to
  * the classic square grid) and `aoe` (nullable JSON AoeTemplate[] blob, null = no templates).
@@ -1051,6 +1068,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0040_ai_provider_config', run: migrateAiProviderConfigTable },
   { name: '0041_ai_dm_seats_mode', run: migrateAiDmSeatsTableForMode },
   { name: '0043_ai_scribe_jobs', run: migrateAiScribeTables },
+  { name: '0044_combatants_npc_id', run: migrateCombatantsTableForNpcId },
 ];
 
 /**

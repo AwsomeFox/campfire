@@ -805,8 +805,9 @@ export const aiScribeJobs = sqliteTable('ai_scribe_jobs', {
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),
-  kind: text('kind').notNull(), // 'character' | 'monster'
+  kind: text('kind').notNull(), // 'character' | 'monster' | 'npc'
   characterId: integer('character_id'), // set when kind='character' — links back to characters.id
+  npcId: integer('npc_id'), // set when kind='npc' — links back to npcs.id (identity). Added by migration on older DBs.
   name: text('name').notNull(),
   initiative: integer('initiative'), // null until rolled
   initMod: integer('init_mod').notNull().default(0),
