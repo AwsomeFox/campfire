@@ -189,11 +189,6 @@ export function CharacterStatCard({
                         {[a.toHit && `${a.toHit} to hit`, a.damage].filter(Boolean).join(', ')}
                       </span>
                     )}
-                    {a.notes && (
-                      <div className="text-muted" style={{ fontSize: 11.5 }}>
-                        {a.notes}
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
