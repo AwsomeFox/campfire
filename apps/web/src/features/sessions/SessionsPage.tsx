@@ -13,7 +13,7 @@
  * calendar feed — see SchedulePanel.tsx.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -55,6 +55,10 @@ export default function SessionsPage() {
   const [forbidden, setForbidden] = useState(false);
 
   const [showAddForm, setShowAddForm] = useState(false);
+  // Soft-delete Undo (issue #116/#269) lifted to the page level: on delete we refresh
+  // the list immediately (so the trashed session stops showing without a manual reload)
+  // and close the detail — the Undo bar must therefore outlive the now-unmounted detail.
+  const [undoTarget, setUndoTarget] = useState<{ id: number; number: number } | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -119,6 +123,22 @@ export default function SessionsPage() {
     return sessions.reduce((max, s) => Math.max(max, s.number), 0) + 1;
   }
 
+  // The detail deleted a session: drop it from the list right away (no lingering
+  // "deleted" row), close the detail, and surface the Undo bar from here so it
+  // survives the detail unmounting.
+  async function handleDeleted(id: number, number: number) {
+    setUndoTarget({ id, number });
+    backToList();
+    await load();
+  }
+
+  async function handleUndo() {
+    if (!undoTarget) return;
+    await api.post(`${API}/sessions/${undoTarget.id}/restore`);
+    setUndoTarget(null);
+    await load();
+  }
+
   if (!Number.isFinite(cid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
@@ -164,6 +184,11 @@ export default function SessionsPage() {
       <div className="flex items-center gap-2.5">
         <h1 className="text-2xl font-extrabold text-white">Sessions</h1>
         <div className="flex-1" />
+        {isDm && (
+          <Link to={`/c/${cid}/trash`} className="text-xs text-slate-500 hover:text-slate-300" title="Restore deleted entities">
+            Trash
+          </Link>
+        )}
         {isDm && tab === 'log' && (
           <Btn
             className="!min-h-0 !py-1.5 text-xs"
@@ -258,7 +283,14 @@ export default function SessionsPage() {
         {/* Recap detail */}
         <main className={`min-w-0 lg:col-span-2 space-y-4 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
           {selected ? (
-            <SessionDetail session={selected} campaignId={cid} isDm={isDm} onBack={backToList} onChange={load} />
+            <SessionDetail
+              session={selected}
+              campaignId={cid}
+              isDm={isDm}
+              onBack={backToList}
+              onChange={load}
+              onDeleted={handleDeleted}
+            />
           ) : (
             <Card>
               {sessions.length > 0 ? (
@@ -284,6 +316,14 @@ export default function SessionsPage() {
         </main>
       </div>
       )}
+
+      {undoTarget && (
+        <UndoSnackbar
+          message={`Session ${undoTarget.number} moved to Trash.`}
+          onUndo={handleUndo}
+          onExpire={() => setUndoTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -296,12 +336,15 @@ function SessionDetail({
   isDm,
   onBack,
   onChange,
+  onDeleted,
 }: {
   session: SessionListItem;
   campaignId: number;
   isDm: boolean;
   onBack: () => void;
   onChange: () => void;
+  /** Session was soft-deleted — the page refreshes the list + owns the Undo bar. */
+  onDeleted: (id: number, number: number) => void | Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [sharing, setSharing] = useState(false);
@@ -314,7 +357,6 @@ function SessionDetail({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [pendingUndo, setPendingUndo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The `updatedAt` we last loaded — sent back on save as the optimistic-concurrency
   // guard (#157) so a co-DM's or a connected AI's interleaved edit 409s instead of being
@@ -404,23 +446,16 @@ function SessionDetail({
     setDeleting(true);
     setError(null);
     try {
-      // Soft-delete (issue #116) — reversible. Keep the detail open with an Undo
-      // affordance; defer the list refresh to expiry so the detail (and this Undo bar)
-      // don't unmount mid-window (the list derives `selected` by id).
+      // Soft-delete (issue #116) — reversible. Hand off to the page: it refreshes the
+      // list immediately (the trashed session stops showing without a manual reload,
+      // issue #269) and owns the Undo bar, which must outlive this now-unmounting detail.
       await api.delete(`${API}/sessions/${session.id}`);
       setConfirmingDelete(false);
-      setPendingUndo(true);
+      await onDeleted(session.id, session.number);
     } catch {
       setError("Couldn't delete the session.");
-    } finally {
       setDeleting(false);
     }
-  }
-
-  async function undoDelete() {
-    await api.post(`${API}/sessions/${session.id}/restore`);
-    setPendingUndo(false);
-    onChange();
   }
 
   return (
@@ -523,21 +558,20 @@ function SessionDetail({
       {confirmingDelete && (
         <ConfirmDialog
           title={`Delete Session ${session.number}?`}
-          body="This moves the session (recap, attendance, share links) to the Trash — you can undo it, or restore it from the campaign Trash."
+          body={
+            <>
+              This moves the session (recap, attendance, share links) to the Trash — you can undo it, or restore it later
+              from the{' '}
+              <Link to={`/c/${campaignId}/trash`} className="underline" style={{ color: 'var(--color-accent)' }}>
+                campaign Trash
+              </Link>
+              .
+            </>
+          }
           confirmLabel={deleting ? 'Deleting…' : 'Delete session'}
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}
-        />
-      )}
-      {pendingUndo && (
-        <UndoSnackbar
-          message={`Session ${session.number} moved to Trash.`}
-          onUndo={undoDelete}
-          onExpire={() => {
-            onChange();
-            onBack();
-          }}
         />
       )}
 
