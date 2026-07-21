@@ -61,7 +61,7 @@ function entityNameFor(
  * non-target, non-DM member must NEVER see a whisper, and this is the single
  * server-side chokepoint every read path (GET, list, MCP) funnels through.
  */
-function canSee(
+export function canSee(
   note: { authorUserId: string; visibility: string; recipientUserId?: string | null },
   user: RequestUser,
   role: Role,
@@ -454,9 +454,22 @@ export class NotesService {
       throw new ForbiddenException('Only the author may edit this note');
     }
     // Optimistic concurrency (#157): a co-author's stale save 409s instead of clobbering.
-    // Notes get the concurrency guard but NOT the revision-history layer — their per-note
-    // visibility/author-only model makes a generic revision endpoint a redaction hazard.
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
+
+    // Snapshot the PRIOR body into revision history when it changes (#157/#233) — #157
+    // cited notes.service by line as the prose being destroyed, so a clobbered note is
+    // recoverable. The revision-read/restore endpoints are gated on the note's OWN
+    // visibility + author (RevisionsController), never a blanket dm-gate, so history is
+    // no redaction back-door. Mirrors the quests/npcs/locations record-on-change pattern.
+    if (input.body !== undefined && input.body !== existing.body) {
+      await this.revisions.record({
+        entityType: 'note',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.body,
+        user,
+      });
+    }
 
     // Recompute the whisper target from the RESULTING visibility + recipient: switching
     // away from whisper clears the recipient, switching into whisper (or re-targeting)

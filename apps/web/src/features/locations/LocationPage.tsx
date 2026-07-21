@@ -19,6 +19,7 @@ import { NotesRail } from '../../components/NotesRail';
 import { attachmentFileUrl } from '../../components/ImageUpload';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
 const statusLabel: Record<Location['status'], string> = {
   unexplored: 'Unexplored',
@@ -67,6 +68,11 @@ export default function LocationPage() {
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
+  // Optimistic-concurrency guard (#157/#233): a stale save 409s instead of clobbering a
+  // co-DM's or a connected AI's interleaved edit. `conflict` shows a Reload-latest
+  // affordance; `historyNonce` refetches the edit-history panel after each save.
+  const [conflict, setConflict] = useState(false);
+  const [historyNonce, setHistoryNonce] = useState(0);
 
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [statusSaving, setStatusSaving] = useState(false);
@@ -189,6 +195,7 @@ export default function LocationPage() {
     if (!form.name.trim()) return;
     setSaving(true);
     setSaveError(null);
+    setConflict(false);
     try {
       if (proposeMode) {
         // Route through the proposal queue — omit the DM-only dmSecret field.
@@ -208,15 +215,39 @@ export default function LocationPage() {
           body: form.body,
           dmSecret: form.dmSecret,
           parentId: form.parentId ? Number(form.parentId) : null,
+          // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#233) instead
+          // of silently overwriting the other author's work.
+          ...(location?.updatedAt ? { expectedUpdatedAt: location.updatedAt } : {}),
         });
         setLocation(updated);
         setAllLocations((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
         setEditing(false);
+        setHistoryNonce((n) => n + 1);
       }
     } catch (err) {
-      setSaveError(err instanceof ApiError ? err.message : "Couldn't save changes.");
+      if (err instanceof ApiError && err.status === 409) {
+        // Someone saved between our load and this save — keep the draft, block the
+        // clobber, and prompt a reload of the latest before saving again.
+        setConflict(true);
+        setSaveError(err.message || "This location changed since you opened it — reload the latest before saving so you don't erase the other edit.");
+      } else {
+        setSaveError(err instanceof ApiError ? err.message : "Couldn't save changes.");
+      }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function reloadLatest() {
+    if (!location) return;
+    setSaveError(null);
+    setConflict(false);
+    try {
+      const fresh = await api.get<Location>(`${API}/locations/${id}`);
+      setLocation(fresh);
+      setForm((f) => ({ ...f, body: fresh.body, dmSecret: fresh.dmSecret }));
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : "Couldn't reload the latest location.");
     }
   }
 
@@ -490,6 +521,20 @@ export default function LocationPage() {
 
               {isDm && location.dmSecret && <DmPanel>{location.dmSecret}</DmPanel>}
 
+              {/* Body revision history + restore (#157/#233) — DM-only, so a clobbered or
+                  regretted edit is recoverable. Refetches after each save. */}
+              {isDm && (
+                <RevisionHistoryPanel
+                  entityType="location"
+                  entityId={id}
+                  reloadNonce={historyNonce}
+                  onRestored={() => {
+                    setHistoryNonce((n) => n + 1);
+                    void reloadLatest();
+                  }}
+                />
+              )}
+
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Here &amp; connected</h2>
                 {hereNpcs.length === 0 && connectedQuests.length === 0 ? (
@@ -629,6 +674,11 @@ export default function LocationPage() {
               <span />
             )}
             <div className="flex gap-2">
+              {conflict && (
+                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                  Reload latest
+                </Btn>
+              )}
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={cancelEdit}>
                 Cancel
               </Btn>
