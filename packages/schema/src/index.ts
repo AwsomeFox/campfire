@@ -2051,6 +2051,98 @@ export const EncounterDifficulty = z.object({
 });
 export type EncounterDifficulty = z.infer<typeof EncounterDifficulty>;
 
+// ---------- encounter generator (issue #304) ----------
+// First-party, offline & deterministic encounter builder. There is no open dataset of
+// prebuilt encounters to import, but Campfire already ships the two ingredients — a
+// monster compendium (rule_entries) and the 5e difficulty-band math (#58) — so we assemble
+// a themed monster group from installed rule packs to hit a target difficulty band for the
+// party. Generation is a read-only *suggestion* (no persistence); committing goes through
+// the normal encounter-create write path, so write-mode (#158)/proposals (#124) and
+// secrecy (#262) all still apply.
+
+/**
+ * The requested "shape" of a generated group — a loose action-economy silhouette that
+ * bounds the monster count: solo (1), pair (2), group (a small band, 3–6), horde (a
+ * swarm, 7+). Omitting it lets the generator pick whatever count best fits the budget.
+ */
+export const EncounterShape = z.enum(['solo', 'pair', 'group', 'horde']);
+export type EncounterShape = z.infer<typeof EncounterShape>;
+
+/** Optional filters narrowing which compendium monsters the generator may pick from. */
+export const EncounterGenerateFilters = z.object({
+  // Creature type / tag substring match against the statblock's type (e.g. "undead",
+  // "dragon", "fiend"). Case-insensitive.
+  creatureType: z.string().min(1).max(60).optional(),
+  // Environment/terrain substring match against the statblock's environments (e.g.
+  // "forest", "underdark") when the source data carries them. Case-insensitive.
+  environment: z.string().min(1).max(60).optional(),
+  // Inclusive CR range. Fractional CRs allowed (0.25). A monster with an unparseable CR
+  // is excluded whenever either bound is set.
+  minCr: z.number().min(0).max(30).optional(),
+  maxCr: z.number().min(0).max(30).optional(),
+  // Restrict to a single installed rule pack by slug (list_rule_packs). Omitting spans
+  // every installed pack.
+  packSlug: z.string().min(1).max(160).optional(),
+});
+export type EncounterGenerateFilters = z.infer<typeof EncounterGenerateFilters>;
+
+/**
+ * Request body for POST /campaigns/:id/encounters/generate (and the generate_encounter
+ * MCP tool). `difficulty` is the TARGET band to hit. Party is auto-inferred from the
+ * campaign's active PCs unless an explicit `party` (list of PC levels) is supplied.
+ * `seed` makes the (otherwise seeded-random) selection reproducible.
+ */
+export const EncounterGenerate = z.object({
+  difficulty: DifficultyBand, // target band (trivial → deadly)
+  // Explicit party PC levels; when omitted the generator infers them from the campaign's
+  // active characters (issue #115 lifecycle).
+  party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
+  filters: EncounterGenerateFilters.optional(),
+  // Upper bound on the number of monsters (before the shape's own bound). Defaults to 12.
+  count: z.number().int().min(1).max(30).optional(),
+  shape: EncounterShape.optional(),
+  // Deterministic seed. Omit to have the server mint one (returned in the suggestion so
+  // the same group can be reproduced or re-rolled with a new seed).
+  seed: z.number().int().nonnegative().max(4294967295).optional(),
+  // Commit-only fields — used solely when the REST endpoint is called with ?commit=true
+  // (they run through the create write path). Ignored by the non-mutating generate.
+  name: z.string().min(1).max(120).optional(),
+  locationId: Id.nullable().optional(),
+  questId: Id.nullable().optional(),
+  // Created encounters default hidden (DM-only prep, #262). Pass false to create it visible.
+  hidden: z.boolean().optional(),
+});
+export type EncounterGenerate = z.infer<typeof EncounterGenerate>;
+
+/** One suggested monster line (a stack of `count` identical statblocks). */
+export const EncounterSuggestionCombatant = z.object({
+  ruleEntryId: Id, // compendium statblock id — feed straight to add_combatant
+  name: z.string(),
+  cr: z.number().nullable(), // numeric CR (null if the statblock's CR was unparseable)
+  xp: z.number().int().nonnegative(), // per-monster XP (5e CR→XP table)
+  hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it
+  count: z.number().int().min(1), // how many of this monster to add
+});
+export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
+
+/**
+ * Read-only result of a generation: the selected monster lines, the computed 5e
+ * difficulty (reusing the #58 math), the adjusted total XP, and the seed that produced
+ * it. Nothing is persisted — the caller commits via create_encounter + add_combatant.
+ */
+export const EncounterSuggestion = z.object({
+  combatants: z.array(EncounterSuggestionCombatant),
+  targetBand: DifficultyBand, // what was asked for
+  difficulty: EncounterDifficulty, // what was produced (band may differ if unachievable)
+  totalXp: z.number().int().nonnegative(), // adjusted monster XP (post number-multiplier)
+  shape: EncounterShape, // the resolved shape of the produced group
+  seed: z.number().int().nonnegative(), // reproduce with this seed; re-roll with a new one
+  // True when the produced band matches the target; false when the compendium couldn't
+  // field a group in the requested band (a best-effort closest group is still returned).
+  matchedBand: z.boolean(),
+});
+export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
+
 export const CombatantKind = z.enum(['character', 'monster']);
 export type CombatantKind = z.infer<typeof CombatantKind>;
 

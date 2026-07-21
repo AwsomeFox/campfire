@@ -8,6 +8,8 @@ import {
   CharacterUpdate,
   CombatantCreate,
   CombatantUpdate,
+  DifficultyBand,
+  EncounterShape,
   EncounterUpdate,
   DangerLevel,
   EntityType,
@@ -689,6 +691,62 @@ export class McpToolsService {
         // non-DM the same way get_encounter's roster is (issue #262).
         const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.getDifficulty(encounterId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'generate_encounter',
+      'Generate a balanced monster group from the installed compendium to hit a target 5e difficulty band for the ' +
+        'party (issue #304) — a first-party, offline, DETERMINISTIC builder (no external data). NON-MUTATING: returns ' +
+        'a read-only suggestion { combatants:[{ruleEntryId,name,cr,xp,hpMax,count}], difficulty, totalXp, shape, seed, ' +
+        'matchedBand } and persists NOTHING. `difficulty` is the target band (trivial|easy|medium|hard|deadly). Party ' +
+        'is inferred from the campaign\'s active PCs unless `party` (explicit PC levels) is passed. Optional filters: ' +
+        'creatureType/environment (substring), minCr/maxCr, packSlug; `shape` (solo|pair|group|horde) and `count` (max ' +
+        'monsters) bound the group. Reproduce a group by passing back its `seed`; re-roll by changing/omitting it. ' +
+        'TO COMMIT: call create_encounter (hidden:true keeps it DM-only prep) then add_combatant once per line with ' +
+        'its ruleEntryId + count — those tools honor write-mode (#158)/proposals (#124), so this preview→commit split ' +
+        'inherits the AI safety model. matchedBand:false means the compendium couldn\'t field the exact band (closest ' +
+        'group returned).',
+      {
+        campaignId: CampaignIdArg,
+        difficulty: DifficultyBand.describe('Target difficulty band to hit'),
+        party: z.array(z.number().int().min(1).max(20)).max(20).optional().describe('Explicit party PC levels; omit to infer from the campaign\'s active PCs'),
+        creatureType: z.string().min(1).max(60).optional().describe('Filter monsters by creature type/tag substring (e.g. "undead", "dragon")'),
+        environment: z.string().min(1).max(60).optional().describe('Filter monsters by environment/terrain substring (when the source data carries it)'),
+        minCr: z.number().min(0).max(30).optional().describe('Minimum challenge rating (inclusive)'),
+        maxCr: z.number().min(0).max(30).optional().describe('Maximum challenge rating (inclusive)'),
+        packSlug: z.string().min(1).max(160).optional().describe('Restrict to a single installed rule pack by slug (list_rule_packs)'),
+        shape: EncounterShape.optional().describe('solo (1) | pair (2) | group (3–6) | horde (7+); omit to let the budget pick the count'),
+        count: z.number().int().min(1).max(30).optional().describe('Upper bound on the number of monsters (default 12)'),
+        seed: z.number().int().nonnegative().max(4294967295).optional().describe('Deterministic seed — pass a returned seed to reproduce, omit for a fresh group'),
+      },
+      async ({ campaignId, difficulty, party, creatureType, environment, minCr, maxCr, packSlug, shape, count, seed }) => {
+        // Read-only preview: membership is enough, so any member or AI can generate + reroll
+        // before committing through the write-gated create_encounter/add_combatant tools.
+        const role = await this.access.requireMember(user, campaignId as number);
+        const filters =
+          creatureType !== undefined || environment !== undefined || minCr !== undefined || maxCr !== undefined || packSlug !== undefined
+            ? {
+                creatureType: creatureType as string | undefined,
+                environment: environment as string | undefined,
+                minCr: minCr as number | undefined,
+                maxCr: maxCr as number | undefined,
+                packSlug: packSlug as string | undefined,
+              }
+            : undefined;
+        return this.encounters.generateEncounter(
+          campaignId as number,
+          {
+            difficulty: difficulty as z.infer<typeof DifficultyBand>,
+            party: party as number[] | undefined,
+            filters,
+            shape: shape as z.infer<typeof EncounterShape> | undefined,
+            count: count as number | undefined,
+            seed: seed as number | undefined,
+          },
+          role,
+        );
       },
     );
 
@@ -2198,7 +2256,9 @@ export class McpToolsService {
       'DM only: create a new encounter (combat tracker) in a campaign, status=preparing. Auto-adds every campaign ' +
         'character as a combatant with hp from their sheet and initiative modifier from DEX. Optionally attach it to a ' +
         'location/quest/session (issue #126) so combat is tied to where/why/when it happened. Pass hidden=true to keep ' +
-        'the encounter DM-only prep (issue #262): its roster + difficulty stay invisible to players until you reveal it.',
+        'the encounter DM-only prep (issue #262): its roster + difficulty stay invisible to players until you reveal it. ' +
+        'To build a balanced fight automatically, call generate_encounter first (non-mutating preview), then create it ' +
+        'here (hidden:true) and add_combatant once per suggested line with its ruleEntryId + count.',
       {
         campaignId: CampaignIdArg,
         name: z.string().min(1).max(120).describe('Encounter name'),
