@@ -37,24 +37,30 @@ export class RulesController {
   }
 
   /**
-   * Kicks off an Open5e import as a background job and returns 202 with the job (issue #20).
-   * The UI polls GET packs/install-jobs/:id for per-section progress and the final result;
-   * `outcome` on the completed job is 'created' (fresh) or 'updated' (incremental add, with
-   * `added`/`skippedExisting` counts).
+   * Kicks off an open-content import as a background job and returns 202 with the job (issue
+   * #20). The UI polls GET packs/install-jobs/:id for per-section progress and the final
+   * result; `outcome` on the completed job is 'created' (fresh) or 'updated' (incremental
+   * add, with `added`/`skippedExisting` counts).
    */
   @Post('packs/install')
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'Install a rule pack from an open source (background job)',
-    description: "Server admin or DM of any campaign. `source` selects the importer: 'open5e' (D&D 5e, default) or 'pf2e' (Pathfinder 2e, issue #295). Returns 202 with an install job to poll.",
+    description:
+      "Server admin or DM of any campaign. `source` selects the importer: 'open5e' (D&D 5e, default), " +
+      "'pf2e' (Pathfinder 2e), 'pf1e' (Pathfinder 1e), 'starfinder', 'archmage' (13th Age), 'open-legend', " +
+      "or 'osr' (retroclones — pass `system` to pick the variant, e.g. 'basic-fantasy'). Sections are " +
+      'validated per-source (a foreign section is rejected 400). Sources without a verified live default ' +
+      'API (pf1e/starfinder/archmage/osr, see #346) require an explicit `url`. Returns 202 with a job to poll.',
   })
   @ApiResponse({ status: 202, description: 'Install job accepted; poll packs/install-jobs/:id.' })
+  @ApiResponse({ status: 400, description: 'Rejected — a section invalid for the source, or a required `url` was missing.' })
   async install(@Body() body: RulePackInstallDto, @CurrentUser() user: RequestUser) {
     await this.assertCanInstall(user);
-    // Dispatch by source — the generalizable seam for adding open-content importers
-    // (issue #295, and #296-300): each new system is a new `source` + a runXInstall path.
-    if (body.source === 'pf2e') return this.rules.enqueuePf2eInstall(body, user);
-    return this.rules.enqueueOpen5eInstall(body, user);
+    // Dispatch by source (issues #295, #296-300, #345): each system routes to its own
+    // importer + enqueue path; per-source section/URL validation happens synchronously
+    // inside enqueueInstall (400 before a job is created).
+    return this.rules.enqueueInstall(body, user);
   }
 
   /**

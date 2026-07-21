@@ -2304,10 +2304,13 @@ export class McpToolsService {
       server,
       user,
       'install_rule_pack',
-      'Server admin only: install (or incrementally update) the Open5e SRD rule pack — spells, monsters, items, ' +
-        'conditions, classes, races, feats — so lookup_rule/get_rule_entry and add_combatant\'s ruleEntryId can find them.',
+      'Server admin only: install (or incrementally update) an open-content rule pack — spells, monsters, items, ' +
+        'conditions, classes, races, feats and system-specific sections — so lookup_rule/get_rule_entry and ' +
+        "add_combatant's ruleEntryId can find them. `source` selects the importer: 'open5e' (default), 'pf2e', " +
+        "'pf1e', 'starfinder', 'archmage', 'open-legend', or 'osr' (pass `system` for the retroclone variant). " +
+        'Sources without a verified live default API (pf1e/starfinder/archmage/osr) require an explicit `url`.',
       { ...RulePackInstall.shape },
-      async ({ source, url, sections }) => {
+      async ({ source, url, sections, system }) => {
         // hasServerAdminPower(), not a raw serverRole check — a token minted for a server
         // admin must NOT carry that admin's server-wide power unless it was explicitly
         // minted with adminEnabled=true. See user.types.ts / the P1 finding this closes.
@@ -2318,8 +2321,10 @@ export class McpToolsService {
           source,
           ...(url !== undefined ? { url } : {}),
           ...(sections !== undefined ? { sections } : {}),
+          ...(system !== undefined ? { system } : {}),
         });
-        return this.rules.installFromOpen5e(validated, user);
+        // Dispatch by source (issue #345) — runs the matching importer, not a silent Open5e install.
+        return this.rules.installFromSource(validated, user);
       },
     );
 
