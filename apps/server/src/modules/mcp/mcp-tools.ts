@@ -84,6 +84,7 @@ import { InventoryService } from '../inventory/inventory.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { CommentsService } from '../comments/comments.service';
 import { SchedulingService } from '../sessions/scheduling.service';
+import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
@@ -238,6 +239,7 @@ export class McpToolsService {
     private readonly timeline: TimelineService,
     private readonly comments: CommentsService,
     private readonly scheduling: SchedulingService,
+    private readonly scribe: ScribeService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
@@ -594,6 +596,23 @@ export class McpToolsService {
             'Rewrite `draft` into a finished recap in the DM\'s voice, then call add_session_recap (or update_session ' +
             'for an existing session). Delete the "Threads resolved this session" source-notes appendix before publishing.',
         };
+      },
+    );
+
+    this.tool(
+      server,
+      'run_scribe',
+      'DM only: run the automatic AI scribe now. Unlike draft_session_recap (which hands YOU the source material to write ' +
+        'from), this has the campaign\'s CONFIGURED provider write the recap prose server-side, then files it as a PENDING ' +
+        'PROPOSAL for DM approval — nothing is published to canon. Gated like an AI-DM turn: the server experimentalAiDm flag ' +
+        'must be on, the AI-DM seat enabled, and token budget must remain (the cost is metered against it). Idempotent: a ' +
+        're-run over unchanged material, or while a scribe recap proposal is still pending, is a no-op that returns the ' +
+        'existing proposal. Pass dryRun:true to generate a preview without filing anything. Returns the recorded job + any ' +
+        'filed proposal ids.',
+      { campaignId: CampaignIdArg, dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal') },
+      async ({ campaignId, dryRun }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.scribe.run(campaignId as number, 'on_demand', user, { dryRun: (dryRun as boolean | undefined) ?? false });
       },
     );
 

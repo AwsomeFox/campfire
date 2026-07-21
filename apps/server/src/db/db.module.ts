@@ -957,6 +957,45 @@ function migrateAiDmSeatsTableForMode(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before the AI scribe (issue #316): the
+ * `ai_scribe_configs` + `ai_scribe_jobs` tables didn't exist. Like the
+ * ai_provider_configs migration (0040) these are NEW tables, so BOOTSTRAP_SQL's
+ * CREATE TABLE IF NOT EXISTS would create them on the next boot regardless; they
+ * are registered as an explicit recorded migration for an auditable schema history
+ * and so the tables exist BEFORE the bootstrap pass. Fully idempotent (CREATE TABLE
+ * / CREATE INDEX IF NOT EXISTS). Runs with foreign_keys OFF, so the declared FK
+ * REFERENCES campaigns(id) never trips a constraint on a fresh DB where campaigns
+ * doesn't exist yet (SQLite resolves FK targets at write time, not CREATE time).
+ */
+function migrateAiScribeTables(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_scribe_configs (
+      campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+      post_session INTEGER NOT NULL DEFAULT 0,
+      cron INTEGER NOT NULL DEFAULT 0,
+      budget_per_run INTEGER NOT NULL DEFAULT 2000,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ai_scribe_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      trigger TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source_hash TEXT,
+      proposal_id INTEGER,
+      proposal_count INTEGER NOT NULL DEFAULT 0,
+      tokens_used INTEGER NOT NULL DEFAULT 0,
+      provider TEXT NOT NULL DEFAULT '',
+      detail TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign ON ai_scribe_jobs(campaign_id, created_at);
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1011,6 +1050,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0039_inventory_items_icon_slug', run: migrateInventoryItemsTableForIconSlug },
   { name: '0040_ai_provider_config', run: migrateAiProviderConfigTable },
   { name: '0041_ai_dm_seats_mode', run: migrateAiDmSeatsTableForMode },
+  { name: '0043_ai_scribe_jobs', run: migrateAiScribeTables },
 ];
 
 /**

@@ -645,6 +645,34 @@ CREATE TABLE IF NOT EXISTS ai_provider_configs (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server ON ai_provider_configs(scope) WHERE scope = 'server';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign ON ai_provider_configs(campaign_id) WHERE campaign_id IS NOT NULL;
 
+-- AI scribe (issue #316): per-campaign trigger config + a log of runs. The scribe
+-- drafts a session recap from the campaign's own material using the configured
+-- provider, always as a PROPOSAL (nothing auto-publishes to canon). Config toggles
+-- are opt-in; jobs record source_hash for idempotent, non-duplicating re-runs.
+CREATE TABLE IF NOT EXISTS ai_scribe_configs (
+  campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+  post_session INTEGER NOT NULL DEFAULT 0,
+  cron INTEGER NOT NULL DEFAULT 0,
+  budget_per_run INTEGER NOT NULL DEFAULT 2000,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_scribe_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  trigger TEXT NOT NULL,
+  status TEXT NOT NULL,
+  source_hash TEXT,
+  proposal_id INTEGER,
+  proposal_count INTEGER NOT NULL DEFAULT 0,
+  tokens_used INTEGER NOT NULL DEFAULT 0,
+  provider TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign ON ai_scribe_jobs(campaign_id, created_at);
+
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,

@@ -19,6 +19,8 @@ import { AI_DM_PROVIDER, NoopAiDmProvider } from './ai-dm.provider';
   imports: [AuditModule, SettingsModule, RoleAccessModule, AiProviderConfigModule],
   controllers: [AiDmController],
   providers: [AiDmService, { provide: AI_DM_PROVIDER, useClass: NoopAiDmProvider }],
-  exports: [AiDmService],
+  // AI_DM_PROVIDER is exported so the scribe (#316) can share the SAME injected
+  // provider seam (and the eval harness's override reaches both through one binding).
+  exports: [AiDmService, AI_DM_PROVIDER],
 })
 export class AiDmModule {}
