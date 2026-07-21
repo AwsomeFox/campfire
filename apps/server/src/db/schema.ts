@@ -642,6 +642,10 @@ export const encounters = sqliteTable('encounters', {
   gridUnit: text('grid_unit'),
   gridSnap: integer('grid_snap', { mode: 'boolean' }).notNull().default(false),
   fog: text('fog'),
+  // Grid geometry + shared AoE templates (issue #238). grid_type is 'square'|'hex' (added by
+  // migration on older DBs, backfilled 'square'); aoe is a JSON AoeTemplate[] blob (null = []).
+  gridType: text('grid_type').notNull().default('square'),
+  aoe: text('aoe'),
   endedAt: text('ended_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),

@@ -702,6 +702,24 @@ function migrateCombatantsTableForTokenSize(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before hex grids + shared AoE templates (issue #238):
+ * `encounters` gained `grid_type` (NOT NULL DEFAULT 'square' — existing encounters backfill to
+ * the classic square grid) and `aoe` (nullable JSON AoeTemplate[] blob, null = no templates).
+ * Plain ADD COLUMNs, same shape as migrateEncountersTableForVtt above.
+ */
+function migrateEncountersTableForAoeHex(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('grid_type')) sqlite.exec("ALTER TABLE encounters ADD COLUMN grid_type TEXT NOT NULL DEFAULT 'square'");
+  if (!has('aoe')) sqlite.exec('ALTER TABLE encounters ADD COLUMN aoe TEXT');
+}
+
+/**
  * Migration for DBs created before first-class factions (issue #221): `npcs.faction_id`
  * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same shape as
  * migrateLocationsTableForParentId above. The `factions` table itself is created by
@@ -769,6 +787,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0030_combatants_token_size', run: migrateCombatantsTableForTokenSize },
   { name: '0031_soft_delete', run: migrateSoftDeleteColumns },
   { name: '0032_npcs_faction_id', run: migrateNpcsTableForFactionId },
+  { name: '0033_encounters_aoe_hex', run: migrateEncountersTableForAoeHex },
 ];
 
 /**

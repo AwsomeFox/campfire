@@ -29,7 +29,7 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
-    (v.type === 'encounter.updated' || v.type === 'encounter.deleted') &&
+    (v.type === 'encounter.updated' || v.type === 'encounter.deleted' || v.type === 'encounter.ping') &&
     typeof v.campaignId === 'number' &&
     typeof v.encounterId === 'number'
   );

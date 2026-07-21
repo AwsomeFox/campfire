@@ -5,7 +5,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
 
 @ApiTags('encounters')
 @Controller('campaigns/:campaignId/encounters')
@@ -113,6 +113,22 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.encounters.updateEncounter(id, body, user, role);
+  }
+
+  @Post(':id/ping')
+  @ApiOperation({
+    summary: 'Broadcast a transient battle-map ping (issue #238)',
+    description:
+      'Requires campaign write membership (any DM or player — a live table gesture, not DM-gated ' +
+      'like fog). Emits a one-shot `encounter.ping` SSE signal carrying the click location so every ' +
+      'open client can flash a marker; nothing is persisted. x/y are 0–100 percent of the map surface.',
+  })
+  @ApiResponse({ status: 201, description: 'Ping broadcast.' })
+  async ping(@Param('id', ParseIntPipe) id: number, @Body() body: MapPingDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    await this.access.requireMember(user, row.campaignId, { write: true });
+    this.encounters.pingMap(id, row.campaignId, body);
+    return { ok: true };
   }
 
   @Get(':id/events')

@@ -1758,6 +1758,54 @@ export const FogState = z.object({
 });
 export type FogState = z.infer<typeof FogState>;
 
+/**
+ * Battle-map grid geometry (issue #40 / #238). 'square' is the classic Battlemat grid; 'hex'
+ * renders a pointy-top hexagonal overlay for hex-crawl / wilderness maps. Purely a display
+ * choice for the overlay — the measurement ruler still reads cell size off gridSize/gridScale.
+ */
+export const GridType = z.enum(['square', 'hex']);
+export type GridType = z.infer<typeof GridType>;
+
+/**
+ * Area-of-effect template shape (issue #238). 'circle' is a radius burst; 'cone' is a 5e
+ * quadrant cone (length ≈ width); 'line' is a straight ray. Unlike the original client-only
+ * circle, templates live in encounter state so every client at the table sees the same shape.
+ */
+export const AoeShape = z.enum(['circle', 'cone', 'line']);
+export type AoeShape = z.infer<typeof AoeShape>;
+
+/**
+ * One shared AoE template painted on the battle map (issue #238). Coordinates are 0–100 percent
+ * of the map surface (same convention as tokens/fog). `x`/`y` is the origin — the centre for a
+ * circle, the apex for a cone or line. `sizeFt` is the radius (circle) or length (cone/line) in
+ * the encounter's grid units; `angleDeg` aims a cone/line (0° points right/east, growing
+ * clockwise) and is ignored for a circle. Persisted on the encounter so it syncs over SSE.
+ */
+export const AoeTemplate = z.object({
+  id: z.string().min(1).max(40),
+  shape: AoeShape,
+  x: z.number().min(0).max(100),
+  y: z.number().min(0).max(100),
+  sizeFt: z.number().positive().max(1000),
+  angleDeg: z.number().min(-360).max(360).default(0),
+  color: z.string().max(24).nullable().default(null),
+});
+export type AoeTemplate = z.infer<typeof AoeTemplate>;
+
+/**
+ * A transient "look here" ping broadcast over SSE (issue #238). Not persisted — it rides the
+ * campaign event stream as a one-shot signal that every open client renders for a moment and
+ * then lets fade. Coordinates are 0–100 percent of the map surface; any writing member may
+ * drop one (a live table gesture, not DM-gated like fog).
+ */
+export const MapPing = z.object({
+  x: z.number().min(0).max(100),
+  y: z.number().min(0).max(100),
+  color: z.string().max(24).nullable().default(null),
+  label: z.string().max(40).nullable().default(null),
+});
+export type MapPing = z.infer<typeof MapPing>;
+
 export const Encounter = z.object({
   id: Id,
   campaignId: Id,
@@ -1789,8 +1837,14 @@ export const Encounter = z.object({
   gridScale: z.number().positive().nullable().default(null),
   gridUnit: z.string().max(12).nullable().default(null),
   gridSnap: z.boolean().default(false),
+  // Grid geometry (issue #238). 'square' (default) or 'hex' — a pointy-top hex overlay. Older
+  // DBs backfill to 'square' via migration, preserving the original square-only behaviour.
+  gridType: GridType.default('square'),
   // Fog of war (issue #40, phase 3). null = never configured (map fully visible). See FogState.
   fog: FogState.nullable().default(null),
+  // Shared AoE templates (issue #238) — circle/cone/line shapes every client sees, unlike the
+  // original client-local circle. Empty by default; capped so the JSON blob stays bounded.
+  aoe: z.array(AoeTemplate).max(50).default([]),
   endedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
@@ -1817,10 +1871,14 @@ export const EncounterUpdate = z.object({
   gridScale: z.number().positive().nullable().optional(),
   gridUnit: z.string().max(12).nullable().optional(),
   gridSnap: z.boolean().optional(),
+  // Grid geometry (issue #238) — dm only. 'square' | 'hex'.
+  gridType: GridType.optional(),
   // Fog of war (issue #40, phase 3) — dm only. Replace the whole fog state (enable/disable +
   // revealed rectangles); null clears it. The dedicated reveal_map_region MCP tool appends
   // a single rectangle for an AI DM without round-tripping the full mask.
   fog: FogState.nullable().optional(),
+  // Shared AoE templates (issue #238) — dm only. Replace the whole template list (empty clears).
+  aoe: z.array(AoeTemplate).max(50).optional(),
 });
 
 // ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
@@ -2059,12 +2117,16 @@ export type RollResult = z.infer<typeof RollResult>;
 // ---------- real-time campaign events (SSE) ----------
 // Thin invalidation signals pushed over GET /campaigns/:id/events — they carry ids, not
 // entity payloads, so clients refetch through the normal (permission-checked) REST reads.
-export const CampaignEventType = z.enum(['encounter.updated', 'encounter.deleted']);
+export const CampaignEventType = z.enum(['encounter.updated', 'encounter.deleted', 'encounter.ping']);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.object({
   type: CampaignEventType,
   campaignId: Id,
   encounterId: Id,
+  // Present only on 'encounter.ping' (issue #238): the transient battle-map ping's location and
+  // optional colour/label. Unlike the id-only updated/deleted signals this carries a small,
+  // non-secret payload (a click coordinate the sender chose), so there is nothing to leak.
+  ping: MapPing.optional(),
   at: IsoDate,
 });
 export type CampaignEvent = z.infer<typeof CampaignEvent>;

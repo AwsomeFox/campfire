@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterUpdate, CombatantCreate, CombatantUpdate, RollRequest } from '@campfire/schema';
+import { EncounterCreate, EncounterUpdate, CombatantCreate, CombatantUpdate, RollRequest, MapPing } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // .strict() (see CombatantUpdateDto below): an unknown key in an encounter PATCH body
@@ -17,3 +17,5 @@ export class EncounterUpdateDto extends createZodDto(EncounterUpdate.strict()) {
 export class CombatantCreateDto extends createZodDto(CombatantCreate.strict()) {}
 export class CombatantUpdateDto extends createZodDto(CombatantUpdate.strict()) {}
 export class RollRequestDto extends createZodDto(RollRequest.strict()) {}
+// Transient battle-map ping (issue #238) — a one-shot SSE broadcast, nothing persisted.
+export class MapPingDto extends createZodDto(MapPing.strict()) {}

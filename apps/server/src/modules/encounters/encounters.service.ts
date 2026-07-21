@@ -1,8 +1,9 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
-import type { Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, FogRect, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
+import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
+import { z as zod } from 'zod';
+import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterStatus, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -39,6 +40,17 @@ function parseFog(text: string | null): FogState | null {
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * Parse the stored AoE-templates JSON back into an AoeTemplate[] (issue #238). Same defensive
+ * degrade-to-empty as parseFog: corrupt/legacy text or an entry that no longer validates is
+ * dropped rather than failing the whole encounter read — templates are a display aid.
+ */
+function parseAoe(text: string | null): AoeTemplateType[] {
+  if (text == null) return [];
+  const parsed = zod.array(AoeTemplate).safeParse(fromJsonText<unknown>(text, null));
+  return parsed.success ? parsed.data : [];
+}
+
 function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
   return {
     id: row.id,
@@ -56,7 +68,9 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     gridScale: row.gridScale,
     gridUnit: row.gridUnit,
     gridSnap: row.gridSnap,
+    gridType: (row.gridType as GridType) ?? 'square',
     fog: parseFog(row.fog),
+    aoe: parseAoe(row.aoe),
     endedAt: row.endedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -326,8 +340,11 @@ export class EncountersService {
     if (input.gridScale !== undefined) set.gridScale = input.gridScale;
     if (input.gridUnit !== undefined) set.gridUnit = input.gridUnit;
     if (input.gridSnap !== undefined) set.gridSnap = input.gridSnap;
+    if (input.gridType !== undefined) set.gridType = input.gridType;
     // Fog of war (issue #40, phase 3). Stored as JSON text; null clears it entirely.
     if (input.fog !== undefined) set.fog = input.fog === null ? null : toJsonText(input.fog);
+    // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
+    if (input.aoe !== undefined) set.aoe = toJsonText(input.aoe);
 
     if (Object.keys(set).length === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
@@ -364,6 +381,18 @@ export class EncountersService {
     const current = parseFog(row.fog) ?? { enabled: true, revealed: [] };
     const next: FogState = { enabled: true, revealed: [...current.revealed, rect].slice(-500) };
     return this.updateEncounter(encounterId, { fog: next }, user, role);
+  }
+
+  /**
+   * Broadcast a transient battle-map ping (issue #238). Unlike fog/AoE this persists nothing —
+   * it rides the campaign event stream as a one-shot `encounter.ping` signal every open client
+   * renders briefly and lets fade. Any writing member may drop one (a live table gesture, not
+   * DM-gated); the caller-side controller asserts membership. The ping location is a coordinate
+   * the sender chose, so there is no secret to leak (contrast the id-only updated/deleted
+   * signals). Returns nothing meaningful — the effect is the emitted event.
+   */
+  pingMap(encounterId: number, campaignId: number, ping: MapPing): void {
+    this.events.emit({ type: 'encounter.ping', campaignId, encounterId, ping });
   }
 
   /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
