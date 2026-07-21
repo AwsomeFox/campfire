@@ -797,4 +797,77 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       expect(after.status).toBe(200);
     });
   });
+
+  // Issue #259 — attaching a battle map to an ENCOUNTER must NOT expose the raw map as a
+  // revealed handout (that defeats fog-of-war). Unlike the campaign background above, an
+  // encounter map stays hidden (DM-only) as a handout: it is omitted from the player
+  // Handouts list, yet the fogged encounter canvas still serves it to players via the
+  // file route's encounter-map exception. The DM continues to see it.
+  describe('encounter battle map does not leak to the player Handouts card (issue #259)', () => {
+    let encounterId: number;
+    let mapId: number;
+
+    beforeAll(async () => {
+      // DM uploads a battle map (hidden by default) and enables fog on an encounter.
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'battle-map.png', contentType: 'image/png' });
+      expect(upload.status).toBe(201);
+      expect(upload.body.hidden).toBe(true);
+      mapId = upload.body.id;
+
+      const enc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fogged Fight' });
+      expect(enc.status).toBe(201);
+      encounterId = enc.body.id;
+
+      // Attach the map + enable fog — the repro's exact steps.
+      const patch = await dmAgent
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .send({ mapAttachmentId: mapId, fog: { enabled: true, revealed: [] } });
+      expect(patch.status).toBe(200);
+      expect(patch.body.mapAttachmentId).toBe(mapId);
+    });
+
+    it('the attachment stays hidden (attach did NOT flip it to revealed)', async () => {
+      const dmList = await dmAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+      expect(dmList.status).toBe(200);
+      const row = dmList.body.find((a: { id: number }) => a.id === mapId);
+      expect(row).toBeDefined();
+      expect(row.hidden).toBe(true);
+    });
+
+    it("the player's Handouts list omits the encounter map (no REVEALED leak)", async () => {
+      const playerList = await playerAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+      expect(playerList.status).toBe(200);
+      expect(playerList.body.some((a: { id: number }) => a.id === mapId)).toBe(false);
+    });
+
+    it('the DM still sees the encounter map in the Handouts list', async () => {
+      const dmList = await dmAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+      expect(dmList.body.some((a: { id: number }) => a.id === mapId)).toBe(true);
+    });
+
+    it('the fogged encounter canvas can still fetch the map bytes for the player (200)', async () => {
+      const fileRes = await playerAgent.get(`/api/v1/attachments/${mapId}/file`);
+      expect(fileRes.status).toBe(200);
+      expect(Buffer.compare(fileRes.body, TINY_PNG)).toBe(0);
+    });
+
+    it('the encounter-map exception does not open OTHER hidden attachments to the player', async () => {
+      // A hidden image that is NOT any encounter's map stays 404 for the player.
+      const other = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'unrelated-hidden.png', contentType: 'image/png' });
+      expect(other.body.hidden).toBe(true);
+      const res = await playerAgent.get(`/api/v1/attachments/${other.body.id}/file`);
+      expect(res.status).toBe(404);
+    });
+
+    it('a non-member outsider still cannot fetch the encounter map (403)', async () => {
+      const res = await outsiderAgent.get(`/api/v1/attachments/${mapId}/file`);
+      expect(res.status).toBe(403);
+    });
+  });
 });
