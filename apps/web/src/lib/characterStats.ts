@@ -8,7 +8,6 @@
  * (a sheet roll and an encounter roll must produce identical expressions/labels).
  */
 import type { Character, RuleSystemAdapter } from '@campfire/schema';
-import type { MouseEvent } from 'react';
 
 export const ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
 export type Ability = (typeof ABILITY_KEYS)[number];
@@ -75,8 +74,20 @@ export function signed(n: number): string {
 
 export type Adv = 'flat' | 'adv' | 'dis';
 
+/**
+ * Just the modifier-key flags of a mouse/pointer event. Structural on purpose — a
+ * React `MouseEvent` or a DOM `MouseEvent` both satisfy it — so this helper (and the
+ * module) stays UI-framework-agnostic and reusable outside React.
+ */
+export interface ModKeyEvent {
+  shiftKey: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+}
+
 /** How a modifier-key click maps to advantage/disadvantage on a d20 roll. */
-export function advFromEvent(e: MouseEvent): Adv {
+export function advFromEvent(e: ModKeyEvent): Adv {
   if (e.shiftKey) return 'adv';
   if (e.altKey || e.ctrlKey || e.metaKey) return 'dis';
   return 'flat';
