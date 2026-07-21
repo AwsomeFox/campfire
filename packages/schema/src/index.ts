@@ -1358,6 +1358,18 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   degreeOfSuccess: pf2eDegreeOfSuccess,
 };
 
+// Sibling ruleset adapters (issues #296-300) live in their own files (type-only imports
+// from here, so no runtime cycle) and register below. Adding a system is one import + one
+// ADAPTERS entry, never a sweep across the combat code.
+import { Pathfinder1eAdapter, PF1E_PACK_SLUG } from './pathfinder1e';
+export * from './pathfinder1e';
+import { StarfinderAdapter, STARFINDER_ADAPTER_ID } from './starfinder-adapter';
+export * from './starfinder-adapter';
+import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
+export * from './adapters/archmage';
+import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS } from './osr-adapter';
+export * from './osr-adapter';
+
 /**
  * Registry of rule-system adapters, keyed by family id (and, for a system with its own
  * importer, its pack slug too — so `campaign.ruleSystem`, which stores the pack slug,
@@ -1369,7 +1381,13 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [PF2E_ADAPTER_ID]: Pf2eAdapter,
   // Pack slug the PF2e importer installs under — campaigns store the slug in `ruleSystem`.
   [PF2E_PACK_SLUG]: Pf2eAdapter,
+  [PF1E_PACK_SLUG]: Pathfinder1eAdapter, // Pathfinder 1e (issue #296)
+  [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
+  [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
+  'archmage-srd': Archmage13aAdapter, // …and its installed rule-pack slug
 };
+// OSR pack (issue #300): one shared adapter resolves several retroclone slugs.
+for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
 
 /**
  * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
