@@ -40,6 +40,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'quests')).toContain('hidden');
       expect(columnNames(sqlite, 'npcs')).toContain('hidden');
       expect(columnNames(sqlite, 'npcs')).toContain('icon_slug'); // 0037 (issue #302)
+      expect(columnNames(sqlite, 'rule_entries')).toContain('icon_slug'); // 0038 (issue #305)
       expect(columnNames(sqlite, 'sessions')).toContain('dm_secret');
       expect(columnNames(sqlite, 'api_tokens')).toContain('admin_enabled');
       expect(columnNames(sqlite, 'proposals')).toContain('snapshot');
@@ -90,8 +91,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(combatant.death_save_successes).toBe(0);
       expect(combatant.death_save_failures).toBe(0);
 
+      // rule_entries icon_slug (0038, issue #305): ADD COLUMN default backfills the row.
+      const ruleEntry = sqlite.prepare('SELECT * FROM rule_entries WHERE id = 1').get() as Record<string, unknown>;
+      expect(ruleEntry).toMatchObject({ name: 'Legacy Fireball', type: 'spell', icon_slug: '' });
+
       // Every seeded table kept exactly its one row (nothing dropped by the rebuild).
-      for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'proposals', 'encounters', 'combatants', 'attachments', 'inventory_items']) {
+      for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'proposals', 'encounters', 'combatants', 'attachments', 'rule_entries', 'inventory_items']) {
         expect(countRows(sqlite, table)).toBe(1);
       }
     } finally {

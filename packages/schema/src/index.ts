@@ -1028,9 +1028,29 @@ export const RuleEntry = z.object({
   // distinguishable and the reader can attribute the real source/license (issue #143).
   // '' for older imports/uploads that predate the column — the reader falls back to the pack name.
   source: z.string().max(200).default(''),
+  // Optional manual icon override (issue #305): the slug of a bundled game-icons.net
+  // entity icon (see apps/web/src/lib/icons) shown in the compendium list + reader in
+  // place of the type/school-derived default. '' means "no override — the web app
+  // derives a sensible default from `type` + `dataJson` (spell school, monster type,
+  // item category, condition)". Stored opaquely (an unknown slug simply falls back to
+  // the default), mirroring Npc.iconSlug from #302 so the field stays forward-compatible
+  // as the curated set grows.
+  iconSlug: z.string().max(80).default(''),
   ...timestamps,
 });
 export type RuleEntry = z.infer<typeof RuleEntry>;
+
+/**
+ * DM-editable fields on an already-imported rule entry (issue #305). The compendium's
+ * entries come from importers/uploads, not a manual create form, so the only mutable
+ * field a DM sets by hand is the icon override — a small PATCH surface (mirrors the
+ * shape of NpcUpdate, which also carries iconSlug). Widen this object if more per-entry
+ * homebrew edits are added later.
+ */
+export const RuleEntryUpdate = z.object({
+  iconSlug: z.string().max(80),
+}).partial();
+export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
 
 /**
  * Importer registry for the /rules/packs/install endpoint (issue #70). Was a bare
@@ -1444,6 +1464,7 @@ export const RulePackUploadEntry = z.object({
   dataJson: z.string().max(100_000).nullable().optional(), // raw structured fields, JSON-encoded
   license: z.string().max(120).optional(), // per-entry license; falls back to the pack license
   source: z.string().max(200).optional(), // per-entry source/document label; falls back to the pack name
+  iconSlug: z.string().max(80).optional(), // optional bundled game-icons.net slug to seed the entry's icon (issue #305)
 });
 export type RulePackUploadEntry = z.infer<typeof RulePackUploadEntry>;
 
