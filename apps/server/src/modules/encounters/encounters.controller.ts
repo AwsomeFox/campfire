@@ -36,8 +36,10 @@ export class CampaignEncountersController {
     @Query('status') status: EncounterStatus | undefined,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireMember(user, campaignId);
-    return this.encounters.listForCampaign(campaignId, status);
+    // The caller's role drives entity-level secrecy (issue #262): a non-DM never sees a
+    // hidden (prepared, not-yet-sprung) encounter in the list.
+    const role = await this.access.requireMember(user, campaignId);
+    return this.encounters.listForCampaign(campaignId, status, role);
   }
 }
 
@@ -97,8 +99,10 @@ export class EncountersController {
   @ApiResponse({ status: 200, description: 'Difficulty band with the party thresholds and adjusted monster XP.' })
   async difficulty(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
-    return this.encounters.getDifficulty(id);
+    // The caller's role gates entity-level secrecy (issue #262): a hidden encounter's
+    // difficulty is DM-only prep, denied (404) to a non-DM like its roster.
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.getDifficulty(id, role);
   }
 
   @Patch(':id')

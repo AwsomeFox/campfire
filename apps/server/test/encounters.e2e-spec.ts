@@ -2343,4 +2343,87 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(diff.body.adjustedXp).toBe(5900);
     expect(diff.body.band).toBe('deadly');
   });
+
+  // Issue #262: a DM's prepared, not-yet-sprung fight must not leak its combatant roster or
+  // computed 5e difficulty to players. hidden gates the encounter WHOLESALE for a non-DM.
+  describe('hidden encounter secrecy (issue #262)', () => {
+    async function createHidden() {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Ambush (prep)', hidden: true });
+      expect(created.status).toBe(201);
+      expect(created.body.hidden).toBe(true);
+      // Seed a monster so the roster + difficulty carry real secrets.
+      await request(server)
+        .post(`/api/v1/encounters/${created.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', ruleEntryId: cr10EntryId });
+      return created.body.id as number;
+    }
+
+    it('a hidden encounter is visible to the DM but hidden wholesale from a player/viewer list', async () => {
+      const server = ctx.app.getHttpServer();
+      const id = await createHidden();
+
+      const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(dm);
+      expect(dmList.status).toBe(200);
+      expect(dmList.body.some((e: { id: number }) => e.id === id)).toBe(true);
+
+      for (const who of [player, viewer]) {
+        const list = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(who);
+        expect(list.status).toBe(200);
+        expect(list.body.some((e: { id: number }) => e.id === id)).toBe(false);
+      }
+    });
+
+    it("a player/viewer GET of a hidden encounter's roster is denied (404); the DM sees it", async () => {
+      const server = ctx.app.getHttpServer();
+      const id = await createHidden();
+
+      const dmGet = await request(server).get(`/api/v1/encounters/${id}`).set(dm);
+      expect(dmGet.status).toBe(200);
+      expect(dmGet.body.combatants.some((c: { kind: string }) => c.kind === 'monster')).toBe(true);
+
+      for (const who of [player, viewer]) {
+        const res = await request(server).get(`/api/v1/encounters/${id}`).set(who);
+        expect(res.status).toBe(404);
+      }
+    });
+
+    it("a player/viewer difficulty read of a hidden encounter is denied (404); the DM sees it", async () => {
+      const server = ctx.app.getHttpServer();
+      const id = await createHidden();
+
+      const dmDiff = await request(server).get(`/api/v1/encounters/${id}/difficulty`).set(dm);
+      expect(dmDiff.status).toBe(200);
+      expect(dmDiff.body.monsterCount).toBe(1);
+
+      for (const who of [player, viewer]) {
+        const res = await request(server).get(`/api/v1/encounters/${id}/difficulty`).set(who);
+        expect(res.status).toBe(404);
+      }
+    });
+
+    it('revealing a hidden encounter (hidden=false) makes its roster + difficulty visible to a player again', async () => {
+      const server = ctx.app.getHttpServer();
+      const id = await createHidden();
+
+      // Player is blocked while hidden...
+      expect((await request(server).get(`/api/v1/encounters/${id}`).set(player)).status).toBe(404);
+
+      // ...DM reveals it...
+      const revealed = await request(server).patch(`/api/v1/encounters/${id}`).set(dm).send({ hidden: false });
+      expect(revealed.status).toBe(200);
+      expect(revealed.body.hidden).toBe(false);
+
+      // ...now the player can read the roster and the difficulty.
+      const got = await request(server).get(`/api/v1/encounters/${id}`).set(player);
+      expect(got.status).toBe(200);
+      const diff = await request(server).get(`/api/v1/encounters/${id}/difficulty`).set(player);
+      expect(diff.status).toBe(200);
+      expect(diff.body.monsterCount).toBe(1);
+    });
+  });
 });

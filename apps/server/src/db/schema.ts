@@ -649,6 +649,10 @@ export const encounters = sqliteTable('encounters', {
   // migration on older DBs, backfilled 'square'); aoe is a JSON AoeTemplate[] blob (null = []).
   gridType: text('grid_type').notNull().default('square'),
   aoe: text('aoe'),
+  // Entity-level secrecy (issue #262) — see quests.hidden. A hidden encounter's roster +
+  // difficulty are DM-only, and the encounter is dropped wholesale from non-DM reads until
+  // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
+  hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   endedAt: text('ended_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),

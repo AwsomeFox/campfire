@@ -43,7 +43,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'api_tokens')).toContain('admin_enabled');
       expect(columnNames(sqlite, 'proposals')).toContain('snapshot');
       expect(columnNames(sqlite, 'encounters')).toEqual(
-        expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id']),
+        expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id', 'hidden']),
       );
       expect(columnNames(sqlite, 'combatants')).toEqual(
         expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures']),
