@@ -2,8 +2,15 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { VitePWA } from "vite-plugin-pwa";
+import { version as pkgVersion } from "./package.json";
 
 export default defineConfig({
+  // Single-source the app version from package.json so signed-out surfaces
+  // (e.g. the login footer) report the real build version without an authed
+  // /admin/metrics call, and can never drift from the published version.
+  define: {
+    __APP_VERSION__: JSON.stringify(pkgVersion),
+  },
   plugins: [
     react(),
     tailwindcss(),
