@@ -761,9 +761,11 @@ export class EncountersService {
     // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
     // already restricts a non-DM to a combatant linked to a character they own, which is
     // exactly the "a player moves only their own token" rule. Clamp to 0–100 (mirrors the
-    // campaign map's pin drag). Both coordinates move together.
-    if (patch.tokenX !== undefined) staticUpdate.tokenX = clampPercent(patch.tokenX);
-    if (patch.tokenY !== undefined) staticUpdate.tokenY = clampPercent(patch.tokenY);
+    // campaign map's pin drag). Both coordinates move together. An explicit `null` clears
+    // the position (unplace, issue #271) — write it straight through rather than clamping,
+    // since clampPercent(null) would collapse to 0 and pin the token to a corner.
+    if (patch.tokenX !== undefined) staticUpdate.tokenX = patch.tokenX === null ? null : clampPercent(patch.tokenX);
+    if (patch.tokenY !== undefined) staticUpdate.tokenY = patch.tokenY === null ? null : clampPercent(patch.tokenY);
     // Token footprint size (issue #40) — DM-only (identity-like), same gate as name/hpMax above.
     if (patch.tokenSize !== undefined && isDm) staticUpdate.tokenSize = patch.tokenSize;
 
