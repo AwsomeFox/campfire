@@ -35,6 +35,8 @@ export const queryKeys = {
   /** All encounters in a campaign (the list surface). */
   campaignEncounters: (campaignId: number) => ['campaign', campaignId, 'encounters'] as const,
   campaignCharacters: (campaignId: number) => ['campaign', campaignId, 'characters'] as const,
+  /** The campaign member roster (resolves userId → display name for AI-DM lever surfaces, #340). */
+  campaignMembers: (campaignId: number) => ['campaign', campaignId, 'members'] as const,
   /** The party roster (alias surface for character/HP/condition writes). */
   campaignParty: (campaignId: number) => ['campaign', campaignId, 'party'] as const,
   /** The campaign dice/roll log. */
