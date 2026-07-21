@@ -7,11 +7,26 @@ import { CharactersModule } from '../characters/characters.module';
 import { SessionsModule } from '../sessions/sessions.module';
 import { MembershipModule } from '../membership/membership.module';
 import { EncountersModule } from '../encounters/encounters.module';
+import { InventoryModule } from '../inventory/inventory.module';
+import { TimelineModule } from '../timeline/timeline.module';
+import { CommentsModule } from '../comments/comments.module';
 import { CampaignsService } from './campaigns.service';
 import { CampaignsController } from './campaigns.controller';
 
 @Module({
-  imports: [AuditModule, QuestsModule, NpcsModule, LocationsModule, CharactersModule, SessionsModule, MembershipModule, EncountersModule],
+  imports: [
+    AuditModule,
+    QuestsModule,
+    NpcsModule,
+    LocationsModule,
+    CharactersModule,
+    SessionsModule,
+    MembershipModule,
+    EncountersModule,
+    InventoryModule,
+    TimelineModule,
+    CommentsModule,
+  ],
   controllers: [CampaignsController],
   providers: [CampaignsService],
   exports: [CampaignsService],

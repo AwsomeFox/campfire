@@ -42,6 +42,17 @@ import {
   SessionUpdate,
   XpAward,
   AiDmTurnKind,
+  InventoryItemCreate,
+  InventoryItemUpdate,
+  TreasuryPatch,
+  TimelineEventCreate,
+  TimelineEventUpdate,
+  TimelineCalendarUpdate,
+  CommentCreate,
+  CommentUpdate,
+  ScheduledSessionCreate,
+  ScheduledSessionUpdate,
+  RsvpSet,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
@@ -65,6 +76,10 @@ import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { TimelineService } from '../timeline/timeline.service';
+import { CommentsService } from '../comments/comments.service';
+import { SchedulingService } from '../sessions/scheduling.service';
 import { filterHidden } from '../../common/redact';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
@@ -214,6 +229,10 @@ export class McpToolsService {
     private readonly aiDm: AiDmService,
     private readonly attachments: AttachmentsService,
     private readonly sessionZero: SessionZeroService,
+    private readonly inventory: InventoryService,
+    private readonly timeline: TimelineService,
+    private readonly comments: CommentsService,
+    private readonly scheduling: SchedulingService,
   ) {}
 
   buildServer(user: RequestUser): McpServer {
@@ -224,10 +243,12 @@ export class McpToolsService {
         'BOOTSTRAP / ID DISCOVERY — ids are never guessable, always discover them:\n' +
         '  1. list_campaigns -> pick a campaignId.\n' +
         '  2. get_campaign_summary {campaignId} -> full dashboard: campaign, current location, quests (with ' +
-        'objectives), npcs, locations, characters, sessions, open inbox count. This is the cheapest way to learn ' +
+        'objectives), npcs, locations, characters, sessions, encounters, in-world timeline, party treasury, ' +
+        'inventory/comment counts, next scheduled session, and open inbox count. This is the cheapest way to learn ' +
         'every entity id in a campaign in one call — prefer it over multiple list_* calls when starting fresh.\n' +
-        '  3. For anything not in the summary (encounters, notes, rule entries, members, proposals, audit log), ' +
-        'use the matching list_* tool first (e.g. list_encounters before get_encounter/update_combatant) to get ids.\n\n' +
+        '  3. For anything not in the summary (inventory items, comments, scheduled sessions, notes, rule entries, ' +
+        'members, proposals, audit log), use the matching list_* tool first (e.g. list_inventory, list_comments, ' +
+        'list_scheduled_sessions, list_encounters) to get ids.\n\n' +
         'ROLES — every tool resolves the caller\'s EFFECTIVE role for the campaign in question: dm > player > viewer ' +
         '(ranked; a higher role can do everything a lower one can). dm: full write access, secrets (dmSecret fields, ' +
         'NPC/quest/location DM-only text), approve/reject proposals, install rule packs (server admin only), manage ' +
@@ -356,7 +377,8 @@ export class McpToolsService {
       server,
       'get_campaign_summary',
       'Full campaign dashboard: campaign, current location, quests (with objectives), NPCs, locations, characters, ' +
-        'sessions, open inbox count. The cheapest single call to learn every core entity id in a campaign.',
+        'sessions, encounter digests, in-world timeline, party treasury, inventory/comment counts, next scheduled ' +
+        'session, and open inbox count. The cheapest single call to learn every core entity id in a campaign.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
@@ -812,6 +834,157 @@ export class McpToolsService {
         const [visible] = filterHidden([await this.attachments.getOrThrow(attachmentId as number)], role);
         if (!visible) throw new NotFoundException(`Attachment ${attachmentId} not found`);
         return visible;
+      },
+    );
+
+    // ---------- inventory & treasury (issue #257) ----------
+    this.tool(
+      server,
+      'list_inventory',
+      'List a campaign\'s inventory — the party stash plus per-character items together. Requires membership; group ' +
+        'client-side by ownerType ("party"|"character") and characterId.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.inventory.listForCampaign(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_inventory_item',
+      'Get one inventory item by id. Ids come from list_inventory.',
+      { itemId: Id.describe('Inventory item id — from list_inventory') },
+      async ({ itemId }) => {
+        const row = await this.inventory.getRowOrThrow(itemId as number);
+        await this.access.requireMember(user, row.campaignId);
+        return this.inventory.getOrThrow(itemId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_treasury',
+      'Get the party treasury — coin totals (cp/sp/ep/gp/pp) for a campaign. Requires membership; a zeroed row is ' +
+        'created lazily on first access.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.inventory.getTreasury(campaignId as number);
+      },
+    );
+
+    // ---------- timeline & calendar (issue #257) ----------
+    this.tool(
+      server,
+      'list_timeline',
+      'List a campaign\'s in-world timeline events in narrative order (DM-controlled sortIndex, then id). Requires ' +
+        'membership; dmSecret is stripped and hidden events are dropped WHOLESALE for non-DM callers.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.timeline.listEvents(campaignId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_timeline_event',
+      'Get one in-world timeline event by id. Ids come from list_timeline. dmSecret is stripped for non-DM; a hidden ' +
+        'event 404s for non-DM (indistinguishable from a nonexistent one).',
+      { eventId: Id.describe('Timeline event id — from list_timeline') },
+      async ({ eventId }) => {
+        const row = await this.timeline.getEventRowOrThrow(eventId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.timeline.getEventOrThrow(eventId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_calendar',
+      'Get the campaign\'s current in-world date and calendar note (issue #63). Requires membership; returns an empty ' +
+        'default (never 404s) if no date has been set yet.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.timeline.getCalendar(campaignId as number);
+      },
+    );
+
+    // ---------- discussion comments (issue #257) ----------
+    this.tool(
+      server,
+      'list_comments',
+      'List the discussion thread anchored to one entity (entityType + entityId) in a campaign, oldest-first; ' +
+        'reconstruct threading client-side from each comment\'s parentId. Requires membership AND visibility of the ' +
+        'anchored entity — a thread on a hidden quest/npc/faction or an unexplored location 404s for non-DM (issue #230).',
+      {
+        campaignId: CampaignIdArg,
+        entityType: EntityType.describe('The entity type the thread is anchored to'),
+        entityId: Id.describe('The entity id the thread is anchored to'),
+        limit: LimitArg(500, 500),
+        offset: OffsetArg,
+      },
+      async ({ campaignId, entityType, entityId, limit, offset }) => {
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.comments.listForEntity(
+          campaignId as number,
+          entityType as z.infer<typeof EntityType>,
+          entityId as number,
+          role,
+          { limit: limit as number | undefined, offset: offset as number | undefined },
+        );
+      },
+    );
+
+    this.tool(
+      server,
+      'get_comment',
+      'Get one discussion comment by id. Ids come from list_comments. 404s (not 403) for a comment on an entity the ' +
+        'caller cannot see (issue #230).',
+      { commentId: Id.describe('Comment id — from list_comments') },
+      async ({ commentId }) => {
+        const row = await this.comments.getRowOrThrow(commentId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.comments.getOrThrow(commentId as number, role);
+      },
+    );
+
+    // ---------- scheduling (issue #257) ----------
+    this.tool(
+      server,
+      'list_scheduled_sessions',
+      'List a campaign\'s scheduled (planned, future) game nights, soonest-first, each with member RSVPs. Requires ' +
+        'membership. Distinct from get_session_recaps, which is the log of sessions that already happened.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.scheduling.listForCampaign(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_next_session',
+      'Get the campaign\'s "next session" — the earliest not-yet-past scheduled game night (with RSVPs), or null when ' +
+        'nothing is planned. Requires membership.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.scheduling.nextForCampaign(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_calendar_feed',
+      'Get the campaign\'s ICS calendar-feed settings — the capability token and relative feed URL, or nulls when the ' +
+        'feed is disabled. Requires membership (the feed only exposes schedule data members already see).',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.scheduling.getFeed(campaignId as number);
       },
     );
   }
@@ -2242,6 +2415,279 @@ export class McpToolsService {
           },
           user,
         );
+      },
+    );
+
+    // ---------- inventory & treasury (issue #257) ----------
+    this.writeTool(
+      server,
+      user,
+      'add_inventory_item',
+      'player: add an inventory item. ownerType defaults to "party" (the shared stash, writable by any player); ' +
+        'ownerType "character" requires a characterId in this campaign and is writable only by the dm or that ' +
+        'character\'s owning player.',
+      { campaignId: CampaignIdArg, ...InventoryItemCreate.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = InventoryItemCreate.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.inventory.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_inventory_item',
+      'player: update an inventory item\'s name/qty/notes, or MOVE it by changing ownerType/characterId. Character ' +
+        'items are writable only by the dm or the owning player; a move requires write access at both source and ' +
+        'destination.',
+      { itemId: Id.describe('Inventory item id — from list_inventory'), ...InventoryItemUpdate.shape },
+      async ({ itemId, ...fields }) => {
+        const row = await this.inventory.getRowOrThrow(itemId as number);
+        const validated = InventoryItemUpdate.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.inventory.update(itemId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'delete_inventory_item',
+      'player: delete an inventory item. Character items only by the dm or the owning player.',
+      { itemId: Id.describe('Inventory item id — from list_inventory') },
+      async ({ itemId }) => {
+        const row = await this.inventory.getRowOrThrow(itemId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        await this.inventory.remove(itemId as number, user, role);
+        return { ok: true, itemId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'adjust_treasury',
+      'player: adjust the party treasury coins. Pass exactly one of `delta` (relative per-denomination change; result ' +
+        'must stay >= 0) or `set` (absolute per-denomination values). Omitted denominations are left untouched. ' +
+        'Denominations: cp, sp, ep, gp, pp.',
+      {
+        campaignId: CampaignIdArg,
+        delta: z
+          .object({
+            cp: z.number().int().optional(),
+            sp: z.number().int().optional(),
+            ep: z.number().int().optional(),
+            gp: z.number().int().optional(),
+            pp: z.number().int().optional(),
+          })
+          .optional()
+          .describe('Relative per-denomination change (may be negative; each result must stay >= 0)'),
+        set: z
+          .object({
+            cp: z.number().int().nonnegative().optional(),
+            sp: z.number().int().nonnegative().optional(),
+            ep: z.number().int().nonnegative().optional(),
+            gp: z.number().int().nonnegative().optional(),
+            pp: z.number().int().nonnegative().optional(),
+          })
+          .optional()
+          .describe('Absolute per-denomination values to set'),
+      },
+      async ({ campaignId, delta, set }) => {
+        if ((delta === undefined) === (set === undefined)) {
+          throw new BadRequestException('Pass exactly one of delta or set');
+        }
+        const validated = TreasuryPatch.parse(delta !== undefined ? { delta } : { set });
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.inventory.patchTreasury(campaignId as number, validated, user, role);
+      },
+    );
+
+    // ---------- timeline & calendar (issue #257) ----------
+    this.writeTool(
+      server,
+      user,
+      'create_timeline_event',
+      'DM only: add an in-world timeline event (issue #63). Free-text `inWorldDate` (fantasy calendars aren\'t ' +
+        'ISO-parseable) plus a DM-controlled `sortIndex` for narrative order. Supports a dmSecret field (DM-only text, ' +
+        'stripped from non-DM reads) and a hidden flag (excluded WHOLESALE from non-DM reads until revealed).',
+      { campaignId: CampaignIdArg, ...TimelineEventCreate.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = TimelineEventCreate.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.timeline.createEvent(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_timeline_event',
+      'DM only: update an in-world timeline event\'s title, inWorldDate, body, era, sortIndex, dmSecret, or hidden flag ' +
+        '(set hidden=false to reveal a previously-hidden event to players).',
+      { eventId: Id.describe('Timeline event id — from list_timeline'), ...TimelineEventUpdate.shape },
+      async ({ eventId, ...fields }) => {
+        const row = await this.timeline.getEventRowOrThrow(eventId as number);
+        const validated = TimelineEventUpdate.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.timeline.updateEvent(eventId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'delete_timeline_event',
+      'DM only: delete an in-world timeline event.',
+      { eventId: Id.describe('Timeline event id — from list_timeline') },
+      async ({ eventId }) => {
+        const row = await this.timeline.getEventRowOrThrow(eventId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.timeline.removeEvent(eventId as number, user, role);
+        return { ok: true, eventId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_calendar',
+      'DM only: set the campaign\'s current in-world date and/or calendar note (issue #63). Upserts the single ' +
+        'per-campaign calendar row.',
+      { campaignId: CampaignIdArg, ...TimelineCalendarUpdate.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = TimelineCalendarUpdate.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.timeline.setCalendar(campaignId as number, validated, user, role);
+      },
+    );
+
+    // ---------- discussion comments (issue #257) ----------
+    this.writeTool(
+      server,
+      user,
+      'post_comment',
+      'Any member: post a discussion comment anchored to an entity (entityType/entityId). Optional parentId for a ' +
+        'threaded reply (must reference a comment on the same entity), and inCharacter for a play-by-post scene. ' +
+        'Requires visibility of the anchored entity — posting on a hidden/secret entity 404s for non-DM (issue #230).',
+      { campaignId: CampaignIdArg, ...CommentCreate.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = CommentCreate.parse(fields);
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        return this.comments.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_comment',
+      'Edit a discussion comment\'s body and/or inCharacter flag. Author or DM only.',
+      { commentId: Id.describe('Comment id — from list_comments'), ...CommentUpdate.shape },
+      async ({ commentId, ...fields }) => {
+        const row = await this.comments.getRowOrThrow(commentId as number);
+        const validated = CommentUpdate.parse(fields);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        return this.comments.update(commentId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'delete_comment',
+      'Delete a discussion comment. Author or DM only. Deleting a top-level comment cascades to its direct replies.',
+      { commentId: Id.describe('Comment id — from list_comments') },
+      async ({ commentId }) => {
+        const row = await this.comments.getRowOrThrow(commentId as number);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        await this.comments.remove(commentId as number, user, role);
+        return { ok: true, commentId };
+      },
+    );
+
+    // ---------- scheduling (issue #257) ----------
+    this.writeTool(
+      server,
+      user,
+      'schedule_session',
+      'DM only: schedule a (future) game night (issue #13). `scheduledAt` is an ISO date-time (normalized to UTC); ' +
+        'durationMinutes defaults to 240. Notifies the party. Distinct from add_session_recap (a past session log).',
+      { campaignId: CampaignIdArg, ...ScheduledSessionCreate.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = ScheduledSessionCreate.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.scheduling.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_scheduled_session',
+      'DM only: update a scheduled game night\'s time/duration/title/location/notes. Moving `scheduledAt` re-notifies ' +
+        'the party.',
+      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...ScheduledSessionUpdate.shape },
+      async ({ scheduleId, ...fields }) => {
+        const row = await this.scheduling.getRowOrThrow(scheduleId as number);
+        const validated = ScheduledSessionUpdate.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.scheduling.update(scheduleId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'cancel_scheduled_session',
+      'DM only: cancel a scheduled game night, deleting the schedule entry and all its RSVPs.',
+      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions') },
+      async ({ scheduleId }) => {
+        const row = await this.scheduling.getRowOrThrow(scheduleId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.scheduling.remove(scheduleId as number, user, role);
+        return { ok: true, scheduleId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_rsvp',
+      'Any member: set YOUR OWN availability (RSVP) for a scheduled game night — status yes|no|maybe with an optional ' +
+        'note. Upserts your single RSVP; notifies the DM(s).',
+      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...RsvpSet.shape },
+      async ({ scheduleId, ...fields }) => {
+        const row = await this.scheduling.getRowOrThrow(scheduleId as number);
+        const validated = RsvpSet.parse(fields);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.scheduling.setRsvp(scheduleId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'rotate_calendar_feed',
+      'DM only: enable the campaign\'s public ICS calendar feed, or rotate its token if already enabled (invalidating ' +
+        'any previously-shared feed URL). Returns the fresh token + relative feed URL.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.scheduling.rotateFeed(campaignId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'disable_calendar_feed',
+      'DM only: disable the campaign\'s public ICS calendar feed — clears the token so the public feed URL 404s afterward.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.scheduling.disableFeed(campaignId as number, user, role);
       },
     );
   }
