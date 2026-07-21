@@ -195,9 +195,9 @@ describe('ai-dm eval harness — offline + gating invariants (e2e)', () => {
  */
 describe('downstream AI flows (harness ready; behavior lands with its issue)', () => {
   // #312 — driver runtime: the mock requests a campfire tool, the runtime EXECUTES it under
-  // write-mode, the result feeds back for a second turn, HP/turn effects + audit + budget land.
-  it.todo('#312 driver: scripted tool call executes a real campfire tool and feeds the result back');
-  it.todo('#312 driver: multi-step tool loop terminates on a stop turn and audits each step');
+  // write-mode, the result feeds back for a second turn, tool effects + audit + budget land.
+  // DONE — see ai-dm-driver.e2e-spec.ts (session loop, streamed narration, tool execution,
+  // canon→proposals, budget hard-stop, per-step audit).
 
   // #313 — co-DM authoring: a scripted draft becomes a PROPOSAL only (nothing written directly),
   // and the DM approve/reject path applies or discards it.

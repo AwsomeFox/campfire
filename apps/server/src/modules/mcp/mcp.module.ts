@@ -56,5 +56,8 @@ import { McpController } from './mcp.controller';
   ],
   controllers: [McpController],
   providers: [McpToolsService],
+  // Exported so the AI driver runtime (#312) can reuse the FULL tool registry
+  // (buildToolset) with identical role/write-mode/proposal enforcement.
+  exports: [McpToolsService],
 })
 export class McpModule {}

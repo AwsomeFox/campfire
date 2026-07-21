@@ -28,6 +28,7 @@ import { MockAiProvider } from '../src/modules/ai-dm/providers/mock-provider';
 import type { MockResponse } from '../src/modules/ai-dm/providers/mock-provider';
 import { ProviderBackedAiDmProvider } from '../src/modules/ai-dm/providers/ai-dm-bridge';
 import type { AiToolSchema } from '../src/modules/ai-dm/providers/ai-provider';
+import { AI_PROVIDER_RESOLVER } from '../src/modules/ai-driver/ai-provider-resolver';
 import type { AiDmTurnKind } from '@campfire/schema';
 
 /** dev-auth header identities (DEV_AUTH=1 path — see SessionAuthGuard). */
@@ -69,6 +70,14 @@ export interface AiEvalHarness {
   ): Promise<request.Response>;
   /** POST a turn to the AI DM seat. */
   takeTurn(campaignId: number, body: { prompt: string; kind?: AiDmTurnKind; maxTokens?: number }): Promise<request.Response>;
+  /** POST player input to the driver runtime (#312) — runs a streamed, tool-executing turn. */
+  sendMessage(
+    campaignId: number,
+    body: { input: string; scene?: string; maxSteps?: number; maxTokens?: number },
+    headers?: Record<string, string>,
+  ): Promise<request.Response>;
+  /** Read the driver session state. */
+  getDriverSession(campaignId: number): Promise<request.Response>;
   /** Read the seat as the DM. */
   getSeat(campaignId: number): Promise<request.Response>;
   /** Read the campaign audit log as the DM. */
@@ -92,7 +101,14 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
     temperature: options.temperature,
   });
 
-  const ctx = await createTestApp({ overrides: [{ token: AI_DM_PROVIDER, useValue: bridged }] });
+  const ctx = await createTestApp({
+    overrides: [
+      { token: AI_DM_PROVIDER, useValue: bridged },
+      // Driver runtime (#312): resolve the SAME deterministic mock as the streaming
+      // AiProvider, so the whole session loop runs offline with scripted turns.
+      { token: AI_PROVIDER_RESOLVER, useValue: { resolve: async () => mock } },
+    ],
+  });
   const server = ctx.app.getHttpServer();
 
   const harness: AiEvalHarness = {
@@ -117,6 +133,12 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
     },
     takeTurn(campaignId, body): Promise<request.Response> {
       return request(server).post(`/api/v1/campaigns/${campaignId}/ai-dm/turn`).set(dm).send(body);
+    },
+    sendMessage(campaignId, body, headers = dm): Promise<request.Response> {
+      return request(server).post(`/api/v1/campaigns/${campaignId}/ai-dm/message`).set(headers).send(body);
+    },
+    getDriverSession(campaignId): Promise<request.Response> {
+      return request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm/session`).set(dm);
     },
     getSeat(campaignId): Promise<request.Response> {
       return request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm);
