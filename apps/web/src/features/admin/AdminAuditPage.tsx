@@ -1,0 +1,18 @@
+/**
+ * /admin/audit — full server admin audit log. Part of the /admin/* page split
+ * (issue #350); see AdminPage.tsx for the full route map (the overview page
+ * shows only the 10 most recent entries and links here for the rest).
+ */
+import { RequireServerAdmin } from './RequireServerAdmin';
+import { AuditLogCard } from './AuditLogCard';
+
+export default function AdminAuditPage() {
+  return (
+    <RequireServerAdmin>
+      <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
+        <h1 className="text-xl font-extrabold text-white">📜 Audit log</h1>
+        <AuditLogCard />
+      </div>
+    </RequireServerAdmin>
+  );
+}

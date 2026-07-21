@@ -1,19 +1,38 @@
 /**
- * IconPicker (issue #302) — a searchable modal for choosing a bundled
- * game-icons.net entity icon. Built on the app's `.dialog` primitives + the
- * shared useDialog hook (Escape/focus-trap/focus-restore), mirroring
- * ConfirmDialog. Reusable by any entity that stores an icon slug (NPCs today;
- * compendium/#305 and inventory/#307 next).
+ * IconPicker (issue #302; full-set search issue #349) — a searchable modal
+ * for choosing a bundled game-icons.net entity icon. Built on the app's
+ * `.dialog` primitives + the shared useDialog hook (Escape/focus-trap/
+ * focus-restore), mirroring ConfirmDialog. Reusable by any entity that
+ * stores an icon slug (NPCs, compendium/#305, inventory/#307).
  *
- * Selecting an icon calls onSelect(slug) and closes; "No icon" clears it (''),
- * so the same control both sets and removes an icon. The catalog is small and
- * fully client-side, so search filters synchronously on each keystroke.
+ * The curated ~180-icon set searches synchronously and renders instantly, no
+ * different from before. On open, the picker also kicks off a dynamic import
+ * of the full ~4,130-icon metadata index (no svg bodies — see
+ * lib/icons/index.ts#loadFullIconIndex); once that lands, search results are
+ * the curated matches followed by full-set matches (deduped), so typing a
+ * query broadens the result set as the index becomes available. Each
+ * rendered result tile resolves (and caches) its own svg body lazily via
+ * <GameIcon>, fetching only the shard(s) actually needed for what's on
+ * screen. If the index (or a shard) fails to load — e.g. offline and
+ * uncached — the picker just keeps working over the curated set.
  */
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Btn, TextInput } from './ui';
 import { useDialog } from './useDialog';
 import { GameIcon } from './GameIcon';
-import { searchIcons, ICON_CATEGORIES, ICON_COUNT, ICON_SOURCE_NAME, ICON_LICENSE } from '../lib/icons';
+import {
+  searchIcons,
+  searchFullIconIndex,
+  loadFullIconIndex,
+  ICON_CATEGORIES,
+  TOTAL_ICON_COUNT,
+  ICON_SOURCE_NAME,
+  ICON_LICENSE,
+  type FullIconIndexEntry,
+} from '../lib/icons';
+
+/** Total tiles shown at once (curated + full-set), so a broad query can't mount thousands. */
+const RESULT_LIMIT = 240;
 
 function categoryLabel(cat: string): string {
   return cat
@@ -38,7 +57,36 @@ export function IconPicker({
   const titleId = useRef(`icon-picker-title-${Math.random().toString(36).slice(2)}`).current;
   const dialogRef = useDialog<HTMLDivElement>({ onClose });
 
-  const results = useMemo(() => searchIcons(query, category), [query, category]);
+  // Full-set index: undefined while loading, null on failure, the array once loaded.
+  const [fullIndex, setFullIndex] = useState<readonly FullIconIndexEntry[] | null | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    loadFullIconIndex().then(
+      (entries) => live && setFullIndex(entries),
+      () => live && setFullIndex(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const curatedResults = useMemo(() => searchIcons(query, category), [query, category]);
+  const fullResults = useMemo(() => {
+    if (!fullIndex) return [];
+    const curatedSlugs = new Set(curatedResults.map((e) => e.slug));
+    const remaining = Math.max(0, RESULT_LIMIT - curatedResults.length);
+    if (remaining === 0) return [];
+    return searchFullIconIndex(fullIndex, query, category, remaining + curatedSlugs.size).filter(
+      (e) => !curatedSlugs.has(e.slug),
+    ).slice(0, remaining);
+  }, [fullIndex, query, category, curatedResults]);
+
+  // curatedResults already carry svg bodies (instant); fullResults are metadata
+  // only — GameIcon resolves each tile's body lazily/on-demand once mounted.
+  const results: Array<{ slug: string; name: string; artist: string }> = useMemo(
+    () => [...curatedResults, ...fullResults],
+    [curatedResults, fullResults],
+  );
 
   return (
     <div className="dialog-backdrop" onClick={onClose}>
@@ -57,7 +105,7 @@ export function IconPicker({
         <div className="dialog-body space-y-3">
           <TextInput
             autoFocus
-            placeholder={`Search ${ICON_COUNT} icons — sword, potion, dragon…`}
+            placeholder={`Search ${TOTAL_ICON_COUNT} icons — sword, potion, dragon…`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             aria-label="Search icons"
@@ -119,7 +167,12 @@ export function IconPicker({
               </button>
             ))}
 
-            {results.length === 0 && (
+            {results.length === 0 && fullIndex === undefined && (
+              <p className="text-sm text-[var(--color-neutral-500)] col-span-full py-6 text-center">
+                Searching the full icon library…
+              </p>
+            )}
+            {results.length === 0 && fullIndex !== undefined && (
               <p className="text-sm text-[var(--color-neutral-500)] col-span-full py-6 text-center">
                 No icons match “{query}”.
               </p>
@@ -132,6 +185,7 @@ export function IconPicker({
               Credits
             </a>{' '}
             for artist attribution.
+            {fullIndex === null && ' Couldn’t load the full icon library — showing the curated set only.'}
           </p>
         </div>
         <div className="dialog-actions">

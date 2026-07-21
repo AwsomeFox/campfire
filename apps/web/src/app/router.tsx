@@ -152,6 +152,12 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/encounters/RunSessionPage')),
           },
           {
+            // Player-facing AI-DM Table (issue #339) — the shared transcript + composer
+            // where a Driver-mode session with the AI DM is actually played.
+            path: '/c/:campaignId/table',
+            element: lazyPage(() => import('../features/ai-dm/AiTablePage')),
+          },
+          {
             path: '/c/:campaignId/search',
             element: lazyPage(() => import('../features/search/SearchPage')),
           },
@@ -191,6 +197,32 @@ export const router = createBrowserRouter([
           {
             path: '/admin',
             element: lazyPage(() => import('../features/admin/AdminPage')),
+          },
+          {
+            // /admin/* sub-pages (issue #350) — each re-parents a slice of the
+            // cards that used to all stack on the single /admin overview page.
+            path: '/admin/users',
+            element: lazyPage(() => import('../features/admin/AdminUsersPage')),
+          },
+          {
+            path: '/admin/rules',
+            element: lazyPage(() => import('../features/admin/AdminRulesPage')),
+          },
+          {
+            path: '/admin/ai',
+            element: lazyPage(() => import('../features/admin/AdminAiPage')),
+          },
+          {
+            path: '/admin/auth',
+            element: lazyPage(() => import('../features/admin/AdminAuthPage')),
+          },
+          {
+            path: '/admin/storage',
+            element: lazyPage(() => import('../features/admin/AdminStoragePage')),
+          },
+          {
+            path: '/admin/audit',
+            element: lazyPage(() => import('../features/admin/AdminAuditPage')),
           },
           {
             path: '/tokens',

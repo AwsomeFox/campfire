@@ -1057,20 +1057,81 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
 
 /**
  * Importer registry for the /rules/packs/install endpoint (issue #70). Was a bare
- * `z.literal('open5e')`, welding the install path to a single importer. Widened to a
- * small enum so a second importer can be added without rewriting the schema — 'open5e'
- * stays the built-in API importer, 'pf2e' is the Pathfinder 2e importer (issue #295), and
- * 'other' is a placeholder for a future/generic importer. The existing Open5e path is
- * unchanged: callers still pass `source: 'open5e'`. (Generic JSON uploads take the separate
- * RulePackUpload path, `source: 'upload'`.)
+ * `z.literal('open5e')`, welding the install path to a single importer. Widened first to a
+ * small enum (open5e/pf2e, issue #295) and then — issue #345 — to the full open-ruleset
+ * family so every shipped importer is reachable from the endpoint:
+ *   - 'open5e'      — D&D 5e SRD (default, the built-in API importer)
+ *   - 'pf2e'        — Pathfinder 2e (Archives of Nethys, issue #295)
+ *   - 'pf1e'        — Pathfinder 1e SRD (issue #296)
+ *   - 'starfinder'  — Starfinder 1e SRD (issue #297)
+ *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)
+ *   - 'open-legend' — Open Legend community codex (issue #299)
+ *   - 'osr'         — the OSR retroclone family (issue #300; see `system` below)
+ *   - 'other'       — generic/placeholder (routes to the Open5e path for back-compat)
+ * The existing Open5e/PF2e request shape is unchanged: callers still pass `source: 'open5e'`
+ * (or 'pf2e'). Generic JSON uploads take the separate RulePackUpload path, `source: 'upload'`.
  */
-export const RulePackInstallSource = z.enum(['open5e', 'pf2e', 'other']);
+export const RulePackInstallSource = z.enum([
+  'open5e',
+  'pf2e',
+  'pf1e',
+  'starfinder',
+  'archmage',
+  'open-legend',
+  'osr',
+  'other',
+]);
 export type RulePackInstallSource = z.infer<typeof RulePackInstallSource>;
+
+/**
+ * OSR variant selector (issue #345): the single `osr` importer serves several retroclone
+ * packs, so an OSR install picks which source system's pack it installs under. Each value
+ * maps to an `OsrSource` (slug/license/attribution) in the OSR importer; the pack installs
+ * under that slug, which the shared `OsrAdapter` is registered against. Defaults to
+ * 'basic-fantasy' (the cleanest CC-BY-SA source) when omitted, matching `osrSource()`.
+ */
+export const OsrInstallSystem = z.enum([
+  'basic-fantasy',
+  'osric',
+  'swords-wizardry',
+  'labyrinth-lord',
+  'old-school-essentials',
+]);
+export type OsrInstallSystem = z.infer<typeof OsrInstallSystem>;
+
+/**
+ * The union of every section name any importer accepts (issue #345). The original enum was
+ * 5e-shaped (spells/monsters/…); the sibling systems add their own vocabularies — Starfinder
+ * adds equipment/starships/vehicles, Open Legend uses creatures/banes/boons. A section name
+ * that parses here is still validated against the CHOSEN source server-side (a foreign
+ * section, e.g. 'starships' for an open5e install, is rejected 400 before a job is enqueued),
+ * because Zod alone can't express the per-source subset without a discriminated union.
+ */
+export const RulePackInstallSection = z.enum([
+  // 5e-shaped (Open5e, Pathfinder 1e; PF2e ignores the filter, OSR uses a subset)
+  'spells',
+  'monsters',
+  'items',
+  'conditions',
+  'classes',
+  'races',
+  'feats',
+  // Starfinder
+  'equipment',
+  'starships',
+  'vehicles',
+  // Open Legend
+  'creatures',
+  'banes',
+  'boons',
+]);
+export type RulePackInstallSection = z.infer<typeof RulePackInstallSection>;
 
 export const RulePackInstall = z.object({
   source: RulePackInstallSource,
   url: z.string().max(500).optional(), // override API base, mainly for tests (fake server)
-  sections: z.array(z.enum(['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'])).optional(), // default: all
+  sections: z.array(RulePackInstallSection).optional(), // default: all (validated per-source server-side)
+  system: OsrInstallSystem.optional(), // OSR only: which retroclone pack to install under (default basic-fantasy)
 });
 export type RulePackInstall = z.infer<typeof RulePackInstall>;
 
@@ -1752,7 +1813,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),

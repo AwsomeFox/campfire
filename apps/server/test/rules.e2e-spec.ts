@@ -987,3 +987,186 @@ describe('rules / rule packs — Pathfinder 2e install (e2e, fake AoN server)', 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
   });
 });
+
+/**
+ * Sibling open-ruleset importers wired into the install endpoint (issue #345). Each new
+ * `source` — pf1e / starfinder / archmage / open-legend / osr — routes POST /rules/packs/install
+ * to its own importer, installs under the pack slug the matching RuleSystemAdapter is
+ * registered against, validates sections per-source (a foreign section is rejected 400 before
+ * a job is enqueued), and runs entirely against an in-process fake upstream (no live network).
+ * The four sources with a dead/placeholder default (pf1e/starfinder/archmage/osr, tracked in
+ * #346) additionally require an explicit `url`.
+ */
+describe('rules / rule packs — sibling importer install wiring (e2e, fake upstreams, issue #345)', () => {
+  let ctx: TestAppContext;
+  let server: Server;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  /** POST install (expect 202 + echoed source), then poll to a terminal state. */
+  async function installSource(body: Record<string, unknown>) {
+    const res = await request(server).post('/api/v1/rules/packs/install').set(dm).send(body);
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe('pending');
+    expect(res.body.source).toBe(body.source);
+    return pollJob(server, dm, res.body.id);
+  }
+
+  it('source: pf1e -> Pathfinder1e importer -> pathfinder-1e pack; validates sections', async () => {
+    const { startFakePathfinder1e } = await import('./fake-pathfinder1e');
+    const fake = await startFakePathfinder1e();
+    try {
+      const job = await installSource({ source: 'pf1e', url: fake.baseUrl });
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('pathfinder-1e');
+
+      const spell = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', type: 'spell' }).set(dm);
+      expect(spell.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+      const monster = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', type: 'monster' }).set(dm);
+      expect(monster.body.some((e: { name: string }) => e.name === 'Goblin')).toBe(true);
+
+      // A section foreign to pf1e (Starfinder's 'starships') is rejected 400 synchronously —
+      // no job enqueued.
+      const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'pf1e', url: fake.baseUrl, sections: ['starships'] });
+      expect(bad.status).toBe(400);
+      expect(String(bad.body.message)).toMatch(/starships/);
+
+      await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('source: starfinder -> Starfinder importer -> starfinder-1e pack; validates sections', async () => {
+    const { startFakeStarfinder } = await import('./fake-starfinder');
+    const fake = await startFakeStarfinder();
+    try {
+      const job = await installSource({ source: 'starfinder', url: fake.baseUrl });
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('starfinder-1e');
+
+      const spell = await request(server).get('/api/v1/rules/search').query({ q: 'magic missile', type: 'spell' }).set(dm);
+      expect(spell.body.some((e: { name: string }) => e.name === 'Magic Missile')).toBe(true);
+      // Starfinder's own sections (starships) imported alongside the 5e-shaped ones.
+      const ship = await request(server).get('/api/v1/rules/search').query({ q: 'pegasus' }).set(dm);
+      expect(ship.body.some((e: { name: string }) => e.name === 'Pegasus')).toBe(true);
+
+      // 'banes' (Open Legend's) is not a Starfinder section -> 400.
+      const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'starfinder', url: fake.baseUrl, sections: ['banes'] });
+      expect(bad.status).toBe(400);
+
+      await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('source: archmage -> 13th Age importer -> archmage-srd pack; validates sections', async () => {
+    const { startFakeArchmage } = await import('./fake-archmage');
+    const fake = await startFakeArchmage();
+    try {
+      const job = await installSource({ source: 'archmage', url: fake.baseUrl });
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('archmage-srd');
+
+      const monster = await request(server).get('/api/v1/rules/search').query({ q: 'bear', type: 'monster' }).set(dm);
+      expect(monster.body.some((e: { name: string }) => e.name === 'Bear')).toBe(true);
+
+      // 13th Age exposes only monsters + conditions; 'spells' is foreign -> 400.
+      const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'archmage', url: fake.baseUrl, sections: ['spells'] });
+      expect(bad.status).toBe(400);
+
+      await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('source: open-legend -> Open Legend importer -> open-legend-srd pack; validates sections', async () => {
+    const { startFakeOpenLegend } = await import('./fake-open-legend');
+    const fake = await startFakeOpenLegend();
+    try {
+      const job = await installSource({ source: 'open-legend', url: fake.baseUrl });
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('open-legend-srd');
+
+      // creatures -> monster; banes/boons -> condition.
+      const creature = await request(server).get('/api/v1/rules/search').query({ q: 'ogre', type: 'monster' }).set(dm);
+      expect(creature.body.some((e: { name: string }) => e.name === 'Ogre')).toBe(true);
+      const bane = await request(server).get('/api/v1/rules/search').query({ q: 'stunned', type: 'condition' }).set(dm);
+      expect(bane.body.some((e: { name: string }) => e.name === 'Stunned')).toBe(true);
+
+      // Open Legend uses 'creatures', not 'monsters' -> 'monsters' is foreign -> 400.
+      const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'open-legend', url: fake.baseUrl, sections: ['monsters'] });
+      expect(bad.status).toBe(400);
+
+      await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('source: osr -> OSR importer; `system` selects the pack slug; validates sections', async () => {
+    const { startFakeOsr } = await import('./fake-osr');
+    const fake = await startFakeOsr();
+    try {
+      // Default variant installs under 'basic-fantasy'.
+      const dflt = await installSource({ source: 'osr', url: fake.baseUrl });
+      expect(dflt.status).toBe('completed');
+      expect(dflt.pack.slug).toBe('basic-fantasy');
+      const monster = await request(server).get('/api/v1/rules/search').query({ q: 'skeleton', type: 'monster' }).set(dm);
+      expect(monster.body.some((e: { name: string }) => e.name === 'Skeleton')).toBe(true);
+      await request(server).delete(`/api/v1/rules/packs/${dflt.pack.id}`).set(dm);
+
+      // The `system` selector installs under the chosen retroclone's slug — the slug the
+      // shared OsrAdapter is registered against, so a campaign on it resolves OSR combat.
+      const osric = await installSource({ source: 'osr', url: fake.baseUrl, system: 'osric' });
+      expect(osric.status).toBe('completed');
+      expect(osric.pack.slug).toBe('osric');
+
+      // A campaign can select the installed OSR pack (validateRuleSystem requires it exist).
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'OSR Campaign' });
+      const patchRes = await request(server).patch(`/api/v1/campaigns/${campRes.body.id}`).set(dm).send({ ruleSystem: 'osric' });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.ruleSystem).toBe('osric');
+
+      // OSR sections are monsters/spells/items/conditions; 'classes' is foreign -> 400.
+      const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'osr', url: fake.baseUrl, sections: ['classes'] });
+      expect(bad.status).toBe(400);
+
+      await request(server).delete(`/api/v1/rules/packs/${osric.pack.id}`).set(dm);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('sources without a verified live default API require an explicit url (400, no job)', async () => {
+    // pf1e/starfinder/archmage/osr have dead/placeholder defaults (#346) — a missing url is
+    // a synchronous 400, not a job that fails obscurely against a dead default.
+    for (const source of ['pf1e', 'starfinder', 'archmage', 'osr']) {
+      const res = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source });
+      expect(res.status).toBe(400);
+      expect(String(res.body.message)).toMatch(/url/i);
+    }
+  });
+
+  it('existing open5e/pf2e request shape is unchanged (no url still routes; open5e default install works)', async () => {
+    const { startFakeOpen5e } = await import('./fake-open5e');
+    const fake = await startFakeOpen5e();
+    try {
+      const job = await installSource({ source: 'open5e', url: fake.baseUrl });
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('open5e-srd');
+      await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+    } finally {
+      await fake.close();
+    }
+  });
+});
