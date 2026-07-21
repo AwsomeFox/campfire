@@ -75,8 +75,10 @@ function resolveAiConfigKey(logger: Logger): Buffer {
  * that feeds #309's provider factory. Owns two scopes:
  *   - `server`   : one admin-managed default row.
  *   - `campaign` : an optional per-campaign override that FALLS BACK to the server
- *                  default (including falling back to the server's API key when the
- *                  campaign supplies its own provider/model but no key of its own).
+ *                  default. When the campaign supplies no key of its own it may still
+ *                  reuse the server's key — but ONLY together with the server's endpoint
+ *                  and providerType, never with a campaign-controlled destination (see
+ *                  the security invariant on `resolveEffectiveConfig`, issue #373).
  *
  * The API key is encrypted at rest (aes-256-gcm) and is WRITE-ONLY: it is accepted
  * on write, stored only as ciphertext + a `keyLast4` indicator, and is NEVER returned
@@ -306,12 +308,21 @@ export class AiProviderConfigService {
 
   /**
    * Resolve the EFFECTIVE, DECRYPTED provider config for a campaign: the campaign
-   * override when present, otherwise the server default. When a campaign override
-   * exists but carries no key of its own, the server default's key is used (so a
-   * group can pick their own model on the server's key). Returns `null` when neither
+   * override when present, otherwise the server default. Returns `null` when neither
    * scope is configured. The returned object carries the plaintext `apiKey` and is
    * for IN-PROCESS use only (createAiProvider) — it must never be serialized to a
    * client. This is the sole decryption path (#312 consumes it).
+   *
+   * SECURITY INVARIANT (issue #373): the server default's key must NEVER be paired
+   * with a campaign-controlled destination. The API key, `baseUrl`, and `providerType`
+   * are resolved together as one coherent unit from the SAME scope — the scope that
+   * OWNS the key also owns where that key is sent and how it is presented. A campaign
+   * override that carries its own key controls its own endpoint; a campaign override
+   * WITHOUT a key falls back to the server key AND the server's endpoint/providerType
+   * (it may still pick its own `model`, which is constrained by the admin allowlist and
+   * is not a credential destination). This closes the exfiltration where a DM could set
+   * `baseUrl: 'https://attacker.example'` with no key and have the server's admin key
+   * shipped there.
    */
   async resolveEffectiveConfig(campaignId: number): Promise<AiProviderConfig | null> {
     const server = await this.serverRow();
@@ -319,18 +330,39 @@ export class AiProviderConfigService {
     const primary = camp ?? server;
     if (!primary) return null;
 
-    let apiKey: string | undefined;
+    // The scope that supplies the key also supplies the endpoint + providerType.
+    // When the primary scope has its own key, key+endpoint+type are self-consistent.
     if (primary.encryptedApiKey) {
-      apiKey = decryptSecret(primary.encryptedApiKey, this.key);
-    } else if (camp && server?.encryptedApiKey) {
-      // Campaign override without its own key — fall back to the server key.
-      apiKey = decryptSecret(server.encryptedApiKey, this.key);
+      return {
+        providerType: primary.providerType as AiProviderType,
+        model: primary.model,
+        apiKey: decryptSecret(primary.encryptedApiKey, this.key),
+        baseUrl: primary.baseUrl ?? undefined,
+        params: safeJson(primary.params, {}),
+      };
     }
 
+    // Campaign override without its own key — fall back to the SERVER key, and with it
+    // the SERVER endpoint + providerType (NEVER the campaign's). The campaign keeps its
+    // own model choice (allowlist-constrained) and sampling params, neither of which is
+    // a credential destination.
+    if (camp && server?.encryptedApiKey) {
+      return {
+        providerType: server.providerType as AiProviderType,
+        model: primary.model,
+        apiKey: decryptSecret(server.encryptedApiKey, this.key),
+        baseUrl: server.baseUrl ?? undefined,
+        params: safeJson(primary.params, {}),
+      };
+    }
+
+    // No key resolvable in any scope (e.g. a keyless provider like `mock`, or an
+    // override on a server default that itself has no key). Return the primary scope's
+    // own endpoint/type — no server key is in play, so there is nothing to leak.
     return {
       providerType: primary.providerType as AiProviderType,
       model: primary.model,
-      apiKey,
+      apiKey: undefined,
       baseUrl: primary.baseUrl ?? undefined,
       params: safeJson(primary.params, {}),
     };
