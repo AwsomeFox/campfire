@@ -13,6 +13,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { RulePacksCard } from './RulePacksCard';
 import { MetricsCard } from './MetricsCard';
 import { StorageCard } from './StorageCard';
+import { AiConsoleCard } from './AiConsoleCard';
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
@@ -86,6 +87,7 @@ export default function AdminPage() {
       <UsersCard users={users ?? []} onChange={load} />
       <ResetRequestsCard />
       <SettingsCard settings={settings} onChange={load} />
+      <AiConsoleCard />
       <OidcCard />
       <RulePacksCard />
       <TokensCard />
