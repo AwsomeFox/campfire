@@ -56,6 +56,7 @@ import {
   ScheduledSessionUpdate,
   RsvpSet,
   GenerateMapParams,
+  CoDmDraftTarget,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
@@ -78,6 +79,7 @@ import { MapsService } from '../maps/maps.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
+import { CoDmService } from '../ai-dm/co-dm.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
 import { InventoryService } from '../inventory/inventory.service';
@@ -233,6 +235,7 @@ export class McpToolsService {
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
     private readonly aiDm: AiDmService,
+    private readonly coDm: CoDmService,
     private readonly attachments: AttachmentsService,
     private readonly sessionZero: SessionZeroService,
     private readonly inventory: InventoryService,
@@ -2527,6 +2530,38 @@ export class McpToolsService {
             ...(maxTokens !== undefined ? { maxTokens: maxTokens as number } : {}),
           },
           user,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'draft_content',
+      'EXPERIMENTAL co-DM (issue #313): ask the AI DM to DRAFT content and file it as PENDING PROPOSAL(S) for the human ' +
+        'DM to review — nothing is written to canon directly. DM role required, the server-wide experimental flag must ' +
+        'be on, and the seat must be enabled with remaining budget. `target` picks what to draft: npc, location, beat ' +
+        '(a story beat/next objective, filed as a quest), recap (filed as a session), encounter (reuses generate_encounter ' +
+        '#304), or map (reuses generate_map #306). `count` (npc/location/beat only) drafts several at once. Returns the ' +
+        'created proposal ids; approve/reject them with approve_proposal / reject_proposal. Metered against the seat ' +
+        'budget; the proposer is recorded as the AI seat + model.',
+      {
+        campaignId: CampaignIdArg,
+        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map'),
+        prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
+        count: z.number().int().min(1).max(10).optional().describe('How many to draft (npc/location/beat only)'),
+      },
+      async ({ campaignId, target, prompt, count }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.coDm.draft(
+          campaignId as number,
+          {
+            target: target as z.infer<typeof CoDmDraftTarget>,
+            prompt: prompt as string,
+            ...(count !== undefined ? { count: count as number } : {}),
+          },
+          user,
+          role,
         );
       },
     );

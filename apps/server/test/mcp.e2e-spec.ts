@@ -134,6 +134,7 @@ const ALL_TOOLS = [
   'end_encounter',
   'delete_encounter',
   'ai_dm_narrate',
+  'draft_content',
   // write — inventory/timeline/comments/scheduling (issue #257)
   'add_inventory_item',
   'update_inventory_item',

@@ -11,6 +11,8 @@ import {
   SessionUpdate,
   CharacterCreate,
   CharacterUpdate,
+  EncounterGenerate,
+  GenerateMapParams,
   ProposalApprove,
   ProposalResolve,
 } from '@campfire/schema';
@@ -25,6 +27,8 @@ import { NpcsService } from '../npcs/npcs.service';
 import { LocationsService } from '../locations/locations.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
+import { EncountersService } from '../encounters/encounters.service';
+import { MapsService } from '../maps/maps.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
@@ -50,6 +54,12 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   location: LocationCreate.strict(),
   session: SessionCreate.strict(),
   character: CharacterCreate.strict(),
+  // Co-DM (issue #313): an encounter/map proposal's payload is the (seeded) GENERATOR
+  // request, not a persisted row — approve re-runs generate_encounter (#304) /
+  // generate_map (#306). These are create-only in v1; the update entries below reuse the
+  // same schema only to keep the Record total (an update proposal is never filed for them).
+  encounter: EncounterGenerate.strict(),
+  map: GenerateMapParams.strict(),
 };
 const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   quest: QuestUpdate.strict(),
@@ -57,6 +67,8 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   location: LocationUpdate.strict(),
   session: SessionUpdate.strict(),
   character: CharacterUpdate.strict(),
+  encounter: EncounterGenerate.strict(),
+  map: GenerateMapParams.strict(),
 };
 
 @Injectable()
@@ -70,6 +82,8 @@ export class ProposalsService {
     private readonly locations: LocationsService,
     private readonly sessions: SessionsService,
     private readonly characters: CharactersService,
+    private readonly encounters: EncountersService,
+    private readonly maps: MapsService,
   ) {}
 
   async listForCampaign(
@@ -132,6 +146,41 @@ export class ProposalsService {
         return this.sessions;
       case 'character':
         return this.characters;
+      // Co-DM (issue #313): encounter/map proposals apply by RE-RUNNING the deterministic
+      // generator (#304/#306) from the seeded params in the payload, through the same
+      // dm+write-gated write path a direct generate-then-commit would take (the approver's
+      // role is passed through). Thin adapters expose the generic `create(campaignId,
+      // payload, user, role) -> {id}` contract approve() calls; update/remove aren't
+      // reachable (v1 files create-only) and reject loudly if ever hit.
+      case 'encounter':
+        return {
+          create: async (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) => {
+            const { encounter } = await this.encounters.generateAndCreateEncounter(
+              campaignId,
+              payload as Parameters<EncountersService['generateAndCreateEncounter']>[1],
+              user,
+              role,
+            );
+            return encounter;
+          },
+          update: () => Promise.reject(new BadRequestException('Encounter proposals are create-only')),
+          remove: () => Promise.reject(new BadRequestException('Encounter proposals are create-only')),
+        };
+      case 'map':
+        return {
+          create: async (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) => {
+            const result = await this.maps.generateForCampaign(
+              campaignId,
+              payload as Parameters<MapsService['generateForCampaign']>[1],
+              user,
+              role,
+            );
+            // The generated map is an attachment; its id is the proposal's produced entity id.
+            return { id: result.attachmentId };
+          },
+          update: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
+          remove: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
+        };
     }
   }
 
