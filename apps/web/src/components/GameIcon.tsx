@@ -45,18 +45,32 @@ export function GameIcon({
   reserveSpace?: boolean;
 }) {
   const [icon, setIcon] = useState<GameIconEntry | undefined>(() => getIcon(slug));
+  // Whether an async resolveIcon() is genuinely in flight — true from mount for a
+  // non-curated slug, false once it settles (resolved OR undefined). reserveSpace
+  // only holds a box while this is true, so a slug that resolves to `undefined`
+  // (unknown / offline shard fetch) collapses to nothing rather than a permanent
+  // blank square.
+  const [resolving, setResolving] = useState<boolean>(() => !!slug && !getIcon(slug));
 
   useEffect(() => {
     const cached = getIcon(slug);
     if (cached) {
       setIcon(cached);
+      setResolving(false);
       return;
     }
     setIcon(undefined);
-    if (!slug) return;
+    if (!slug) {
+      setResolving(false);
+      return;
+    }
     let live = true;
+    setResolving(true);
     resolveIcon(slug).then((entry) => {
-      if (live) setIcon(entry);
+      if (live) {
+        setIcon(entry);
+        setResolving(false);
+      }
     });
     return () => {
       live = false;
@@ -65,7 +79,7 @@ export function GameIcon({
 
   if (!icon) {
     if (fallback !== undefined) return <>{fallback}</>;
-    if (reserveSpace) {
+    if (reserveSpace && resolving) {
       return <span aria-hidden="true" style={{ display: 'inline-block', width: size, height: size }} />;
     }
     return null;

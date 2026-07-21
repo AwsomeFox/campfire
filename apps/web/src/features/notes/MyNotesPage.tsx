@@ -231,7 +231,7 @@ export default function MyNotesPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card className="text-center space-y-2">
-          <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} /></p>
+          <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
           <p className="font-bold text-white">{t('notes.lostAccessTitle')}</p>
           <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
             {t('notes.backToCampaigns')}

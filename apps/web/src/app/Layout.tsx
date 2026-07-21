@@ -450,7 +450,7 @@ export function Layout() {
       <div className="min-h-screen flex items-center justify-center px-4" style={{ background: 'var(--color-bg)' }}>
         <div style={{ maxWidth: 380, width: '100%' }}>
           <Card className="text-center space-y-2">
-            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} /></p>
+            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
             <p className="font-bold text-white">{t('nav.lostAccessTitle')}</p>
             <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
               {t('nav.backToCampaigns')}
