@@ -63,6 +63,40 @@ describe('ai-dm (e2e)', () => {
     await setExperimental(true);
   });
 
+  it('selecting an operating mode drives the enabled turn-gate (the UI sends only {mode})', async () => {
+    // Regression: the settings UI's mode picker PUTs just {mode} — it never sends {enabled}.
+    // enabled must therefore be derived from mode, or co-DM/Driver would be unreachable from
+    // the UI (every turn refused for !enabled) even after a DM picks an active mode.
+    const toCoDm = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-dm`)
+      .set(dm)
+      .send({ mode: 'co_dm' });
+    expect(toCoDm.status).toBe(200);
+    expect(toCoDm.body.mode).toBe('co_dm');
+    expect(toCoDm.body.enabled).toBe(true); // derived, though {enabled} was never sent
+
+    const toOff = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-dm`)
+      .set(dm)
+      .send({ mode: 'off' });
+    expect(toOff.status).toBe(200);
+    expect(toOff.body.mode).toBe('off');
+    expect(toOff.body.enabled).toBe(false); // 'off' disables the seat again
+
+    // An explicit {enabled} still wins over the mode-derived value (back-compat with the
+    // existing configure path, which sets enabled directly).
+    const explicit = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-dm`)
+      .set(dm)
+      .send({ enabled: false, mode: 'co_dm' });
+    expect(explicit.status).toBe(200);
+    expect(explicit.body.mode).toBe('co_dm');
+    expect(explicit.body.enabled).toBe(false);
+
+    // Reset to the pristine default so later cases start from off/disabled.
+    await request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm).send({ mode: 'off' });
+  });
+
   it('dm configures the seat (200), non-dm is forbidden (403)', async () => {
     const denied = await request(server)
       .put(`/api/v1/campaigns/${campaignId}/ai-dm`)
