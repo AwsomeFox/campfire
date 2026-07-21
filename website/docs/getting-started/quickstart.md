@@ -15,9 +15,11 @@ it will also be your first DM, but those two roles are independent (see
 For a searchable rules compendium — monsters to drop into fights, spells and
 conditions to look up — install a rule pack first:
 
-1. **Admin** (top bar) → **Rule systems**.
-2. Under *Install from Open5e*, tick the sections you want (Conditions and Monsters
-   are the most useful at the table) and click **Install**.
+1. **Admin** → **Rule packs** (`/admin/rules`).
+2. Pick a system from the source picker — **D&D 5e (Open5e)**, **Pathfinder 2e**, or
+   **Open Legend** install live in one click (other systems come from a mirror URL or
+   upload). Tick the sections you want (Conditions and Monsters are the most useful at
+   the table) and click **Install**.
 3. Conditions import in a couple of seconds; the full monster list takes about a
    minute — you can keep building while it runs.
 

@@ -47,7 +47,8 @@ You host it. You own the data. One container, one volume.
 
 -   :material-book-open-variant: __Bring your own rules__
 
-    Install the Open5e SRD — or upload any open-licensed dataset — into a searchable
+    Install D&D 5e (Open5e), Pathfinder 2e, or Open Legend in one click — or bring
+    another system by mirror URL or open-licensed upload — into a searchable
     compendium, look monsters and spells up mid-combat, and drop them straight into
     an encounter.
 
@@ -61,7 +62,7 @@ You host it. You own the data. One container, one volume.
 ---
 
 !!! note "Project status"
-    Campfire is in active development; the current release is **v0.5.0**. The core
+    Campfire is in active development; the current release is **v0.13.1**. The core
     play loop is complete and well-tested; see the
     [Roadmap & status](reference/roadmap.md) for exactly what's done, what's
     half-built, and what's planned next.

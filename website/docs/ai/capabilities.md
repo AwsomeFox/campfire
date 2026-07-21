@@ -1,7 +1,7 @@
 # What an AI can do
 
 Once [connected](connect.md), an AI assistant reaches Campfire through its **MCP
-server** (~90 tools) and REST API. What it's allowed to do is capped by two
+server** (134 tools) and REST API. What it's allowed to do is capped by two
 independent, server-enforced token dimensions — a **read scope** (dm / player /
 viewer) and a **write mode** (direct / propose / read-only) — exactly like a human
 of that role.
@@ -57,26 +57,66 @@ An AI with a DM-scoped token can run a campaign end to end — verified end-to-e
 ## The AI Dungeon Master seat (experimental)
 
 Campfire ships an experimental, admin-gated **AI Dungeon Master seat** (issue #28) —
-a per-campaign "DM seat" with real plumbing around it. What actually ships is the
-seat, not a server that plays the game for you:
+a per-campaign "DM seat" with a full web UI and real plumbing around it. It's still
+**gated twice**: a server admin turns on the server-wide experimental flag
+(`experimentalAiDm`), and the per-campaign seat must be enabled, before any turn runs.
 
-- **It's gated twice.** A server admin must turn on the server-wide experimental
-  flag (`experimentalAiDm`), and the per-campaign seat must be enabled, before any
-  turn is allowed.
-- **Turns are metered.** Each campaign has a token budget; every turn is drawn down
-  against it and **audited** under the caller's name. The `ai_dm_narrate` MCP tool
-  takes a turn (DM role required).
-- **The shipped provider makes no vendor call.** The default `AI_DM_PROVIDER` is a
-  **no-op scaffold** — it contacts no LLM and returns a clearly-labelled placeholder.
-  There is **no API-key flow and no web UI**; the server does not run the game with a
-  key you paste in.
+### An operating mode per campaign
 
-So in a **stock install**, the seat is driven by a **connected MCP agent** (for
-example, Claude on a dm-scoped token): that agent authors the narration and drives
-the other write tools — exactly the loop described above — while the seat handles the
-gating, budget metering, and audit around it. A **self-hoster** who explicitly wants
-server-side generation can bind their own provider to the `AI_DM_PROVIDER` token,
-leaving the metering/gating/audit unchanged.
+The seat has three modes, set in the web UI:
+
+- **Off** — the seat takes no turns.
+- **Co-DM** — the AI **only proposes**. Everything it produces is filed into the
+  **proposal queue** for the DM to approve or reject; it never writes canon directly.
+- **Driver** — the AI **holds the seat and runs the live session**, calling the
+  play tools itself. Even here, **canon writes are still forced through proposals**;
+  the driver is **tool-scoped to live-play tools** (dice, initiative, encounter and
+  turn flow, HP/conditions, XP, map reveal, notes) and is **refused** cross-campaign
+  calls and any admin/destructive tool (deletes, `update_campaign`,
+  `uninstall_rule_pack`, `withdraw_proposal`).
+
+### Configured in the web UI
+
+Under **Settings → AI Dungeon Master** on a campaign, the DM sets:
+
+- **Mode** (off / co-DM / driver).
+- **Provider** — OpenAI, Anthropic, or a `mock` provider — plus a **write-only API
+  key**. The key is **stored encrypted** (AES-256-GCM) and **never read back**: only
+  the last four characters are shown, and it's kept out of reads, logs, and the audit
+  trail.
+- **Model allowlist**, a per-campaign **token budget**, and free-text **steering
+  instructions** (redacted from non-DM readers).
+
+A server admin also gets an **AI console** at **`/admin/ai`**: a **kill switch** (the
+server-wide `experimentalAiDm` flag), a **server-wide token cap**, and a **provider
+health** check that probes the configured providers.
+
+### The shipped provider still makes no vendor call
+
+The **default provider is a no-op scaffold** — it contacts no LLM and returns a
+clearly-labelled placeholder. **Campfire never calls an LLM vendor from the server by
+default.** Real narration comes from one of two places:
+
+- a **connected MCP agent** (for example, Claude on a dm-scoped PAT) that authors the
+  narration and drives the write tools — exactly the loop described above; **or**
+- a **per-campaign provider** you configure with your own key (above), or a self-hoster's
+  own provider bound to the `AI_DM_PROVIDER` seam for server-side generation.
+
+Either way the seat handles the gating, budget metering, and audit around it.
+
+### Keeping a driver in check
+
+If a driver stalls or makes a call the table disputes, players have recovery levers:
+**nudge** it (replay the turn with a hint), **flag** a ruling to force a re-decide,
+open a **table vote** (to override or pause), or **request a human takeover**. The DM
+can pause and resume the seat at any time.
+
+### The scheduled AI scribe
+
+A companion **AI scribe** can **draft session recaps** — after a scheduled session ends,
+or on a per-campaign cron — and files each draft **as a proposal** in the DM's queue
+(never a direct write). It's opt-in and off by default, under the same experimental
+gating and token budget as the seat.
 
 See the [roadmap](../reference/roadmap.md) for its status. (The branching **story
 planner** it complements has shipped — see *Story planning* above.)

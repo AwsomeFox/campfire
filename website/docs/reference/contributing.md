@@ -59,6 +59,7 @@ only holds if it grows with the code.
 ## What's most wanted
 
 See the [roadmap](roadmap.md) for the honest list of what's missing and half-built.
-The account-lifecycle features (invites, self-signup), between-session engagement
-(notifications, share links), and multi-system rule packs are the highest-leverage
-areas.
+With account lifecycle, between-session engagement, and multi-system rule packs now
+shipped, the highest-leverage areas are combat mechanical depth, smoother mobile
+live-combat nav, published-adventure import, and hardening the still-experimental AI
+Dungeon Master seat.
