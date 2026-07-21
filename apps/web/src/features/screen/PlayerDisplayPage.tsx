@@ -25,6 +25,7 @@ import type {
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAnnounce } from '../../components/Announcer';
+import { GameIcon } from '../../components/GameIcon';
 import { useAuth } from '../../app/auth';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
 import {
@@ -196,11 +197,11 @@ export default function PlayerDisplayPage() {
   }, []);
 
   if (!Number.isFinite(cid)) {
-    return <CenteredMessage icon="📺" title="No campaign selected." />;
+    return <CenteredMessage icon="tv" title="No campaign selected." />;
   }
   if (role == null && !loading) {
     return (
-      <CenteredMessage icon="🔒" title="You don't have access to this campaign.">
+      <CenteredMessage icon="padlock" title="You don't have access to this campaign.">
         <Link to="/" className="btn btn-primary" style={{ marginTop: 12 }}>
           Back to your campaigns
         </Link>
@@ -208,11 +209,11 @@ export default function PlayerDisplayPage() {
     );
   }
   if (loading && !summary) {
-    return <CenteredMessage icon="🔥" title="Loading display…" pulse />;
+    return <CenteredMessage icon="campfire" title="Loading display…" pulse />;
   }
   if (error && !summary) {
     return (
-      <CenteredMessage icon="⚠️" title={error}>
+      <CenteredMessage icon="hazard-sign" title={error}>
         <button className="btn btn-primary" style={{ marginTop: 12 }} onClick={() => void load()}>
           Retry
         </button>
@@ -254,7 +255,7 @@ export default function PlayerDisplayPage() {
         <div className="cf-screen-chips">
           {location ? (
             <span className="cf-chip cf-chip-accent">
-              {location.isCurrent ? '📍 ' : ''}
+              {location.isCurrent ? <GameIcon slug="position-marker" size={14} className="inline align-text-bottom mr-1" /> : null}
               {location.name}
               {location.kind ? <span className="cf-chip-sub"> · {location.kind}</span> : null}
             </span>
@@ -264,7 +265,7 @@ export default function PlayerDisplayPage() {
           <span className="cf-chip">Session {summary.campaign.sessionCount}</span>
         </div>
         {liveActivity.mode === 'driver' && liveActivity.lastNarration && (
-          <p className="cf-ai-ticker">🤖 {liveActivity.lastNarration}</p>
+          <p className="cf-ai-ticker"><GameIcon slug="robot-golem" size={14} className="inline align-text-bottom mr-1" />{liveActivity.lastNarration}</p>
         )}
       </header>
 
@@ -389,7 +390,9 @@ export default function PlayerDisplayPage() {
 // ---------------------------------------------------------------------------
 
 function InitiativeRow({ combatant, isCurrent }: { combatant: SafeCombatant; isCurrent: boolean }) {
-  const isMonster = combatant.kind === 'monster';
+  // Non-character combatants (monsters AND DM-controlled NPCs) show a coarse HP band,
+  // not exact numbers — safeCombatant redacts both, so treat both the same here.
+  const isMonster = combatant.kind !== 'character';
   const bandPct = combatant.hpBand ? HP_BAND_PCT[combatant.hpBand] : 0;
   const bandTone = combatant.hpBand ? HP_BAND_TONE[combatant.hpBand] : '';
   const charPct =
@@ -404,7 +407,7 @@ function InitiativeRow({ combatant, isCurrent }: { combatant: SafeCombatant; isC
       <div className="cf-init-main">
         <div className="cf-init-name">
           {combatant.name}
-          <span className={`cf-chip cf-chip-sm ${isMonster ? '' : 'cf-chip-accent'}`}>{combatant.kind}</span>
+          <span className={`cf-chip cf-chip-sm ${isMonster ? '' : 'cf-chip-accent'}`}>{combatant.kind === 'npc' ? 'NPC' : combatant.kind}</span>
         </div>
         {combatant.conditions.length > 0 && (
           <div className="cf-conds">
@@ -464,8 +467,8 @@ function CenteredMessage({
         padding: 24,
       }}
     >
-      <span className={pulse ? 'animate-pulse' : ''} style={{ fontSize: 56 }}>
-        {icon}
+      <span className={pulse ? 'animate-pulse' : ''} style={{ display: 'flex', color: 'var(--color-neutral-400)' }}>
+        <GameIcon slug={icon} size={56} reserveSpace />
       </span>
       <p style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-text)', margin: 0 }}>{title}</p>
       {children}

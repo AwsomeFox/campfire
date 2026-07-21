@@ -21,6 +21,7 @@ import { useAiDmSeat } from '../../lib/query';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { useDialog } from '../../components/useDialog';
+import { GameIcon } from '../../components/GameIcon';
 
 const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
   on_demand: 'Manual run',
@@ -174,7 +175,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
   return (
     <Card className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-lg leading-none">🖋️</span>
+        <span className="flex leading-none"><GameIcon slug="feather" size={18} /></span>
         <h2 className="font-bold text-white text-sm m-0">AI Scribe</h2>
         {latest && (
           <span className={jobBadge(latest).cls} style={{ fontSize: 10 }}>
@@ -364,7 +365,7 @@ function ConfigForm({
 function JobHistory({ campaignId, jobs }: { campaignId: number; jobs: ScribeJob[] | null }) {
   if (jobs === null) return <Skeleton lines={2} />;
   if (jobs.length === 0) {
-    return <EmptyState icon="🖋️" title="No scribe runs yet" hint="Run it on demand, or turn on a sweep in Configure." />;
+    return <EmptyState icon="feather" title="No scribe runs yet" hint="Run it on demand, or turn on a sweep in Configure." />;
   }
   return (
     <ul className="m-0 p-0 space-y-1.5" style={{ listStyle: 'none' }}>

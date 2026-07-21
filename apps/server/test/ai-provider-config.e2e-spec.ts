@@ -233,6 +233,102 @@ describe('ai-provider-config (e2e)', () => {
 });
 
 /**
+ * Regression: the server default's API key must NEVER be shipped to a campaign-controlled
+ * destination (issue #373). A DM who creates a campaign can set a per-campaign override with
+ * a foreign `baseUrl`/`providerType` and NO key of its own; the resolver must not pair the
+ * server key with the campaign's endpoint/type. Key + endpoint + providerType are resolved as
+ * one coherent unit from the scope that owns the key.
+ */
+describe('ai-provider-config key-exfiltration guard (issue #373, e2e)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let campaignId: number;
+
+  const SERVER_BASE = 'https://api.openai.com/v1';
+  const ATTACKER_BASE = 'https://attacker.example';
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Exfil Guard Campaign' });
+    campaignId = campRes.body.id;
+    // Server admin default: openai, own key, own trusted endpoint.
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'gpt-4o-mini', apiKey: SERVER_KEY, baseUrl: SERVER_BASE });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a keyless campaign override with a foreign baseUrl does NOT get the server key sent there', async () => {
+    // DM sets an override pointing at an attacker host, with NO key of its own.
+    const put = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'openai', model: 'gpt-4o', baseUrl: ATTACKER_BASE });
+    expect(put.status).toBe(200);
+    expect(put.body.configured).toBe(false); // no key of its own
+
+    const svc = ctx.app.get(AiProviderConfigService);
+    const eff = await svc.resolveEffectiveConfig(campaignId);
+    // The server key may still be reused (same-vendor model pick) — but ONLY with the
+    // SERVER's endpoint. It must NEVER be paired with the campaign-controlled URL.
+    expect(eff!.apiKey).toBe(SERVER_KEY);
+    expect(eff!.baseUrl).toBe(SERVER_BASE);
+    expect(eff!.baseUrl).not.toBe(ATTACKER_BASE);
+    expect(eff!.model).toBe('gpt-4o'); // model override still honored (not a destination)
+  });
+
+  it('a keyless campaign override CANNOT redirect the server key to a different providerType/host', async () => {
+    // Switch the override to anthropic (different auth header + host) with a foreign baseUrl, still no key.
+    const put = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'anthropic', model: 'gpt-4o', baseUrl: ATTACKER_BASE });
+    expect(put.status).toBe(200);
+
+    const svc = ctx.app.get(AiProviderConfigService);
+    const eff = await svc.resolveEffectiveConfig(campaignId);
+    // providerType + baseUrl are bound to the SERVER (the key's owner), never the campaign row.
+    expect(eff!.apiKey).toBe(SERVER_KEY);
+    expect(eff!.providerType).toBe('openai');
+    expect(eff!.baseUrl).toBe(SERVER_BASE);
+    expect(eff!.baseUrl).not.toBe(ATTACKER_BASE);
+  });
+
+  it('a campaign override that brings its OWN key keeps its own endpoint (legitimate path still works)', async () => {
+    const CAMP_KEY = 'sk-campaign-own-key-7777';
+    const CAMP_BASE = 'https://campaign-own-proxy.example/v1';
+    const put = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'openai', model: 'gpt-4o', apiKey: CAMP_KEY, baseUrl: CAMP_BASE });
+    expect(put.status).toBe(200);
+    expect(put.body.configured).toBe(true);
+
+    const svc = ctx.app.get(AiProviderConfigService);
+    const eff = await svc.resolveEffectiveConfig(campaignId);
+    // Its OWN key with its OWN endpoint is coherent and allowed — the server key is not involved.
+    expect(eff!.apiKey).toBe(CAMP_KEY);
+    expect(eff!.apiKey).not.toBe(SERVER_KEY);
+    expect(eff!.baseUrl).toBe(CAMP_BASE);
+  });
+
+  it('rejects a baseUrl with a non-http(s) scheme or embedded credentials (defense-in-depth)', async () => {
+    for (const bad of ['file:///etc/passwd', 'javascript:alert(1)', 'https://user:pass@attacker.example']) {
+      const res = await request(server)
+        .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+        .set(dm)
+        .send({ providerType: 'openai', model: 'gpt-4o', baseUrl: bad });
+      expect(res.status).toBe(400);
+    }
+  });
+});
+
+/**
  * Server-default endpoints are server-admin gated. All dev-auth users are admin, so
  * the non-admin 403 needs a real cookie-session (no-dev-auth) non-admin user.
  */

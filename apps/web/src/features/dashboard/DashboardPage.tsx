@@ -24,6 +24,7 @@ import { DiceWidget } from './DiceWidget';
 import { HandoutsCard } from './HandoutsCard';
 import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
+import { GameIcon } from '../../components/GameIcon';
 
 // Slow poll so the summary (quests, party HP, notes, NPCs) picks up other
 // players' edits at the table without a manual reload; SSE only covers combat.
@@ -103,7 +104,7 @@ export default function DashboardPage() {
     return (
       <div className="max-w-7xl mx-auto px-4 mt-5">
         <Card className="text-center space-y-2">
-          <p className="text-2xl">🔒</p>
+          <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
           <p className="font-bold text-white">You no longer have access to this campaign</p>
           <Link to="/" className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 4 }}>
             Back to your campaigns

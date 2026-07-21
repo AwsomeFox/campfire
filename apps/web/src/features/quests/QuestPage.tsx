@@ -381,7 +381,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     return (
       <PageShell campaignId={campaignId}>
         <Card>
-          <EmptyState icon="🔒" title={t('quests.noAccess')} />
+          <EmptyState icon="padlock" title={t('quests.noAccess')} />
         </Card>
       </PageShell>
     );
@@ -863,7 +863,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
     return (
       <PageShell campaignId={campaignId}>
         <Card>
-          <EmptyState icon="🔒" title={t('quests.onlyDmCreate')} />
+          <EmptyState icon="padlock" title={t('quests.onlyDmCreate')} />
         </Card>
       </PageShell>
     );
@@ -873,7 +873,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
     return (
       <PageShell campaignId={campaignId}>
         <Card>
-          <EmptyState icon="🔒" title={t('quests.noAccess')} />
+          <EmptyState icon="padlock" title={t('quests.noAccess')} />
         </Card>
       </PageShell>
     );

@@ -4,6 +4,7 @@ import type { ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schem
 import { api, API } from '../../lib/api';
 import { formatDate } from '../../lib/format';
 import { EmptyState } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
 
 /** Strip basic markdown syntax from a recap excerpt for a one-line preview. */
 function firstLinePlain(text: string): string {
@@ -58,7 +59,7 @@ export function SessionLog({ campaignId, sessions }: { campaignId: number; sessi
             color: 'var(--color-text)',
           }}
         >
-          <span style={{ fontSize: 12, color: 'var(--color-accent)', flex: 'none' }}>📅 Next session</span>
+          <span style={{ fontSize: 12, color: 'var(--color-accent)', flex: 'none' }}><GameIcon slug="calendar" size={12} className="inline align-text-bottom mr-1" />Next session</span>
           <span style={{ fontSize: 13 }}>
             {new Date(next.scheduledAt).toLocaleString(undefined, {
               weekday: 'short',
@@ -74,7 +75,7 @@ export function SessionLog({ campaignId, sessions }: { campaignId: number; sessi
         </Link>
       )}
       {latest3.length === 0 ? (
-        <EmptyState icon="📓" title="No sessions logged yet" />
+        <EmptyState icon="book-cover" title="No sessions logged yet" />
       ) : (
         latest3.map((s) => (
           <Link

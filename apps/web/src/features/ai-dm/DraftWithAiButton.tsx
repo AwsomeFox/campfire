@@ -22,6 +22,7 @@ import { useAiDmSeat } from '../../lib/query';
 import { Btn, TextArea } from '../../components/ui';
 import { isKnownAiGate } from './aiGate';
 import { AiGateExplainer } from './AiSetupChecklist';
+import { GameIcon } from '../../components/GameIcon';
 
 /** Targets that support drafting N items at once (mirrors CoDmService's MULTI_TARGETS). */
 const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
@@ -70,7 +71,7 @@ export function DraftWithAiButton({
   return (
     <>
       <Btn ghost className={className} onClick={() => setOpen(true)}>
-        ✨ {label}
+        <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{label}
       </Btn>
       {open && <DraftWithAiModal campaignId={campaignId} target={target} onClose={() => setOpen(false)} />}
     </>
@@ -139,7 +140,7 @@ function DraftWithAiModal({
       >
         <div className="flex items-start justify-between gap-2">
           <div>
-            <h2 className="text-base font-extrabold text-white m-0">✨ Draft a {noun} with AI</h2>
+            <h2 className="flex items-center gap-2 text-base font-extrabold text-white m-0"><GameIcon slug="sparkles" size={16} /> Draft a {noun} with AI</h2>
             <p className="text-muted text-xs m-0 mt-1">
               Describe what you want — the AI DM drafts it and files {multi ? 'pending proposals' : 'a pending proposal'} for
               your review. Nothing touches canon until you approve.

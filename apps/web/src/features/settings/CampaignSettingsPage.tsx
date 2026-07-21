@@ -17,6 +17,7 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
 import AiDmCard from './AiDmCard';
+import { GameIcon } from '../../components/GameIcon';
 
 const DANGER_LEVELS: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
 
@@ -74,7 +75,7 @@ export default function CampaignSettingsPage() {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
         <Card className="text-center space-y-1">
-          <p className="text-2xl">🔒</p>
+          <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
           <p style={{ fontSize: 13, color: 'var(--color-neutral-300)', fontWeight: 600 }}>DM only</p>
           <p className="text-muted" style={{ fontSize: 12 }}>Only this campaign's DM can change its settings.</p>
         </Card>

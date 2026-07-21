@@ -4,12 +4,14 @@
  * Approve/Reject (or a decided-status tag once resolved).
  * DM-only guardrail queue for AI/collab writes: nothing touches canon until approved.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { Proposal } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
+import { ENTITY_ICON } from '../../lib/uiIcons';
 
 type EntityType = Proposal['entityType'];
 
@@ -56,20 +58,29 @@ function isAiProposal(p: Proposal): boolean {
 }
 
 const entityIcon: Record<EntityType, string> = {
-  quest: '📜',
-  npc: '🤝',
-  faction: '🏴',
-  location: '🗺',
-  character: '🛡',
-  session: '📓',
-  encounter: '⚔️',
-  campaign: '🔥',
+  quest: ENTITY_ICON.quest,
+  npc: ENTITY_ICON.npc,
+  faction: ENTITY_ICON.faction,
+  location: ENTITY_ICON.location,
+  character: ENTITY_ICON.character,
+  session: ENTITY_ICON.session,
+  encounter: ENTITY_ICON.encounter,
+  campaign: ENTITY_ICON.campaign,
 };
 
-/** `entityIcon` lookup with a fallback for entity types outside the shared enum
+/** `entityIcon` slug lookup with a fallback for entity types outside the shared enum
  *  (e.g. a co-DM 'map' draft, #313/#306) — see the `targetHref` comment above. */
 function iconFor(entityType: EntityType): string {
-  return entityIcon[entityType] ?? '🗺️';
+  return entityIcon[entityType] ?? ENTITY_ICON.location;
+}
+
+/** Entity glyph + title, shared by the pending/history rows. */
+function EntityTitle({ slug, children }: { slug: string; children: ReactNode }) {
+  return (
+    <>
+      <GameIcon slug={slug} size={15} className="inline align-text-bottom mr-1.5 text-[var(--color-accent)]" /> {children}
+    </>
+  );
 }
 
 export default function ProposalsPage() {
@@ -196,7 +207,7 @@ export default function ProposalsPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🔒" title="You don't have access to this campaign" />
+          <EmptyState icon="padlock" title="You don't have access to this campaign" />
         </Card>
       </div>
     );
@@ -229,7 +240,7 @@ export default function ProposalsPage() {
       {error && <ErrorNote message={error} onRetry={load} />}
 
       {(pending ?? []).length === 0 ? (
-        <EmptyState icon="🔮" title="No pending proposals" hint="Approved & rejected proposals show up below." />
+        <EmptyState icon="crystal-ball" title="No pending proposals" hint="Approved & rejected proposals show up below." />
       ) : (
         <div className="space-y-3">
           {aiPendingCount > 0 && (
@@ -247,7 +258,7 @@ export default function ProposalsPage() {
                   background: aiOnly ? 'var(--color-accent-300)' : 'transparent',
                 }}
               />
-              🤖 AI drafts only ({aiPendingCount})
+              <GameIcon slug="robot-golem" size={13} className="inline align-text-bottom mr-1" /> AI drafts only ({aiPendingCount})
             </button>
           )}
           <BatchBar
@@ -262,7 +273,7 @@ export default function ProposalsPage() {
             onReject={() => resolveSelected('reject')}
           />
           {visiblePending.length === 0 ? (
-            <EmptyState icon="🤖" title="No AI drafts pending" hint="Turn off the filter to see the rest of the queue." />
+            <EmptyState icon="robot-golem" title="No AI drafts pending" hint="Turn off the filter to see the rest of the queue." />
           ) : (
             visiblePending.map((p) => (
               <ProposalCard
@@ -433,10 +444,10 @@ function ProposalCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="card-title text-[15px] m-0">
-              {iconFor(proposal.entityType)} {proposalTitle(proposal)}
+              <EntityTitle slug={iconFor(proposal.entityType)}>{proposalTitle(proposal)}</EntityTitle>
             </p>
             {isDelete && <Chip variant="proposal">delete</Chip>}
-            {isAi && <Chip variant="ai">🤖 drafted by AI</Chip>}
+            {isAi && <Chip variant="ai"><span className="inline-flex items-center gap-1"><GameIcon slug="robot-golem" size={12} /> drafted by AI</span></Chip>}
             <Chip variant="proposal">{proposal.proposer}</Chip>
           </div>
           <p className="text-muted text-xs m-0 mt-0.5">
@@ -638,7 +649,7 @@ function MyProposalsView({ campaignId }: { campaignId: number }) {
         </Card>
       ) : proposals.length === 0 ? (
         <EmptyState
-          icon="🔮"
+          icon="crystal-ball"
           title="You haven't proposed anything yet"
           hint="Use “Suggest to the DM” on a quest, NPC, or location to send a change here for approval."
         />
@@ -690,7 +701,7 @@ function MyProposalCard({
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2 flex-wrap">
         <p className="card-title text-[15px] m-0">
-          {iconFor(proposal.entityType)} {proposalTitle(proposal)}
+          <EntityTitle slug={iconFor(proposal.entityType)}>{proposalTitle(proposal)}</EntityTitle>
         </p>
         <Chip variant="proposal">pending</Chip>
       </div>
@@ -727,8 +738,8 @@ function HistoryRow({ proposal }: { proposal: Proposal }) {
   return (
     <div className="cf-card p-3.5 flex items-center justify-between gap-2 opacity-70">
       <p className="text-sm text-slate-400 m-0">
-        {iconFor(proposal.entityType)} {proposalTitle(proposal)}{' '}
-        {isAiProposal(proposal) && <Chip variant="ai" className="mx-1">🤖 AI</Chip>}
+        <EntityTitle slug={iconFor(proposal.entityType)}>{proposalTitle(proposal)}</EntityTitle>{' '}
+        {isAiProposal(proposal) && <Chip variant="ai" className="mx-1"><span className="inline-flex items-center gap-1"><GameIcon slug="robot-golem" size={12} /> AI</span></Chip>}
         <span className="text-slate-600">· {proposal.proposer}</span>
       </p>
       <span className={`tag ${approved ? 'tag-accent' : 'tag-neutral'}`}>{label}</span>

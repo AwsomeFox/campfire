@@ -11,13 +11,14 @@
  */
 import { Link } from 'react-router-dom';
 import { Card } from './ui';
+import { GameIcon } from './GameIcon';
 
 export function NotFoundState({
   title,
   hint = 'It may have been deleted, or it never existed.',
   backTo,
   backLabel,
-  icon = '🗺️',
+  icon = 'treasure-map',
 }: {
   title: string;
   hint?: string;
@@ -27,7 +28,7 @@ export function NotFoundState({
 }) {
   return (
     <Card className="text-center space-y-2">
-      <p className="text-2xl">{icon}</p>
+      <p className="flex justify-center text-slate-400"><GameIcon slug={icon} size={32} reserveSpace /></p>
       <p className="font-bold text-white">{title}</p>
       <p className="text-sm text-slate-400">{hint}</p>
       <Link to={backTo} className="btn btn-primary" style={{ display: 'inline-flex', marginTop: 8 }}>

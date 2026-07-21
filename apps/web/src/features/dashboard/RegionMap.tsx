@@ -30,7 +30,7 @@ const STATUS_LABEL: Record<Location['status'], string> = {
 // Status glyphs pair with color so pins read color+text, not color-only (matches the
 // suffix already used in the no-map SVG view below).
 const STATUS_GLYPH: Record<Location['status'], string> = {
-  current: '📍',
+  current: '●',
   explored: '✓',
   unexplored: '?',
 };

@@ -17,6 +17,8 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { GameIcon } from '../../components/GameIcon';
+import { ENTITY_ICON } from '../../lib/uiIcons';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 type ViewValue = 'open' | 'history';
@@ -34,23 +36,23 @@ const entityRoute: Record<EntityTypeValue, string | null> = {
 };
 
 const entityIcon: Record<EntityTypeValue, string> = {
-  quest: '📜',
-  npc: '🤝',
-  faction: '🏴',
-  location: '🗺',
-  character: '🛡',
-  session: '📓',
-  encounter: '⚔️',
-  campaign: '🔥',
+  quest: ENTITY_ICON.quest,
+  npc: ENTITY_ICON.npc,
+  faction: ENTITY_ICON.faction,
+  location: ENTITY_ICON.location,
+  character: ENTITY_ICON.character,
+  session: ENTITY_ICON.session,
+  encounter: ENTITY_ICON.encounter,
+  campaign: ENTITY_ICON.campaign,
 };
 
 /** Entity types the resolve form offers as link targets (campaign excluded — nothing "becomes" the campaign). */
 const LINKABLE: { value: EntityTypeValue; label: string; listPath: string }[] = [
-  { value: 'quest', label: '📜 Quest', listPath: 'quests' },
-  { value: 'npc', label: '🤝 NPC', listPath: 'npcs' },
-  { value: 'location', label: '🗺 Location', listPath: 'locations' },
-  { value: 'session', label: '📓 Session', listPath: 'sessions' },
-  { value: 'character', label: '🛡 Character', listPath: 'characters' },
+  { value: 'quest', label: 'Quest', listPath: 'quests' },
+  { value: 'npc', label: 'NPC', listPath: 'npcs' },
+  { value: 'location', label: 'Location', listPath: 'locations' },
+  { value: 'session', label: 'Session', listPath: 'sessions' },
+  { value: 'character', label: 'Character', listPath: 'characters' },
 ];
 
 interface EntityOption {
@@ -133,7 +135,7 @@ export default function InboxPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🎩" title={t('notes.dmOnlyTitle')} hint={t('notes.dmOnlyHint')} />
+          <EmptyState icon="top-hat" title={t('notes.dmOnlyTitle')} hint={t('notes.dmOnlyHint')} />
         </Card>
       </div>
     );
@@ -143,7 +145,7 @@ export default function InboxPage() {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="🔒" title={t('notes.noAccess')} />
+          <EmptyState icon="padlock" title={t('notes.noAccess')} />
         </Card>
       </div>
     );
@@ -179,7 +181,7 @@ export default function InboxPage() {
         </Card>
       ) : view === 'open' ? (
         items.length === 0 ? (
-          <EmptyState icon="✉️" title={t('notes.inboxClearTitle')} hint={t('notes.inboxClearHint')} />
+          <EmptyState icon="envelope" title={t('notes.inboxClearTitle')} hint={t('notes.inboxClearHint')} />
         ) : (
           <div className="space-y-3">
             {items.map((item) => (
@@ -196,7 +198,7 @@ export default function InboxPage() {
           </div>
         )
       ) : resolvedItems.length === 0 ? (
-        <EmptyState icon="🗂" title={t('notes.noHistoryTitle')} hint={t('notes.noHistoryHint')} />
+        <EmptyState icon="archive-register" title={t('notes.noHistoryTitle')} hint={t('notes.noHistoryHint')} />
       ) : (
         <div className="space-y-3">
           {resolvedItems.map((item) => (
@@ -239,8 +241,8 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
       <div className="cf-inset p-3 space-y-1.5">
         <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest m-0">{t('notes.resolvedInto')}</p>
         {item.entityType && href && (
-          <Link to={href} className="inline-flex text-xs text-purple-400 hover:underline">
-            {entityIcon[item.entityType]} {capitalize(item.entityType)}
+          <Link to={href} className="inline-flex items-center gap-1.5 text-xs text-purple-400 hover:underline">
+            <GameIcon slug={entityIcon[item.entityType]} size={13} /> {capitalize(item.entityType)}
             {item.entityId !== null && item.entityType !== 'campaign' ? ` #${item.entityId}` : ''} →
           </Link>
         )}

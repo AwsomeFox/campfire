@@ -39,7 +39,7 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
       )}
 
       {users.length === 0 ? (
-        <EmptyState icon="👤" title="No users yet" hint="Create the first account above." />
+        <EmptyState icon="person" title="No users yet" hint="Create the first account above." />
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">

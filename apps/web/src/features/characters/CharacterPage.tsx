@@ -30,6 +30,7 @@ import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials } from './avatar';
+import { GameIcon } from '../../components/GameIcon';
 import {
   ABILITY_KEYS,
   type Ability,
@@ -650,7 +651,7 @@ type SheetCardProps = {
   onError: (msg: string | null) => void;
 };
 
-/** A small "🎲 …" button that posts a roll to the shared dice log. */
+/** A small dice-roll button that posts a roll to the shared dice log. */
 function RollChip({
   label,
   title,
@@ -664,7 +665,7 @@ function RollChip({
 }) {
   return (
     <Btn ghost type="button" className="!min-h-0 !py-1 text-xs" style={{ minHeight: 32 }} onClick={onClick} disabled={disabled} title={title}>
-      🎲 {label}
+      <GameIcon slug="rolling-dices" size={13} className="inline align-text-bottom mr-1" />{label}
     </Btn>
   );
 }
