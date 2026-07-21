@@ -112,6 +112,10 @@ export default function CompendiumPage() {
   }, [debouncedQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack, campaign]);
 
   const chips = useMemo(() => TYPE_CHIPS, []);
+  // Empty results have two very different causes: a search that found nothing vs.
+  // a type filter (e.g. "Monsters") the installed pack has no entries for. The
+  // copy should say which (issue #242).
+  const activeTypeLabel = TYPE_CHIPS.find((c) => c.key === type)?.label ?? '';
 
   if (!Number.isFinite(id)) {
     return (
@@ -195,9 +199,26 @@ export default function CompendiumPage() {
               </Card>
             ) : results && results.length === 0 ? (
               <div className="card items-center text-center" style={{ padding: 24 }}>
-                <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                  Nothing matches. Try another word.
-                </p>
+                {debouncedQuery.trim() ? (
+                  <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                    Nothing matches “{debouncedQuery.trim()}”
+                    {type !== 'all' ? ` in ${activeTypeLabel}` : ''}. Try another word
+                    {type !== 'all' ? ', or switch to All' : ''}.
+                  </p>
+                ) : type !== 'all' ? (
+                  <>
+                    <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
+                      No {activeTypeLabel.toLowerCase()} in this rule system.
+                    </p>
+                    <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
+                      This campaign’s installed pack has no {activeTypeLabel.toLowerCase()} — try another type, or switch to All.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                    This rule system has no entries yet.
+                  </p>
+                )}
               </div>
             ) : (
               (results ?? []).map((entry) => (

@@ -54,10 +54,46 @@ function NewCampaignTile({ onClick }: { onClick: () => void }) {
 }
 
 /**
+ * POST a Campfire .zip export as multipart to /campaigns/import/archive. The JSON `api`
+ * client can't send FormData (see ImageUpload.tsx), so this posts via fetch directly,
+ * carrying the same dev-role headers and cookie credentials.
+ */
+async function importArchive(file: File): Promise<Campaign> {
+  const form = new FormData();
+  form.append('file', file);
+
+  const headers: Record<string, string> = {};
+  const devRole = localStorage.getItem('cf.devRole');
+  const devUser = localStorage.getItem('cf.devUser');
+  if (devRole) headers['x-dev-role'] = devRole;
+  if (devUser) headers['x-dev-user'] = devUser;
+
+  const res = await fetch(`${API}/campaigns/import/archive`, {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body: form,
+  });
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const body = await res.json();
+      message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
+    } catch {
+      /* non-json error body */
+    }
+    throw new ApiError(res.status, message);
+  }
+  return (await res.json()) as Campaign;
+}
+
+/**
  * Import-campaign tile (issue #120) — the round-trip companion to export. Reads a
- * Campfire JSON export from the user's disk and POSTs it to /campaigns/import,
- * which recreates the campaign fresh (new ids, references remapped). On success we
- * reuse the same post-create flow (refresh + navigate) as the wizard.
+ * Campfire export from the user's disk and recreates the campaign fresh (new ids,
+ * references remapped). Accepts BOTH export flavours (issue #236): a `.zip` (mdzip)
+ * carries the maps/portraits and goes to /campaigns/import/archive; a `.json` is
+ * text-only (no attachments) and goes to /campaigns/import. On success we reuse the
+ * same post-create flow (refresh + navigate) as the wizard.
  */
 function ImportCampaignTile({
   onImported,
@@ -76,14 +112,24 @@ function ImportCampaignTile({
     if (!file) return;
     setImporting(true);
     try {
-      const text = await file.text();
-      let doc: unknown;
-      try {
-        doc = JSON.parse(text);
-      } catch {
-        throw new Error('That file is not valid JSON — pick a Campfire JSON export.');
+      const isZip =
+        file.name.toLowerCase().endsWith('.zip') ||
+        file.type === 'application/zip' ||
+        file.type === 'application/x-zip-compressed';
+      let created: Campaign;
+      if (isZip) {
+        // ZIP export: keeps maps & portraits — send the file straight to the archive endpoint.
+        created = await importArchive(file);
+      } else {
+        const text = await file.text();
+        let doc: unknown;
+        try {
+          doc = JSON.parse(text);
+        } catch {
+          throw new Error('That file is not a Campfire export — pick a .zip (with maps/portraits) or a .json export.');
+        }
+        created = await api.post<Campaign>(`${API}/campaigns/import`, doc);
       }
-      const created = await api.post<Campaign>(`${API}/campaigns/import`, doc);
       await onImported(created);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Import failed.');
@@ -94,7 +140,13 @@ function ImportCampaignTile({
 
   return (
     <>
-      <input ref={inputRef} type="file" accept="application/json,.json" onChange={onFile} style={{ display: 'none' }} />
+      <input
+        ref={inputRef}
+        type="file"
+        accept="application/zip,application/json,.zip,.json"
+        onChange={onFile}
+        style={{ display: 'none' }}
+      />
       <button
         onClick={() => inputRef.current?.click()}
         disabled={importing}
@@ -114,7 +166,7 @@ function ImportCampaignTile({
         >
           ⬆
         </span>
-        {importing ? 'Importing…' : 'Import from export'}
+        {importing ? 'Importing…' : 'Import from export (.zip / .json)'}
       </button>
     </>
   );

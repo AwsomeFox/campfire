@@ -1,6 +1,25 @@
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
+// Minimal valid 1x1 PNG — same fixture as attachments/export specs.
+const TINY_PNG = Buffer.from(
+  '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+    '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+  'hex',
+);
+
+/** GET a route as a raw Buffer (supertest's default parser mangles binary). */
+async function getBuffer(agent: ReturnType<typeof request.agent>, url: string) {
+  return agent
+    .get(url)
+    .buffer(true)
+    .parse((response, callback) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => chunks.push(chunk));
+      response.on('end', () => callback(null, Buffer.concat(chunks)));
+    });
+}
+
 /**
  * Issue #120 — make the one-way export round-trippable.
  * POST /campaigns/import accepts a Campfire JSON export document and recreates the
@@ -190,5 +209,146 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(res.body.name).toBe('Bare Bones');
     const locs = await dmAgent.get(`/api/v1/campaigns/${res.body.id}/locations`);
     expect(locs.body.length).toBe(0);
+  });
+});
+
+/**
+ * Issue #236 — the ZIP export is round-trippable: importing the mdzip recreates the
+ * attachment ROWS and their BYTES on disk, and remaps every reference (campaign
+ * mapAttachmentId, character portraitUrl, encounter battle-map mapAttachmentId) to
+ * the fresh attachment ids instead of dropping them. Seed a campaign with a map, a
+ * portrait and a battle-map encounter, export it as a zip, import that zip, and
+ * assert the maps/portraits survive.
+ */
+describe('campaign ZIP import — attachments round-trip (e2e)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let mapAttachmentId: number;
+  let portraitAttachmentId: number;
+  let battleMapAttachmentId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'zip-dm', password: 'dm-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Zip Source', description: 'Has maps and portraits.' });
+    campaignId = campRes.body.id;
+
+    // Campaign map.
+    const mapUpload = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'map')
+      .attach('file', TINY_PNG, { filename: 'overworld.png', contentType: 'image/png' });
+    mapAttachmentId = mapUpload.body.id;
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ mapAttachmentId });
+
+    // Character portrait.
+    const portraitUpload = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'portrait')
+      .attach('file', TINY_PNG, { filename: 'hero.png', contentType: 'image/png' });
+    portraitAttachmentId = portraitUpload.body.id;
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'Portrait Hero', portraitUrl: `/api/v1/attachments/${portraitAttachmentId}/file` });
+
+    // Encounter with a battle map (issue #39).
+    const battleUpload = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'map')
+      .attach('file', TINY_PNG, { filename: 'dungeon.png', contentType: 'image/png' });
+    battleMapAttachmentId = battleUpload.body.id;
+    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Dungeon Fight' });
+    encounterId = encRes.body.id;
+    await dmAgent.patch(`/api/v1/encounters/${encounterId}`).send({ mapAttachmentId: battleMapAttachmentId, gridSize: 5 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('imports the zip export, recreating attachment rows + bytes and remapping every map/portrait ref', async () => {
+    // Export as a zip (bytes + campaign.json manifest).
+    const zipRes = await getBuffer(dmAgent, `/api/v1/campaigns/${campaignId}/export?format=mdzip`);
+    expect(zipRes.status).toBe(200);
+    const zipBuffer = zipRes.body as Buffer;
+
+    // Import the zip on a fresh campaign.
+    const importRes = await dmAgent
+      .post('/api/v1/campaigns/import/archive')
+      .attach('file', zipBuffer, { filename: 'export.zip', contentType: 'application/zip' });
+    expect(importRes.status).toBe(201);
+    const imported = importRes.body;
+    expect(imported.id).not.toBe(campaignId);
+    expect(imported.name).toBe('Zip Source');
+
+    // Campaign map: remapped to a NEW attachment id (not null, not the source id).
+    expect(imported.mapAttachmentId).not.toBeNull();
+    expect(imported.mapAttachmentId).not.toBe(mapAttachmentId);
+
+    // Attachment rows recreated under the new campaign (map + portrait + battle map).
+    const atts = await dmAgent.get(`/api/v1/campaigns/${imported.id}/attachments`);
+    expect(atts.status).toBe(200);
+    expect(atts.body.length).toBe(3);
+    // Every new id differs from every source id — no collision with the source campaign.
+    const sourceIds = new Set([mapAttachmentId, portraitAttachmentId, battleMapAttachmentId]);
+    for (const a of atts.body) expect(sourceIds.has(a.id)).toBe(false);
+
+    // The bytes are on disk and fetchable — and identical to what we uploaded.
+    const mapFile = await getBuffer(dmAgent, `/api/v1/attachments/${imported.mapAttachmentId}/file`);
+    expect(mapFile.status).toBe(200);
+    expect(Buffer.compare(mapFile.body as Buffer, TINY_PNG)).toBe(0);
+
+    // Character portrait: portraitUrl remapped to the new portrait attachment (not null).
+    const chars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
+    const hero = chars.body.find((c: { name: string }) => c.name === 'Portrait Hero');
+    expect(hero).toBeDefined();
+    expect(hero.portraitUrl).not.toBeNull();
+    expect(hero.portraitUrl).not.toContain(`/attachments/${portraitAttachmentId}/file`);
+    const portraitMatch = hero.portraitUrl.match(/\/attachments\/(\d+)\/file$/);
+    expect(portraitMatch).not.toBeNull();
+    const newPortraitId = Number(portraitMatch[1]);
+    const portraitFile = await getBuffer(dmAgent, `/api/v1/attachments/${newPortraitId}/file`);
+    expect(portraitFile.status).toBe(200);
+    expect(Buffer.compare(portraitFile.body as Buffer, TINY_PNG)).toBe(0);
+
+    // Encounter battle map: mapAttachmentId remapped (not null), grid config carried over.
+    const encs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);
+    expect(encs.body.length).toBe(1);
+    const encDetail = await dmAgent.get(`/api/v1/encounters/${encs.body[0].id}`);
+    expect(encDetail.body.mapAttachmentId).not.toBeNull();
+    expect(encDetail.body.mapAttachmentId).not.toBe(battleMapAttachmentId);
+    expect(encDetail.body.gridSize).toBe(5);
+    const battleFile = await getBuffer(dmAgent, `/api/v1/attachments/${encDetail.body.mapAttachmentId}/file`);
+    expect(battleFile.status).toBe(200);
+
+    // The source campaign is untouched — its map still points at its own attachment.
+    const sourceCamp = await dmAgent.get(`/api/v1/campaigns/${campaignId}`);
+    expect(sourceCamp.body.mapAttachmentId).toBe(mapAttachmentId);
+  });
+
+  it('rejects a non-zip upload with 400', async () => {
+    const res = await dmAgent
+      .post('/api/v1/campaigns/import/archive')
+      .attach('file', Buffer.from('not a zip'), { filename: 'nope.zip', contentType: 'application/zip' });
+    expect(res.status).toBe(400);
+  });
+
+  it('400 when the archive lacks campaign.json (a plain zip, not a Campfire export)', async () => {
+    // Build a minimal valid zip with no campaign.json.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const JSZip = require('jszip');
+    const zip = new JSZip();
+    zip.file('readme.txt', 'hello');
+    const buf: Buffer = await zip.generateAsync({ type: 'nodebuffer' });
+    const res = await dmAgent
+      .post('/api/v1/campaigns/import/archive')
+      .attach('file', buf, { filename: 'plain.zip', contentType: 'application/zip' });
+    expect(res.status).toBe(400);
   });
 });

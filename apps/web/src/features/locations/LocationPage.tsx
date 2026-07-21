@@ -7,7 +7,7 @@
  * Everyone: header, mini pin map, markdown body, here & connected, notes.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -57,6 +57,10 @@ export default function LocationPage() {
   const [notFound, setNotFound] = useState(false);
 
   const [editing, setEditing] = useState(false);
+  // Propose mode (issue #240): a non-DM member editing this location submits the change
+  // to the DM's proposal queue (PATCH ?proposed=true) instead of writing canon directly.
+  const [proposeMode, setProposeMode] = useState(false);
+  const [proposeDone, setProposeDone] = useState(false);
   const [form, setForm] = useState({ name: '', kind: '', body: '', dmSecret: '', parentId: '' });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -149,7 +153,7 @@ export default function LocationPage() {
     return allLocations.filter((l) => !descendants.has(l.id));
   }, [allLocations, id]);
 
-  function startEdit() {
+  function fillForm() {
     if (!location) return;
     setForm({
       name: location.name,
@@ -159,7 +163,26 @@ export default function LocationPage() {
       parentId: location.parentId != null ? String(location.parentId) : '',
     });
     setSaveError(null);
+  }
+
+  function startEdit() {
+    fillForm();
+    setProposeMode(false);
     setEditing(true);
+  }
+
+  // Non-DM members suggest an edit (issue #240): same form, minus the DM secret,
+  // and Save routes the change through the proposal queue.
+  function startPropose() {
+    fillForm();
+    setProposeDone(false);
+    setProposeMode(true);
+    setEditing(true);
+  }
+
+  function cancelEdit() {
+    setEditing(false);
+    setProposeMode(false);
   }
 
   async function save() {
@@ -167,16 +190,29 @@ export default function LocationPage() {
     setSaving(true);
     setSaveError(null);
     try {
-      const updated = await api.patch<Location>(`${API}/locations/${id}`, {
-        name: form.name.trim(),
-        kind: form.kind.trim(),
-        body: form.body,
-        dmSecret: form.dmSecret,
-        parentId: form.parentId ? Number(form.parentId) : null,
-      });
-      setLocation(updated);
-      setAllLocations((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
-      setEditing(false);
+      if (proposeMode) {
+        // Route through the proposal queue — omit the DM-only dmSecret field.
+        await api.patch(`${API}/locations/${id}?proposed=true`, {
+          name: form.name.trim(),
+          kind: form.kind.trim(),
+          body: form.body,
+          parentId: form.parentId ? Number(form.parentId) : null,
+        });
+        setEditing(false);
+        setProposeMode(false);
+        setProposeDone(true);
+      } else {
+        const updated = await api.patch<Location>(`${API}/locations/${id}`, {
+          name: form.name.trim(),
+          kind: form.kind.trim(),
+          body: form.body,
+          dmSecret: form.dmSecret,
+          parentId: form.parentId ? Number(form.parentId) : null,
+        });
+        setLocation(updated);
+        setAllLocations((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
+        setEditing(false);
+      }
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : "Couldn't save changes.");
     } finally {
@@ -290,6 +326,15 @@ export default function LocationPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      {proposeDone && !editing && (
+        <div className="cf-card p-3 flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
+          <span className="text-slate-200">✅ Suggestion sent to the DM — it's waiting for approval.</span>
+          <Link to={`/c/${cid}/proposals`} className="text-purple-400 hover:underline shrink-0">
+            View my proposals
+          </Link>
+        </div>
+      )}
+
       {!editing && (
         <>
           {ancestors.length > 0 && (
@@ -327,6 +372,18 @@ export default function LocationPage() {
               >
                 {NEXT_STATUS_LABEL[location.status]}
               </Btn>
+            )}
+            {!isDm && role !== null && (
+              <div className="flex gap-2 shrink-0 ml-auto">
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1.5 text-xs"
+                  onClick={startPropose}
+                  title="Suggest a change to the DM for approval"
+                >
+                  ✎ Suggest an edit
+                </Btn>
+              </div>
             )}
             {isDm && (
               <div className="flex gap-2 shrink-0 relative ml-auto">
@@ -521,6 +578,11 @@ export default function LocationPage() {
 
       {editing && (
         <Card className="space-y-3">
+          {proposeMode && (
+            <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
+              💡 You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
+            </p>
+          )}
           {saveError && <ErrorNote message={saveError} />}
           <div className="grid sm:grid-cols-2 gap-3">
             <div className="space-y-1">
@@ -552,20 +614,26 @@ export default function LocationPage() {
             <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
             <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
-            <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
-          </div>
+          {!proposeMode && (
+            <div className="space-y-1">
+              <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
+              <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2">
-            <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
-              {deleting ? 'Deleting…' : 'Delete location'}
-            </Btn>
+            {!proposeMode ? (
+              <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
+                {deleting ? 'Deleting…' : 'Delete location'}
+              </Btn>
+            ) : (
+              <span />
+            )}
             <div className="flex gap-2">
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={cancelEdit}>
                 Cancel
               </Btn>
               <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
-                {saving ? 'Saving…' : 'Save'}
+                {proposeMode ? (saving ? 'Suggesting…' : 'Suggest to the DM') : saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>
           </div>

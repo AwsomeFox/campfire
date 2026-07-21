@@ -24,7 +24,7 @@ export class CampaignCommentsController {
   @ApiOperation({
     summary: 'List comments on an entity',
     description:
-      'Requires campaign membership. Returns the discussion thread for one entity (entityType + entityId), oldest-first. Comments are visible to all campaign members.',
+      'Requires campaign membership AND visibility of the anchored entity: a thread on a hidden quest/npc/faction or an unexplored location 404s for a non-DM, exactly as the entity itself does (issue #230). Returns the discussion thread for one entity (entityType + entityId), oldest-first; comments are then visible to every member who can see the entity.',
   })
   @ApiQuery({ name: 'entityType', required: true, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign'], description: 'The entity type the thread is anchored to.' })
   @ApiQuery({ name: 'entityId', required: true, type: Number, description: 'The entity id the thread is anchored to.' })
@@ -39,17 +39,17 @@ export class CampaignCommentsController {
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
   ) {
-    await this.access.requireMember(user, campaignId);
+    const role = await this.access.requireMember(user, campaignId);
     const type = EntityType.parse(entityType) as EntityTypeValue;
     const page = parsePageParams({ limit, offset }, COMMENTS_LIST_MAX_LIMIT);
-    return this.comments.listForEntity(campaignId, type, Number(entityId), page);
+    return this.comments.listForEntity(campaignId, type, Number(entityId), role, page);
   }
 
   @Post()
   @ApiOperation({
     summary: 'Post a comment',
     description:
-      'Requires campaign membership (write). Anchored to an entity (entityType/entityId). Optional parentId for a threaded reply and inCharacter flag for a play-by-post scene.',
+      'Requires campaign membership (write) AND visibility of the anchored entity — posting on a hidden/secret entity 404s for a non-DM (issue #230). Anchored to an entity (entityType/entityId). Optional parentId for a threaded reply and inCharacter flag for a play-by-post scene.',
   })
   @ApiResponse({ status: 201, description: 'Created comment.' })
   async create(
@@ -75,8 +75,8 @@ export class CommentsController {
   @ApiResponse({ status: 200, description: 'Comment.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.comments.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
-    return this.comments.getOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.comments.getOrThrow(id, role);
   }
 
   @Patch(':id')

@@ -57,10 +57,6 @@ const STATUS_TAG_CLASS: Record<string, string> = {
   ended: 'tag tag-outline',
 };
 
-// Condition vocabulary comes from the rule-system adapter (issue #70), not a hardcoded
-// array. Default (5e) yields the same run-session chip list this page has always shown.
-const CONDITION_SUGGESTIONS = [...ruleSystemAdapter().conditions];
-
 // 5e difficulty band badge (issue #58) — party XP thresholds vs adjusted monster XP.
 const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {
   trivial: 'Trivial',
@@ -371,6 +367,12 @@ export default function RunSessionPage() {
   const isDm = role === 'dm';
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
+
+  // Resolve the rule-system adapter FROM THE ACTIVE CAMPAIGN (issue #234) rather than at
+  // module scope with no argument — so a future non-5e adapter's condition vocabulary and
+  // statblock mapping actually take effect. Default (5e) is unchanged.
+  const ruleSystem = campaign?.ruleSystem ?? null;
+  const conditionSuggestions = useMemo(() => [...ruleSystemAdapter(ruleSystem).conditions], [ruleSystem]);
 
   const queryClient = useQueryClient();
 
@@ -854,6 +856,8 @@ export default function RunSessionPage() {
               canRemove={isDm}
               canSetInitiative={isDm && encounter.status !== 'ended'}
               busy={pendingCombatantIds.has(c.id)}
+              conditionSuggestions={conditionSuggestions}
+              ruleSystem={ruleSystem}
               onHpDelta={(delta) => hpDelta.mutate({ combatantId: c.id, delta })}
               onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
               onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
@@ -1801,6 +1805,8 @@ function CombatantRow({
   canRemove,
   canSetInitiative,
   busy,
+  conditionSuggestions,
+  ruleSystem,
   onHpDelta,
   onSetTempHp,
   onSetDeathSaves,
@@ -1820,6 +1826,10 @@ function CombatantRow({
   canRemove: boolean;
   canSetInitiative: boolean;
   busy: boolean;
+  /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
+  conditionSuggestions: readonly string[];
+  /** Active campaign's rule system — selects the statblock adapter (issue #234). */
+  ruleSystem: string | null;
   onHpDelta: (delta: number) => void;
   onSetTempHp: (value: number) => void;
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
@@ -2074,7 +2084,7 @@ function CombatantRow({
           <div style={{ marginTop: 4 }}>
             {addingCondition ? (
               <div className="flex gap-1 flex-wrap">
-                {CONDITION_SUGGESTIONS.filter((s) => !combatant.conditions.includes(s)).map((s) => (
+                {conditionSuggestions.filter((s) => !combatant.conditions.includes(s)).map((s) => (
                   <button
                     key={s}
                     className="btn btn-ghost"
@@ -2111,7 +2121,7 @@ function CombatantRow({
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
         {canViewStatblock && combatant.ruleEntryId != null && (
-          <CombatantStatblock ruleEntryId={combatant.ruleEntryId} />
+          <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} />
         )}
       </div>
       <div style={{ minWidth: 130, flex: 'none' }}>
@@ -2210,7 +2220,7 @@ function CombatantRow({
  * and rendered with the shared StatBlock component (added by #142). Kept collapsed by
  * default so the initiative row stays scannable mid-fight.
  */
-function CombatantStatblock({ ruleEntryId }: { ruleEntryId: number }) {
+function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; ruleSystem: string | null }) {
   const [open, setOpen] = useState(false);
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [loading, setLoading] = useState(false);
@@ -2261,8 +2271,8 @@ function CombatantStatblock({ ruleEntryId }: { ruleEntryId: number }) {
             <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
               Couldn&apos;t load the statblock.
             </p>
-          ) : entry && hasMonsterStatblock(entry.dataJson) ? (
-            <StatBlock data={entry.dataJson} />
+          ) : entry && hasMonsterStatblock(entry.dataJson, ruleSystem) ? (
+            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} />
           ) : (
             <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
               No statblock details for this entry.

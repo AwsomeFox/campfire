@@ -1,10 +1,28 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseIntPipe,
+  Patch,
+  Post,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiTags, ApiOperation, ApiConsumes, ApiResponse } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from './campaigns.service';
 import { CampaignCloneDto, CampaignCreateDto, CampaignImportDto, CampaignUpdateDto } from './campaigns.dto';
+
+// Express.Multer.File augments the Express namespace via @types/multer; import side-effect only.
+type MulterFile = Express.Multer.File;
+/** Generous cap on the uploaded archive (mirrors MAX_IMPORT_ARCHIVE_BYTES in the service). */
+const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
 
 @ApiTags('campaigns')
 @Controller('campaigns')
@@ -30,14 +48,30 @@ export class CampaignsController {
 
   @Post('import')
   @ApiOperation({
-    summary: 'Import a campaign from a Campfire export',
+    summary: 'Import a campaign from a Campfire JSON export',
     description:
-      "Any authenticated user may import; the caller becomes the new campaign's dm. Accepts a Campfire JSON export document (the shape GET /campaigns/:id/export?format=json produces) and recreates the campaign with fresh ids and every intra-campaign reference remapped (location nesting, npc→location, quest parent/giver, combatant→character, note entity links, currentLocationId). Imported PCs come in unowned; attachments (metadata-only in the JSON export) are not recreated (mapAttachmentId/portraitUrl reset); status starts 'active'; an unknown ruleSystem is cleared. Members, audit and proposals are not imported.",
+      "Any authenticated user may import; the caller becomes the new campaign's dm. Accepts a Campfire JSON export document (the shape GET /campaigns/:id/export?format=json produces) and recreates the campaign with fresh ids and every intra-campaign reference remapped (location nesting, npc→location, quest parent/giver, combatant→character, note entity links, currentLocationId). Imported PCs come in unowned; status starts 'active'; an unknown ruleSystem is cleared. Members, audit and proposals are not imported. NOTE: a JSON export carries attachment METADATA only, so a JSON-only import has NO maps or portraits (mapAttachmentId/portraitUrl come in null). To carry maps/portraits across installs, export with format=mdzip and import the zip via POST /campaigns/import/archive.",
   })
   @ApiResponse({ status: 201, description: 'The newly created campaign.' })
   @ApiResponse({ status: 400, description: 'Body is not a valid Campfire export document.' })
   importCampaign(@Body() body: CampaignImportDto, @CurrentUser() user: RequestUser) {
     return this.campaigns.importCampaign(body, user);
+  }
+
+  @Post('import/archive')
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary: 'Import a campaign from a Campfire ZIP export',
+    description:
+      "Any authenticated user may import; the caller becomes the new campaign's dm. Multipart upload (field `file`) of a Campfire mdzip export (GET /campaigns/:id/export?format=mdzip). Recreates the campaign exactly like POST /campaigns/import PLUS the attachments: the zip's embedded map/portrait/image bytes are written to the new campaign's uploads dir with fresh attachment rows, and campaign.mapAttachmentId, character.portraitUrl and encounter.mapAttachmentId are remapped to those new ids (issue #236). Attachment bytes are re-sniffed (png/jpeg/webp only) and size-capped; dangling/invalid entries are skipped.",
+  })
+  @ApiResponse({ status: 201, description: 'The newly created campaign.' })
+  @ApiResponse({ status: 400, description: 'Missing file, or the archive is not a valid Campfire zip export.' })
+  @ApiResponse({ status: 413, description: 'Uploaded archive exceeds the max size.' })
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_IMPORT_ARCHIVE_BYTES } }))
+  importArchive(@UploadedFile() file: MulterFile | undefined, @CurrentUser() user: RequestUser) {
+    if (!file) throw new BadRequestException('Missing file (multipart field "file")');
+    return this.campaigns.importArchive(file.buffer, user);
   }
 
   @Get('trash')

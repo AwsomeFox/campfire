@@ -151,7 +151,6 @@ function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
   return { ...c, tokenX: null, tokenY: null };
 }
 
-/** floor((score - 10) / 2), the standard 5e ability-modifier formula. */
 @Injectable()
 export class EncountersService {
   constructor(

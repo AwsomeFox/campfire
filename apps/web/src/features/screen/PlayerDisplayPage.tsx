@@ -24,6 +24,7 @@ import type {
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { useAnnounce } from '../../components/Announcer';
 import { useAuth } from '../../app/auth';
 import {
   safeCombatants,
@@ -49,6 +50,7 @@ export default function PlayerDisplayPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
+  const announce = useAnnounce();
   const { roleIn } = useAuth();
   const role = roleIn(cid);
 
@@ -100,6 +102,65 @@ export default function PlayerDisplayPage() {
     onEvent: useCallback(() => void load(), [load]),
     onReconnect: useCallback(() => void load(), [load]),
   });
+
+  // The ARIA live region is a single node mounted at the app root (Announcer),
+  // so it survives client-side navigation. The DM's run-session tracker announces
+  // EXACT monster HP ("Ash Cultist: 22 of 22 hit points", issue #93) into it; if
+  // the DM then opens this cast view that stale, secret-leaking text would linger
+  // in the DOM / be read by assistive tech on the shared screen (issue #232).
+  // Wipe it on mount so nothing exact carries over onto this secret-free surface.
+  useEffect(() => {
+    announce('');
+  }, [announce]);
+
+  // Announce combat changes for assistive tech on the cast device — but from the
+  // PLAYER-SAFE projection: characters keep exact HP (shared table info), monsters
+  // are announced as a coarse band only ("Ash Cultist: Bloodied"), mirroring the
+  // #43 API redaction. Never announce a monster's exact 'N of M hit points'.
+  const prevAnnounceRef = useRef<{ hp: Map<number, string>; turnKey: string } | null>(null);
+  useEffect(() => {
+    if (!encounter) {
+      prevAnnounceRef.current = null;
+      return;
+    }
+    const safe = safeCombatants(encounter.combatants);
+    const currentId = encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
+    const turnKey =
+      encounter.status === 'running' ? `${encounter.round}:${currentId}` : encounter.status;
+    // Player-safe HP signature per combatant: band for monsters, exact for characters.
+    const sig = (c: SafeCombatant): string =>
+      c.hpBand != null
+        ? `band:${c.hpBand}`
+        : c.hpCurrent != null && c.hpMax != null
+          ? `hp:${c.hpCurrent}/${c.hpMax}`
+          : '';
+    const hp = new Map(safe.map((c) => [c.id, sig(c)]));
+    const prev = prevAnnounceRef.current;
+
+    if (prev) {
+      if (turnKey !== prev.turnKey) {
+        if (encounter.status === 'running') {
+          const current = safe.find((c) => c.id === currentId);
+          announce(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
+        } else if (encounter.status === 'ended') {
+          announce('Encounter ended');
+        }
+      }
+      for (const c of safe) {
+        const before = prev.hp.get(c.id);
+        const now = hp.get(c.id);
+        if (before == null || now == null || now === '' || before === now) continue;
+        if (c.hpBand != null) {
+          // Monster — band label only, never the exact numbers.
+          announce(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
+        } else if (c.hpCurrent != null && c.hpMax != null) {
+          // Character — exact HP is shared table info.
+          announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
+        }
+      }
+    }
+    prevAnnounceRef.current = { hp, turnKey };
+  }, [encounter, announce]);
 
   // Auto-hide the exit/fullscreen controls after a few idle seconds so the cast
   // is clean; any mouse move brings them back.
