@@ -160,7 +160,15 @@ export class AttachmentsController {
     // response leaks nothing about whether the id exists, matching how hidden
     // quests/npcs are treated (#42). The DM reveals it (POST :id/reveal) to share.
     if (row.hidden && role !== 'dm') {
-      throw new NotFoundException(`Attachment ${id} not found`);
+      // Issue #259: a fogged encounter's battle map stays hidden (DM-only) as a handout so it
+      // never surfaces raw on the player Handouts card — but the fogged encounter canvas still
+      // renders it for every member, so a hidden attachment that IS an encounter's map remains
+      // fetchable here by non-DM. All other hidden attachments stay 404 (indistinguishable from
+      // nonexistent, so ids can't be enumerated).
+      const servesEncounterMap = await this.attachmentsService.isEncounterMap(id, row.campaignId);
+      if (!servesEncounterMap) {
+        throw new NotFoundException(`Attachment ${id} not found`);
+      }
     }
 
     // Issue #84: the DB row can outlive its bytes on disk — an orphaned row from a

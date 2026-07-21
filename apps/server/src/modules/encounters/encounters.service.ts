@@ -303,9 +303,13 @@ export class EncountersService {
   /**
    * DM-only: edit an encounter's name, its location/quest/session links (issue #126), and/or
    * its battle map (issue #39). Only fields present in `input` are written; `null` clears a
-   * link/map. A linked location/quest/session must belong to THIS campaign (404). Setting a
-   * battle map reveals the attachment (attachments default DM-only since #97) so every member
-   * can see the shared background; clearing to null doesn't re-hide (reveal is one-way).
+   * link/map. A linked location/quest/session must belong to THIS campaign (404).
+   *
+   * Attaching a battle map does NOT reveal the attachment (issue #259): a fogged encounter
+   * map must stay hidden (DM-only) as a *handout* so it never surfaces raw on the player
+   * Handouts card, defeating fog-of-war. The fogged encounter canvas still renders it for
+   * players — the file route (GET /attachments/:id/file) serves an encounter's map to non-DM
+   * even while hidden (see AttachmentsService.isEncounterMap).
    */
   async updateEncounter(encounterId: number, input: EncounterUpdateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
@@ -325,13 +329,10 @@ export class EncountersService {
       set.sessionId = input.sessionId;
     }
     if (input.mapAttachmentId !== undefined) {
+      // Do NOT flip the attachment to hidden=false here (issue #259). A battle map must stay
+      // hidden as a handout so it isn't exposed raw on the player Handouts card; the fogged
+      // canvas still gets it via the file route's encounter-map exception.
       await this.validateAttachmentRef(input.mapAttachmentId, encounterRow.campaignId);
-      if (input.mapAttachmentId != null) {
-        await this.db
-          .update(attachments)
-          .set({ hidden: false, updatedAt: nowIso() })
-          .where(and(eq(attachments.id, input.mapAttachmentId), eq(attachments.campaignId, encounterRow.campaignId)));
-      }
       set.mapAttachmentId = input.mapAttachmentId;
     }
     // VTT grid config (issue #40, phase 2). Each field is independently settable/clearable.
