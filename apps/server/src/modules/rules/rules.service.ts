@@ -32,10 +32,11 @@ import {
   ALL_OPEN_LEGEND_SECTIONS,
   OL_MAX_ENTRIES_PER_SECTION,
   OPEN_LEGEND_DEFAULT_BASE_URL,
+  OPEN_LEGEND_DEFAULT_LICENSE,
   fetchOpenLegendSection,
   type OpenLegendSection,
 } from './open-legend-importer';
-import { OPEN_LEGEND_PACK_SLUG } from '@campfire/schema';
+import { OPEN_LEGEND_PACK_SLUG, RULE_PACK_SOURCE_META } from '@campfire/schema';
 import {
   ALL_PF2E_SECTIONS,
   MAX_ENTRIES_PER_SECTION as PF2E_MAX_ENTRIES_PER_SECTION,
@@ -304,18 +305,18 @@ export class RulesService {
   };
 
   /**
-   * Sources whose importer default base URL is dead or a placeholder (tracked in #346), or —
-   * for OSR — which have no default at all. These require the caller to pass an explicit
-   * `url` (a mirror/self-hosted server, or a test fake) rather than silently failing a job
-   * against a dead default. A clear 400 at enqueue is friendlier than an obscure DNS/HTTP
-   * error surfaced only by polling the job.
+   * Sources with NO validated open, machine-readable first-party source (the #346 research
+   * pass: pf1e/starfinder/archmage/osr — see RULE_PACK_SOURCE_META for the per-system finding).
+   * They are `sourceKind: 'manual-upload'`, so an install with no `url` is rejected 400 at
+   * enqueue with a pointer to the upload path — friendlier than a job that fails obscurely
+   * against a dead default, and honest about the fact that no built-in source exists. Derived
+   * from the shared metadata so enforcement and the install picker (#347) never drift apart.
    */
-  private static readonly SOURCES_REQUIRING_URL = new Set<RulePackInstallSource>([
-    'pf1e',
-    'starfinder',
-    'archmage',
-    'osr',
-  ]);
+  private static readonly SOURCES_REQUIRING_URL: ReadonlySet<RulePackInstallSource> = new Set(
+    (Object.values(RULE_PACK_SOURCE_META) as (typeof RULE_PACK_SOURCE_META)[RulePackInstallSource][])
+      .filter((m) => !m.installableWithoutUrl)
+      .map((m) => m.source),
+  );
 
   /** Reject a section that isn't valid for the chosen source (400, before any job is enqueued). */
   private assertSectionsForSource(source: RulePackInstallSource, sections: string[] | undefined): void {
@@ -329,11 +330,13 @@ export class RulesService {
     }
   }
 
-  /** Require an explicit base URL for a source whose default is dead/placeholder (see #346). */
+  /** Require an explicit base URL for a manual-upload source (no open first-party API, see #346). */
   private assertUrlForSource(source: RulePackInstallSource, url: string | undefined): void {
     if (RulesService.SOURCES_REQUIRING_URL.has(source) && !url) {
+      const meta = RULE_PACK_SOURCE_META[source];
       throw new BadRequestException(
-        `Source "${source}" has no verified live default API yet (see #346) — pass an explicit "url" pointing at a mirror or self-hosted server.`,
+        `Source "${source}" has no built-in open data source (${meta.note}). ` +
+          `Upload an open-licensed JSON pack via POST /rules/packs/upload, or pass an explicit "url" pointing at a self-hosted mirror.`,
       );
     }
   }
@@ -736,7 +739,7 @@ export class RulesService {
     }
 
     const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
-    const license = licenses.size > 0 ? [...licenses].join(', ') : 'OGL';
+    const license = licenses.size > 0 ? [...licenses].join(', ') : OPEN_LEGEND_DEFAULT_LICENSE;
 
     return this.persistPack(
       { slug, name: 'Open Legend SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },

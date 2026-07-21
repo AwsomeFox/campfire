@@ -1135,6 +1135,132 @@ export const RulePackInstall = z.object({
 });
 export type RulePackInstall = z.infer<typeof RulePackInstall>;
 
+/**
+ * How a given install source obtains its data (issue #346). The five sibling importers
+ * (#296-300) were shipped against test fixtures, but only some of the target systems
+ * actually have an OPEN, machine-readable, first-party source that installs without the
+ * caller supplying a URL. This enum lets the API be HONEST about that, and lets the install
+ * picker (#347) either offer a one-click live import or steer the user to "bring your own
+ * pack" via the upload endpoint — rather than presenting a source that would fail.
+ *   - 'api'           — a validated live/first-party source; installs with no `url`.
+ *   - 'manual-upload' — no usable open source found; the user must upload an open-licensed
+ *                       JSON pack (POST /rules/packs/upload) or pass an explicit `url`.
+ */
+export const RulePackSourceKind = z.enum(['api', 'manual-upload']);
+export type RulePackSourceKind = z.infer<typeof RulePackSourceKind>;
+
+/** Honesty metadata for one install source — consumed by the install picker (#347). */
+export interface RulePackSourceMeta {
+  source: RulePackInstallSource;
+  label: string;
+  sourceKind: RulePackSourceKind;
+  /** True when POST /rules/packs/install works with no caller-supplied `url`. */
+  installableWithoutUrl: boolean;
+  /** License the wired source publishes under, or that an uploaded pack for this system must carry. */
+  license: string;
+  /** One-line, user-facing explanation of how this system installs (and why, if manual-upload). */
+  note: string;
+  /**
+   * For a manual-upload system: a documented source a user could convert into an uploadable
+   * pack (recorded so the finding is auditable, NOT a wired importer). null when even a
+   * candidate is dead/unusable. For an api system: the base the importer actually pulls from.
+   */
+  candidateSourceUrl: string | null;
+}
+
+/**
+ * The result of the #346 research pass — which placeholder systems have a real open,
+ * machine-readable source and which honestly do not. Validated live 2026-07-21:
+ *   - open5e / pf2e / open-legend → real first-party open source, wired, no `url` needed.
+ *   - pf1e / starfinder / archmage / osr → NO stable first-party open machine-readable
+ *     source. Their former defaults were dead or placeholder (a `.example` host, dead DNS,
+ *     HTTP 410, or a project homepage that is not an API). They install via upload only.
+ */
+export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSourceMeta> = {
+  open5e: {
+    source: 'open5e',
+    label: 'D&D 5e SRD (Open5e)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'OGL v1.0a / CC-BY-4.0',
+    note: 'Live import from the Open5e v2 API.',
+    candidateSourceUrl: 'https://api.open5e.com/v2',
+  },
+  pf2e: {
+    source: 'pf2e',
+    label: 'Pathfinder 2e (Archives of Nethys)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'OGL / ORC',
+    note: 'Live import from the Archives of Nethys 2e Elasticsearch backend.',
+    candidateSourceUrl: 'https://elasticsearch.aonprd.com',
+  },
+  'open-legend': {
+    source: 'open-legend',
+    label: 'Open Legend',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'Open Legend Community License',
+    note: 'Live import of boons, banes, and feats from the official Open Legend core-rules repository (YAML).',
+    candidateSourceUrl: 'https://github.com/openlegend/core-rules',
+  },
+  pf1e: {
+    source: 'pf1e',
+    label: 'Pathfinder 1e',
+    sourceKind: 'manual-upload',
+    installableWithoutUrl: false,
+    license: 'Open Game License v1.0a',
+    note: 'No stable first-party open SRD API exists. Upload an OGL-licensed JSON pack (or pass an explicit `url`). Community datasets exist but none is a dependable first-party source.',
+    candidateSourceUrl: 'https://github.com/Noobulater/pathfinder-srd',
+  },
+  starfinder: {
+    source: 'starfinder',
+    label: 'Starfinder 1e',
+    sourceKind: 'manual-upload',
+    installableWithoutUrl: false,
+    license: 'Open Game License v1.0a',
+    note: 'No live open source: unlike PF2e, the Archives of Nethys Starfinder site exposes no Elasticsearch backend, and the community Starjammer SRD (HTTP 410) and Dragonlash API are offline. Upload an OGL JSON pack, or pass `url`.',
+    candidateSourceUrl: null,
+  },
+  archmage: {
+    source: 'archmage',
+    label: '13th Age (Archmage Engine)',
+    sourceKind: 'manual-upload',
+    installableWithoutUrl: false,
+    license: 'Open Game License v1.0a',
+    note: 'The official 13thagesrd.com is HTTP 410 Gone; the only open mirror is unstructured Markdown, not a data API. Upload an OGL JSON pack, or pass `url`.',
+    candidateSourceUrl: 'https://github.com/Obsidian-TTRPG-Community/13th-Age-SRD-Markdown',
+  },
+  osr: {
+    source: 'osr',
+    label: 'OSR retroclones',
+    sourceKind: 'manual-upload',
+    installableWithoutUrl: false,
+    license: 'CC-BY-SA-4.0 (Basic Fantasy) / OGL v1.0a (OSRIC, S&W, Labyrinth Lord, OSE)',
+    note: 'Basic Fantasy is CC-BY-SA but published only as PDF/ODT — not machine-readable — and the OGL retroclones have no JSON API. Upload a converted pack, or pass `url`.',
+    candidateSourceUrl: 'https://basicfantasy.org/downloads.html',
+  },
+  other: {
+    source: 'other',
+    label: 'Other (Open5e-compatible)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'OGL / CC',
+    note: 'Alias for the Open5e importer.',
+    candidateSourceUrl: 'https://api.open5e.com/v2',
+  },
+};
+
+/** Look up the honesty metadata for an install source (#346). */
+export function rulePackSourceMeta(source: RulePackInstallSource): RulePackSourceMeta {
+  return RULE_PACK_SOURCE_META[source];
+}
+
+/** Every install source, in a stable display order, with its honesty metadata (#347 install picker). */
+export function listRulePackSources(): RulePackSourceMeta[] {
+  return (RulePackInstallSource.options as readonly RulePackInstallSource[]).map((s) => RULE_PACK_SOURCE_META[s]);
+}
+
 // ---------- rule-system adapters (issue #70) ----------
 // The combat/statblock layers used to bake D&D-5e rules in at every call site: the
 // ability-modifier formula floor((score-10)/2), DEX-derived initiative rolled on a d20,
