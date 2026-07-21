@@ -14,11 +14,15 @@ import type { RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
+import { useCampaign } from '../../app/CampaignContext';
 
 export default function ReaderPage() {
   const { campaignId, entryId } = useParams<{ campaignId: string; entryId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
+  // Resolve the statblock adapter from the active campaign's rule system (issue #234),
+  // not the 5e default baked in at the call site.
+  const ruleSystem = useCampaign(Number.isFinite(id) ? id : undefined)?.ruleSystem ?? null;
 
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [pack, setPack] = useState<RulePack | null>(null);
@@ -95,8 +99,8 @@ export default function ReaderPage() {
               already-installed packs render correctly without a reinstall. */}
           {entry.body.trim() ? (
             <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
-          ) : hasMonsterStatblock(entry.dataJson) ? (
-            <StatBlock data={entry.dataJson} />
+          ) : hasMonsterStatblock(entry.dataJson, ruleSystem) ? (
+            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} />
           ) : (
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}
