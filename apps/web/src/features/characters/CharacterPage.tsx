@@ -19,16 +19,17 @@
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
-import { xpForLevel, CONDITIONS } from '@campfire/schema';
+import { xpForLevel, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaign } from '../../app/CampaignContext';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
-import { initials, abilityMod } from './avatar';
+import { initials } from './avatar';
 
 const ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
 type Ability = (typeof ABILITY_KEYS)[number];
@@ -74,8 +75,11 @@ function abilityScore(character: Character, ability: Ability): number {
   return stats[ability] ?? stats[ability.toLowerCase()] ?? 10;
 }
 
-function modOf(character: Character, ability: Ability): number {
-  return Math.floor((abilityScore(character, ability) - 10) / 2);
+// Ability modifier comes from the active campaign's rule-system adapter (issue #234),
+// not the 5e formula hardcoded here — so a future non-5e adapter's math takes effect.
+// Default (5e) yields floor((score - 10) / 2), unchanged.
+function modOf(adapter: RuleSystemAdapter, character: Character, ability: Ability): number {
+  return adapter.abilityModifier(abilityScore(character, ability));
 }
 
 function signed(n: number): string {
@@ -90,6 +94,9 @@ export default function CharacterPage() {
   const { me, roleIn } = useAuth();
   const role = roleIn(cid);
   const isDm = role === 'dm';
+  // Rule-system adapter resolved from the active campaign (issue #234): drives ability
+  // modifiers and the condition vocabulary instead of a call-site 5e default.
+  const adapter = ruleSystemAdapter(useCampaign(Number.isFinite(cid) ? cid : undefined)?.ruleSystem);
 
   const [character, setCharacter] = useState<Character | null>(null);
   const [members, setMembers] = useState<CampaignMember[]>([]);
@@ -253,7 +260,7 @@ export default function CharacterPage() {
                     <p className="text-[10px] tracking-wide text-slate-500">{k}</p>
                     <p className="text-xl font-heading my-0.5">{score}</p>
                     <p className="text-[11px]" style={{ color: 'var(--color-accent-300)' }}>
-                      {abilityMod(score)}
+                      {signed(adapter.abilityModifier(score))}
                     </p>
                   </div>
                 );
@@ -282,9 +289,9 @@ export default function CharacterPage() {
 
           <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
 
-          <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+          <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
 
-          <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+          <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
 
           <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
 
@@ -315,7 +322,7 @@ export default function CharacterPage() {
 
           <Card className="space-y-2.5">
             <p className="card-kicker mb-0">Conditions</p>
-            <ConditionsRow character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+            <ConditionsRow character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
           </Card>
 
           {isDm && <DmSecretCard character={character} onChange={load} onError={setActionError} />}
@@ -678,7 +685,7 @@ type SheetCardProps = {
   onError: (msg: string | null) => void;
 };
 
-function SavingThrowsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
+function SavingThrowsCard({ character, canEdit, onChange, onError, adapter }: SheetCardProps & { adapter: RuleSystemAdapter }) {
   const [busy, setBusy] = useState(false);
   const pb = profBonus(character.level);
   const profs = new Set(character.saveProficiencies);
@@ -709,7 +716,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError }: SheetCardPr
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
         {ABILITY_KEYS.map((k) => {
           const proficient = profs.has(k);
-          const mod = modOf(character, k) + (proficient ? pb : 0);
+          const mod = modOf(adapter, character, k) + (proficient ? pb : 0);
           const inner = (
             <>
               <p className="text-[10px] tracking-wide text-slate-500">
@@ -750,7 +757,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError }: SheetCardPr
   );
 }
 
-function SkillsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
+function SkillsCard({ character, canEdit, onChange, onError, adapter }: SheetCardProps & { adapter: RuleSystemAdapter }) {
   const [busy, setBusy] = useState(false);
   const pb = profBonus(character.level);
 
@@ -782,7 +789,7 @@ function SkillsCard({ character, canEdit, onChange, onError }: SheetCardProps) {
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
         {SKILLS.map(({ name, ability }) => {
           const rank = character.skills[name];
-          const mod = modOf(character, ability) + (rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0);
+          const mod = modOf(adapter, character, ability) + (rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0);
           const marker = rank === 'expertise' ? '★' : rank === 'proficient' ? '●' : '○';
           const row = (
             <>
@@ -1148,11 +1155,13 @@ function ConditionsRow({
   canEdit,
   onChange,
   onError,
+  adapter,
 }: {
   character: Character;
   canEdit: boolean;
   onChange: () => void;
   onError: (msg: string | null) => void;
+  adapter: RuleSystemAdapter;
 }) {
   const [adding, setAdding] = useState(false);
   const [value, setValue] = useState('');
@@ -1236,7 +1245,7 @@ function ConditionsRow({
               style={{ minHeight: 0, padding: '4px 8px' }}
             />
             <datalist id="cf-condition-vocab">
-              {CONDITIONS.map((c) => (
+              {adapter.conditions.map((c) => (
                 <option key={c} value={c} />
               ))}
             </datalist>

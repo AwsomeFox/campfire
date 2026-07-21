@@ -116,14 +116,15 @@ function normalize(data: unknown): Record<string, unknown> | null {
   return null;
 }
 
-export function parseMonsterStatblock(data: unknown): MonsterStatblock | null {
+export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null): MonsterStatblock | null {
   const d = normalize(data);
   if (!d) return null;
 
   // Statblock field mapping + the ability-modifier formula come from the rule-system
-  // adapter (issue #70), not inline field names/math here. Default (5e) reproduces the
-  // prior behavior exactly for imported/Open5e monsters, which store camelCase fields.
-  const adapter = ruleSystemAdapter();
+  // adapter (issue #70), resolved from the active campaign's `ruleSystem` (issue #234)
+  // rather than defaulted at the call site. Default (5e) reproduces the prior behavior
+  // exactly for imported/Open5e monsters, which store camelCase fields.
+  const adapter = ruleSystemAdapter(ruleSystem);
   const mapped = adapter.mapStatblock(d);
 
   const scores = mapped.abilityScores;
@@ -163,8 +164,8 @@ export function parseMonsterStatblock(data: unknown): MonsterStatblock | null {
 }
 
 /** True when `data` yields at least one renderable statblock field. */
-export function hasMonsterStatblock(data: unknown): boolean {
-  return parseMonsterStatblock(data) !== null;
+export function hasMonsterStatblock(data: unknown, ruleSystem?: string | null): boolean {
+  return parseMonsterStatblock(data, ruleSystem) !== null;
 }
 
 const dividerRule: CSSProperties = { borderTop: '1px solid var(--color-divider)', paddingTop: 10, marginTop: 2 };
@@ -195,10 +196,12 @@ function NamedSection({ title, entries }: { title: string; entries: NamedEntry[]
 /**
  * Renders a monster statblock. Returns null when `data` carries no renderable
  * fields, so callers can fall back to a markdown body. Pass either the raw
- * `dataJson` string or an already-parsed object.
+ * `dataJson` string or an already-parsed object. `ruleSystem` is the active
+ * campaign's rule system (issue #234) — it selects the adapter that maps the
+ * statblock fields and ability modifiers; omit for the 5e default.
  */
-export function StatBlock({ data }: { data: unknown }) {
-  const block = parseMonsterStatblock(data);
+export function StatBlock({ data, ruleSystem }: { data: unknown; ruleSystem?: string | null }) {
+  const block = parseMonsterStatblock(data, ruleSystem);
   if (!block) return null;
 
   const metaBits = [block.size, block.creatureType].filter(Boolean).join(' ');
