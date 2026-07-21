@@ -24,8 +24,10 @@ import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { SchedulePanel } from './SchedulePanel';
+import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
 export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -189,6 +191,7 @@ export default function SessionsPage() {
             Trash
           </Link>
         )}
+        {isDm && tab === 'log' && <DraftWithAiButton campaignId={cid} target="recap" label="Draft a recap with AI" />}
         {isDm && tab === 'log' && (
           <Btn
             className="!min-h-0 !py-1.5 text-xs"
@@ -228,7 +231,11 @@ export default function SessionsPage() {
       ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Timeline list */}
-        <aside className={`min-w-0 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
+        <aside className={`min-w-0 space-y-3 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
+          {/* AI scribe (issue #342) — configure triggers, run on demand (with a dry-run
+              preview), and review recent runs. Renders nothing until the AI DM seat is on. */}
+          <ScribePanel campaignId={cid} isDm={isDm} />
+
           {sessions.length === 0 && !showAddForm ? (
             <Card>
               <EmptyState title="No sessions yet — add your first recap" />

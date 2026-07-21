@@ -10,6 +10,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -120,11 +121,14 @@ export default function NpcListPage() {
       <Card className="space-y-4">
         <div className="flex items-center justify-between border-b border-slate-700 pb-3">
           <h1 className="font-bold text-white text-lg flex items-center gap-2">🤝 NPCs</h1>
-          {isDm && !creating && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-              + New NPC
-            </Btn>
-          )}
+          <div className="flex items-center gap-2">
+            <DraftWithAiButton campaignId={id} target="npc" />
+            {isDm && !creating && (
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
+                + New NPC
+              </Btn>
+            )}
+          </div>
         </div>
 
         {isDm && creating && (

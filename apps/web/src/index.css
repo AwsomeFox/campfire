@@ -221,6 +221,12 @@ h1, h2, h3, h4, h5, h6 {
   background: rgb(167 139 250 / 0.16);
   color: #c4b5fd;
 }
+/* AI — teal/cyan, distinct from every other chip family so an AI-drafted proposal
+   (issue #341) reads at a glance as something to scrutinize a little closer. */
+.cf-chip-ai {
+  background: rgb(45 212 191 / 0.16);
+  color: #5eead4;
+}
 
 .cf-btn {
   display: inline-flex;

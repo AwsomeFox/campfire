@@ -19,6 +19,9 @@ import type { MapSource } from '@campfire/schema';
 import { api, API, ApiError } from '../lib/api';
 import { importMapWithAttribution } from './ImageUpload';
 import { Btn, TextInput } from './ui';
+import { DraftWithAiButton } from '../features/ai-dm/DraftWithAiButton';
+import { useAuth } from '../app/auth';
+import { useAiDmSeat } from '../lib/query';
 
 const ACCEPTED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
 
@@ -36,6 +39,14 @@ export function GetAMapPanel({
   const [open, setOpen] = useState(false);
   const [importSource, setImportSource] = useState<MapSource | null>(null);
 
+  // Same self-gate as DraftWithAiButton (DM + AI-DM seat enabled, co_dm/driver mode) —
+  // checked here too so the panel doesn't collapse to nothing when there are no external
+  // map sources configured but AI drafting (issue #341) is still available.
+  const { roleIn } = useAuth();
+  const isDm = roleIn(campaignId) === 'dm';
+  const { data: seat } = useAiDmSeat(isDm ? campaignId : undefined);
+  const canDraftWithAi = isDm && !!seat && seat.mode !== 'off' && seat.enabled;
+
   useEffect(() => {
     let alive = true;
     api
@@ -47,27 +58,38 @@ export function GetAMapPanel({
     };
   }, [campaignId]);
 
-  if (!sources || sources.length === 0) return null;
+  const hasSources = !!sources && sources.length > 0;
+  if (!hasSources && !canDraftWithAi) return null;
 
-  const generators = sources.filter((s) => s.kind === 'generator-external');
-  const importable = sources.filter((s) => s.importable);
+  const generators = (sources ?? []).filter((s) => s.kind === 'generator-external');
+  const importable = (sources ?? []).filter((s) => s.importable);
 
   return (
     <div className="cf-inset" style={{ padding: '10px 12px', marginTop: 8 }}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', cursor: 'pointer', background: 'none', border: 0, padding: 0 }}
-      >
-        <span className="card-kicker">Get a map</span>
-        <span className="text-muted" style={{ fontSize: 11 }}>
-          open, license-clean sources
-        </span>
-        <span style={{ flex: 1 }} />
-        <span className="text-muted" style={{ fontSize: 12 }}>{open ? '▾' : '▸'}</span>
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {hasSources ? (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, cursor: 'pointer', background: 'none', border: 0, padding: 0 }}
+          >
+            <span className="card-kicker">Get a map</span>
+            <span className="text-muted" style={{ fontSize: 11 }}>
+              open, license-clean sources
+            </span>
+            <span style={{ flex: 1 }} />
+            <span className="text-muted" style={{ fontSize: 12 }}>{open ? '▾' : '▸'}</span>
+          </button>
+        ) : (
+          <>
+            <span className="card-kicker">Get a map</span>
+            <span style={{ flex: 1 }} />
+          </>
+        )}
+        {canDraftWithAi && <DraftWithAiButton campaignId={campaignId} target="map" />}
+      </div>
 
-      {open && (
+      {open && hasSources && (
         <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
             Generate a map on one of these sites, export it as an image, then import it below. Output is free to use;

@@ -9,6 +9,7 @@ import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
+import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
 function firstLine(body: string): string {
   const line = body.split('\n').find((l) => l.trim().length > 0);
@@ -145,6 +146,7 @@ export default function LocationListPage() {
           <Link to={`/c/${id}/npcs`} className="btn btn-ghost" style={{ fontSize: 12 }}>
             NPCs →
           </Link>
+          <DraftWithAiButton campaignId={id} target="location" />
           {isDm && !creating && (
             <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
               + New location

@@ -32,12 +32,27 @@ const entityRoute: Record<EntityType, string | null> = {
  */
 function targetHref(entityType: EntityType, entityId: number | null, campaignId: number): string | null {
   if (entityId == null || !Number.isFinite(campaignId)) return null;
+  // `entityRoute` is a lookup, not an exhaustive validator: the co-DM draft endpoint
+  // (#313) can file a proposal with entityType 'map' (map generator params, #306),
+  // which predates and sits outside the shared EntityType contract — `route` is
+  // `undefined` rather than `null` for that (and any other future) unmapped type, so
+  // fall through to "no detail view" rather than building a broken `/undefined/:id` URL.
   const route = entityRoute[entityType];
-  if (route === null) return null;
+  if (!route) return null;
   // Sessions have no `/:id` detail route — the list page selects a session via
   // a `?session=` query param, so link there instead of `/sessions/:id` (404).
   if (entityType === 'session') return `/c/${campaignId}/sessions?session=${entityId}`;
   return `/c/${campaignId}/${route}/${entityId}`;
+}
+
+/**
+ * An AI-drafted proposal (issue #341): the co-DM draft endpoint (#313) attributes these
+ * to `ai-dm:<campaignId>` (see CoDmService.draft's `attribution.proposerUserId`), never a
+ * human user id, so this prefix check is a reliable, cheap way to tell "drafted by AI" from
+ * a human/collaborator proposal without a schema change.
+ */
+function isAiProposal(p: Proposal): boolean {
+  return p.proposerUserId.startsWith('ai-dm:');
 }
 
 const entityIcon: Record<EntityType, string> = {
@@ -50,6 +65,12 @@ const entityIcon: Record<EntityType, string> = {
   encounter: '⚔️',
   campaign: '🔥',
 };
+
+/** `entityIcon` lookup with a fallback for entity types outside the shared enum
+ *  (e.g. a co-DM 'map' draft, #313/#306) — see the `targetHref` comment above. */
+function iconFor(entityType: EntityType): string {
+  return entityIcon[entityType] ?? '🗺️';
+}
 
 export default function ProposalsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -66,6 +87,9 @@ export default function ProposalsPage() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
+  // "AI drafts" filter (issue #341): narrow the pending queue down to co-DM-drafted
+  // proposals so a DM can triage what the AI wrote separately from human/collab edits.
+  const [aiOnly, setAiOnly] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -188,6 +212,9 @@ export default function ProposalsPage() {
     );
   }
 
+  const aiPendingCount = (pending ?? []).filter(isAiProposal).length;
+  const visiblePending = aiOnly ? (pending ?? []).filter(isAiProposal) : (pending ?? []);
+
   return (
     <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
       <h1 className="text-xl font-extrabold text-white m-0">Proposals</h1>
@@ -205,30 +232,52 @@ export default function ProposalsPage() {
         <EmptyState icon="🔮" title="No pending proposals" hint="Approved & rejected proposals show up below." />
       ) : (
         <div className="space-y-3">
+          {aiPendingCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setAiOnly((v) => !v)}
+              className="inline-flex items-center gap-1.5 text-[11px] px-1"
+              style={{ color: aiOnly ? 'var(--color-accent-300)' : 'var(--color-neutral-500)' }}
+            >
+              <span
+                aria-hidden
+                className="inline-block w-3.5 h-3.5 rounded-sm border"
+                style={{
+                  borderColor: aiOnly ? 'var(--color-accent-300)' : 'var(--color-neutral-600)',
+                  background: aiOnly ? 'var(--color-accent-300)' : 'transparent',
+                }}
+              />
+              🤖 AI drafts only ({aiPendingCount})
+            </button>
+          )}
           <BatchBar
-            total={(pending ?? []).length}
+            total={visiblePending.length}
             selectedCount={selected.size}
-            allSelected={(pending ?? []).length > 0 && selected.size === (pending ?? []).length}
+            allSelected={visiblePending.length > 0 && selected.size === visiblePending.length}
             busy={batchBusy}
             onToggleAll={(all) =>
-              setSelected(all ? new Set((pending ?? []).map((p) => p.id)) : new Set())
+              setSelected(all ? new Set(visiblePending.map((p) => p.id)) : new Set())
             }
             onApprove={() => resolveSelected('approve')}
             onReject={() => resolveSelected('reject')}
           />
-          {(pending ?? []).map((p) => (
-            <ProposalCard
-              key={p.id}
-              proposal={p}
-              campaignId={cid}
-              expanded={expandedId === p.id}
-              selected={selected.has(p.id)}
-              onSelectChange={() => toggleSelected(p.id)}
-              onToggle={() => setExpandedId((cur) => (cur === p.id ? null : p.id))}
-              onApprove={(note, payload) => resolve(p, 'approve', note, payload)}
-              onReject={(note) => resolve(p, 'reject', note)}
-            />
-          ))}
+          {visiblePending.length === 0 ? (
+            <EmptyState icon="🤖" title="No AI drafts pending" hint="Turn off the filter to see the rest of the queue." />
+          ) : (
+            visiblePending.map((p) => (
+              <ProposalCard
+                key={p.id}
+                proposal={p}
+                campaignId={cid}
+                expanded={expandedId === p.id}
+                selected={selected.has(p.id)}
+                onSelectChange={() => toggleSelected(p.id)}
+                onToggle={() => setExpandedId((cur) => (cur === p.id ? null : p.id))}
+                onApprove={(note, payload) => resolve(p, 'approve', note, payload)}
+                onReject={(note) => resolve(p, 'reject', note)}
+              />
+            ))
+          )}
         </div>
       )}
 
@@ -336,6 +385,12 @@ function ProposalCard({
   const isDelete = proposal.action === 'delete';
   // Edit-before-approve is meaningful only for create/update (delete carries no payload).
   const canEdit = !isDelete;
+  const isAi = isAiProposal(proposal);
+  // Encounter/map drafts carry a pinned `seed` (#304/#306) so approving them re-runs the
+  // deterministic generator rather than a plain field write — worth flagging (issue #341).
+  // 'map' isn't (yet) a member of the shared EntityType enum — see the `targetHref`
+  // comment above — hence the string cast rather than a plain literal comparison.
+  const isGenerated = proposal.entityType === 'encounter' || (proposal.entityType as string) === 'map';
 
   function startEdit() {
     setDraft(JSON.stringify(proposal.payload, null, 2));
@@ -378,9 +433,10 @@ function ProposalCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="card-title text-[15px] m-0">
-              {entityIcon[proposal.entityType]} {proposalTitle(proposal)}
+              {iconFor(proposal.entityType)} {proposalTitle(proposal)}
             </p>
             {isDelete && <Chip variant="proposal">delete</Chip>}
+            {isAi && <Chip variant="ai">🤖 drafted by AI</Chip>}
             <Chip variant="proposal">{proposal.proposer}</Chip>
           </div>
           <p className="text-muted text-xs m-0 mt-0.5">
@@ -393,6 +449,14 @@ function ProposalCard({
             ) : null}
             {' '}· {timeAgo(proposal.createdAt)}
           </p>
+          {isAi && (
+            <p className="text-[11px] m-0 mt-1" style={{ color: 'var(--color-accent-2-300)' }}>
+              AI-drafted — review closely before approving.{' '}
+              {isGenerated
+                ? 'Approving re-runs the generator with the pinned seed shown below.'
+                : `Approving creates the ${proposal.entityType} through the normal write path.`}
+            </p>
+          )}
         </div>
       </div>
 
@@ -626,7 +690,7 @@ function MyProposalCard({
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2 flex-wrap">
         <p className="card-title text-[15px] m-0">
-          {entityIcon[proposal.entityType]} {proposalTitle(proposal)}
+          {iconFor(proposal.entityType)} {proposalTitle(proposal)}
         </p>
         <Chip variant="proposal">pending</Chip>
       </div>
@@ -663,7 +727,8 @@ function HistoryRow({ proposal }: { proposal: Proposal }) {
   return (
     <div className="cf-card p-3.5 flex items-center justify-between gap-2 opacity-70">
       <p className="text-sm text-slate-400 m-0">
-        {entityIcon[proposal.entityType]} {proposalTitle(proposal)}{' '}
+        {iconFor(proposal.entityType)} {proposalTitle(proposal)}{' '}
+        {isAiProposal(proposal) && <Chip variant="ai" className="mx-1">🤖 AI</Chip>}
         <span className="text-slate-600">· {proposal.proposer}</span>
       </p>
       <span className={`tag ${approved ? 'tag-accent' : 'tag-neutral'}`}>{label}</span>
