@@ -194,6 +194,14 @@ textarea.input { min-height: 90px; resize: vertical; }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 12px; font-size: 13px; cursor: pointer;
 }
+/* On a narrow rail (e.g. an NPC's Notes panel at ~1280px) a 4-option segmented
+   control can't fit on one row; without wrapping the last option ('🤫 Whisper')
+   gets clipped to a single letter by the box's overflow:hidden (issue #242).
+   `seg-wrap` lets the options wrap to a second row and lets the box shrink below
+   its one-line width — the container grows in height and the rounded corners
+   still clip cleanly. */
+.seg-wrap { flex-wrap: wrap; }
+.seg-wrap .seg-opt { flex: 1 1 auto; justify-content: center; white-space: nowrap; }
 .seg-opt + .seg-opt { border-left: 1px solid var(--color-divider); }
 .seg-opt:has(input:checked) { color: var(--color-accent); box-shadow: inset 0 0 0 1px var(--color-accent); }
 .seg-opt:not(:has(input:checked)):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
