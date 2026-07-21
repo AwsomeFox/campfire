@@ -1862,6 +1862,9 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
     expect(res.body.gridUnit).toBeNull();
     expect(res.body.gridSnap).toBe(false);
     expect(res.body.fog).toBeNull();
+    // Issue #238 defaults: square grid, no AoE templates.
+    expect(res.body.gridType).toBe('square');
+    expect(res.body.aoe).toEqual([]);
     for (const c of res.body.combatants) expect(c.tokenSize).toBe('medium');
   });
 
@@ -2013,6 +2016,85 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
         .send({ fog: { enabled: true, revealed: [{ x: -5, y: 0, w: 200, h: 10 }] } });
       expect(res.status).toBe(400);
     });
+  });
+});
+
+// Issue #238 — VTT follow-ups: hex grid option, shared (persisted) AoE templates, and transient
+// map pings. Own campaign so the party/fixtures don't leak in from other suites.
+describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'VTT238 Campaign' })).body.id;
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Hexy Fight' })).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('DM switches the grid to hex; it round-trips and persists for players', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridType: 'hex' });
+    expect(res.status).toBe(200);
+    expect(res.body.gridType).toBe('hex');
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(getRes.body.gridType).toBe('hex');
+  });
+
+  it('an invalid gridType is rejected (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridType: 'octagon' });
+    expect(res.status).toBe(400);
+  });
+
+  it('DM adds shared cone + line + circle AoE templates; they round-trip and persist for players', async () => {
+    const server = ctx.app.getHttpServer();
+    const aoe = [
+      { id: 'a1', shape: 'circle', x: 50, y: 50, sizeFt: 20, angleDeg: 0, color: null },
+      { id: 'a2', shape: 'cone', x: 30, y: 30, sizeFt: 15, angleDeg: 90, color: null },
+      { id: 'a3', shape: 'line', x: 10, y: 10, sizeFt: 30, angleDeg: 45, color: null },
+    ];
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ aoe });
+    expect(res.status).toBe(200);
+    expect(res.body.aoe).toHaveLength(3);
+    expect(res.body.aoe.map((t: { shape: string }) => t.shape).sort()).toEqual(['circle', 'cone', 'line']);
+    // Shared, not client-local: a player reads the same templates.
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(getRes.body.aoe).toHaveLength(3);
+  });
+
+  it('an empty aoe array clears the templates', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ aoe: [] });
+    expect(res.status).toBe(200);
+    expect(res.body.aoe).toEqual([]);
+  });
+
+  it('an out-of-range AoE template is rejected (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ aoe: [{ id: 'bad', shape: 'circle', x: 150, y: 0, sizeFt: 10, angleDeg: 0, color: null }] });
+    expect(res.status).toBe(400);
+  });
+
+  it('a player cannot change grid type or AoE (dm only, 403)', async () => {
+    const server = ctx.app.getHttpServer();
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ gridType: 'hex' })).status).toBe(403);
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ aoe: [] })).status).toBe(403);
+  });
+
+  it('any member (DM or player) may ping the map; a bad coordinate is rejected (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(dm).send({ x: 40, y: 60 })).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(player).send({ x: 10, y: 10 })).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(dm).send({ x: 200, y: 10 })).status).toBe(400);
   });
 });
 

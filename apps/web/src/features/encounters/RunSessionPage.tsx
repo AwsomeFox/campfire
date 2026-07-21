@@ -14,6 +14,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type {
+  AoeShape,
+  AoeTemplate,
   Attachment,
   Character,
   Combatant,
@@ -23,6 +25,8 @@ import type {
   EncounterEvent,
   EncounterWithCombatants,
   FogState,
+  GridType,
+  MapPing,
   RuleEntry,
   TokenSize,
 } from '@campfire/schema';
@@ -373,6 +377,15 @@ export default function RunSessionPage() {
   const queryClient = useQueryClient();
 
   const [actionError, setActionError] = useState<string | null>(null);
+  // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
+  // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
+  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
+  const pingSeq = useRef(0);
+  const addPing = useCallback((ping: MapPing) => {
+    const key = ++pingSeq.current;
+    setPings((prev) => [...prev, { key, x: ping.x, y: ping.y }]);
+    setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 2600);
+  }, []);
   // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
   // flag so one combatant's slower edit (rename, condition, initiative…) disables only
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
@@ -454,9 +467,14 @@ export default function RunSessionPage() {
           navigate(`/c/${cid}/encounters`);
           return;
         }
+        // A ping is a one-shot transient marker — render it, don't refetch the encounter.
+        if (event.type === 'encounter.ping') {
+          if (event.ping) addPing(event.ping);
+          return;
+        }
         invalidateEncounter(queryClient, eid);
       },
-      [eid, cid, navigate, queryClient],
+      [eid, cid, navigate, queryClient, addPing],
     ),
     // The stream was down for a while — refetch to catch anything missed.
     onReconnect: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
@@ -622,9 +640,20 @@ export default function RunSessionPage() {
   });
   const setEncounterMap = (attachmentId: number | null) => setMap.mutate({ mapAttachmentId: attachmentId });
   // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
-  const setEncounterGrid = (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap'>>) => setMap.mutate(patch);
+  const setEncounterGrid = (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>>) => setMap.mutate(patch);
   // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
   const setEncounterFog = (fog: FogState | null) => setMap.mutate({ fog });
+  // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
+  const setEncounterAoe = (aoe: AoeTemplate[]) => setMap.mutate({ aoe });
+
+  // Transient battle-map ping (issue #238). Fire-and-forget POST; the server broadcasts an
+  // `encounter.ping` SSE signal that every client — including this one — renders and fades, so
+  // there's no optimistic local echo to manage. Any writing member may ping (a live gesture).
+  const pingMap = useMutation({
+    mutationFn: (ping: MapPing) => api.post(`${API}/encounters/${eid}/ping`, ping),
+    onError: reportError,
+  });
+  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null });
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
@@ -803,6 +832,9 @@ export default function RunSessionPage() {
           onMoveToken={moveToken}
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
+          onSetAoe={setEncounterAoe}
+          onPing={sendPing}
+          pings={pings}
           onError={setActionError}
         />
       )}
@@ -944,7 +976,89 @@ function rectFromCorners(a: { x: number; y: number }, b: { x: number; y: number 
   return { x, y, w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
 }
 
-type MapTool = 'move' | 'measure' | 'reveal';
+type MapTool = 'move' | 'measure' | 'reveal' | 'ping';
+
+// AoE token-footprint scale is defined near the tokens; AoE template geometry lives here.
+const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
+
+/** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
+function newAoeId(): string {
+  const uuid = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+  return uuid.slice(0, 40);
+}
+
+/**
+ * Pointy-top hexagon centres + vertices tiling the surface (issue #238). Returned as SVG
+ * `points` strings in pixel space so the overlay can draw them directly. `cellPx` is treated as
+ * the hex width; a cap keeps a pathologically fine grid from emitting tens of thousands of nodes.
+ */
+function hexPolygons(surfaceW: number, surfaceH: number, cellPx: number): string[] {
+  if (cellPx <= 2 || surfaceW <= 0 || surfaceH <= 0) return [];
+  const w = cellPx;
+  const s = w / Math.sqrt(3); // hex side / circumradius for a pointy-top hex of width w
+  const rowH = 1.5 * s;
+  const cols = Math.ceil(surfaceW / w) + 1;
+  const rows = Math.ceil(surfaceH / rowH) + 1;
+  if (cols * rows > 3000) return []; // too fine to draw as discrete polygons — skip the overlay
+  const out: string[] = [];
+  for (let r = 0; r <= rows; r++) {
+    const offset = r % 2 ? w / 2 : 0;
+    for (let c = 0; c <= cols; c++) {
+      const cx = c * w + offset;
+      const cy = r * rowH;
+      out.push(
+        [
+          [cx, cy - s],
+          [cx + w / 2, cy - s / 2],
+          [cx + w / 2, cy + s / 2],
+          [cx, cy + s],
+          [cx - w / 2, cy + s / 2],
+          [cx - w / 2, cy - s / 2],
+        ]
+          .map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`)
+          .join(' '),
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Pixel-space SVG `points` for one AoE template (issue #238). Circle callers use radius instead;
+ * this builds the cone (5e quadrant-style triangle, far edge ≈ length) and line (a rectangle of
+ * one grid-cell width) polygons. `ox/oy` is the origin in px, `lengthPx` the reach, `angleRad`
+ * the aim, `widthPx` the line thickness.
+ */
+function aoePolygonPoints(
+  shape: AoeShape,
+  ox: number,
+  oy: number,
+  lengthPx: number,
+  angleRad: number,
+  widthPx: number,
+): string {
+  const dx = Math.cos(angleRad);
+  const dy = Math.sin(angleRad);
+  const px = -dy; // unit perpendicular
+  const py = dx;
+  if (shape === 'cone') {
+    const fx = ox + dx * lengthPx;
+    const fy = oy + dy * lengthPx;
+    const half = lengthPx / 2;
+    const a = [fx + px * half, fy + py * half];
+    const b = [fx - px * half, fy - py * half];
+    return `${ox.toFixed(1)},${oy.toFixed(1)} ${a[0].toFixed(1)},${a[1].toFixed(1)} ${b[0].toFixed(1)},${b[1].toFixed(1)}`;
+  }
+  // line: a rectangle of width widthPx running from the origin along the aim
+  const half = widthPx / 2;
+  const fx = ox + dx * lengthPx;
+  const fy = oy + dy * lengthPx;
+  const p1 = [ox + px * half, oy + py * half];
+  const p2 = [fx + px * half, fy + py * half];
+  const p3 = [fx - px * half, fy - py * half];
+  const p4 = [ox - px * half, oy - py * half];
+  return [p1, p2, p3, p4].map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+}
 
 /**
  * Battle map (issue #39 + VTT phases 2–3, issue #40): a DM-uploaded image rendered as the
@@ -953,12 +1067,16 @@ type MapTool = 'move' | 'measure' | 'reveal';
  *  - a configurable square grid overlay (DM sets cell size / scale / unit / snap),
  *  - a click-drag measurement ruler that reads out distance in squares + feet,
  *  - per-token size footprints (tiny→gargantuan) via combatant.tokenSize,
+ *  - a square OR hex grid overlay (issue #238, gridType),
  *  - fog of war: the DM reveals rectangular regions; players see only revealed area, and
  *    the server additionally withholds token positions in the dark (redaction-safe),
- *  - a simple, client-only circular AoE template for visualising a spell's radius.
- * Grid config and fog are DM-only PATCHes to the encounter; every change rides the existing
- * SSE `encounter.updated` signal so other clients update live (the poll is the backstop).
- * DM may move any token; a player only their own character's (canMoveToken).
+ *  - shared circle/cone/line AoE templates (issue #238) persisted on the encounter so every
+ *    client sees the same shapes (the old circle was client-local),
+ *  - transient click-to-ping markers broadcast to the whole table over SSE (issue #238).
+ * Grid config, fog, and AoE are DM-only PATCHes to the encounter; every change rides the existing
+ * SSE `encounter.updated` signal so other clients update live (the poll is the backstop). Pings
+ * ride a dedicated one-shot `encounter.ping` signal. DM may move any token; a player only their
+ * own character's (canMoveToken), but any member may ping.
  */
 function BattleMap({
   encounter,
@@ -970,6 +1088,9 @@ function BattleMap({
   onMoveToken,
   onSetGrid,
   onSetFog,
+  onSetAoe,
+  onPing,
+  pings,
   onError,
 }: {
   encounter: EncounterWithCombatants;
@@ -979,8 +1100,11 @@ function BattleMap({
   canMoveToken: (c: Combatant) => boolean;
   onSetMap: (attachmentId: number | null) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
-  onSetGrid: (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap'>>) => void;
+  onSetGrid: (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>>) => void;
   onSetFog: (fog: FogState | null) => void;
+  onSetAoe: (aoe: AoeTemplate[]) => void;
+  onPing: (x: number, y: number) => void;
+  pings: ReadonlyArray<{ key: number; x: number; y: number }>;
   onError: (message: string) => void;
 }) {
   const [uploading, setUploading] = useState(false);
@@ -990,8 +1114,10 @@ function BattleMap({
   const [ruler, setRuler] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [revealCorners, setRevealCorners] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [gridPanelOpen, setGridPanelOpen] = useState(false);
-  const [aoe, setAoe] = useState<{ x: number; y: number; radiusFt: number } | null>(null);
-  const [aoeDragging, setAoeDragging] = useState(false);
+  // Shared AoE templates (issue #238) live in encounter state; `selectedAoeId` is the DM's local
+  // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
+  const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
+  const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const { w: surfaceW, h: surfaceH } = useElementSize(surfaceRef);
 
@@ -1002,13 +1128,15 @@ function BattleMap({
   const gridSize = encounter.gridSize; // cell edge as % of width; null = no grid
   const gridScale = encounter.gridScale;
   const gridUnit = encounter.gridUnit || 'ft';
+  const gridType: GridType = encounter.gridType ?? 'square';
   const gridOn = gridSize != null && gridSize > 0;
   // One cell in rendered pixels — cells are square in pixels regardless of the 16:9 surface.
   const cellPx = gridOn && surfaceW > 0 ? (gridSize! / 100) * surfaceW : 0;
   // Distance readout needs both a cell size (px) and a real-world scale.
   const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
-  const canAoe = canMeasure; // AoE radius is expressed in feet, so it needs the scale too.
+  const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
 
+  const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
   // A non-DM whose token would be hidden by fog simply never receives its position from the
@@ -1058,12 +1186,20 @@ function BattleMap({
   function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     const pct = pointerToPercent(e);
     if (!pct) return;
+    if (tool === 'ping') {
+      // A ping is a one-shot gesture — broadcast immediately on press, no drag.
+      onPing(pct.x, pct.y);
+      return;
+    }
     if (tool === 'measure' && canMeasure) {
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
       setRuler({ start: pct, end: pct });
     } else if (tool === 'reveal' && isDm) {
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
       setRevealCorners({ start: pct, end: pct });
+    } else if (tool === 'move') {
+      // Click on empty map in move mode clears any AoE selection (deselect).
+      setSelectedAoeId(null);
     }
   }
 
@@ -1073,9 +1209,9 @@ function BattleMap({
       if (pct) setDragPos(pct);
       return;
     }
-    if (aoeDragging) {
+    if (aoeDrag) {
       const pct = pointerToPercent(e);
-      if (pct) setAoe((prev) => (prev ? { ...prev, x: pct.x, y: pct.y } : prev));
+      if (pct) setAoeDrag((prev) => (prev ? { ...prev, x: pct.x, y: pct.y } : prev));
       return;
     }
     if (ruler) {
@@ -1089,6 +1225,14 @@ function BattleMap({
     }
   }
 
+  // Ends whatever surface drag is active. Wired to onPointerUp AND onPointerCancel /
+  // onLostPointerCapture: when the surface itself holds the pointer capture (measure/reveal), a
+  // plain synthetic `pointerup` on that element is unreliable across browsers — the fog-reveal
+  // commit (issue #231) was silently dropped because its `pointerup` branch never ran, leaving
+  // the dashed preview stuck and never PATCHing `fog.revealed`. `lostpointercapture` fires
+  // reliably when the captured pointer is released or cancelled, so routing it here guarantees
+  // the reveal (and token/AoE) drag commits. Each branch clears its own state and returns, so a
+  // second invocation (pointerup THEN lostpointercapture) is an idempotent no-op.
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
     if (draggingId != null) {
       const raw = pointerToPercent(e) ?? dragPos;
@@ -1101,8 +1245,10 @@ function BattleMap({
       }
       return;
     }
-    if (aoeDragging) {
-      setAoeDragging(false);
+    if (aoeDrag) {
+      const drag = aoeDrag;
+      setAoeDrag(null);
+      onSetAoe(aoeTemplates.map((t) => (t.id === drag.id ? { ...t, x: drag.x, y: drag.y } : t)));
       return;
     }
     if (revealCorners) {
@@ -1119,11 +1265,29 @@ function BattleMap({
     // next measurement starts, the tool changes, or move mode is re-entered.
   }
 
-  function onAoePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+  function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
+    if (!isDm) return;
     e.preventDefault();
     e.stopPropagation();
     (e.target as Element).setPointerCapture?.(e.pointerId);
-    setAoeDragging(true);
+    setSelectedAoeId(t.id);
+    const pct = pointerToPercent(e);
+    setAoeDrag({ id: t.id, x: pct?.x ?? t.x, y: pct?.y ?? t.y });
+  }
+
+  // AoE template CRUD (issue #238) — all DM-only PATCHes of the whole template list.
+  function addAoe(shape: AoeShape) {
+    const sizeFt = shape === 'circle' ? (gridScale ?? 5) * 2 : (gridScale ?? 5) * BASE_AOE_LENGTH_MULT;
+    const t: AoeTemplate = { id: newAoeId(), shape, x: 50, y: 50, sizeFt, angleDeg: 0, color: null };
+    setSelectedAoeId(t.id);
+    onSetAoe([...aoeTemplates, t]);
+  }
+  function updateAoe(id: string, patch: Partial<AoeTemplate>) {
+    onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  }
+  function removeAoe(id: string) {
+    if (selectedAoeId === id) setSelectedAoeId(null);
+    onSetAoe(aoeTemplates.filter((t) => t.id !== id));
   }
 
   // Measurement readout (5e: distance counts whole squares along the longer axis is common,
@@ -1138,7 +1302,14 @@ function BattleMap({
   })();
 
   const revealPreview = revealCorners ? rectFromCorners(revealCorners.start, revealCorners.end) : null;
-  const aoeRadiusPx = aoe && canAoe ? (aoe.radiusFt / gridScale!) * cellPx : 0;
+  const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
+
+  // Hex overlay polygons (issue #238). Memoized on the geometry inputs so a token/AoE drag —
+  // which changes none of them — never recomputes the (potentially hundreds of) hexes.
+  const hexCells = useMemo(
+    () => (gridOn && gridType === 'hex' ? hexPolygons(surfaceW, surfaceH, cellPx) : []),
+    [gridOn, gridType, surfaceW, surfaceH, cellPx],
+  );
 
   function changeTool(next: MapTool) {
     setTool(next);
@@ -1195,35 +1366,19 @@ function BattleMap({
 
       {mapImageUrl && (
         <>
-          {/* Toolbar: interaction mode + (DM) grid & fog controls + AoE template. */}
+          {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
           <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }}>
             {modeBtn('move', 'Move')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
+            {modeBtn('ping', 'Ping', false, 'Click the map to ping a spot for everyone')}
             {isDm && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
-            {canAoe && (
-              <button
-                type="button"
-                className="cf-chip"
-                onClick={() => setAoe((prev) => (prev ? null : { x: 50, y: 50, radiusFt: gridScale! * 2 }))}
-                title="Toggle a circular AoE template"
-                style={{ cursor: 'pointer', borderColor: aoe ? 'var(--color-accent)' : 'var(--color-divider)', color: aoe ? 'var(--color-accent)' : undefined }}
-              >
-                AoE
-              </button>
-            )}
-            {aoe && canAoe && (
-              <label className="flex items-center gap-1 text-muted" style={{ fontSize: 11 }}>
-                radius
-                <input
-                  type="number"
-                  min={0}
-                  step={gridScale ?? 5}
-                  value={aoe.radiusFt}
-                  onChange={(e) => setAoe((prev) => (prev ? { ...prev, radiusFt: Math.max(0, Number(e.target.value) || 0) } : prev))}
-                  style={{ width: 56 }}
-                />
-                {gridUnit}
-              </label>
+            {isDm && canAoe && (
+              <>
+                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
+                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
+              </>
             )}
             <div style={{ flex: 1 }} />
             {isDm && (
@@ -1238,6 +1393,38 @@ function BattleMap({
               </button>
             )}
           </div>
+
+          {/* Selected AoE template editor (DM) — size / rotation / remove for the picked shape. */}
+          {isDm && selectedAoe && canAoe && (
+            <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }}>
+              <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedAoe.shape}</span>
+              <label className="flex items-center gap-1 text-muted">
+                {selectedAoe.shape === 'circle' ? 'radius' : 'length'}
+                <input
+                  type="number"
+                  min={0}
+                  step={gridScale ?? 5}
+                  value={selectedAoe.sizeFt}
+                  onChange={(e) => updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.target.value) || 1) })}
+                  style={{ width: 56 }}
+                />
+                {gridUnit}
+              </label>
+              {selectedAoe.shape !== 'circle' && (
+                <label className="flex items-center gap-1 text-muted">
+                  angle°
+                  <input
+                    type="number"
+                    step={15}
+                    value={selectedAoe.angleDeg}
+                    onChange={(e) => updateAoe(selectedAoe.id, { angleDeg: Number(e.target.value) || 0 })}
+                    style={{ width: 56 }}
+                  />
+                </label>
+              )}
+              <button type="button" className="cf-chip" style={{ cursor: 'pointer', color: 'var(--color-danger, #ef4444)' }} onClick={() => removeAoe(selectedAoe.id)}>Remove</button>
+            </div>
+          )}
 
           {isDm && gridPanelOpen && (
             <div
@@ -1290,6 +1477,18 @@ function BattleMap({
                 <input type="checkbox" checked={encounter.gridSnap} onChange={(e) => onSetGrid({ gridSnap: e.target.checked })} />
                 Snap
               </label>
+              <label className="flex items-center gap-1 text-muted">
+                type
+                <select
+                  value={gridType}
+                  disabled={!gridOn}
+                  onChange={(e) => onSetGrid({ gridType: e.target.value as GridType })}
+                  style={{ fontSize: 12 }}
+                >
+                  <option value="square">square</option>
+                  <option value="hex">hex</option>
+                </select>
+              </label>
               <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--color-divider)' }} />
               <label className="flex items-center gap-1">
                 <input
@@ -1326,17 +1525,21 @@ function BattleMap({
             style={{
               margin: '8px 14px',
               aspectRatio: '16 / 9',
-              touchAction: tool !== 'move' || draggingId != null || aoeDragging ? 'none' : undefined,
-              cursor: tool === 'measure' ? 'crosshair' : tool === 'reveal' ? 'cell' : undefined,
+              touchAction: tool !== 'move' || draggingId != null || aoeDrag != null ? 'none' : undefined,
+              cursor: tool === 'measure' ? 'crosshair' : tool === 'reveal' ? 'cell' : tool === 'ping' ? 'pointer' : undefined,
             }}
             onPointerDown={onSurfacePointerDown}
             onPointerMove={onSurfacePointerMove}
             onPointerUp={onSurfacePointerUp}
+            // See onSurfacePointerUp: cancel/lost-capture are the reliable drag-end signals when the
+            // surface itself holds pointer capture (fixes the fog-reveal commit, issue #231).
+            onPointerCancel={onSurfacePointerUp}
+            onLostPointerCapture={onSurfacePointerUp}
           >
             <img src={mapImageUrl} alt="Battle map" className="absolute inset-0 w-full h-full object-contain" style={{ background: 'rgba(15,23,42,.4)' }} />
 
-            {/* Grid overlay (issue #40) — square cells sized in pixels off the measured surface. */}
-            {gridOn && cellPx > 1 && (
+            {/* Grid overlay (issue #40 / #238) — a square CSS grid, or a pointy-top hex SVG. */}
+            {gridOn && gridType === 'square' && cellPx > 1 && (
               <div
                 className="absolute inset-0"
                 style={{
@@ -1346,6 +1549,13 @@ function BattleMap({
                     `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
                 }}
               />
+            )}
+            {gridOn && gridType === 'hex' && hexCells.length > 0 && (
+              <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none' }} width={surfaceW} height={surfaceH}>
+                {hexCells.map((pts, i) => (
+                  <polygon key={i} points={pts} fill="none" stroke="rgba(148,163,184,.35)" strokeWidth={1} />
+                ))}
+              </svg>
             )}
 
             {placed.map((c) => {
@@ -1393,26 +1603,56 @@ function BattleMap({
               );
             })}
 
-            {/* AoE template (issue #40) — client-only circle for visualising a spell radius. */}
-            {aoe && canAoe && aoeRadiusPx > 0 && (
-              <div
-                className="absolute -translate-x-1/2 -translate-y-1/2"
-                style={{
-                  left: `${aoe.x}%`,
-                  top: `${aoe.y}%`,
-                  width: aoeRadiusPx * 2,
-                  height: aoeRadiusPx * 2,
-                  borderRadius: '50%',
-                  background: 'rgba(239,68,68,.22)',
-                  border: '2px solid rgba(239,68,68,.75)',
-                  cursor: 'grab',
-                  touchAction: 'none',
-                  zIndex: 6,
-                }}
-                onPointerDown={onAoePointerDown}
-                title={`AoE · ${aoe.radiusFt} ${gridUnit} radius`}
-              />
+            {/* Shared AoE templates (issue #238) — circle/cone/line drawn in pixel space so every
+                client sees the same shapes. Drawn under an SVG (pointer-inert); the DM gets a
+                draggable origin handle per template (move mode only, so it never eats a drag). */}
+            {canAoe && aoeTemplates.length > 0 && (
+              <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none', zIndex: 6 }} width={surfaceW} height={surfaceH}>
+                {aoeTemplates.map((t) => {
+                  const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
+                  const ox = ((drag ? drag.x : t.x) / 100) * surfaceW;
+                  const oy = ((drag ? drag.y : t.y) / 100) * surfaceH;
+                  const lengthPx = (t.sizeFt / gridScale!) * cellPx;
+                  if (lengthPx <= 0) return null;
+                  const selected = t.id === selectedAoeId;
+                  const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
+                  const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
+                  if (t.shape === 'circle') {
+                    return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
+                  }
+                  const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
+                  return <polygon key={t.id} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
+                })}
+              </svg>
             )}
+            {isDm && canAoe &&
+              aoeTemplates.map((t) => {
+                const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
+                const x = drag ? drag.x : t.x;
+                const y = drag ? drag.y : t.y;
+                return (
+                  <div
+                    key={t.id}
+                    className="absolute -translate-x-1/2 -translate-y-1/2"
+                    style={{
+                      left: `${x}%`,
+                      top: `${y}%`,
+                      width: 14,
+                      height: 14,
+                      borderRadius: '50%',
+                      background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
+                      border: '2px solid rgba(15,23,42,.85)',
+                      // Only grab the pointer in move mode, so reveal/measure drags pass through.
+                      pointerEvents: tool === 'move' ? 'auto' : 'none',
+                      cursor: 'grab',
+                      touchAction: 'none',
+                      zIndex: 7,
+                    }}
+                    onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
+                    title={`${t.shape} · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''} — drag to move, click to edit`}
+                  />
+                );
+              })}
 
             {/* Fog of war (issue #40). A dark overlay with the revealed rectangles punched out.
                 DM sees through it (semi-transparent) to prep; players see it solid. Coordinates
@@ -1490,6 +1730,26 @@ function BattleMap({
                 )}
               </>
             )}
+
+            {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
+            {pings.map((p) => (
+              <div
+                key={p.key}
+                className="absolute -translate-x-1/2 -translate-y-1/2"
+                style={{
+                  left: `${p.x}%`,
+                  top: `${p.y}%`,
+                  width: 20,
+                  height: 20,
+                  borderRadius: '50%',
+                  border: '3px solid var(--color-accent)',
+                  pointerEvents: 'none',
+                  zIndex: 10,
+                  animation: 'cfPing 2.4s ease-out forwards',
+                }}
+              />
+            ))}
+            <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
           </div>
 
           {unplaced.length > 0 && (
@@ -1522,9 +1782,11 @@ function BattleMap({
               ? 'Click-drag on the map to measure distance.'
               : tool === 'reveal'
                 ? 'Click-drag to reveal a region of the map to players.'
-                : isDm
-                  ? 'Drag a token to move it. Click an unplaced token to drop it on the map.'
-                  : 'Drag your own token to move it.'}
+                : tool === 'ping'
+                  ? 'Click anywhere on the map to ping that spot for everyone.'
+                  : isDm
+                    ? 'Drag a token to move it. Drag an AoE handle to move a template, click it to edit.'
+                    : 'Drag your own token to move it.'}
           </div>
         </>
       )}

@@ -46,6 +46,71 @@ deleting and re-adding it.
 Rolls from the **dice widget** on the screen, and everyone's turn actions, keep the
 fight moving.
 
+## The battle map (VTT)
+
+Attach a map image to an encounter and the run-session screen becomes a lightweight
+**virtual tabletop**: combatant tokens on a grid, distance measurement, area-of-effect
+templates, and fog of war — all shared live over SSE, so every player's device shows
+the same board.
+
+### Add a map & move tokens
+
+As DM, drop an image on the **Battle map** panel (or click to choose one). Attaching a
+map makes it visible to the whole party. Each combatant becomes a **token**; drag one
+to move it. The DM can move any token, a **player only their own character's**. Click an
+**unplaced** token to drop it at the centre, then position it. Token **size**
+(tiny → gargantuan) scales the footprint — set it from a combatant's controls; it's a
+display footprint only and doesn't touch combat math.
+
+### Grid, scale & snapping
+
+Open **Grid & fog** to configure the overlay:
+
+- **Grid** on/off and **cell %w** — the cell edge as a percent of the map's width.
+- **Scale** + **unit** — the real-world size of one cell (e.g. `5` `ft`), which drives
+  the measurement readout.
+- **Snap** — drops a moved token to the nearest cell centre.
+- **Type** — **square** (classic) or **hex** (a pointy-top hexagonal overlay for
+  hex-crawl and wilderness maps).
+
+### Measure distance
+
+Pick the **Measure** tool and click-drag on the map: it reads out the straight-line
+distance in **squares and feet** (using the grid scale). The ruler stays on screen after
+you release so you can read it. Measurement needs a grid scale set first.
+
+### Area-of-effect templates
+
+With a grid scale set, the DM can add shared **AoE templates** from the toolbar:
+
+- **Circle** — a radius burst (e.g. *fireball*).
+- **Cone** — a 5e-style cone (e.g. *burning hands*).
+- **Line** — a straight ray (e.g. *lightning bolt*).
+
+Every template lives in the encounter, so **all clients see the same shapes** (they're
+not private to your screen). Drag a template's handle to reposition it; click it to edit
+its **size** (radius or length in feet) and, for cones and lines, its **angle**. Remove
+it when you're done.
+
+### Ping the map
+
+Anyone at the table can pick the **Ping** tool and click a spot to flash a **ping** —
+a short pulse everyone sees at once. It's transient (nothing is saved); use it to say
+"*here*" without moving a token.
+
+### Fog of war
+
+Toggle **Fog** on and the map goes dark for players; the DM sees through it dimmed for
+prep. Reveal the board as the party explores:
+
+- **Reveal** tool — click-drag a rectangle to reveal that region to players.
+- **Reveal all** / **Hide all** — light or re-hide the whole map at once.
+
+Fog is **information-safe**: a combatant token sitting in an unrevealed area is withheld
+by the server, so a player's client never even receives where the ambush is waiting —
+it can't be read out of the network response. (An AI DM can reveal regions too, via the
+`reveal_map_region` MCP tool.)
+
 ## End the encounter — HP writes back
 
 Click **End**. The encounter closes and each **character combatant's current HP is
