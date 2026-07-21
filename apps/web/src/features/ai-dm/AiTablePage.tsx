@@ -51,6 +51,7 @@ import {
   type ToolEntry,
 } from './transcript';
 import { invalidateForToolEvent, resolveToolActivity, type ToolResource } from './toolActivity';
+import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
 import { Btn, Card, Chip, EmptyState, Skeleton, TextArea, TextInput, type ChipVariant } from '../../components/ui';
 
@@ -376,11 +377,24 @@ export default function AiTablePage() {
       )}
 
       {/*
-        #340 SEAM: the stuck-ladder banner + recovery levers mount here, driven by
-        session.stuck / session.state / session.vote / session.actingDm (already carried
-        by useAiDmSession). Until then, the transcript's system lines and the composer
-        lock convey the paused/awaiting/human-control states; no lever UI lives here yet.
+        #340: the stuck-ladder banner + recovery levers, driven by session.stuck /
+        session.state / session.vote / session.actingDm (all carried by useAiDmSession).
+        The SSE stuck/recovered/vote/takeover signals invalidate the session query (above),
+        so this reconciles live for every member; a rules-lookup answer is folded straight
+        into the transcript as a system line.
       */}
+      {session && (
+        <StuckLadder
+          campaignId={campaignId!}
+          session={session}
+          isDm={isDm}
+          canAct={canCompose}
+          myUserId={me ? String(me.user.id) : null}
+          onRulesAnswer={(query, answer) =>
+            dispatch({ type: 'localSystem', variant: 'rules', text: answer, data: { query } })
+          }
+        />
+      )}
 
       {/* Transcript */}
       <Card className="!p-0 flex-1 flex flex-col overflow-hidden">
@@ -552,7 +566,22 @@ function TranscriptRow({
     );
   }
 
-  // system
+  // system: a rules-lookup answer renders as a small compendium card (question + answer);
+  // every other system variant is a single italic divider line.
+  if (entry.variant === 'rules') {
+    return (
+      <div className="flex justify-center">
+        <div className="cf-inset px-3 py-2 max-w-[92%] text-sm">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-neutral-600)]">
+            {t('ladder.rulesAnswerLabel', { query: entry.data?.query ?? '' })}
+          </div>
+          <div className="mt-1">
+            <Markdown>{entry.text ?? ''}</Markdown>
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex justify-center">
       <span className="text-[11px] text-[var(--color-neutral-600)] italic px-2">{systemText(entry, t)}</span>
