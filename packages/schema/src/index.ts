@@ -1285,6 +1285,19 @@ export const CampaignSummary = z.object({
   characters: z.array(Character),
   sessions: z.array(SessionListItem), // list-shape (recapExcerpt, not full recap) — issue #71
   encounters: z.array(EncounterDigest), // combat digest (issue #126) — makes fights visible to the continuity layer
+  // Newer systems (issue #257) — bring the summary up to parity with what shipped.
+  timeline: z.array(TimelineEvent), // in-world events, role-redacted (dmSecret stripped, hidden dropped for non-DM)
+  // Party coin totals inlined (Treasury is declared below CampaignSummary — avoid a temporal-dead-zone reference).
+  treasury: z.object({
+    cp: z.number().int().nonnegative(),
+    sp: z.number().int().nonnegative(),
+    ep: z.number().int().nonnegative(),
+    gp: z.number().int().nonnegative(),
+    pp: z.number().int().nonnegative(),
+  }),
+  inventoryCount: z.number().int().nonnegative(), // number of loot/inventory items tracked
+  commentCount: z.number().int().nonnegative(), // discussion comments the caller may see (anchor-visibility redacted)
+  nextSession: ScheduledSessionWithRsvps.nullable(), // the soonest not-yet-past game night (with RSVPs), or null
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;

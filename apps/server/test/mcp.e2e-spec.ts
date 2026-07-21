@@ -52,6 +52,18 @@ const ALL_TOOLS = [
   'get_ai_dm_seat',
   'list_attachments',
   'get_attachment',
+  // read — inventory/timeline/comments/scheduling (issue #257)
+  'list_inventory',
+  'get_inventory_item',
+  'get_treasury',
+  'list_timeline',
+  'get_timeline_event',
+  'get_calendar',
+  'list_comments',
+  'get_comment',
+  'list_scheduled_sessions',
+  'get_next_session',
+  'get_calendar_feed',
   // write
   'create_campaign',
   'delete_campaign',
@@ -119,6 +131,24 @@ const ALL_TOOLS = [
   'end_encounter',
   'delete_encounter',
   'ai_dm_narrate',
+  // write — inventory/timeline/comments/scheduling (issue #257)
+  'add_inventory_item',
+  'update_inventory_item',
+  'delete_inventory_item',
+  'adjust_treasury',
+  'create_timeline_event',
+  'update_timeline_event',
+  'delete_timeline_event',
+  'set_calendar',
+  'post_comment',
+  'update_comment',
+  'delete_comment',
+  'schedule_session',
+  'update_scheduled_session',
+  'cancel_scheduled_session',
+  'set_rsvp',
+  'rotate_calendar_feed',
+  'disable_calendar_feed',
 ];
 
 describe('mcp endpoint (e2e, real sessions + PATs)', () => {
@@ -194,7 +224,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(102);
+    expect(tools).toHaveLength(130);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -322,6 +352,113 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const created = parseResult(note) as { body: string; kind: string };
     expect(created.body).toBe('A viewer note over MCP');
     expect(created.kind).toBe('note');
+  });
+
+  it('inventory + treasury (issue #257): dm writes, viewer reads, viewer write is a 403-equivalent isError', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    // dm adds a party item and tops up the treasury.
+    const addRes = await dmClient.callTool({
+      name: 'add_inventory_item',
+      arguments: { campaignId, name: 'Bag of Holding', qty: 1, notes: 'from the goblin hoard' },
+    });
+    expect(addRes.isError).toBeFalsy();
+    const item = parseResult(addRes) as { id: number; name: string; ownerType: string };
+    expect(item.name).toBe('Bag of Holding');
+    expect(item.ownerType).toBe('party');
+
+    const treasuryRes = await dmClient.callTool({
+      name: 'adjust_treasury',
+      arguments: { campaignId, delta: { gp: 50 } },
+    });
+    expect(treasuryRes.isError).toBeFalsy();
+    expect((parseResult(treasuryRes) as { gp: number }).gp).toBe(50);
+
+    // viewer PAT may READ inventory + treasury…
+    const listRes = await viewerClient.callTool({ name: 'list_inventory', arguments: { campaignId } });
+    expect(listRes.isError).toBeFalsy();
+    expect((parseResult(listRes) as Array<{ id: number }>).some((i) => i.id === item.id)).toBe(true);
+    const getTreasury = await viewerClient.callTool({ name: 'get_treasury', arguments: { campaignId } });
+    expect((parseResult(getTreasury) as { gp: number }).gp).toBe(50);
+
+    // …but a viewer-scoped PAT cannot write (player role required).
+    const denied = await viewerClient.callTool({
+      name: 'add_inventory_item',
+      arguments: { campaignId, name: 'Contraband' },
+    });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('403');
+  });
+
+  it('timeline (issue #257): dm creates an event with a secret/hidden; viewer reads are redacted', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    const visibleRes = await dmClient.callTool({
+      name: 'create_timeline_event',
+      arguments: { campaignId, title: 'The Comet Falls', inWorldDate: '3rd of Flamerule', dmSecret: 'it is an omen' },
+    });
+    expect(visibleRes.isError).toBeFalsy();
+    const visible = parseResult(visibleRes) as { id: number };
+
+    const hiddenRes = await dmClient.callTool({
+      name: 'create_timeline_event',
+      arguments: { campaignId, title: 'Secret Cabal Forms', hidden: true },
+    });
+    const hidden = parseResult(hiddenRes) as { id: number };
+
+    // dm sees both, with the secret.
+    const dmList = parseResult(await dmClient.callTool({ name: 'list_timeline', arguments: { campaignId } })) as Array<{
+      id: number;
+      dmSecret: string;
+    }>;
+    expect(dmList.some((e) => e.id === hidden.id)).toBe(true);
+    expect(dmList.find((e) => e.id === visible.id)?.dmSecret).toBe('it is an omen');
+
+    // viewer: hidden event dropped wholesale, dmSecret stripped on the visible one.
+    const viewerList = parseResult(await viewerClient.callTool({ name: 'list_timeline', arguments: { campaignId } })) as Array<{
+      id: number;
+      dmSecret: string;
+    }>;
+    expect(viewerList.some((e) => e.id === hidden.id)).toBe(false);
+    expect(viewerList.find((e) => e.id === visible.id)?.dmSecret).toBe('');
+
+    // a viewer fetching the hidden event by id 404s (indistinguishable from nonexistent).
+    const denied = await viewerClient.callTool({ name: 'get_timeline_event', arguments: { eventId: hidden.id } });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('404');
+  });
+
+  it('scheduling (issue #257): dm schedules a session, viewer RSVPs, viewer cannot cancel', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    const schedRes = await dmClient.callTool({
+      name: 'schedule_session',
+      arguments: { campaignId, scheduledAt: '2999-01-01T18:00:00Z', title: 'Session 5' },
+    });
+    expect(schedRes.isError).toBeFalsy();
+    const sched = parseResult(schedRes) as { id: number };
+
+    // Any member (viewer scope included) may RSVP.
+    const rsvpRes = await viewerClient.callTool({
+      name: 'set_rsvp',
+      arguments: { scheduleId: sched.id, status: 'yes', note: 'bringing snacks' },
+    });
+    expect(rsvpRes.isError).toBeFalsy();
+    expect((parseResult(rsvpRes) as { rsvps: Array<{ status: string }> }).rsvps.some((r) => r.status === 'yes')).toBe(true);
+
+    // get_next_session surfaces it as the next game night.
+    const next = parseResult(await viewerClient.callTool({ name: 'get_next_session', arguments: { campaignId } })) as {
+      id: number;
+    } | null;
+    expect(next?.id).toBe(sched.id);
+
+    // Cancelling is DM-only.
+    const denied = await viewerClient.callTool({ name: 'cancel_scheduled_session', arguments: { scheduleId: sched.id } });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('403');
   });
 
   it('lookup_rule finds an installed rule pack entry and includes body on the top match', async () => {
