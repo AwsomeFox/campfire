@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, eq, inArray } from 'drizzle-orm';
+import { and, count, eq, inArray, isNotNull } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CampaignClone, CampaignCreate, CampaignImport, CampaignUpdate } from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
@@ -24,6 +24,7 @@ import {
   rulePacks,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { AuditService } from '../audit/audit.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -82,6 +83,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
+    deletedAt: row.deletedAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -102,18 +104,41 @@ export class CampaignsService {
     private readonly members: MembersService,
   ) {}
 
-  /** Dev-auth (dev:*) users see all campaigns; everyone else — server admins included (issue #9) — only campaigns they're a member of. */
+  /**
+   * Dev-auth (dev:*) users see all campaigns; everyone else — server admins included
+   * (issue #9) — only campaigns they're a member of. Trashed (soft-deleted, issue #116)
+   * campaigns are excluded — they surface only through listTrashedForUser().
+   */
   async listForUser(user: RequestUser): Promise<Campaign[]> {
     const accessible = await this.roleResolver.accessibleCampaignIds(user);
-    const rows = await this.db.select().from(campaigns);
+    const rows = await this.db.select().from(campaigns).where(notDeleted(campaigns.deletedAt));
     if (accessible === 'all') return rows.map(toDomain);
     const allowed = new Set(accessible);
     return rows.filter((r) => allowed.has(r.id)).map(toDomain);
   }
 
-  async getOrThrow(id: number): Promise<Campaign> {
+  /**
+   * The Trash view (issue #116): the caller's soft-deleted campaigns, newest-trashed
+   * first. Same membership scoping as listForUser — the membership rows survive a
+   * soft-delete, so a co-DM still sees (and can restore) a campaign a co-DM trashed.
+   */
+  async listTrashedForUser(user: RequestUser): Promise<Campaign[]> {
+    const accessible = await this.roleResolver.accessibleCampaignIds(user);
+    const rows = await this.db.select().from(campaigns).where(isNotNull(campaigns.deletedAt));
+    const visible = accessible === 'all' ? rows : rows.filter((r) => new Set(accessible).has(r.id));
+    return visible.sort((a, b) => (b.deletedAt ?? '').localeCompare(a.deletedAt ?? '')).map(toDomain);
+  }
+
+  /**
+   * Fetch a campaign by id. By default a trashed campaign is invisible (404), same as
+   * a nonexistent one — every normal GET/summary path funnels through here. The
+   * restore/purge paths pass `{ includeDeleted: true }` so they can act on a trashed row.
+   */
+  async getOrThrow(id: number, opts?: { includeDeleted?: boolean }): Promise<Campaign> {
     const [row] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Campaign ${id} not found`);
+    if (!row || (!opts?.includeDeleted && row.deletedAt != null)) {
+      throw new NotFoundException(`Campaign ${id} not found`);
+    }
     return toDomain(row);
   }
 
@@ -281,14 +306,15 @@ export class CampaignsService {
     const template = input.mode === 'template';
     const name = (input.name ?? `${source.name} (copy)`).slice(0, 120);
 
-    // Read everything up front — only the writes need the transaction.
+    // Read everything up front — only the writes need the transaction. Trashed
+    // (soft-deleted, #116) entities are excluded so a clone never resurrects them.
     const [locationRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows] = await Promise.all([
-      this.db.select().from(locations).where(eq(locations.campaignId, id)),
-      this.db.select().from(npcs).where(eq(npcs.campaignId, id)),
-      this.db.select().from(quests).where(eq(quests.campaignId, id)),
-      this.db.select().from(characters).where(eq(characters.campaignId, id)),
-      this.db.select().from(sessions).where(eq(sessions.campaignId, id)),
-      this.db.select().from(notes).where(eq(notes.campaignId, id)),
+      this.db.select().from(locations).where(and(eq(locations.campaignId, id), notDeleted(locations.deletedAt))),
+      this.db.select().from(npcs).where(and(eq(npcs.campaignId, id), notDeleted(npcs.deletedAt))),
+      this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
+      this.db.select().from(characters).where(and(eq(characters.campaignId, id), notDeleted(characters.deletedAt))),
+      this.db.select().from(sessions).where(and(eq(sessions.campaignId, id), notDeleted(sessions.deletedAt))),
+      this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
       this.db.select().from(encounters).where(eq(encounters.campaignId, id)),
     ]);
     const questIds = questRows.map((r) => r.id);
@@ -911,22 +937,70 @@ export class CampaignsService {
   }
 
   /**
-   * Full cascade delete — campaigns.service used to only delete the single
-   * campaigns row, orphaning every child table (quests, npcs, locations,
-   * characters, encounters+combatants, notes, proposals, campaign_members,
-   * api_tokens) plus attachment rows AND their on-disk files. All DB rows are
-   * removed in one db.transaction() (better-sqlite3 synchronous transaction
-   * API — same pattern as QuestsService.remove()/RulesService.uninstall()),
-   * with the campaigns row cleared last so a mid-transaction failure never
-   * leaves an orphaned-but-still-"deleted"-looking campaign. The on-disk
-   * upload directory is removed after the transaction commits (best-effort,
-   * mirroring AttachmentsService.remove()'s fs.rm — the DB is the source of
-   * truth for what exists; a stray directory is harmless, but we still try
-   * synchronously here since this is a rarer, heavier operation than a
-   * single attachment delete).
+   * Soft-delete (trash) a campaign (issue #116). This is now the DEFAULT of
+   * DELETE /campaigns/:id: instead of the old irreversible hard-cascade + disk wipe
+   * (any co-DM one confirm-click away from destroying months of play), we merely
+   * stamp `deleted_at`. Every row and the on-disk upload directory survive intact;
+   * the campaign just vanishes from normal listings (listForUser filters it) and its
+   * GET/summary 404. It is fully restorable via restore(), and only the deliberate
+   * second step purge() runs the real cascade + fs.rm. A no-op if already trashed
+   * (getOrThrow without includeDeleted 404s a trashed campaign).
    */
   async remove(id: number, user: RequestUser): Promise<void> {
     await this.getOrThrow(id);
+    await this.db.update(campaigns).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(campaigns.id, id));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'campaign.delete',
+      entityType: 'campaign',
+      entityId: id,
+      campaignId: id,
+      detail: 'soft-delete (trashed)',
+    });
+  }
+
+  /**
+   * Restore a trashed campaign (issue #116) — clears `deleted_at` so it returns to
+   * normal listings with every child row + upload intact. 404 if the campaign
+   * doesn't exist or isn't actually trashed (restoring a live campaign is a no-op error).
+   */
+  async restore(id: number, user: RequestUser): Promise<Campaign> {
+    const existing = await this.getOrThrow(id, { includeDeleted: true });
+    if (existing.deletedAt == null) throw new NotFoundException(`Campaign ${id} is not in the trash`);
+    const [row] = await this.db
+      .update(campaigns)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(campaigns.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'campaign.restore',
+      entityType: 'campaign',
+      entityId: id,
+      campaignId: id,
+    });
+    return toDomain(row);
+  }
+
+  /**
+   * Permanently purge a campaign (issue #116) — the deliberate, irreversible second
+   * step that the old one-click DELETE used to be. Full cascade delete: campaigns.service
+   * used to only delete the single campaigns row, orphaning every child table (quests,
+   * npcs, locations, characters, encounters+combatants, notes, proposals, campaign_members,
+   * api_tokens) plus attachment rows AND their on-disk files. All DB rows are removed in one
+   * db.transaction() (better-sqlite3 synchronous transaction API — same pattern as
+   * QuestsService.remove()/RulesService.uninstall()), with the campaigns row cleared last so
+   * a mid-transaction failure never leaves an orphaned-but-still-"deleted"-looking campaign.
+   * The on-disk upload directory is removed after the transaction commits (best-effort,
+   * mirroring AttachmentsService.remove()'s fs.rm — the DB is the source of truth for what
+   * exists; a stray directory is harmless, but we still try synchronously here since this is
+   * a rarer, heavier operation than a single attachment delete). Purge acts on live OR
+   * trashed campaigns (includeDeleted) so the disk wipe can only ever run through here.
+   */
+  async purge(id: number, user: RequestUser): Promise<void> {
+    await this.getOrThrow(id, { includeDeleted: true });
 
     // Every quest in this campaign — objectives cascade off quest ids, not campaignId directly.
     const questRows = await this.db.select({ id: quests.id }).from(quests).where(eq(quests.campaignId, id));
@@ -975,7 +1049,7 @@ export class CampaignsService {
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
-      action: 'campaign.delete',
+      action: 'campaign.purge',
       entityType: 'campaign',
       entityId: id,
       campaignId: id,
@@ -1003,7 +1077,7 @@ export class CampaignsService {
     const [{ value: openInboxCount }] = await this.db
       .select({ value: count() })
       .from(notes)
-      .where(and(eq(notes.campaignId, id), eq(notes.kind, 'inbox'), eq(notes.resolved, false)));
+      .where(and(eq(notes.campaignId, id), eq(notes.kind, 'inbox'), eq(notes.resolved, false), notDeleted(notes.deletedAt)));
 
     return {
       campaign,

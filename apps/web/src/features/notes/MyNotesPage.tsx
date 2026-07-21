@@ -15,6 +15,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote, type ChipVariant } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from './EntityPicker';
 
@@ -86,6 +87,7 @@ export default function MyNotesPage() {
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Note | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [undoNote, setUndoNote] = useState<Note | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -174,14 +176,23 @@ export default function MyNotesPage() {
     setDeleting(true);
     setNotes((cur) => cur.filter((n) => n.id !== note.id));
     try {
+      // Soft-delete (issue #116) — reversible; offer an Undo that restores the note.
       await api.delete(`${API}/notes/${note.id}`);
       setPendingDelete(null);
+      setUndoNote(note);
     } catch {
       setNotes(prev);
       setError(t('notes.couldntDeleteNote'));
     } finally {
       setDeleting(false);
     }
+  }
+
+  async function undoDeleteNote(note: Note) {
+    const restored = await api.post<Note>(`${API}/notes/${note.id}/restore`);
+    setUndoNote(null);
+    // Re-insert in id order so it lands where it was.
+    setNotes((cur) => [...cur, restored].sort((a, b) => a.id - b.id));
   }
 
   const filtered = useMemo(() => {
@@ -392,11 +403,18 @@ export default function MyNotesPage() {
       {pendingDelete && (
         <ConfirmDialog
           title="Delete this note?"
-          body="This cannot be undone."
+          body="This moves the note to the Trash — you can undo it right after."
           confirmLabel={deleting ? 'Deleting…' : 'Delete note'}
           busy={deleting}
           onConfirm={() => deleteNote(pendingDelete)}
           onCancel={() => setPendingDelete(null)}
+        />
+      )}
+      {undoNote && (
+        <UndoSnackbar
+          message="Note moved to Trash."
+          onUndo={() => undoDeleteNote(undoNote)}
+          onExpire={() => setUndoNote(null)}
         />
       )}
     </div>

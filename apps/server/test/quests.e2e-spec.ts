@@ -214,7 +214,7 @@ describe('quests (e2e)', () => {
     expect(filteredRes.body.find((q: { id: number }) => q.id === questId).objectives).toHaveLength(2);
   });
 
-  it('deleting a quest promotes its subquests to top level instead of orphaning them', async () => {
+  it('soft-deleting a parent quest hides it but keeps subquests (issue #116) — restore re-nests them', async () => {
     const server = ctx.app.getHttpServer();
 
     const parentRes = await request(server)
@@ -239,16 +239,25 @@ describe('quests (e2e)', () => {
     const deleteRes = await request(server).delete(`/api/v1/quests/${parentId}`).set(dm);
     expect(deleteRes.status).toBe(200);
 
-    const childGet = await request(server).get(`/api/v1/quests/${childId}`).set(dm);
-    expect(childGet.status).toBe(200);
-    expect(childGet.body.parentId).toBeNull();
-
-    const otherChildGet = await request(server).get(`/api/v1/quests/${otherChildId}`).set(dm);
-    expect(otherChildGet.status).toBe(200);
-    expect(otherChildGet.body.parentId).toBeNull();
-
+    // The parent is trashed (hidden from GET/list)...
     const parentGet = await request(server).get(`/api/v1/quests/${parentId}`).set(dm);
     expect(parentGet.status).toBe(404);
+    const listAfter = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(dm);
+    expect(listAfter.body.some((q: { id: number }) => q.id === parentId)).toBe(false);
+
+    // ...but the subquests survive, reversibly keeping their parentId (they render as
+    // top-level while the parent is hidden; the board groups by an absent parent).
+    const childGet = await request(server).get(`/api/v1/quests/${childId}`).set(dm);
+    expect(childGet.status).toBe(200);
+    expect(childGet.body.parentId).toBe(parentId);
+    const otherChildGet = await request(server).get(`/api/v1/quests/${otherChildId}`).set(dm);
+    expect(otherChildGet.status).toBe(200);
+
+    // Restore brings the parent back and the nesting is intact again.
+    const restoreRes = await request(server).post(`/api/v1/quests/${parentId}/restore`).set(dm);
+    expect(restoreRes.status).toBe(201);
+    const parentBack = await request(server).get(`/api/v1/quests/${parentId}`).set(dm);
+    expect(parentBack.status).toBe(200);
   });
 
   it('objective routes 404 when questId doesn\'t own the objective (cross-parent-id pin)', async () => {

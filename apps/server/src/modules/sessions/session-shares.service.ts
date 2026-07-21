@@ -1,9 +1,10 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { Role, SessionShare, SessionShareCreated, SharedRecap } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessionShares, sessions, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { generateShareToken, hashShareToken, shareTokenPrefix, looksLikeShareToken } from '../../common/crypto';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -115,7 +116,9 @@ export class SessionSharesService {
       .from(sessionShares)
       .innerJoin(sessions, eq(sessionShares.sessionId, sessions.id))
       .innerJoin(campaigns, eq(sessionShares.campaignId, campaigns.id))
-      .where(eq(sessionShares.tokenHash, hashShareToken(rawToken)))
+      // A trashed session or campaign (soft-deleted, #116) must not resolve its public
+      // recap — the share stays dormant (404) until the row is restored.
+      .where(and(eq(sessionShares.tokenHash, hashShareToken(rawToken)), notDeleted(sessions.deletedAt), notDeleted(campaigns.deletedAt)))
       .limit(1);
     if (!row) {
       throw new NotFoundException('Share link not found or revoked');

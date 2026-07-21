@@ -4,8 +4,9 @@ import type { z } from 'zod';
 import { SessionCreate, SessionUpdate, RECAP_TEMPLATE } from '@campfire/schema';
 import type { Session, SessionListItem, SessionAttendee, Role, Note, EncounterWithCombatants, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { sessions, sessionShares, sessionAttendees, characters, campaigns } from '../../db/schema';
+import { sessions, sessionAttendees, characters, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { applyPage } from '../../common/pagination';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
@@ -141,7 +142,7 @@ export class SessionsService {
         updatedAt: sessions.updatedAt,
       })
       .from(sessions)
-      .where(eq(sessions.campaignId, campaignId))
+      .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
       .orderBy(desc(sessions.number))
       .$dynamic();
     q = applyPage(q, page);
@@ -169,7 +170,7 @@ export class SessionsService {
     let q = this.db
       .select()
       .from(sessions)
-      .where(eq(sessions.campaignId, campaignId))
+      .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
       .orderBy(desc(sessions.number))
       .$dynamic();
     q = applyPage(q, page);
@@ -177,9 +178,10 @@ export class SessionsService {
     return redactSecrets(rows.map(toDomain), role);
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(sessions).where(eq(sessions.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Session ${id} not found`);
+    // A trashed session (soft-deleted, #116) reads as nonexistent unless includeDeleted (restore).
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Session ${id} not found`);
     return row;
   }
 
@@ -195,7 +197,9 @@ export class SessionsService {
    * (which previously never decremented it at all).
    */
   private async recomputeSessionCount(campaignId: number): Promise<void> {
-    const rows = await this.db.select({ id: sessions.id }).from(sessions).where(eq(sessions.campaignId, campaignId));
+    // Trashed sessions (soft-deleted, #116) don't count toward the campaign's session
+    // tally — the count reflects live sessions only, and rises again on restore.
+    const rows = await this.db.select({ id: sessions.id }).from(sessions).where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
     await this.db.update(campaigns).set({ sessionCount: rows.length, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
   }
 
@@ -390,20 +394,17 @@ export class SessionsService {
     return redactSecret(toDomain(row), role);
   }
 
+  /**
+   * Soft-delete (trash) a session (issue #116) — reversible. Only stamps `deleted_at`;
+   * the session vanishes from normal reads and stops counting toward sessionCount, but
+   * every row survives for restore(). Unlike the old hard delete we deliberately KEEP the
+   * session's share links and attendance rows — deleting them would be irreversible; a
+   * trashed session's public share simply 404s (the resolver filters deleted) until restore.
+   */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    await this.db.delete(sessions).where(eq(sessions.id, id));
-    // Hygiene: drop this session's share links too. The public resolver joins
-    // through to the live session row, so orphaned links would already 404 —
-    // this just keeps the table from accumulating dead rows.
-    await this.db.delete(sessionShares).where(eq(sessionShares.sessionId, id));
+    await this.db.update(sessions).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(sessions.id, id));
     await this.recomputeSessionCount(existing.campaignId);
-    // Attendance rows point only at this session — drop them so the join table
-    // doesn't accumulate orphans after a session is deleted.
-    await this.db.delete(sessionAttendees).where(eq(sessionAttendees.sessionId, id));
-    // Revision history is a polymorphic (soft) reference with no FK cascade — drop this
-    // session's revisions explicitly so a single delete leaves no orphan (#157).
-    await this.revisions.removeForEntity('session', id);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -411,7 +412,29 @@ export class SessionsService {
       entityType: 'session',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed session (issue #116) — clears `deleted_at` + re-counts. 404 if it isn't trashed. */
+  async restore(id: number, user: RequestUser, role: Role): Promise<Session> {
+    const existing = await this.getRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Session ${id} is not in the trash`);
+    const [row] = await this.db
+      .update(sessions)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(sessions.id, id))
+      .returning();
+    await this.recomputeSessionCount(existing.campaignId);
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'session.restore',
+      entityType: 'session',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return redactSecret(toDomain(row), role);
   }
 
   // ----- attendance (issue #121): which characters played a session -----
@@ -445,7 +468,7 @@ export class SessionsService {
       const found = await this.db
         .select({ id: characters.id, name: characters.name })
         .from(characters)
-        .where(and(eq(characters.campaignId, session.campaignId), inArray(characters.id, wanted)));
+        .where(and(eq(characters.campaignId, session.campaignId), inArray(characters.id, wanted), notDeleted(characters.deletedAt)));
       if (found.length !== wanted.length) {
         const foundIds = new Set(found.map((c) => c.id));
         const bad = wanted.filter((id) => !foundIds.has(id));

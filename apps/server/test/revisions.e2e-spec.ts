@@ -121,7 +121,7 @@ describe('revisions + optimistic concurrency (e2e) — #157', () => {
       expect(revs.status).toBe(403);
     });
 
-    it('deleting the session removes its revisions (list then 404s on the missing entity)', async () => {
+    it('soft-deleting the session preserves its revisions (recoverable via restore, issue #116)', async () => {
       const server = ctx.app.getHttpServer();
       const throwaway = await request(server)
         .post(`/api/v1/campaigns/${campaignId}/sessions`)
@@ -135,9 +135,11 @@ describe('revisions + optimistic concurrency (e2e) — #157', () => {
       const del = await request(server).delete(`/api/v1/sessions/${tid}`).set(dm);
       expect(del.status).toBe(200);
 
-      // Entity gone → the generic revisions endpoint 404s on the missing entity.
+      // Delete is now a soft-delete (issue #116) — the session is trashed but recoverable,
+      // so its revision history is deliberately preserved (not dropped) for restore.
       const after = await request(server).get(`/api/v1/revisions/session/${tid}`).set(dm);
-      expect(after.status).toBe(404);
+      expect(after.status).toBe(200);
+      expect(after.body).toHaveLength(1);
     });
   });
 

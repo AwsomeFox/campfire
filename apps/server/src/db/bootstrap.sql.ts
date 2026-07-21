@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,
   storage_quota_bytes INTEGER,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS characters (
   ddb_id TEXT,
   notes TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -85,6 +87,7 @@ CREATE TABLE IF NOT EXISTS quests (
   dm_secret TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
   sort_order INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -171,6 +174,7 @@ CREATE TABLE IF NOT EXISTS npcs (
   body TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -186,6 +190,7 @@ CREATE TABLE IF NOT EXISTS locations (
   map_y REAL,
   body TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -198,6 +203,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   played_at TEXT,
   recap TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -259,6 +265,7 @@ CREATE TABLE IF NOT EXISTS notes (
   body TEXT NOT NULL,
   resolved INTEGER NOT NULL DEFAULT 0,
   resolved_note TEXT NOT NULL DEFAULT '',
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -641,6 +648,9 @@ CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaig
 CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign ON scheduled_sessions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_session_rsvps_schedule ON session_rsvps(scheduled_session_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_ics_token ON campaigns(ics_token);
+-- #116: normal campaign listings filter deleted_at IS NULL; the trash view filters
+-- IS NOT NULL. Index it so both are index scans rather than full-table filters.
+CREATE INDEX IF NOT EXISTS idx_campaigns_deleted_at ON campaigns(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
 -- #123: comment threads are always read for one entity (campaign + type + id),
 -- newest-thread-context ordering handled in SQL; this composite covers the lookup.

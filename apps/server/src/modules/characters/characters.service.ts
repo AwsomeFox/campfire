@@ -4,8 +4,9 @@ import type { z } from 'zod';
 import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { characters, combatants, encounters, campaignMembers } from '../../db/schema';
+import { characters, combatants, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
@@ -83,13 +84,14 @@ export class CharactersService {
   ) {}
 
   async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
-    const rows = await this.db.select().from(characters).where(eq(characters.campaignId, campaignId));
+    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
     return redactSecrets(rows.map(toDomain), role);
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(characters).where(eq(characters.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Character ${id} not found`);
+    // A trashed character (soft-deleted, #116) reads as nonexistent unless includeDeleted (restore).
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Character ${id} not found`);
     return row;
   }
 
@@ -283,21 +285,17 @@ export class CharactersService {
     return redactSecret(toDomain(row), role);
   }
 
+  /**
+   * Soft-delete (trash) a character (issue #116) — reversible. dm or the owning player
+   * may delete (issue #129, unchanged). We only stamp `deleted_at`: the character vanishes
+   * from normal reads but survives for restore(). Unlike the old hard delete we deliberately
+   * DON'T null the member's characterId link or detach live combatants — those are
+   * irreversible mutations; they simply reference a now-hidden character until restore.
+   */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    // dm or the owning player may delete (issue #129) — mirrors update/patch so a player
-    // can remove a character they created (backup PC, familiar) instead of it being stuck
-    // until a dm intervenes; a non-owner player still gets 403 here.
     this.assertCanWrite(existing, user, role);
-    // Unlink inbound references in the same transaction as the delete so nothing dangles
-    // on a deleted character: the member's characterId link (campaignMembers.characterId,
-    // whose denormalized join would otherwise point at a ghost) and any combatant row
-    // (combatants.characterId — the combatant stays in the fight, just no longer HP-synced).
-    this.db.transaction((tx) => {
-      tx.update(campaignMembers).set({ characterId: null, updatedAt: nowIso() }).where(eq(campaignMembers.characterId, id)).run();
-      tx.update(combatants).set({ characterId: null }).where(eq(combatants.characterId, id)).run();
-      tx.delete(characters).where(eq(characters.id, id)).run();
-    });
+    await this.db.update(characters).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(characters.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -305,7 +303,29 @@ export class CharactersService {
       entityType: 'character',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed character (issue #116) — clears `deleted_at`. dm/owner gate; 404 if not trashed. */
+  async restore(id: number, user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Character ${id} is not in the trash`);
+    this.assertCanWrite(existing, user, role);
+    const [row] = await this.db
+      .update(characters)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(characters.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.restore',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return redactSecret(toDomain(row), role);
   }
 
   async patchHp(id: number, patch: HpPatchInput, user: RequestUser, role: Role): Promise<Character> {
@@ -375,7 +395,7 @@ export class CharactersService {
 
   /** DM party award: add `amount` XP to every campaign character (or just `characterIds`). Role gate (dm) enforced at controller. */
   async awardXp(campaignId: number, award: XpAwardInput, user: RequestUser, role: Role): Promise<Character[]> {
-    const rows = await this.db.select().from(characters).where(eq(characters.campaignId, campaignId));
+    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
     let targets = rows;
     if (award.characterIds) {
       const wanted = new Set(award.characterIds);
