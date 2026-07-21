@@ -22,6 +22,26 @@ import {
   apiTokens,
   attachments,
   rulePacks,
+  storyArcs,
+  storyBeats,
+  storyBranches,
+  timelineEvents,
+  timelineCalendars,
+  sessionZero,
+  factions,
+  sessionAttendees,
+  sessionShares,
+  scheduledSessions,
+  sessionRsvps,
+  comments,
+  entityRevisions,
+  campaignInvites,
+  diceRolls,
+  notifications,
+  inventoryItems,
+  partyTreasury,
+  aiDmSeats,
+  encounterEvents,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
@@ -986,13 +1006,18 @@ export class CampaignsService {
 
   /**
    * Permanently purge a campaign (issue #116) — the deliberate, irreversible second
-   * step that the old one-click DELETE used to be. Full cascade delete: campaigns.service
-   * used to only delete the single campaigns row, orphaning every child table (quests,
-   * npcs, locations, characters, encounters+combatants, notes, proposals, campaign_members,
-   * api_tokens) plus attachment rows AND their on-disk files. All DB rows are removed in one
-   * db.transaction() (better-sqlite3 synchronous transaction API — same pattern as
-   * QuestsService.remove()/RulesService.uninstall()), with the campaigns row cleared last so
-   * a mid-transaction failure never leaves an orphaned-but-still-"deleted"-looking campaign.
+   * step that the old one-click DELETE used to be. Full cascade delete across EVERY
+   * campaign-scoped table (issue #235): a pre-#69 DB carries no FK constraints (SQLite
+   * can't ALTER-ADD one) so this hand cascade is its ONLY teardown, and it previously
+   * covered only ~12 of the ~30 child tables — leaving story_arcs/beats/branches,
+   * timeline_events/calendars, session_zero, factions, session_shares/attendees,
+   * scheduled_sessions/rsvps, comments, entity_revisions, campaign_invites, dice_rolls,
+   * notifications, inventory_items, party_treasury, ai_dm_seats and encounter_events
+   * orphaned. The list is now complete (see the in-body comment + the db-cascades test).
+   * All DB rows are removed in one db.transaction() (better-sqlite3 synchronous transaction
+   * API — same pattern as QuestsService.remove()/RulesService.uninstall()), with the
+   * campaigns row cleared last so a mid-transaction failure never leaves an
+   * orphaned-but-still-"deleted"-looking campaign.
    * The on-disk upload directory is removed after the transaction commits (best-effort,
    * mirroring AttachmentsService.remove()'s fs.rm — the DB is the source of truth for what
    * exists; a stray directory is harmless, but we still try synchronously here since this is
@@ -1002,38 +1027,78 @@ export class CampaignsService {
   async purge(id: number, user: RequestUser): Promise<void> {
     await this.getOrThrow(id, { includeDeleted: true });
 
-    // Every quest in this campaign — objectives cascade off quest ids, not campaignId directly.
-    const questRows = await this.db.select({ id: quests.id }).from(quests).where(eq(quests.campaignId, id));
-    const questIds = questRows.map((r) => r.id);
+    // This hand-rolled cascade is the ONLY teardown mechanism on databases created
+    // before FK enforcement shipped (issue #69) — SQLite cannot ALTER-ADD a foreign
+    // key, so a pre-#69 DB carries no constraints and a bare `DELETE FROM campaigns`
+    // would orphan every child. On a fresh DB the declared ON DELETE CASCADE would
+    // handle all of this anyway (these explicit deletes are then FK-redundant no-ops,
+    // fired before the parent rows they'd cascade from), but we must not RELY on that:
+    // the list below therefore covers EVERY table that hangs off a campaign — directly
+    // via campaign_id or transitively via a parent id (issue #235). When you add a new
+    // campaign-scoped table, add it here too, and extend the db-cascades orphan test.
+    //
+    // audit_log is deliberately excluded (it must outlive the campaign — see bootstrap.sql).
+    // The user/auth/oauth/rule-pack graphs are not campaign-scoped and are left untouched.
 
-    // Every encounter in this campaign — combatants cascade off encounter ids.
-    const encounterRows = await this.db.select({ id: encounters.id }).from(encounters).where(eq(encounters.campaignId, id));
-    const encounterIds = encounterRows.map((r) => r.id);
+    // Two-hop children keyed off a parent id, not campaign_id — collect the parent ids
+    // up front (same pattern as questIds/encounterIds before this change).
+    const questIds = (await this.db.select({ id: quests.id }).from(quests).where(eq(quests.campaignId, id))).map((r) => r.id);
+    const encounterIds = (await this.db.select({ id: encounters.id }).from(encounters).where(eq(encounters.campaignId, id))).map((r) => r.id);
+    const sessionIds = (await this.db.select({ id: sessions.id }).from(sessions).where(eq(sessions.campaignId, id))).map((r) => r.id);
+    const scheduledSessionIds = (
+      await this.db.select({ id: scheduledSessions.id }).from(scheduledSessions).where(eq(scheduledSessions.campaignId, id))
+    ).map((r) => r.id);
+    const storyBeatIds = (await this.db.select({ id: storyBeats.id }).from(storyBeats).where(eq(storyBeats.campaignId, id))).map((r) => r.id);
 
     this.db.transaction((tx) => {
-      // Delete all objectives / combatants for this campaign's quests / encounters in
-      // one statement each (#72) via `WHERE quest_id IN (...)` / `encounter_id IN (...)`,
-      // rather than a DELETE per parent row. Guard the empty case: `inArray(col, [])`
-      // would be a degenerate/invalid IN clause, and there's nothing to delete anyway.
+      // ---- two-hop children first (keyed off a parent id, no campaign_id of their own).
+      // Guard the empty case: `inArray(col, [])` is a degenerate/invalid IN clause and
+      // there is nothing to delete anyway.
       if (questIds.length > 0) {
         tx.delete(questObjectives).where(inArray(questObjectives.questId, questIds)).run();
       }
-      tx.delete(quests).where(eq(quests.campaignId, id)).run();
-
       if (encounterIds.length > 0) {
         tx.delete(combatants).where(inArray(combatants.encounterId, encounterIds)).run();
+        tx.delete(encounterEvents).where(inArray(encounterEvents.encounterId, encounterIds)).run();
       }
-      tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
+      if (sessionIds.length > 0) {
+        tx.delete(sessionAttendees).where(inArray(sessionAttendees.sessionId, sessionIds)).run();
+      }
+      if (scheduledSessionIds.length > 0) {
+        tx.delete(sessionRsvps).where(inArray(sessionRsvps.scheduledSessionId, scheduledSessionIds)).run();
+      }
+      if (storyBeatIds.length > 0) {
+        tx.delete(storyBranches).where(inArray(storyBranches.beatId, storyBeatIds)).run();
+      }
 
+      // ---- everything keyed directly off campaign_id.
+      tx.delete(quests).where(eq(quests.campaignId, id)).run();
+      tx.delete(storyBeats).where(eq(storyBeats.campaignId, id)).run();
+      tx.delete(storyArcs).where(eq(storyArcs.campaignId, id)).run();
+      tx.delete(timelineEvents).where(eq(timelineEvents.campaignId, id)).run();
+      tx.delete(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).run();
+      tx.delete(sessionZero).where(eq(sessionZero.campaignId, id)).run();
+      tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
       tx.delete(npcs).where(eq(npcs.campaignId, id)).run();
+      tx.delete(factions).where(eq(factions.campaignId, id)).run();
       tx.delete(locations).where(eq(locations.campaignId, id)).run();
       tx.delete(characters).where(eq(characters.campaignId, id)).run();
       tx.delete(notes).where(eq(notes.campaignId, id)).run();
+      tx.delete(comments).where(eq(comments.campaignId, id)).run();
+      tx.delete(entityRevisions).where(eq(entityRevisions.campaignId, id)).run();
+      tx.delete(sessionShares).where(eq(sessionShares.campaignId, id)).run();
       tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
+      tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
       tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
       tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();
+      tx.delete(campaignInvites).where(eq(campaignInvites.campaignId, id)).run();
       tx.delete(apiTokens).where(eq(apiTokens.campaignId, id)).run();
       tx.delete(attachments).where(eq(attachments.campaignId, id)).run();
+      tx.delete(diceRolls).where(eq(diceRolls.campaignId, id)).run();
+      tx.delete(notifications).where(eq(notifications.campaignId, id)).run();
+      tx.delete(inventoryItems).where(eq(inventoryItems.campaignId, id)).run();
+      tx.delete(partyTreasury).where(eq(partyTreasury.campaignId, id)).run();
+      tx.delete(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).run();
 
       tx.delete(campaigns).where(eq(campaigns.id, id)).run();
     });

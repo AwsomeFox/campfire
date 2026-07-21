@@ -72,6 +72,13 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [bodyConflict, setBodyConflict] = useState(false);
   const [historyNonce, setHistoryNonce] = useState(0);
 
+  // Propose mode (issue #240): a non-DM member editing the quest body submits the
+  // change to the DM's proposal queue (PATCH ?proposed=true) instead of writing directly.
+  const [proposeMode, setProposeMode] = useState(false);
+  const [submittingProposal, setSubmittingProposal] = useState(false);
+  const [proposalError, setProposalError] = useState<string | null>(null);
+  const [proposalDone, setProposalDone] = useState(false);
+
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [savingStatus, setSavingStatus] = useState(false);
 
@@ -178,6 +185,38 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       setBodyDraft(fresh.body);
     } catch {
       setError(t('quests.loadOneFailed'));
+    }
+  }
+
+  // Non-DM members suggest a body edit (issue #240) — routed to the DM's proposal queue.
+  function startPropose() {
+    if (!quest) return;
+    setBodyDraft(quest.body);
+    setProposalError(null);
+    setProposalDone(false);
+    setProposeMode(true);
+    setEditingBody(true);
+  }
+
+  function cancelBodyEdit() {
+    setEditingBody(false);
+    setProposeMode(false);
+    setProposalError(null);
+  }
+
+  async function submitBodyProposal() {
+    if (!quest) return;
+    setSubmittingProposal(true);
+    setProposalError(null);
+    try {
+      await api.patch(`${API}/quests/${quest.id}?proposed=true`, { body: bodyDraft });
+      setEditingBody(false);
+      setProposeMode(false);
+      setProposalDone(true);
+    } catch {
+      setProposalError(t('quests.suggestFailed'));
+    } finally {
+      setSubmittingProposal(false);
     }
   }
 
@@ -451,31 +490,65 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             </Btn>
           </>
         )}
+        {!isDm && role !== null && (
+          <>
+            <div style={{ flex: 1 }} />
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={startPropose}
+              title={t('quests.suggestEditTitle')}
+            >
+              {t('quests.suggestEdit')}
+            </Btn>
+          </>
+        )}
       </div>
+
+      {proposalDone && !editingBody && (
+        <div className="cf-card p-3 flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
+          <span className="text-slate-200">{t('quests.suggestDone')}</span>
+          <Link to={`/c/${campaignId}/proposals`} className="text-purple-400 hover:underline shrink-0">
+            {t('quests.viewMyProposals')}
+          </Link>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <div className="card elev-sm">
             {editingBody ? (
               <div className="space-y-2">
+                {proposeMode && (
+                  <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
+                    {t('quests.suggestHint')}
+                  </p>
+                )}
                 <TextArea
                   style={{ minHeight: 140 }}
                   value={bodyDraft}
                   onChange={(e) => setBodyDraft(e.target.value)}
                   placeholder={t('quests.bodyPlaceholder')}
                 />
+                {proposalError && <p className="text-xs text-red-400 m-0">{proposalError}</p>}
                 <div className="flex gap-2 justify-end">
                   {bodyConflict && (
                     <Btn ghost onClick={reloadBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
                       {t('quests.reloadLatest')}
                     </Btn>
                   )}
-                  <Btn ghost onClick={() => setEditingBody(false)} className="!min-h-0 !py-1.5 text-xs">
+                  <Btn ghost onClick={proposeMode ? cancelBodyEdit : () => setEditingBody(false)} className="!min-h-0 !py-1.5 text-xs">
                     {t('quests.cancel')}
                   </Btn>
-                  <Btn onClick={saveBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
-                    {savingBody ? t('quests.saving') : t('quests.save')}
-                  </Btn>
+                  {proposeMode ? (
+                    <Btn onClick={submitBodyProposal} disabled={submittingProposal} className="!min-h-0 !py-1.5 text-xs">
+                      {submittingProposal ? t('quests.suggesting') : t('quests.suggestSubmit')}
+                    </Btn>
+                  ) : (
+                    <Btn onClick={saveBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
+                      {savingBody ? t('quests.saving') : t('quests.save')}
+                    </Btn>
+                  )}
                 </div>
               </div>
             ) : (

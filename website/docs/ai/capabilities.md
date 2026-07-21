@@ -54,9 +54,29 @@ An AI with a DM-scoped token can run a campaign end to end — verified end-to-e
 > and roll initiative."* · *"Sweep the inbox into quest and NPC proposals."* ·
 > *"Draft three plot beats for the next arc."*
 
-## On the horizon
+## The AI Dungeon Master seat (experimental)
 
-A server-side **AI Dungeon Master** — you connect an API key and the server runs the
-game, everyone joins as a player — is an experimental, admin-gated feature on the
-[roadmap](../reference/roadmap.md), built on this same tool surface. (The branching
-**story planner** it complements has shipped — see *Story planning* above.)
+Campfire ships an experimental, admin-gated **AI Dungeon Master seat** (issue #28) —
+a per-campaign "DM seat" with real plumbing around it. What actually ships is the
+seat, not a server that plays the game for you:
+
+- **It's gated twice.** A server admin must turn on the server-wide experimental
+  flag (`experimentalAiDm`), and the per-campaign seat must be enabled, before any
+  turn is allowed.
+- **Turns are metered.** Each campaign has a token budget; every turn is drawn down
+  against it and **audited** under the caller's name. The `ai_dm_narrate` MCP tool
+  takes a turn (DM role required).
+- **The shipped provider makes no vendor call.** The default `AI_DM_PROVIDER` is a
+  **no-op scaffold** — it contacts no LLM and returns a clearly-labelled placeholder.
+  There is **no API-key flow and no web UI**; the server does not run the game with a
+  key you paste in.
+
+So in a **stock install**, the seat is driven by a **connected MCP agent** (for
+example, Claude on a dm-scoped token): that agent authors the narration and drives
+the other write tools — exactly the loop described above — while the seat handles the
+gating, budget metering, and audit around it. A **self-hoster** who explicitly wants
+server-side generation can bind their own provider to the `AI_DM_PROVIDER` token,
+leaving the metering/gating/audit unchanged.
+
+See the [roadmap](../reference/roadmap.md) for its status. (The branching **story
+planner** it complements has shipped — see *Story planning* above.)

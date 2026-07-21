@@ -6,7 +6,7 @@
  * Everyone: header, facts card, markdown body, connected quests, notes.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Faction, Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -51,6 +51,10 @@ export default function NpcPage() {
   const [notFound, setNotFound] = useState(false);
 
   const [editing, setEditing] = useState(false);
+  // Propose mode (issue #240): a non-DM member editing this NPC submits the change
+  // to the DM's proposal queue (PATCH ?proposed=true) instead of writing canon directly.
+  const [proposeMode, setProposeMode] = useState(false);
+  const [proposeDone, setProposeDone] = useState(false);
   const [form, setForm] = useState({ name: '', role: '', disposition: '', locationId: '' as string, factionId: '' as string, body: '', dmSecret: '', hidden: false });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -105,7 +109,7 @@ export default function NpcPage() {
     [npc, factions],
   );
 
-  function startEdit() {
+  function fillForm() {
     if (!npc) return;
     setForm({
       name: npc.name,
@@ -118,7 +122,27 @@ export default function NpcPage() {
       hidden: npc.hidden,
     });
     setSaveError(null);
+  }
+
+  function startEdit() {
+    fillForm();
+    setProposeMode(false);
     setEditing(true);
+  }
+
+  // Non-DM members suggest an edit (issue #240): same form, but the fields that
+  // aren't theirs to touch (DM secret, hidden) are omitted, and Save routes the
+  // change through the proposal queue.
+  function startPropose() {
+    fillForm();
+    setProposeDone(false);
+    setProposeMode(true);
+    setEditing(true);
+  }
+
+  function cancelEdit() {
+    setEditing(false);
+    setProposeMode(false);
   }
 
   // Entity-level secrecy (issue #42): reveal/hide the whole NPC from players.
@@ -141,22 +165,37 @@ export default function NpcPage() {
     setSaveError(null);
     setConflict(false);
     try {
-      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, {
-        name: form.name.trim(),
-        role: form.role.trim(),
-        disposition: form.disposition.trim() || 'neutral',
-        locationId: form.locationId ? Number(form.locationId) : null,
-        factionId: form.factionId ? Number(form.factionId) : null,
-        body: form.body,
-        dmSecret: form.dmSecret,
-        hidden: form.hidden,
-        // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#233) instead
-        // of silently overwriting the other author's work.
-        ...(npc?.updatedAt ? { expectedUpdatedAt: npc.updatedAt } : {}),
-      });
-      setNpc(updated);
-      setEditing(false);
-      setHistoryNonce((n) => n + 1);
+      if (proposeMode) {
+        // Route through the proposal queue — omit DM-only fields (dmSecret, hidden).
+        await api.patch(`${API}/npcs/${id}?proposed=true`, {
+          name: form.name.trim(),
+          role: form.role.trim(),
+          disposition: form.disposition.trim() || 'neutral',
+          locationId: form.locationId ? Number(form.locationId) : null,
+          factionId: form.factionId ? Number(form.factionId) : null,
+          body: form.body,
+        });
+        setEditing(false);
+        setProposeMode(false);
+        setProposeDone(true);
+      } else {
+        const updated = await api.patch<Npc>(`${API}/npcs/${id}`, {
+          name: form.name.trim(),
+          role: form.role.trim(),
+          disposition: form.disposition.trim() || 'neutral',
+          locationId: form.locationId ? Number(form.locationId) : null,
+          factionId: form.factionId ? Number(form.factionId) : null,
+          body: form.body,
+          dmSecret: form.dmSecret,
+          hidden: form.hidden,
+          // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#233) instead
+          // of silently overwriting the other author's work.
+          ...(npc?.updatedAt ? { expectedUpdatedAt: npc.updatedAt } : {}),
+        });
+        setNpc(updated);
+        setEditing(false);
+        setHistoryNonce((n) => n + 1);
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         // Someone saved between our load and this save — keep the draft, block the
@@ -250,6 +289,15 @@ export default function NpcPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      {proposeDone && !editing && (
+        <div className="cf-card p-3 flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
+          <span className="text-slate-200">✅ Suggestion sent to the DM — it's waiting for approval.</span>
+          <Link to={`/c/${cid}/proposals`} className="text-purple-400 hover:underline shrink-0">
+            View my proposals
+          </Link>
+        </div>
+      )}
+
       {!editing && (
         <>
           <div className="flex items-center gap-3 flex-wrap">
@@ -275,6 +323,18 @@ export default function NpcPage() {
                 </Btn>
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
+                </Btn>
+              </div>
+            )}
+            {!isDm && role !== null && (
+              <div className="flex gap-2 ml-auto">
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1.5 text-xs"
+                  onClick={startPropose}
+                  title="Suggest a change to the DM for approval"
+                >
+                  ✎ Suggest an edit
                 </Btn>
               </div>
             )}
@@ -382,6 +442,11 @@ export default function NpcPage() {
 
       {editing && (
         <Card className="space-y-3">
+          {proposeMode && (
+            <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
+              💡 You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
+            </p>
+          )}
           {saveError && <ErrorNote message={saveError} />}
           <div className="grid sm:grid-cols-2 gap-3">
             <div className="space-y-1">
@@ -431,29 +496,37 @@ export default function NpcPage() {
             <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
             <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
-            <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
-          </div>
-          <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
-            <input type="checkbox" checked={form.hidden} onChange={(e) => setForm({ ...form, hidden: e.target.checked })} />
-            <span>🙈 Hidden from players (whole NPC, not just the secret)</span>
-          </label>
+          {!proposeMode && (
+            <>
+              <div className="space-y-1">
+                <label className="text-[10px] text-amber-500 font-bold uppercase">🔒 DM secret</label>
+                <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                <input type="checkbox" checked={form.hidden} onChange={(e) => setForm({ ...form, hidden: e.target.checked })} />
+                <span>🙈 Hidden from players (whole NPC, not just the secret)</span>
+              </label>
+            </>
+          )}
           <div className="flex items-center justify-between gap-2">
-            <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
-              {deleting ? 'Deleting…' : 'Delete NPC'}
-            </Btn>
+            {!proposeMode ? (
+              <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
+                {deleting ? 'Deleting…' : 'Delete NPC'}
+              </Btn>
+            ) : (
+              <span />
+            )}
             <div className="flex gap-2">
               {conflict && (
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
                   Reload latest
                 </Btn>
               )}
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={cancelEdit}>
                 Cancel
               </Btn>
               <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !form.name.trim()} onClick={save}>
-                {saving ? 'Saving…' : 'Save'}
+                {proposeMode ? (saving ? 'Suggesting…' : 'Suggest to the DM') : saving ? 'Saving…' : 'Save'}
               </Btn>
             </div>
           </div>

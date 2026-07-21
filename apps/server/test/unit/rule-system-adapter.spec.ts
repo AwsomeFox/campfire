@@ -1,4 +1,4 @@
-import { Dnd5eAdapter, DND5E_ADAPTER_ID, ruleSystemAdapter } from '@campfire/schema';
+import { Dnd5eAdapter, DND5E_ADAPTER_ID, ruleSystemAdapter, CONDITIONS } from '@campfire/schema';
 
 /**
  * Unit tests for the RuleSystemAdapter seam (issue #70). The 5e adapter captures the
@@ -49,8 +49,8 @@ describe('RuleSystemAdapter — 5e initiative derivation', () => {
 });
 
 describe('RuleSystemAdapter — 5e condition vocabulary', () => {
-  it('is exactly the run-session chip list (order preserved)', () => {
-    expect(Dnd5eAdapter.conditions).toEqual(['Poisoned', 'Prone', 'Restrained', 'Stunned', 'Grappled', 'Blinded', 'Frightened']);
+  it('is the canonical schema CONDITIONS list (single source of truth, issue #234)', () => {
+    expect(Dnd5eAdapter.conditions).toEqual(CONDITIONS);
   });
 });
 

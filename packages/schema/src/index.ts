@@ -1048,9 +1048,6 @@ function dnd5eDexScore(abilities: Record<string, unknown> | null | undefined): n
 /** Family id of the built-in D&D 5e adapter (the default). */
 export const DND5E_ADAPTER_ID = 'dnd5e';
 
-/** The 5e condition chips currently offered in the run-session combat UI. */
-const DND5E_CONDITIONS = ['Poisoned', 'Prone', 'Restrained', 'Stunned', 'Grappled', 'Blinded', 'Frightened'] as const;
-
 export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
@@ -1062,7 +1059,10 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     const dex = dnd5eDexScore(abilities);
     return dex === null ? 0 : this.abilityModifier(dex);
   },
-  conditions: DND5E_CONDITIONS,
+  // The combat-UI condition vocabulary is the canonical 5e list (issue #111's single
+  // source of truth), not a separate hand-maintained subset. This is what every 5e
+  // surface — character sheet, encounter tracker, compendium — offers as suggestions.
+  conditions: CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
     return {
