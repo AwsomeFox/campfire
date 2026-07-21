@@ -96,7 +96,7 @@ export default function AiDmCard({ campaignId }: { campaignId: number }) {
   const usagePct = seat.tokenBudget > 0 ? Math.min(100, Math.round((seat.tokensUsed / seat.tokenBudget) * 100)) : 0;
 
   return (
-    <div className="card elev-sm">
+    <div className="card elev-sm" id="ai-dm" style={{ scrollMarginTop: 72 }}>
       <div className="flex items-center gap-2 flex-wrap">
         <span className="card-kicker" style={{ margin: 0 }}>AI Dungeon Master</span>
         <span className={`tag ${MODE_TAG[seat.mode]}`} style={{ fontSize: 10 }}>
@@ -116,10 +116,18 @@ export default function AiDmCard({ campaignId }: { campaignId: number }) {
   );
 }
 
-/** Divider + subsection heading to keep the one card readable. */
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/**
+ * Divider + subsection heading to keep the one card readable. The optional `id` is the
+ * deep-link anchor the onboarding checklist (#343) targets (e.g. #ai-dm-provider);
+ * `scrollMarginTop` keeps the heading clear of the sticky app header when jumped to.
+ */
+function Section({ title, id, children }: { title: string; id?: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-2" style={{ borderTop: '1px solid var(--color-neutral-800, #2a2a2a)', paddingTop: 12, marginTop: 4 }}>
+    <div
+      id={id}
+      className="flex flex-col gap-2"
+      style={{ borderTop: '1px solid var(--color-neutral-800, #2a2a2a)', paddingTop: 12, marginTop: 4, scrollMarginTop: 72 }}
+    >
       <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-neutral-200)' }}>{title}</span>
       {children}
     </div>
@@ -154,7 +162,7 @@ function ModeSection({
   }
 
   return (
-    <Section title="Operating mode">
+    <Section title="Operating mode" id="ai-dm-mode">
       <div className="flex flex-col gap-2">
         {MODES.map((m) => (
           <label
@@ -247,7 +255,7 @@ function ProviderSection({
   }
 
   return (
-    <Section title="Provider & model">
+    <Section title="Provider & model" id="ai-dm-provider">
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         {provider
           ? provider.configured
@@ -361,7 +369,7 @@ function BudgetSection({
   }
 
   return (
-    <Section title="Budget & usage">
+    <Section title="Budget & usage" id="ai-dm-budget">
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         A hard token cap. Turns stop once it's reached — a positive budget is required to run Driver mode.
       </p>
