@@ -14,6 +14,9 @@ export const campaigns = sqliteTable('campaigns', {
   status: text('status').notNull().default('active'),
   currentLocationId: integer('current_location_id'),
   dangerLevel: text('danger_level').notNull().default('low'),
+  // When true, only the DM may award XP / level up characters (issue #270). Added in
+  // older DBs via migrateCampaignsTableForDmControlsProgression() — see db/db.module.ts.
+  dmControlsProgression: integer('dm_controls_progression', { mode: 'boolean' }).notNull().default(false),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.

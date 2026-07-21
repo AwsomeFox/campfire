@@ -119,6 +119,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     status: row.status as Campaign['status'],
     currentLocationId: row.currentLocationId,
     dangerLevel: row.dangerLevel as Campaign['dangerLevel'],
+    dmControlsProgression: row.dmControlsProgression,
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
@@ -246,6 +247,7 @@ export class CampaignsService {
         status: input.status ?? 'active',
         currentLocationId: input.currentLocationId ?? null,
         dangerLevel: input.dangerLevel ?? 'low',
+        dmControlsProgression: input.dmControlsProgression ?? false,
         sessionCount: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
@@ -376,6 +378,7 @@ export class CampaignsService {
           status: 'active',
           currentLocationId: null, // remapped below (full mode only)
           dangerLevel: source.dangerLevel,
+          dmControlsProgression: source.dmControlsProgression,
           sessionCount: template ? 0 : source.sessionCount,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // attachments (on-disk files) are not cloned
