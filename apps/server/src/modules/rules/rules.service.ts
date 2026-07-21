@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, sql } from 'drizzle-orm';
 import {
+  PF2E_PACK_SLUG,
   isOpenLicense,
   type RuleEntry,
   type RuleEntryType,
@@ -24,6 +25,15 @@ import {
   type ImportedEntry,
   type Open5eSection,
 } from './open5e-importer';
+import {
+  ALL_PF2E_SECTIONS,
+  MAX_ENTRIES_PER_SECTION as PF2E_MAX_ENTRIES_PER_SECTION,
+  PF2E_DEFAULT_BASE_URL,
+  PF2E_DEFAULT_LICENSE,
+  PF2E_PACK_NAME,
+  fetchPf2eSection,
+  type Pf2eSection,
+} from './pf2e-importer';
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -62,6 +72,7 @@ function entryToDomain(row: typeof ruleEntries.$inferSelect): RuleEntry {
     body: row.body,
     dataJson: row.dataJson,
     source: row.source ?? '',
+    iconSlug: row.iconSlug ?? '',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -128,7 +139,7 @@ export class RulesService {
     return { ...job, progress: job.progress.map((p) => ({ ...p })) };
   }
 
-  private newJob(source: 'open5e' | 'upload', sections: string[]): RulePackInstallJob {
+  private newJob(source: 'open5e' | 'pf2e' | 'upload', sections: string[]): RulePackInstallJob {
     this.pruneOldJobs();
     const ts = nowIso();
     const job: RulePackInstallJob = {
@@ -237,6 +248,25 @@ export class RulesService {
   }
 
   /**
+   * Enqueue a Pathfinder 2e install as a background job (issues #295 + #20). Same shape as
+   * the Open5e enqueue — returns a 'pending' snapshot immediately and runs the paginated
+   * fetch + insert in runJob() — but routes through the PF2e importer and installs under
+   * the `pf2e-srd` pack slug, which the PF2e RuleSystemAdapter is registered against.
+   */
+  enqueuePf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    // The shared RulePackInstall.sections enum is Open5e-shaped (spells/monsters/…); PF2e
+    // has its own section vocabulary (creatures/equipment/ancestries/…), so a PF2e install
+    // always imports all PF2e sections rather than honouring the 5e-named filter.
+    const job = this.newJob('pf2e', ALL_PF2E_SECTIONS);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromPf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
    * Enqueue a generic uploaded-dataset install as a background job (issues #19 + #20).
    * License open-ness is validated synchronously here so a bad-license upload gets a
    * clean 400 at the POST rather than a failed job the caller must poll to discover.
@@ -274,6 +304,29 @@ export class RulesService {
 
   async getEntryOrThrow(id: number): Promise<RuleEntry> {
     const [row] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).limit(1);
+    if (!row) throw new NotFoundException(`Rule entry ${id} not found`);
+    return entryToDomain(row);
+  }
+
+  /**
+   * DM/admin-set edits to an imported entry (issue #305). Today only the manual icon
+   * override is editable — a DM picks a bundled game-icons.net slug to show in the
+   * compendium list + reader, or clears it ('') to fall back to the type-derived
+   * default. The slug is stored opaquely (an unknown one just renders as the default),
+   * so no catalog validation is needed server-side. Bumps updatedAt so the reader's
+   * optimistic state stays in sync.
+   */
+  async updateEntry(id: number, patch: { iconSlug?: string }): Promise<RuleEntry> {
+    const set: Partial<typeof ruleEntries.$inferInsert> = {};
+    if (patch.iconSlug !== undefined) set.iconSlug = patch.iconSlug;
+    if (Object.keys(set).length === 0) return this.getEntryOrThrow(id);
+
+    set.updatedAt = nowIso();
+    const [row] = await this.db
+      .update(ruleEntries)
+      .set(set)
+      .where(eq(ruleEntries.id, id))
+      .returning();
     if (!row) throw new NotFoundException(`Rule entry ${id} not found`);
     return entryToDomain(row);
   }
@@ -340,6 +393,47 @@ export class RulesService {
   }
 
   /**
+   * Installs a Pathfinder 2e rule pack from the Archives of Nethys open dataset (issue
+   * #295), or incrementally adds missing entries if `pf2e-srd` is already installed. This
+   * is the deliberate mirror of installFromOpen5e: fetch each PF2e section concurrently,
+   * report per-section progress, then reuse the same persistPack path (multi-pack
+   * coexistence, incremental add, and the concurrent-install race guard all apply). The
+   * pack installs under PF2E_PACK_SLUG, which the PF2e RuleSystemAdapter is registered
+   * against — so a campaign selecting this pack routes its combat math through PF2e.
+   */
+  async installFromPf2e(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? PF2E_DEFAULT_BASE_URL;
+    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchPf2eSection(baseUrl, s);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Pathfinder 2e import returned no entries for the requested sections');
+    }
+
+    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
+    const license = licenses.size > 0 ? [...licenses].join(', ') : PF2E_DEFAULT_LICENSE;
+
+    return this.persistPack(
+      { slug: PF2E_PACK_SLUG, name: PF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
+      allEntries,
+      user,
+      `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
    * Installs a generic uploaded rule pack (issue #19): an open-licensed JSON dataset
    * for any system (Pathfinder 2e ORC, other OGL/CC content, homebrew), not just
    * Open5e. Reuses the same persistence path as the Open5e importer, so multi-pack
@@ -374,6 +468,7 @@ export class RulesService {
         dataJson: e.dataJson ?? null,
         license: e.license ?? input.pack.license,
         source: e.source ?? input.pack.name,
+        iconSlug: e.iconSlug ?? '',
       }));
 
     // Report per-type import counts for progress (uploads have no network fetch, so
@@ -445,6 +540,7 @@ export class RulesService {
               body: entry.body,
               dataJson: entry.dataJson,
               source: entry.source,
+              iconSlug: entry.iconSlug ?? '',
               createdAt: ts,
               updatedAt: ts,
             })

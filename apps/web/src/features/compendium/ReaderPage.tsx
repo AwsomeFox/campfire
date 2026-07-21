@@ -11,10 +11,14 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { RuleEntry, RulePack } from '@campfire/schema';
-import { Card, ErrorNote, Skeleton } from '../../components/ui';
+import { Card, ErrorNote, Skeleton, Btn } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
+import { GameIcon } from '../../components/GameIcon';
+import { IconPicker } from '../../components/IconPicker';
+import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign } from '../../app/CampaignContext';
+import { useAuth } from '../../app/auth';
 
 export default function ReaderPage() {
   const { campaignId, entryId } = useParams<{ campaignId: string; entryId: string }>();
@@ -23,11 +27,33 @@ export default function ReaderPage() {
   // Resolve the statblock adapter from the active campaign's rule system (issue #234),
   // not the 5e default baked in at the call site.
   const ruleSystem = useCampaign(Number.isFinite(id) ? id : undefined)?.ruleSystem ?? null;
+  // Only the DM (of this campaign) may set an entry's icon override (issue #305) — the
+  // PATCH is server-side gated to admin/DM too; this just hides the control for players.
+  const { roleIn } = useAuth();
+  const isDm = Number.isFinite(id) && roleIn(id) === 'dm';
 
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [pack, setPack] = useState<RulePack | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [pickingIcon, setPickingIcon] = useState(false);
+  const [savingIcon, setSavingIcon] = useState(false);
+  const [iconError, setIconError] = useState<string | null>(null);
+
+  async function saveIcon(slug: string) {
+    if (!entry) return;
+    setPickingIcon(false);
+    setSavingIcon(true);
+    setIconError(null);
+    try {
+      const updated = await api.patch<RuleEntry>(`${API}/rules/entries/${entry.id}`, { iconSlug: slug });
+      setEntry(updated);
+    } catch (err) {
+      setIconError(err instanceof ApiError ? err.message : "Couldn't update the icon.");
+    } finally {
+      setSavingIcon(false);
+    }
+  }
 
   useEffect(() => {
     if (!entryId) return;
@@ -87,10 +113,31 @@ export default function ReaderPage() {
         <ErrorNote message="Entry not found." />
       ) : (
         <div className="card elev-sm" style={{ minWidth: 0, padding: '22px 26px', gap: 12 }}>
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            {/* Statblock-title glyph (issue #305): the DM's override, else the
+                type/school-derived default. Decorative — the heading names the entry. */}
+            <span
+              aria-hidden="true"
+              style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 34, color: 'var(--color-accent)' }}
+            >
+              <GameIcon slug={ruleEntryIconSlug(entry)} size={30} />
+            </span>
             <h3 style={{ margin: 0, fontFamily: 'var(--font-heading)' }}>{entry.name}</h3>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
+            {isDm && (
+              <span className="flex items-center gap-1.5" style={{ marginLeft: 'auto' }}>
+                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={savingIcon} onClick={() => setPickingIcon(true)}>
+                  {savingIcon ? 'Saving…' : entry.iconSlug ? 'Change icon' : 'Set icon'}
+                </Btn>
+                {entry.iconSlug && (
+                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={savingIcon} onClick={() => saveIcon('')}>
+                    Reset
+                  </Btn>
+                )}
+              </span>
+            )}
           </div>
+          {iconError && <ErrorNote message={iconError} />}
           {/* Monster entries carry an empty `body` — their stats live in `dataJson`
               (issue #142). Render the structured statblock when there's no prose body
               and the JSON has renderable fields; otherwise fall back to the markdown
@@ -110,6 +157,9 @@ export default function ReaderPage() {
             {pack?.license ? ` · ${pack.license}` : ''}.
           </p>
         </div>
+      )}
+      {pickingIcon && entry && (
+        <IconPicker value={entry.iconSlug} onSelect={saveIcon} onClose={() => setPickingIcon(false)} />
       )}
     </div>
   );

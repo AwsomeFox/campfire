@@ -581,6 +581,10 @@ export const ruleEntries = sqliteTable('rule_entries', {
   // different rulebooks are distinguishable and attributable (issue #143). Nullable-as-''
   // in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   source: text('source').notNull().default(''),
+  // Optional manual icon override (issue #305): slug of a bundled game-icons.net entity
+  // icon, or '' to let the web app derive a default from type/dataJson. Nullable/absent
+  // in older DBs pre-migration; see db/db.module.ts migrateRuleEntriesTableForIconSlug().
+  iconSlug: text('icon_slug').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -714,6 +718,7 @@ export const inventoryItems = sqliteTable('inventory_items', {
   name: text('name').notNull(),
   qty: integer('qty').notNull().default(1),
   notes: text('notes').notNull().default(''),
+  iconSlug: text('icon_slug').notNull().default(''), // optional game-icons override (issue #307)
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

@@ -494,6 +494,7 @@ CREATE TABLE IF NOT EXISTS rule_entries (
   body TEXT NOT NULL DEFAULT '',
   data_json TEXT,
   source TEXT NOT NULL DEFAULT '',
+  icon_slug TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -590,6 +591,7 @@ CREATE TABLE IF NOT EXISTS inventory_items (
   name TEXT NOT NULL,
   qty INTEGER NOT NULL DEFAULT 1,
   notes TEXT NOT NULL DEFAULT '',
+  icon_slug TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
