@@ -10,6 +10,8 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { RuleEntry, RuleEntryType, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
+import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 
 const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
@@ -226,8 +228,17 @@ export default function CompendiumPage() {
                   key={entry.id}
                   onClick={() => navigate(`/c/${id}/compendium/${entry.id}`)}
                   className="card elev-sm text-left"
-                  style={{ gap: 8, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)' }}
+                  style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)' }}
                 >
+                  {/* Type/school/monster glyph (issue #305): the DM's override if set,
+                      else derived from the entry's type + dataJson. Decorative — the
+                      name beside it carries the label. */}
+                  <span
+                    aria-hidden="true"
+                    style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, color: 'var(--color-accent)' }}
+                  >
+                    <GameIcon slug={ruleEntryIconSlug(entry)} size={22} />
+                  </span>
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>
                       {entry.name}

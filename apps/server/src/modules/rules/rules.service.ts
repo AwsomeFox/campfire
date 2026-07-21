@@ -72,6 +72,7 @@ function entryToDomain(row: typeof ruleEntries.$inferSelect): RuleEntry {
     body: row.body,
     dataJson: row.dataJson,
     source: row.source ?? '',
+    iconSlug: row.iconSlug ?? '',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -308,6 +309,29 @@ export class RulesService {
   }
 
   /**
+   * DM/admin-set edits to an imported entry (issue #305). Today only the manual icon
+   * override is editable — a DM picks a bundled game-icons.net slug to show in the
+   * compendium list + reader, or clears it ('') to fall back to the type-derived
+   * default. The slug is stored opaquely (an unknown one just renders as the default),
+   * so no catalog validation is needed server-side. Bumps updatedAt so the reader's
+   * optimistic state stays in sync.
+   */
+  async updateEntry(id: number, patch: { iconSlug?: string }): Promise<RuleEntry> {
+    const set: Partial<typeof ruleEntries.$inferInsert> = {};
+    if (patch.iconSlug !== undefined) set.iconSlug = patch.iconSlug;
+    if (Object.keys(set).length === 0) return this.getEntryOrThrow(id);
+
+    set.updatedAt = nowIso();
+    const [row] = await this.db
+      .update(ruleEntries)
+      .set(set)
+      .where(eq(ruleEntries.id, id))
+      .returning();
+    if (!row) throw new NotFoundException(`Rule entry ${id} not found`);
+    return entryToDomain(row);
+  }
+
+  /**
    * Installs a rule pack from Open5e, or — if "open5e-srd" is already installed —
    * incrementally adds whatever entries from the requested sections aren't present yet
    * (round-2 finding #2). Dedupe key is (slug, type): an entry already in the pack with
@@ -444,6 +468,7 @@ export class RulesService {
         dataJson: e.dataJson ?? null,
         license: e.license ?? input.pack.license,
         source: e.source ?? input.pack.name,
+        iconSlug: e.iconSlug ?? '',
       }));
 
     // Report per-type import counts for progress (uploads have no network fetch, so
@@ -515,6 +540,7 @@ export class RulesService {
               body: entry.body,
               dataJson: entry.dataJson,
               source: entry.source,
+              iconSlug: entry.iconSlug ?? '',
               createdAt: ts,
               updatedAt: ts,
             })
