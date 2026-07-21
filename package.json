@@ -1,7 +1,7 @@
 {
   "name": "campfire",
   "private": true,
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Self-hosted, AI-operable D&D campaign tracker",
   "license": "MIT",
   "engines": { "node": ">=22" },
