@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { NpcCreate, NpcUpdate } from '@campfire/schema';
+import { NpcCreate, NpcUpdate, ExpectedUpdatedAt } from '@campfire/schema';
 
 // .strict() at the DTO layer only — the shared NpcCreate/NpcUpdate exports in
 // @campfire/schema stay lenient (reused verbatim by mcp-tools.ts and
@@ -9,4 +9,5 @@ import { NpcCreate, NpcUpdate } from '@campfire/schema';
 // POST .../npcs?proposed=true with a misnamed field like `{ description: ... }`
 // (the real column is `body`) used to return 202 and store an emptier-than-intended NPC.
 export class NpcCreateDto extends createZodDto(NpcCreate.strict()) {}
-export class NpcUpdateDto extends createZodDto(NpcUpdate.strict()) {}
+// expectedUpdatedAt (#157) added here, not in the shared NpcUpdate — see sessions.dto.ts.
+export class NpcUpdateDto extends createZodDto(NpcUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}

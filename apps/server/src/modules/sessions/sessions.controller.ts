@@ -112,7 +112,9 @@ export class SessionsController {
       return { proposal };
     }
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.sessions.update(id, body, user, role);
+    // Split off the optimistic-concurrency guard (#157) from the entity fields.
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.sessions.update(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Delete(':id')

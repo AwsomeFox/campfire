@@ -115,7 +115,9 @@ export class NotesController {
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: NoteUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
-    return this.notes.update(id, body, user, role);
+    // Split off the optimistic-concurrency guard (#157) from the entity fields.
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.notes.update(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Delete(':id')

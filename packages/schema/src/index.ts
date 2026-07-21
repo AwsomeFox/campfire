@@ -36,6 +36,25 @@ export const PageParams = z.object({
 });
 export type PageParams = z.infer<typeof PageParams>;
 
+// ---------- optimistic concurrency (issue #157) ----------
+// The `updatedAt` timestamp a client last read for an entity, echoed back on a
+// PATCH/update as a compare-and-swap guard. When provided and it no longer matches
+// the row's current `updatedAt` (someone else — a co-DM, or a connected AI over MCP
+// — saved in the meantime), the write is rejected with 409 Conflict instead of blindly
+// overwriting their edit. Omitted => unconditional write (unchanged back-compat). Kept
+// OUT of the entity Create/Update schemas on purpose: it's a request-time concern, not
+// a stored field, and must never leak into a proposal payload — the server DTO layer and
+// the MCP update tools attach it explicitly.
+export const ExpectedUpdatedAt = z
+  .string()
+  .max(64)
+  .optional()
+  .describe(
+    'Optimistic-concurrency guard: the `updatedAt` timestamp you last read for this entity. If provided and it no ' +
+      'longer matches the stored row (someone else saved since you loaded it), the update is rejected with 409 ' +
+      'Conflict instead of silently overwriting their edit. Omit to force an unconditional write.',
+  );
+
 // ---------- campaign ----------
 export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
 
@@ -771,6 +790,34 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
+// ---------- entity revisions (issue #157) ----------
+// A revision-history layer for the prose entities most at risk of a blind
+// last-write-wins clobber (a co-DM polishing a recap while a connected AI saves its
+// own edit). On every committed prose update the server snapshots the PRIOR content
+// here; the history can then be listed and any prior snapshot RESTORED (re-applied as
+// a new update, itself recorded). Scoped to the DM-authored world-building prose whose
+// edit path is uniformly dm-gated — sessions (recap), quests/npcs/locations (body).
+// Notes get optimistic concurrency (ExpectedUpdatedAt) but not this history layer:
+// their per-note visibility/author-only-edit model makes a generic revision endpoint a
+// redaction hazard.
+export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location']);
+export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
+
+export const EntityRevision = z.object({
+  id: Id,
+  campaignId: Id,
+  entityType: RevisionEntityType,
+  entityId: Id,
+  // The snapshotted PRIOR prose, keyed by the entity's prose field ('recap' for a
+  // session, 'body' for quest/npc/location). A plain string map so the shape is uniform
+  // across entity types and the web can render whichever key is present.
+  snapshot: z.record(z.string(), z.string()).default({}),
+  authorUserId: z.string().max(120).default(''),
+  authorName: z.string().max(120).default(''),
+  createdAt: IsoDate,
+});
+export type EntityRevision = z.infer<typeof EntityRevision>;
+
 // ---------- comments (threaded discussion / play-by-post — issue #123) ----------
 // A first-class DISCUSSION layer, distinct from private-or-shared `notes`: every
 // comment is anchored to a campaign entity (session/recap, quest, npc, location,
@@ -879,12 +926,137 @@ export const RuleEntry = z.object({
 });
 export type RuleEntry = z.infer<typeof RuleEntry>;
 
+/**
+ * Importer registry for the /rules/packs/install endpoint (issue #70). Was a bare
+ * `z.literal('open5e')`, welding the install path to a single importer. Widened to a
+ * small enum so a second importer can be added without rewriting the schema — 'open5e'
+ * stays the built-in API importer, 'other' is a placeholder for a future/generic
+ * importer. The existing Open5e path is unchanged: callers still pass `source: 'open5e'`.
+ * (Generic JSON uploads take the separate RulePackUpload path, `source: 'upload'`.)
+ */
+export const RulePackInstallSource = z.enum(['open5e', 'other']);
+export type RulePackInstallSource = z.infer<typeof RulePackInstallSource>;
+
 export const RulePackInstall = z.object({
-  source: z.literal('open5e'),
+  source: RulePackInstallSource,
   url: z.string().max(500).optional(), // override API base, mainly for tests (fake server)
   sections: z.array(z.enum(['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'])).optional(), // default: all
 });
 export type RulePackInstall = z.infer<typeof RulePackInstall>;
+
+// ---------- rule-system adapters (issue #70) ----------
+// The combat/statblock layers used to bake D&D-5e rules in at every call site: the
+// ability-modifier formula floor((score-10)/2), DEX-derived initiative rolled on a d20,
+// a hardcoded condition list in the web UI, and the monster-statblock field mapping.
+// Adding a second system (Pathfinder, a d100 game) would have meant editing each layer.
+//
+// `RuleSystemAdapter` is the seam that captures those decisions behind one interface,
+// resolved from `campaign.ruleSystem` via `ruleSystemAdapter()`. 5e is the first and
+// default implementation (`Dnd5eAdapter`), so every existing campaign — whatever its
+// rule-pack slug — resolves to the exact same behavior it has today. A future system is
+// one adapter object registered in ADAPTERS, not a sweep across the combat code.
+
+/** Raw statblock fields picked out of a monster rule-entry's `dataJson` (pre-formatting). */
+export interface MonsterStatblockData {
+  size: unknown;
+  creatureType: unknown;
+  challengeRating: unknown;
+  armorClass: unknown;
+  hitPoints: unknown;
+  speed: unknown;
+  /** The ability-score sub-object (5e: `{ strength, dexterity, … }`), or undefined. */
+  abilityScores: Record<string, unknown> | undefined;
+  specialAbilities: unknown;
+  actions: unknown;
+}
+
+export interface RuleSystemAdapter {
+  /** Stable family id for this adapter (not a pack slug), e.g. 'dnd5e'. */
+  readonly id: string;
+  /** Human-readable label. */
+  readonly label: string;
+  /** Ability-score → modifier (5e: floor((score - 10) / 2)). */
+  abilityModifier(score: number): number;
+  /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
+  readonly initiativeDie: number;
+  /**
+   * Derive a combatant's initiative modifier from an ability-score map (5e: the DEX
+   * modifier). Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster
+   * `abilityScores` object (`{ dexterity: 14 }`); returns 0 when the governing score is
+   * absent or non-numeric.
+   */
+  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number;
+  /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
+  readonly conditions: readonly string[];
+  /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
+  mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
+  /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
+  monsterHitPoints(data: Record<string, unknown>): number | null;
+}
+
+/** Read the governing (DEX) score from either a canonical or raw ability map, if numeric. */
+function dnd5eDexScore(abilities: Record<string, unknown> | null | undefined): number | null {
+  if (!abilities) return null;
+  const raw = abilities.DEX ?? abilities.dexterity ?? abilities.dex;
+  return typeof raw === 'number' ? raw : null;
+}
+
+/** Family id of the built-in D&D 5e adapter (the default). */
+export const DND5E_ADAPTER_ID = 'dnd5e';
+
+/** The 5e condition chips currently offered in the run-session combat UI. */
+const DND5E_CONDITIONS = ['Poisoned', 'Prone', 'Restrained', 'Stunned', 'Grappled', 'Blinded', 'Frightened'] as const;
+
+export const Dnd5eAdapter: RuleSystemAdapter = {
+  id: DND5E_ADAPTER_ID,
+  label: 'D&D 5e',
+  abilityModifier(score: number): number {
+    return Math.floor((score - 10) / 2);
+  },
+  initiativeDie: 20,
+  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+    const dex = dnd5eDexScore(abilities);
+    return dex === null ? 0 : this.abilityModifier(dex);
+  },
+  conditions: DND5E_CONDITIONS,
+  mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
+    const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
+    return {
+      size: d.size,
+      creatureType: d.type ?? d.creatureType,
+      challengeRating: d.challengeRating ?? d.challenge_rating ?? d.cr,
+      armorClass: d.armorClass ?? d.armor_class,
+      hitPoints: d.hitPoints ?? d.hit_points ?? d.hp,
+      speed: d.speed,
+      abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      specialAbilities: d.specialAbilities ?? d.special_abilities,
+      actions: d.actions,
+    };
+  },
+  monsterHitPoints(d: Record<string, unknown>): number | null {
+    const hp = d.hitPoints ?? d.hit_points ?? d.hp;
+    return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
+  },
+};
+
+/**
+ * Registry of rule-system adapters, keyed by family id. Only 5e exists today; a second
+ * system is added here (not by editing the combat/statblock code).
+ */
+const ADAPTERS: Record<string, RuleSystemAdapter> = {
+  [DND5E_ADAPTER_ID]: Dnd5eAdapter,
+};
+
+/**
+ * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
+ * (or ''); it is matched against the adapter registry and falls back to the 5e adapter
+ * for anything unrecognized — so every existing campaign keeps 5e behavior. The default
+ * is deliberate, not a stopgap: 5e is the built-in system.
+ */
+export function ruleSystemAdapter(ruleSystem?: string | null): RuleSystemAdapter {
+  if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem];
+  return Dnd5eAdapter;
+}
 
 // ---------- generic uploaded rule packs (issue #19) ----------
 // Any open-licensed rules dataset (Pathfinder 2e ORC, other OGL/CC systems, homebrew

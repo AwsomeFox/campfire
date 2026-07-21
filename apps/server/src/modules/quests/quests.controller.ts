@@ -123,7 +123,10 @@ export class QuestsController {
       return { proposal };
     }
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.quests.update(id, body, user, role);
+    // Split off the optimistic-concurrency guard (#157) from the entity fields — it's a
+    // request-time concern passed separately, never written as a column.
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.quests.update(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Delete(':id')

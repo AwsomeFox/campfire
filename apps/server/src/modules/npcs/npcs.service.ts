@@ -9,6 +9,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -36,6 +37,7 @@ export class NpcsService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   async listForCampaign(campaignId: number, role: Role): Promise<Npc[]> {
@@ -122,9 +124,27 @@ export class NpcsService {
     return redactSecret(toDomain(row), role);
   }
 
-  async update(id: number, input: NpcUpdateInput, user: RequestUser, role: Role): Promise<Npc> {
+  async update(
+    id: number,
+    input: NpcUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<Npc> {
     const existing = await this.getRowOrThrow(id);
+    // Optimistic concurrency (#157): 409 on a stale expectedUpdatedAt before any write.
+    this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
     await this.validateLocationRef(input.locationId, existing.campaignId);
+    // Snapshot the PRIOR body into revision history when it changes (#157).
+    if (input.body !== undefined && input.body !== existing.body) {
+      await this.revisions.record({
+        entityType: 'npc',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.body,
+        user,
+      });
+    }
     const [row] = await this.db
       .update(npcs)
       .set({ ...input, updatedAt: nowIso() })

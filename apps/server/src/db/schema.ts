@@ -321,6 +321,24 @@ export const comments = sqliteTable('comments', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Prose revision history (issue #157) — one row per committed prose update, holding a
+// snapshot of the entity's PRIOR content so a blind last-write-wins overwrite can be
+// listed and restored. entity_type/entity_id is a polymorphic (soft) reference across
+// sessions/quests/npcs/locations — no single FK can cover it, so the owning service's
+// remove() deletes this entity's revisions (mirroring session_attendees cleanup), and
+// campaign_id carries the ON DELETE CASCADE that tears the whole tree down with a
+// campaign. `snapshot` is a JSON string map of the prior prose field(s) (see json.ts).
+export const entityRevisions = sqliteTable('entity_revisions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  entityType: text('entity_type').notNull(), // 'session' | 'quest' | 'npc' | 'location'
+  entityId: integer('entity_id').notNull(),
+  snapshot: text('snapshot').notNull().default('{}'), // JSON: { recap } | { body }
+  authorUserId: text('author_user_id').notNull().default(''),
+  authorName: text('author_name').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
 export const auditLog = sqliteTable('audit_log', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id'),
