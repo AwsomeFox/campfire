@@ -11,7 +11,7 @@ import type { ToolChipVariant } from './toolActivity';
 const SLUG_BY_ICON: Record<string, string> = {
   dices: 'rolling-dices',
   swords: 'crossed-swords',
-  users: 'meeple',
+  users: 'shield',
   map: 'treasure-map',
   'file-plus-2': 'quill-ink',
   'book-open': 'open-book',
