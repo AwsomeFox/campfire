@@ -1216,9 +1216,16 @@ export class EncountersService {
 
   async remove(encounterId: number, user: RequestUser, role: Role): Promise<void> {
     const encounterRow = await this.getRowOrThrow(encounterId);
-    await this.db.delete(combatants).where(eq(combatants.encounterId, encounterId));
-    await this.db.delete(encounterEvents).where(eq(encounterEvents.encounterId, encounterId));
-    await this.db.delete(encounters).where(eq(encounters.id, encounterId));
+    // Delete the combatants, combat-log events, and the encounter row in ONE
+    // synchronous better-sqlite3 transaction (issue #272) — mirrors factions.remove /
+    // encounters.end. On FK-less (pre-#69, migrated) DBs there's no ON DELETE cascade,
+    // so three separately-awaited deletes could half-fail and orphan combatants/events
+    // on a vanished encounter; the transaction makes it all-or-nothing.
+    this.db.transaction((tx) => {
+      tx.delete(combatants).where(eq(combatants.encounterId, encounterId)).run();
+      tx.delete(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).run();
+      tx.delete(encounters).where(eq(encounters.id, encounterId)).run();
+    });
 
     await this.audit.log({
       actor: auditActor(user),

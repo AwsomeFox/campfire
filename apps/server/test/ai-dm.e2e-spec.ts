@@ -133,6 +133,37 @@ describe('ai-dm (e2e)', () => {
     expect(actions).toContain('ai-dm.configure');
   });
 
+  it('metering accumulates across turns (atomic in-SQL increment, issue #272)', async () => {
+    // Start from a known, non-exhausted state: clear counters, generous budget.
+    await request(server).post(`/api/v1/campaigns/${campaignId}/ai-dm/reset`).set(dm).send({});
+    await request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm).send({ enabled: true, tokenBudget: 100_000 });
+
+    const first = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/turn`)
+      .set(dm)
+      .send({ prompt: 'Turn one.', kind: 'narrate' });
+    expect(first.status).toBe(201);
+    const afterFirst = first.body.seat.tokensUsed;
+    expect(afterFirst).toBeGreaterThan(0);
+    expect(first.body.seat.turnCount).toBe(1);
+
+    const second = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/turn`)
+      .set(dm)
+      .send({ prompt: 'Turn two.', kind: 'narrate' });
+    expect(second.status).toBe(201);
+    // tokens_used = tokens_used + n must have COMPOSED, not clobbered: the second turn's
+    // persisted total is the first turn's total plus this turn's cost, and turnCount is 2.
+    expect(second.body.seat.tokensUsed).toBe(afterFirst + second.body.tokensUsed);
+    expect(second.body.seat.turnCount).toBe(2);
+    expect(second.body.budgetRemaining).toBe(100_000 - second.body.seat.tokensUsed);
+
+    // Persisted read agrees with the accumulated total.
+    const seatRes = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm);
+    expect(seatRes.body.tokensUsed).toBe(second.body.seat.tokensUsed);
+    expect(seatRes.body.turnCount).toBe(2);
+  });
+
   it('turn is 403 when the seat is disabled even with the flag on', async () => {
     await request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm).send({ enabled: false });
     const res = await request(server)

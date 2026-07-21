@@ -1,5 +1,5 @@
 import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -210,20 +210,40 @@ export class AiDmService {
       maxTokens,
     });
 
-    // Clamp recorded usage to the budget so the counter never overshoots the cap —
-    // the turn that lands on/over the cap still runs, but the next one 403s (remaining<=0).
     const tokensUsed = Math.max(0, Math.floor(result.tokensUsed));
-    const newTokensUsed = Math.min(seat.tokenBudget, seat.tokensUsed + tokensUsed);
     const ts = nowIso();
 
+    // Meter the turn's token cost atomically (issue #272). The old shape read
+    // seat.tokensUsed, computed newTokensUsed = tokensUsed + n in JS, then wrote it back
+    // across the provider await — two concurrent turns could each read the same
+    // tokensUsed and the second UPDATE would clobber the first, under-counting the budget
+    // (a governance cap must not rely on better-sqlite3 happening to serialize the two
+    // separate statements). We increment IN SQL inside a transaction (mirroring
+    // EncountersService.updateCombatant's read-write-in-one-tx idiom) and capture the
+    // post-update total from the same statement's RETURNING. `MIN(token_budget, ...)`
+    // preserves the old clamp so the counter never overshoots the cap — the turn landing
+    // on/over the cap still runs, but the next one 403s (remaining<=0).
+    let newTokensUsed = 0;
     if (existing) {
-      await this.db
-        .update(aiDmSeats)
-        .set({ tokensUsed: newTokensUsed, turnCount: seat.turnCount + 1, lastTurnAt: ts, updatedAt: ts })
-        .where(eq(aiDmSeats.campaignId, campaignId));
+      this.db.transaction((tx) => {
+        const [updated] = tx
+          .update(aiDmSeats)
+          .set({
+            tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${tokensUsed})`,
+            turnCount: sql`${aiDmSeats.turnCount} + 1`,
+            lastTurnAt: ts,
+            updatedAt: ts,
+          })
+          .where(eq(aiDmSeats.campaignId, campaignId))
+          .returning()
+          .all();
+        newTokensUsed = updated.tokensUsed;
+      });
     } else {
       // enabled seat with no persisted row is impossible (defaultSeat.enabled=false),
-      // but guard anyway so an enabled-in-memory seat never silently drops metering.
+      // but guard anyway so an enabled-in-memory seat never silently drops metering. A
+      // single INSERT is atomic on its own, so no read-modify-write race applies here.
+      newTokensUsed = Math.min(seat.tokenBudget, seat.tokensUsed + tokensUsed);
       await this.db.insert(aiDmSeats).values({
         campaignId,
         enabled: seat.enabled,
