@@ -13,6 +13,7 @@ import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
+import { Markdown } from '../../components/Markdown';
 import { getIcon } from '../../lib/icons';
 import { itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
 
@@ -387,7 +388,7 @@ function ItemRow({
   const hasOverride = !!(item.iconSlug && item.iconSlug.trim());
 
   return (
-    <li className="py-2 flex items-start gap-3">
+    <li className="py-2 flex flex-wrap items-start gap-x-3 gap-y-2">
       {editable ? (
         <button
           type="button"
@@ -409,11 +410,11 @@ function ItemRow({
           {item.name}
           {item.qty !== 1 && <span className="text-slate-500 font-normal"> ×{item.qty}</span>}
         </p>
-        {item.notes && <p className="text-[12px] text-slate-500">{item.notes}</p>}
+        {item.notes && <Markdown className="!text-[12px] !text-slate-500">{item.notes}</Markdown>}
         {error && <p className="text-[12px] text-rose-400">{error}</p>}
       </div>
       {editable && (
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-1.5 shrink-0 w-full sm:w-auto sm:ml-auto justify-end">
           <Btn
             ghost
             className="!min-h-0 !py-0.5 !px-2 text-xs"

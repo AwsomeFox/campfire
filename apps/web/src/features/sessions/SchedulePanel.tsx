@@ -11,6 +11,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { formatDateTime } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
 
@@ -206,7 +207,7 @@ function ScheduleItem({
           <span className="text-muted text-xs ml-auto">{formatDuration(schedule.durationMinutes)}</span>
         </div>
         {schedule.location && <p className="flex items-center gap-1 text-muted text-xs m-0"><GameIcon slug="position-marker" size={11} /> {schedule.location}</p>}
-        {schedule.notes && <p className="text-sm m-0" style={{ color: 'var(--color-text)' }}>{schedule.notes}</p>}
+        {schedule.notes && <Markdown className="!text-sm !text-[color:var(--color-text)]">{schedule.notes}</Markdown>}
 
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Can you make it?</span>

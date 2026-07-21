@@ -5,6 +5,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { Chip, TextInput, Btn, ErrorNote, EmptyState, type ChipVariant } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
+import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from '../notes/EntityPicker';
 
 const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; label: string }> = {
@@ -126,7 +127,7 @@ export function NotesQuickRail({
                 'linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent) no-repeat top / 100% 1px',
             }}
           >
-            <div style={{ fontSize: 13, color: 'var(--color-neutral-200)' }}>{n.body}</div>
+            <Markdown className="!text-[13px] !text-[color:var(--color-neutral-200)]">{n.body}</Markdown>
             <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center' }}>
               <Chip variant={visMeta[n.visibility].chip}><span className="inline-flex items-center gap-1"><GameIcon slug={visMeta[n.visibility].slug} size={12} /> {visMeta[n.visibility].label}</span></Chip>
               <span className="text-muted" style={{ fontSize: 10.5 }}>

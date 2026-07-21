@@ -18,7 +18,7 @@
  */
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, DiceRoll, SkillRank } from '@campfire/schema';
+import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpForLevel, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
@@ -29,205 +29,24 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
-import { useAnnounce } from '../../components/Announcer';
-import { RolledDice } from '../dice/RolledDice';
 import { initials } from './avatar';
 import { GameIcon } from '../../components/GameIcon';
-
-const ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
-type Ability = (typeof ABILITY_KEYS)[number];
-
-/** SRD 5e skill list with governing abilities. */
-const SKILLS: ReadonlyArray<{ name: string; ability: Ability }> = [
-  { name: 'Acrobatics', ability: 'DEX' },
-  { name: 'Animal Handling', ability: 'WIS' },
-  { name: 'Arcana', ability: 'INT' },
-  { name: 'Athletics', ability: 'STR' },
-  { name: 'Deception', ability: 'CHA' },
-  { name: 'History', ability: 'INT' },
-  { name: 'Insight', ability: 'WIS' },
-  { name: 'Intimidation', ability: 'CHA' },
-  { name: 'Investigation', ability: 'INT' },
-  { name: 'Medicine', ability: 'WIS' },
-  { name: 'Nature', ability: 'INT' },
-  { name: 'Perception', ability: 'WIS' },
-  { name: 'Performance', ability: 'CHA' },
-  { name: 'Persuasion', ability: 'CHA' },
-  { name: 'Religion', ability: 'INT' },
-  { name: 'Sleight of Hand', ability: 'DEX' },
-  { name: 'Stealth', ability: 'DEX' },
-  { name: 'Survival', ability: 'WIS' },
-];
-
-const SPELL_LEVELS = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const;
-
-/** 5e proficiency bonus by level: +2 at 1-4 up to +6 at 17-20. */
-function profBonus(level: number): number {
-  return 2 + Math.floor((Math.max(1, level) - 1) / 4);
-}
-
-/**
- * Read an ability score tolerantly. `stats` is a free-keyed record, so a character
- * saved with lowercase keys (`{ str: 16 }` — schema-valid, and what some API/MCP
- * writers produce) would miss a canonical-uppercase lookup and read 10 (issue #48).
- * The server now folds keys to uppercase, but this guards data that reaches the
- * client by any other path. Defaults to 10 when the ability is absent.
- */
-function abilityScore(character: Character, ability: Ability): number {
-  const stats = character.stats;
-  return stats[ability] ?? stats[ability.toLowerCase()] ?? 10;
-}
-
-// Ability modifier comes from the active campaign's rule-system adapter (issue #234),
-// not the 5e formula hardcoded here — so a future non-5e adapter's math takes effect.
-// Default (5e) yields floor((score - 10) / 2), unchanged.
-function modOf(adapter: RuleSystemAdapter, character: Character, ability: Ability): number {
-  return adapter.abilityModifier(abilityScore(character, ability));
-}
-
-function signed(n: number): string {
-  return n >= 0 ? `+${n}` : `${n}`;
-}
-
-// ---------- click-to-roll (issue #258) ----------
-// The sheet already knows every number (Athletics +6, Longsword +5 / 1d8+3); these
-// helpers turn those into the SAME restricted dice expressions the Dice tray posts,
-// so a sheet roll lands in the shared campaign feed (POST /campaigns/:id/roll) with
-// no re-typing. Advantage/disadvantage reuse the tray's 2d20kh1 / 2d20kl1 keep-die
-// expressions (issue #130) — a d20 roll can be taken with advantage (shift-click) or
-// disadvantage (alt/ctrl-click); damage rolls ignore the modifier keys.
-
-type Adv = 'flat' | 'adv' | 'dis';
-
-/** How a modifier-key click maps to advantage/disadvantage on a d20 roll. */
-function advFromEvent(e: MouseEvent): Adv {
-  if (e.shiftKey) return 'adv';
-  if (e.altKey || e.ctrlKey || e.metaKey) return 'dis';
-  return 'flat';
-}
-
-/** d20 check/attack expression for a numeric modifier, honouring advantage/disadvantage. */
-function d20Expr(mod: number, adv: Adv): string {
-  const tail = mod === 0 ? '' : signed(mod);
-  if (adv === 'adv') return `2d20kh1${tail}`;
-  if (adv === 'dis') return `2d20kl1${tail}`;
-  return `1d20${tail}`;
-}
-
-/**
- * Turn a free-text to-hit string ("+5", "5", "-1") into a d20 attack expression.
- * Returns null when there's no number to roll.
- */
-function toHitExpr(toHit: string, adv: Adv): string | null {
-  const m = toHit.match(/[+-]?\s*\d{1,3}/);
-  if (!m) return null;
-  const n = parseInt(m[0].replace(/\s+/g, ''), 10);
-  if (!Number.isFinite(n)) return null;
-  return d20Expr(n, adv);
-}
-
-/**
- * Extract the first "NdM(+/-K)" dice group from a free-text damage string
- * ("1d8+3 slashing" -> "1d8+3", "2d6 fire" -> "2d6"). Returns null when the damage
- * field carries no dice (e.g. a flat "5 fire"), matching the server's single-group
- * expression grammar.
- */
-function damageExpr(damage: string): string | null {
-  const m = damage.match(/(\d{0,2})\s*d\s*(\d{1,3})\s*([+-]\s*\d{1,3})?/i);
-  if (!m) return null;
-  const count = m[1] ? parseInt(m[1], 10) : 1;
-  const sides = parseInt(m[2], 10);
-  if (!count || !sides) return null;
-  const mod = m[3] ? m[3].replace(/\s+/g, '') : '';
-  return `${count}d${sides}${mod}`;
-}
-
-export interface Roller {
-  /** POST the expression to the shared dice log with a character-attributed label. */
-  roll: (expr: string, label: string) => Promise<DiceRoll | null>;
-  rolling: boolean;
-}
-
-/**
- * Posts sheet rolls to the exact endpoint the Dice tray / dashboard Dice card use
- * (POST /campaigns/:id/roll — see SharedDiceLog.submitExpr), so a save/skill/attack
- * rolled from the sheet appears in the same shared feed everyone at the table watches.
- * There is no per-character roll field on the API, so the character name rides in the
- * label ("Aldra · Athletics check") to attribute the roll; the user identity is still
- * recorded server-side as the roller.
- */
-function useRoller(campaignId: number, onError: (msg: string | null) => void): Roller & {
-  last: DiceRoll | null;
-  dismiss: () => void;
-} {
-  const [rolling, setRolling] = useState(false);
-  const [last, setLast] = useState<DiceRoll | null>(null);
-  const announce = useAnnounce();
-
-  const roll = useCallback(
-    async (expr: string, label: string): Promise<DiceRoll | null> => {
-      setRolling(true);
-      onError(null);
-      try {
-        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
-        setLast(result);
-        const crit = /\bd20\b/i.test(result.expr) && result.rolls.includes(20);
-        const fumble = /\bd20\b/i.test(result.expr) && result.rolls.includes(1);
-        announce(
-          `${result.label ? `${result.label}: ` : ''}rolled ${result.expr}, total ${result.total}` +
-            (crit ? ' — natural 20!' : fumble ? ' — natural 1.' : ''),
-        );
-        return result;
-      } catch (err) {
-        onError(err instanceof ApiError ? err.message : "Couldn't roll the dice.");
-        return null;
-      } finally {
-        setRolling(false);
-      }
-    },
-    [campaignId, onError, announce],
-  );
-
-  return { roll, rolling, last, dismiss: () => setLast(null) };
-}
-
-/**
- * Ephemeral readout of the last sheet roll — the sheet has no dice log of its own, so
- * this gives immediate feedback (label, dice, total, crit/fumble flavour) while the
- * roll also flows to the shared feed. A natural 20 / natural 1 on a d20 gets the same
- * gold/rose flourish as the shared log.
- */
-function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismiss: () => void }) {
-  const isD20 = /\bd20\b/i.test(roll.expr);
-  const crit = isD20 && roll.rolls.includes(20);
-  const fumble = isD20 && roll.rolls.includes(1);
-  const totalColor = crit ? 'var(--cf-crit, #fbbf24)' : fumble ? 'var(--color-danger, #f87171)' : 'var(--color-accent)';
-  return (
-    <div className="cf-inset flex items-center gap-3 px-3.5 py-2" role="status">
-      <div className="min-w-0 flex-1">
-        <p className="text-[13px] font-semibold truncate">{roll.label || roll.expr}</p>
-        <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
-          <span>{roll.expr}</span>
-          <RolledDice rolls={roll.rolls} kept={roll.kept} fontSize={11} />
-          {crit && <span style={{ color: totalColor }}>nat 20!</span>}
-          {fumble && <span style={{ color: totalColor }}>nat 1</span>}
-        </p>
-      </div>
-      <span className="font-heading leading-none" style={{ fontSize: 26, color: totalColor }}>
-        {roll.total}
-      </span>
-      <button
-        type="button"
-        aria-label="Dismiss roll result"
-        onClick={onDismiss}
-        className="text-slate-500 hover:text-slate-300 shrink-0"
-        style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 14 }}
-      >
-        ✕
-      </button>
-    </div>
-  );
-}
+import {
+  ABILITY_KEYS,
+  type Ability,
+  SKILLS,
+  SPELL_LEVELS,
+  profBonus,
+  abilityScore,
+  modOf,
+  signed,
+  advFromEvent,
+  d20Expr,
+  toHitExpr,
+  damageExpr,
+} from '../../lib/characterStats';
+import { useRoller, type Roller } from '../../lib/useRoller';
+import { RollResultBanner } from '../../components/RollResultBanner';
 
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
