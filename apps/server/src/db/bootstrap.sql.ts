@@ -21,9 +21,11 @@
  * (there is no `ALTER TABLE … ADD CONSTRAINT`, and these CREATE TABLE statements are
  * `IF NOT EXISTS`, so a table that already exists is never rewritten). Therefore FK
  * ENFORCEMENT applies to databases first created from this bootstrap. Databases that
- * predate this change keep working exactly as before via the hand-written cascades in
- * the service layer (CampaignsService.remove et al.), which delete children in
- * FK-safe (child-first) order and are a strict superset of what the constraints do.
+ * predate this change keep working via the hand-written cascade in the service layer
+ * (CampaignsService.purge — the hard-delete path), which deletes children child-first
+ * and now covers EVERY campaign-scoped table so a purge on a non-FK DB leaves zero
+ * orphans (issue #235; it previously missed ~16 newer tables). On boot we also run a
+ * `foreign_key_check` diagnostic (db.module.ts) that logs any pre-existing violation.
  * See the migration notes in db.module.ts. Forward references (a table referencing one
  * created later in this script, e.g. campaigns→locations) are permitted by SQLite —
  * FK targets are only resolved at write time, not at CREATE TABLE time.
