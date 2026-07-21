@@ -25,6 +25,52 @@ class AiDmMessageDto extends createZodDto(AiDmMessageRequest) {}
 const AiDmPauseRequest = z.object({ paused: z.boolean() }).strict();
 class AiDmPauseDto extends createZodDto(AiDmPauseRequest) {}
 
+/** Retry / nudge the stuck seat (POST /ai-dm/nudge) — replays the last turn, optionally with a hint. */
+const AiDmNudgeRequest = z
+  .object({ hint: z.string().max(2_000).optional().describe('Optional steer injected into the replayed turn.') })
+  .strict();
+class AiDmNudgeDto extends createZodDto(AiDmNudgeRequest) {}
+
+/** Flag / dispute the AI's last ruling (POST /ai-dm/flag) — forces a re-decision with the objection in context. */
+const AiDmFlagRequest = z
+  .object({ objection: z.string().min(1).max(2_000).describe('Why the last ruling was wrong/unfair — the AI re-decides with this in view.') })
+  .strict();
+class AiDmFlagDto extends createZodDto(AiDmFlagRequest) {}
+
+/** Open or cast a table vote (POST /ai-dm/vote) to override the last ruling or pause the seat. */
+const AiDmVoteRequest = z
+  .object({
+    action: z.enum(['open', 'cast']).describe('open a new vote, or cast a ballot on the open one.'),
+    kind: z.enum(['override', 'pause']).optional().describe('What the vote decides (required when action=open).'),
+    choice: z.boolean().optional().describe('Your ballot (required when action=cast).'),
+  })
+  .strict()
+  .refine((v) => (v.action === 'open' ? v.kind !== undefined : v.choice !== undefined), {
+    message: 'open requires `kind`; cast requires `choice`.',
+  });
+class AiDmVoteDto extends createZodDto(AiDmVoteRequest) {}
+
+/** Grant the acting-DM seat to a human (POST /ai-dm/grant-takeover). */
+const AiDmGrantTakeoverRequest = z
+  .object({
+    memberId: z.string().max(120).optional().describe('Who takes the seat (defaults to the last requester or the granter).'),
+    note: z.string().max(500).optional().describe('Optional note recorded with the grant.'),
+  })
+  .strict();
+class AiDmGrantTakeoverDto extends createZodDto(AiDmGrantTakeoverRequest) {}
+
+/** Hand the seat back to the AI (POST /ai-dm/handback). */
+const AiDmHandbackRequest = z
+  .object({ note: z.string().max(500).optional().describe('The call the human made while in control (audited).') })
+  .strict();
+class AiDmHandbackDto extends createZodDto(AiDmHandbackRequest) {}
+
+/** Route a rules question to the compendium instead of the model (POST /ai-dm/rules-lookup). */
+const AiDmRulesLookupRequest = z
+  .object({ query: z.string().min(1).max(200).describe('The rules question to look up in the compendium.') })
+  .strict();
+class AiDmRulesLookupDto extends createZodDto(AiDmRulesLookupRequest) {}
+
 const HEARTBEAT_MS = 25_000;
 
 /**
@@ -101,6 +147,106 @@ export class AiDriverController {
   ) {
     await this.access.requireRole(user, id, 'dm');
     return this.driver.setPaused(id, body.paused);
+  }
+
+  @Post('resume')
+  @ApiOperation({
+    summary: 'Resume the AI DM seat',
+    description: 'DM only. Convenience for POST /pause {paused:false} — clears a deliberate pause.',
+  })
+  @ApiResponse({ status: 201, description: 'The session state after resuming.' })
+  async resume(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.driver.setPaused(id, false);
+  }
+
+  // ---- Stuck-ladder player levers (#314): available to any player at the table ----
+
+  @Post('nudge')
+  @ApiOperation({
+    summary: 'Retry / nudge a stuck AI DM turn',
+    description:
+      'Player+. Replays the last player input through the driver (bounded, budget-aware), optionally injecting a hint. ' +
+      'A successful replay clears the stuck state. 409 if there is no prior turn to retry; 403 if the budget is exhausted.',
+  })
+  @ApiResponse({ status: 201, description: 'The replayed turn summary.' })
+  async nudge(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmNudgeDto, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'player');
+    return this.driver.nudge(id, user, body.hint);
+  }
+
+  @Post('flag')
+  @ApiOperation({
+    summary: 'Flag / dispute the AI DM’s last ruling',
+    description: 'Player+. Injects the objection into context and re-runs the turn so the AI must re-decide. Audited + notified.',
+  })
+  @ApiResponse({ status: 201, description: 'The re-decided turn summary.' })
+  async flag(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmFlagDto, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'player');
+    return this.driver.flag(id, user, body.objection);
+  }
+
+  @Post('vote')
+  @ApiOperation({
+    summary: 'Open or cast a table vote to override/pause the AI DM',
+    description:
+      'Player+. `action:open` starts a vote (`kind: override|pause`); `action:cast` casts a ballot (`choice`). A majority ' +
+      'of members carries it: a passed override discards the disputed ruling, a passed pause freezes the seat. All audited.',
+  })
+  @ApiResponse({ status: 201, description: 'The session state after the vote action.' })
+  @ApiResponse({ status: 409, description: 'A vote is already open, or none is open to cast on.' })
+  async vote(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmVoteDto, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'player');
+    if (body.action === 'open') return this.driver.openVote(id, user, body.kind!);
+    return this.driver.castVote(id, user, body.choice!);
+  }
+
+  @Post('rules-lookup')
+  @ApiOperation({
+    summary: 'Route a rules question to the compendium (retrieval, not the model)',
+    description: 'Player+. Looks the question up in the installed rule packs (cheaper + authoritative) instead of the generative model.',
+  })
+  @ApiResponse({ status: 201, description: 'The compendium lookup result.' })
+  async rulesLookup(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmRulesLookupDto, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'player');
+    return this.driver.rulesLookup(id, user, body.query);
+  }
+
+  @Post('request-takeover')
+  @ApiOperation({
+    summary: 'Request a human takeover of the DM seat',
+    description: 'Player+. Advisory — flags the ask and notifies the table so a DM/owner can grant the acting-DM seat.',
+  })
+  @ApiResponse({ status: 201, description: 'The session state after the request.' })
+  async requestTakeover(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'player');
+    return this.driver.requestTakeover(id, user);
+  }
+
+  @Post('grant-takeover')
+  @ApiOperation({
+    summary: 'Grant the acting-DM seat to a human',
+    description: 'DM only. Freezes the AI seat (state → human_control) and records a revocable, audited acting-DM grant.',
+  })
+  @ApiResponse({ status: 201, description: 'The session state after the grant.' })
+  async grantTakeover(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiDmGrantTakeoverDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.driver.grantTakeover(id, user, body.memberId, body.note);
+  }
+
+  @Post('handback')
+  @ApiOperation({
+    summary: 'Hand the DM seat back to the AI',
+    description: 'Player+. Revokes the acting-DM grant, unfreezes the seat, and clears any stuck state. `note` records the human’s call.',
+  })
+  @ApiResponse({ status: 201, description: 'The session state after handback.' })
+  async handback(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmHandbackDto, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'player');
+    return this.driver.handback(id, user, body.note);
   }
 
   @Sse('stream')

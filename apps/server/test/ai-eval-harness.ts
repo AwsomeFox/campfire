@@ -78,6 +78,13 @@ export interface AiEvalHarness {
   ): Promise<request.Response>;
   /** Read the driver session state. */
   getDriverSession(campaignId: number): Promise<request.Response>;
+  /** POST a stuck-ladder lever (#314): nudge/flag/vote/rules-lookup/request-takeover/grant-takeover/handback/resume. */
+  lever(
+    campaignId: number,
+    lever: 'nudge' | 'flag' | 'vote' | 'rules-lookup' | 'request-takeover' | 'grant-takeover' | 'handback' | 'resume',
+    body?: Record<string, unknown>,
+    headers?: Record<string, string>,
+  ): Promise<request.Response>;
   /** Read the seat as the DM. */
   getSeat(campaignId: number): Promise<request.Response>;
   /** Read the campaign audit log as the DM. */
@@ -139,6 +146,9 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
     },
     getDriverSession(campaignId): Promise<request.Response> {
       return request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm/session`).set(dm);
+    },
+    lever(campaignId, lever, body = {}, headers = dm): Promise<request.Response> {
+      return request(server).post(`/api/v1/campaigns/${campaignId}/ai-dm/${lever}`).set(headers).send(body);
     },
     getSeat(campaignId): Promise<request.Response> {
       return request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm);

@@ -974,6 +974,9 @@ export const NotificationType = z.enum([
   'quest_updated',
   'proposal_submitted',
   'proposal_resolved',
+  // The driver AI-DM got stuck / a recovery lever was pulled (issue #314): AI errored/looped,
+  // budget exhausted, a ruling was disputed, a table vote resolved, or a human took the seat.
+  'ai_dm_alert',
 ]);
 export type NotificationType = z.infer<typeof NotificationType>;
 
