@@ -642,8 +642,12 @@ export class McpToolsService {
       { encounterId: Id.describe('Encounter id — from list_encounters') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
-        await this.access.requireMember(user, row.campaignId);
-        return this.encounters.getWithCombatantsOrThrow(encounterId as number);
+        // Pass the caller's campaign role so a non-DM viewer gets the same
+        // redaction the REST route applies (issue #256): monster HP as a coarse
+        // band (#43) and fog-hidden token positions nulled (#40). Omitting the
+        // role defaulted to full-DM view, leaking both to any player-scoped PAT.
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.getWithCombatantsOrThrow(encounterId as number, role);
       },
     );
 
