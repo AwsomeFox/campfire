@@ -25,13 +25,16 @@
  * Large sections (spells, monsters) can take 30s+ to import, so the button
  * locks for the duration and the copy sets that expectation.
  *
- * Usage visibility (#348): usage is computed client-side from GET /campaigns
- * (the campaigns visible to the caller, each carrying its `ruleSystem` slug) —
- * the "Used by" column and the uninstall confirm both read this. Uninstalling a
- * pack resets every campaign pointing at it to none/homebrew server-side (the
- * DELETE clears `campaign.ruleSystem` to '' in the same transaction, so no
- * dangling slug is left behind); the confirm names those campaigns and requires
- * an explicit acknowledgement when the count is non-zero.
+ * Usage visibility (#348, #385): the "Used by" column and the uninstall confirm
+ * gate on `pack.usageCount` — an AUTHORITATIVE server-wide count from GET
+ * /rules/packs (every campaign whose `ruleSystem` == the slug). GET /campaigns
+ * still supplies the campaign NAMES the caller can see (for the confirm's list),
+ * but the count/gate no longer depends on that visibility: an admin who belongs
+ * to no campaigns still sees the true blast radius. Uninstalling a pack resets
+ * every campaign pointing at it to none/homebrew server-side (the DELETE clears
+ * `campaign.ruleSystem` to '' in the same transaction, so no dangling slug is
+ * left behind); the confirm names the visible campaigns, notes any it can't, and
+ * requires an explicit acknowledgement when the count is non-zero.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
@@ -168,8 +171,8 @@ export function RulePacksCard() {
 
       <p className="text-[11px] text-slate-500">
         Rule packs are server-wide (not per-campaign) and readable by any signed-in user. Installing or removing a
-        pack here affects every campaign that has it selected as its rule system. Usage counts reflect the campaigns
-        visible to you.
+        pack here affects every campaign that has it selected as its rule system. Usage counts are server-wide
+        (every campaign using the pack, even ones you can't see).
       </p>
     </Card>
   );
@@ -205,7 +208,14 @@ function PackRow({
     }
   }
 
-  const usageCount = usedBy.length;
+  // Authoritative, server-wide usage (issue #385): GET /rules/packs reports how many campaigns
+  // reference this pack across the whole server. Uninstall resets ruleSystem on ALL of them, and
+  // a server admin (the only role that can uninstall) is usually a member of few/no campaigns —
+  // so the old client-side count from visible campaigns under-reported and the acknowledgement
+  // gate disengaged exactly when it mattered. Fall back to the visible count only if the server
+  // didn't supply the field. `usedBy` still names the campaigns the caller CAN see.
+  const usageCount = pack.usageCount ?? usedBy.length;
+  const unnamedCount = Math.max(0, usageCount - usedBy.length);
 
   return (
     <tr>
@@ -247,12 +257,18 @@ function PackRow({
                     ? ' No campaign visible to you has it selected.'
                     : ` The following ${usageCount === 1 ? 'campaign is' : usageCount + ' campaigns are'} using it and will be reset to None / homebrew (existing sheets keep their numbers; combat math falls back to D&D 5e defaults):`}
                 </p>
-                {usageCount > 0 && (
+                {usedBy.length > 0 && (
                   <ul className="list-disc pl-5 text-slate-300 max-h-40 overflow-y-auto">
                     {usedBy.map((c) => (
                       <li key={c.id}>{c.name}</li>
                     ))}
                   </ul>
+                )}
+                {unnamedCount > 0 && (
+                  <p className="text-slate-400">
+                    {usedBy.length > 0 ? `…and ${unnamedCount} more ` : `${unnamedCount} `}
+                    {unnamedCount === 1 ? 'campaign' : 'campaigns'} you can't see (server-wide count).
+                  </p>
                 )}
                 {usageCount > 0 && (
                   <label className="flex items-start gap-2 pt-1 text-slate-200">
