@@ -5,7 +5,7 @@ import { and, count, eq, inArray, isNotNull } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import { CampaignClone, CampaignCreate, CampaignImport, CampaignUpdate } from '@campfire/schema';
-import type { Campaign, CampaignSummary, Role } from '@campfire/schema';
+import type { Campaign, CampaignSummary, Role, TrashedEntity } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
@@ -168,6 +168,57 @@ export class CampaignsService {
     const rows = await this.db.select().from(campaigns).where(isNotNull(campaigns.deletedAt));
     const visible = accessible === 'all' ? rows : rows.filter((r) => new Set(accessible).has(r.id));
     return visible.sort((a, b) => (b.deletedAt ?? '').localeCompare(a.deletedAt ?? '')).map(toDomain);
+  }
+
+  /**
+   * The per-campaign Trash (issue #269): every soft-deleted (issue #116) child entity
+   * of this campaign, newest-trashed first, as lightweight {type,id,name,deletedAt} rows
+   * the Trash page renders and restores (POST /<type>/:id/restore). DM-only — gated in
+   * the controller. Covers the entity types that both carry a `deleted_at` column AND
+   * expose a DM-gated restore endpoint today: sessions, characters, quests, npcs,
+   * locations. Notes are deliberately excluded — their per-author/whisper visibility
+   * means a trashed note may belong to another member and must not surface in a DM's
+   * campaign-wide Trash (their restore is membership+author-scoped, not DM-only). Add a
+   * new type here (and to @campfire/schema TrashedEntityType) when it gains a restore route.
+   */
+  async listTrashedEntities(campaignId: number): Promise<TrashedEntity[]> {
+    const [sessionRows, characterRows, questRows, npcRows, locationRows] = await Promise.all([
+      this.db
+        .select({ id: sessions.id, title: sessions.title, number: sessions.number, deletedAt: sessions.deletedAt })
+        .from(sessions)
+        .where(and(eq(sessions.campaignId, campaignId), isNotNull(sessions.deletedAt))),
+      this.db
+        .select({ id: characters.id, name: characters.name, deletedAt: characters.deletedAt })
+        .from(characters)
+        .where(and(eq(characters.campaignId, campaignId), isNotNull(characters.deletedAt))),
+      this.db
+        .select({ id: quests.id, title: quests.title, deletedAt: quests.deletedAt })
+        .from(quests)
+        .where(and(eq(quests.campaignId, campaignId), isNotNull(quests.deletedAt))),
+      this.db
+        .select({ id: npcs.id, name: npcs.name, deletedAt: npcs.deletedAt })
+        .from(npcs)
+        .where(and(eq(npcs.campaignId, campaignId), isNotNull(npcs.deletedAt))),
+      this.db
+        .select({ id: locations.id, name: locations.name, deletedAt: locations.deletedAt })
+        .from(locations)
+        .where(and(eq(locations.campaignId, campaignId), isNotNull(locations.deletedAt))),
+    ]);
+
+    const items: TrashedEntity[] = [
+      ...sessionRows.map((r) => ({
+        type: 'session' as const,
+        id: r.id,
+        name: r.title || `Session ${r.number}`,
+        deletedAt: r.deletedAt as string,
+      })),
+      ...characterRows.map((r) => ({ type: 'character' as const, id: r.id, name: r.name, deletedAt: r.deletedAt as string })),
+      ...questRows.map((r) => ({ type: 'quest' as const, id: r.id, name: r.title, deletedAt: r.deletedAt as string })),
+      ...npcRows.map((r) => ({ type: 'npc' as const, id: r.id, name: r.name, deletedAt: r.deletedAt as string })),
+      ...locationRows.map((r) => ({ type: 'location' as const, id: r.id, name: r.name, deletedAt: r.deletedAt as string })),
+    ];
+    // Newest-trashed first — a single ordering across the merged types.
+    return items.sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
   }
 
   /**

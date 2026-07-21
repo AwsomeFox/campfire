@@ -184,6 +184,11 @@ export const router = createBrowserRouter([
             element: lazyPage(() => import('../features/settings/CampaignSettingsPage')),
           },
           {
+            // Per-campaign Trash (issue #269) — soft-deleted entities, restorable.
+            path: '/c/:campaignId/trash',
+            element: lazyPage(() => import('../features/trash/TrashPage')),
+          },
+          {
             path: '/admin',
             element: lazyPage(() => import('../features/admin/AdminPage')),
           },

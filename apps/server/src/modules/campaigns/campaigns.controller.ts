@@ -151,6 +151,22 @@ export class CampaignsController {
     return this.campaigns.clone(id, body, user);
   }
 
+  @Get(':id/trash')
+  @ApiOperation({
+    summary: "List a campaign's trashed (soft-deleted) entities",
+    description:
+      'dm role required. The per-campaign Trash (issue #269): this campaign\'s soft-deleted child entities (issue #116) — ' +
+      'sessions, characters, quests, npcs, locations — newest-trashed first, as {type,id,name,deletedAt} rows. Restore any ' +
+      'of them with POST /<type>/:id/restore (e.g. POST /sessions/:id/restore). Notes are excluded (their restore is ' +
+      "author-scoped, not DM-only). This is where the delete dialog/toast's \"restore from the campaign Trash\" leads.",
+  })
+  @ApiResponse({ status: 200, description: 'Trashed entities in the campaign.' })
+  @ApiResponse({ status: 403, description: 'Not a dm of this campaign.' })
+  async trash(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.campaigns.listTrashedEntities(id);
+  }
+
   @Get(':id/summary')
   @ApiOperation({ summary: 'Campaign dashboard/AI-primer summary', description: 'Aggregates campaign metadata, current location, quests (with objectives), npcs, locations, characters, and sessions in one call — intended for dashboards and as an LLM context primer. Requires campaign membership.' })
   @ApiResponse({ status: 200, description: 'Aggregate campaign summary.' })

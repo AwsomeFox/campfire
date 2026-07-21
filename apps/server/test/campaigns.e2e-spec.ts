@@ -613,3 +613,86 @@ describe('entity soft-delete + restore round-trip (e2e, issue #116)', () => {
     expect(restore.status).toBe(404);
   });
 });
+
+/**
+ * Per-campaign Trash — GET /campaigns/:id/trash (issue #269). The soft-delete/undo
+ * feature (#116) shipped restore endpoints + an Undo toast, but the toast promised a
+ * "campaign Trash" that didn't exist. This endpoint lists a campaign's soft-deleted
+ * child entities (sessions/characters/quests/npcs/locations) so they stay recoverable
+ * after the toast expires, gated DM-only, and Restore round-trips through it.
+ */
+describe('per-campaign trash: GET /campaigns/:id/trash (e2e, issue #269)', () => {
+  const player = { 'x-dev-role': 'player', 'x-dev-user': 'trash-player' };
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let sessionId: number;
+  let characterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Trash Endpoint Campaign' });
+    campaignId = campRes.body.id;
+
+    const sess = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 1, title: 'Doomed Recap' });
+    sessionId = sess.body.id;
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Doomed Hero' });
+    characterId = char.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('lists soft-deleted entities (type/name/deletedAt) once trashed; empty before any delete', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Nothing deleted yet — the trash is empty.
+    const empty = await request(server).get(`/api/v1/campaigns/${campaignId}/trash`).set(dm);
+    expect(empty.status).toBe(200);
+    expect(empty.body).toEqual([]);
+
+    await request(server).delete(`/api/v1/sessions/${sessionId}`).set(dm).expect(200);
+    await request(server).delete(`/api/v1/characters/${characterId}`).set(dm).expect(200);
+
+    const trash = await request(server).get(`/api/v1/campaigns/${campaignId}/trash`).set(dm);
+    expect(trash.status).toBe(200);
+    expect(trash.body).toHaveLength(2);
+
+    const session = trash.body.find((t: { type: string }) => t.type === 'session');
+    expect(session).toMatchObject({ type: 'session', id: sessionId, name: 'Doomed Recap' });
+    expect(typeof session.deletedAt).toBe('string');
+
+    const character = trash.body.find((t: { type: string }) => t.type === 'character');
+    expect(character).toMatchObject({ type: 'character', id: characterId, name: 'Doomed Hero' });
+    expect(typeof character.deletedAt).toBe('string');
+  });
+
+  it('is DM-only — a non-dm member gets 403', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/trash`).set(player);
+    expect(res.status).toBe(403);
+  });
+
+  it('restore round-trips: the restored entity leaves the trash and returns to its list', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const restore = await request(server).post(`/api/v1/sessions/${sessionId}/restore`).set(dm);
+    expect(restore.status).toBe(201);
+
+    // Gone from the trash (only the still-trashed character remains).
+    const trash = await request(server).get(`/api/v1/campaigns/${campaignId}/trash`).set(dm);
+    expect(trash.body.some((t: { type: string; id: number }) => t.type === 'session' && t.id === sessionId)).toBe(false);
+    expect(trash.body.some((t: { type: string; id: number }) => t.type === 'character' && t.id === characterId)).toBe(true);
+
+    // Back in the normal sessions list.
+    const list = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(dm);
+    expect(list.body.some((s: { id: number }) => s.id === sessionId)).toBe(true);
+  });
+});
