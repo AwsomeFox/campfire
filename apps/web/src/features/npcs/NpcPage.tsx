@@ -16,6 +16,7 @@ import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -61,6 +62,11 @@ export default function NpcPage() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
   const [togglingHidden, setTogglingHidden] = useState(false);
+  // Optimistic-concurrency guard (#157/#233): a stale save 409s instead of clobbering a
+  // co-DM's or a connected AI's interleaved edit. `conflict` shows a Reload-latest
+  // affordance; `historyNonce` refetches the edit-history panel after each save.
+  const [conflict, setConflict] = useState(false);
+  const [historyNonce, setHistoryNonce] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -157,6 +163,7 @@ export default function NpcPage() {
     if (!form.name.trim()) return;
     setSaving(true);
     setSaveError(null);
+    setConflict(false);
     try {
       if (proposeMode) {
         // Route through the proposal queue — omit DM-only fields (dmSecret, hidden).
@@ -181,14 +188,38 @@ export default function NpcPage() {
           body: form.body,
           dmSecret: form.dmSecret,
           hidden: form.hidden,
+          // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#233) instead
+          // of silently overwriting the other author's work.
+          ...(npc?.updatedAt ? { expectedUpdatedAt: npc.updatedAt } : {}),
         });
         setNpc(updated);
         setEditing(false);
+        setHistoryNonce((n) => n + 1);
       }
     } catch (err) {
-      setSaveError(err instanceof ApiError ? err.message : "Couldn't save changes.");
+      if (err instanceof ApiError && err.status === 409) {
+        // Someone saved between our load and this save — keep the draft, block the
+        // clobber, and prompt a reload of the latest before saving again.
+        setConflict(true);
+        setSaveError(err.message || "This NPC changed since you opened it — reload the latest before saving so you don't erase the other edit.");
+      } else {
+        setSaveError(err instanceof ApiError ? err.message : "Couldn't save changes.");
+      }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function reloadLatest() {
+    if (!npc) return;
+    setSaveError(null);
+    setConflict(false);
+    try {
+      const fresh = await api.get<Npc>(`${API}/npcs/${id}`);
+      setNpc(fresh);
+      setForm((f) => ({ ...f, body: fresh.body, dmSecret: fresh.dmSecret }));
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : "Couldn't reload the latest NPC.");
     }
   }
 
@@ -316,6 +347,20 @@ export default function NpcPage() {
               </Card>
 
               {isDm && npc.dmSecret && <DmPanel>{npc.dmSecret}</DmPanel>}
+
+              {/* Body revision history + restore (#157/#233) — DM-only, so a clobbered or
+                  regretted edit is recoverable. Refetches after each save. */}
+              {isDm && (
+                <RevisionHistoryPanel
+                  entityType="npc"
+                  entityId={id}
+                  reloadNonce={historyNonce}
+                  onRestored={() => {
+                    setHistoryNonce((n) => n + 1);
+                    void reloadLatest();
+                  }}
+                />
+              )}
 
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Connected</h2>
@@ -472,6 +517,11 @@ export default function NpcPage() {
               <span />
             )}
             <div className="flex gap-2">
+              {conflict && (
+                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                  Reload latest
+                </Btn>
+              )}
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={cancelEdit}>
                 Cancel
               </Btn>
