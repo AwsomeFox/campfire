@@ -1909,8 +1909,16 @@ export const ServerSettings = z.object({
   allowSignup: z.boolean().default(false), // gate for self-service signup (POST /auth/signup) — off by default
   // Experimental server-side AI Dungeon Master (issue #28) — OFF by default. When
   // false, every AI-DM configure/turn path is 403-gated server-wide, so the feature
-  // is inert until an admin opts the whole server in. See modules/ai-dm.
+  // is inert until an admin opts the whole server in. See modules/ai-dm. This flag
+  // doubles as the admin console's KILL SWITCH (issue #315): flipping it off pauses
+  // all AI immediately.
   experimentalAiDm: z.boolean().default(false),
+  // Server-wide HARD token cap (issue #315) — a ceiling on total tokens metered
+  // across EVERY campaign's AI-DM seat. 0 = unlimited. When positive, a turn is
+  // rejected (403) once the aggregate tokensUsed across all seats reaches the cap,
+  // regardless of any per-campaign budget still remaining. Admin-managed from the
+  // AI console (PUT /settings/ai/caps).
+  aiServerTokenCap: z.number().int().nonnegative().max(1_000_000_000).default(0),
 });
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();
@@ -2228,9 +2236,23 @@ export type ProposalBatchResolve = z.infer<typeof ProposalBatchResolve>;
 export const AiDmTurnKind = z.enum(['narrate', 'combat', 'recap']);
 export type AiDmTurnKind = z.infer<typeof AiDmTurnKind>;
 
+// How the AI participates in a campaign (issue #311). This is the first-class
+// "operating mode" of the seat, orthogonal to the metering/`enabled` turn gate:
+//   - off    : no AI participation (default).
+//   - co_dm  : AI only PROPOSES — every write flows through the approval queue
+//              (#124); the human DM runs the table. The safe, recommended mode.
+//   - driver : the AI HOLDS the DM seat and runs the game (#312). Requires the
+//              server experimental flag, a positive token budget, AND a configured
+//              provider — configuring it otherwise is a 409 (enforced server-side).
+// Non-secret, so players can see it: it is the honest indicator of whether an AI
+// is co-DMing or driving (unlike `instructions`, which is redacted per #261).
+export const AiDmMode = z.enum(['off', 'co_dm', 'driver']);
+export type AiDmMode = z.infer<typeof AiDmMode>;
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,
+  mode: AiDmMode.default('off'), // operating mode: off / co_dm / driver (issue #311)
   enabled: z.boolean().default(false), // per-campaign on/off (in addition to the server flag)
   model: z.string().max(120).default(''), // informational label of the model/agent occupying the seat
   instructions: z.string().max(20_000).default(''), // the DM persona / house rules the connected agent should follow
@@ -2248,6 +2270,7 @@ export type AiDmSeat = z.infer<typeof AiDmSeat>;
 // Configure the seat (PUT /campaigns/:id/ai-dm, dm only). All fields optional;
 // an omitted field is left unchanged.
 export const AiDmSeatUpdate = z.object({
+  mode: AiDmMode.optional(), // operating mode (issue #311); driver has server-side preconditions
   enabled: z.boolean().optional(),
   model: z.string().max(120).optional(),
   instructions: z.string().max(20_000).optional(),
@@ -2274,6 +2297,42 @@ export const AiDmTurnResult = z.object({
   seat: AiDmSeat, // the seat after metering
 });
 export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
+
+// ── Co-DM authoring: draft content for the approval queue (issue #313) ────────
+// The AI acts as a co-DM that DRAFTS content the human DM reviews. A `draft`
+// request is turned by the configured provider into structured entity content and
+// filed as a PENDING PROPOSAL (never a direct write) — so nothing lands in canon
+// until the DM approves it. Encounters/maps reuse the deterministic generators
+// (#304/#306); the proposal payload carries their (seeded) params and approval
+// runs the generator. Every draft is metered against the seat budget and the
+// proposer is attributed to the AI seat + model, not a raw token name.
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map']);
+export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
+
+// POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.
+export const CoDmDraftRequest = z.object({
+  target: CoDmDraftTarget,
+  // Free-text brief for the model, e.g. "a shady fence tied to the thieves guild".
+  prompt: z.string().min(1).max(20_000),
+  // How many drafts to produce (npc/location/beat only; ignored for recap/encounter/map).
+  count: z.number().int().min(1).max(10).optional(),
+});
+export type CoDmDraftRequest = z.infer<typeof CoDmDraftRequest>;
+
+export const CoDmDraftResult = z.object({
+  target: CoDmDraftTarget,
+  provider: z.string(), // which provider produced the draft ('noop' by default)
+  model: z.string(), // the seat's model label
+  // The proposal entity type the drafts were filed under (npc/location/quest/session/
+  // encounter/map) — a beat files a quest, a recap files a session.
+  entityType: z.string(),
+  proposalIds: z.array(Id), // the pending proposals awaiting DM review
+  proposals: z.array(Proposal),
+  tokensUsed: z.number().int().nonnegative(), // metered against the seat budget
+  tokenBudget: z.number().int().nonnegative(),
+  budgetRemaining: z.number().int().nonnegative(),
+});
+export type CoDmDraftResult = z.infer<typeof CoDmDraftResult>;
 
 // ── AI provider config: encrypted API-key + provider storage (issue #310) ────
 // Feeds the vendor-neutral provider factory (#309) with the credentials/config it
@@ -2336,6 +2395,194 @@ export const AiProviderTestResult = z.object({
   error: z.string().nullable().default(null),
 });
 export type AiProviderTestResult = z.infer<typeof AiProviderTestResult>;
+
+// ── Admin AI console (issue #315): opt-in, budgets & caps, usage, kill switch ──
+// A server-admin-only cockpit over the AI program: the global kill switch
+// (ServerSettings.experimentalAiDm), server-wide + per-campaign token caps, a usage
+// rollup aggregated from the existing per-seat metering (AiDmSeat.tokensUsed —
+// NO new ledger table), the model allowlist (#310's allowedModels) editor, and a
+// provider-health "test all". Every route lives under `/settings/ai/*` and is
+// @ServerRoles('admin'). No API key or raw prompt is ever surfaced here.
+
+// One row of the usage dashboard: a campaign's AI-DM seat metering. `model` is the
+// informational label of the model/agent occupying the seat (never a credential).
+export const AiUsageCampaignRow = z.object({
+  campaignId: Id,
+  campaignName: z.string(),
+  enabled: z.boolean(), // the seat's per-campaign on/off
+  model: z.string(),
+  tokenBudget: z.number().int().nonnegative(), // per-campaign hard cap (0 = seat can't run)
+  tokensUsed: z.number().int().nonnegative(),
+  turnCount: z.number().int().nonnegative(),
+  lastTurnAt: IsoDate.nullable(),
+});
+export type AiUsageCampaignRow = z.infer<typeof AiUsageCampaignRow>;
+
+// Tokens/turns grouped by the seat's model label — the "by model" dashboard axis.
+export const AiUsageModelRow = z.object({
+  model: z.string(), // '' = seats with no model label set
+  tokensUsed: z.number().int().nonnegative(),
+  turnCount: z.number().int().nonnegative(),
+  seats: z.number().int().nonnegative(), // how many campaign seats use this model
+});
+export type AiUsageModelRow = z.infer<typeof AiUsageModelRow>;
+
+// The full usage rollup (GET /settings/ai/usage) — aggregated live from seat counters.
+export const AiUsageRollup = z.object({
+  totalTokensUsed: z.number().int().nonnegative(),
+  totalTurns: z.number().int().nonnegative(),
+  seatCount: z.number().int().nonnegative(), // configured seats (persisted rows)
+  activeSeatCount: z.number().int().nonnegative(), // seats with enabled=true
+  serverTokenCap: z.number().int().nonnegative(), // 0 = unlimited
+  serverBudgetRemaining: z.number().int().nonnegative().nullable(), // null when uncapped
+  byCampaign: z.array(AiUsageCampaignRow),
+  byModel: z.array(AiUsageModelRow),
+});
+export type AiUsageRollup = z.infer<typeof AiUsageRollup>;
+
+// One provider-health probe result (GET-triggered POST /settings/ai/health). Reuses
+// the connection-test shape; `campaignId` is null for the server-default provider.
+export const AiProviderHealthEntry = z.object({
+  scope: z.enum(['server', 'campaign']),
+  campaignId: Id.nullable(),
+  campaignName: z.string().nullable(),
+  ok: z.boolean(),
+  // The effective provider type as reported by the live probe. A plain string (not
+  // the narrow config enum) because the provider factory's runtime type union is
+  // broader (e.g. 'custom'); a health readout just displays whatever ran.
+  providerType: z.string(),
+  model: z.string(),
+  error: z.string().nullable(),
+});
+export type AiProviderHealthEntry = z.infer<typeof AiProviderHealthEntry>;
+
+// The console overview (GET /settings/ai) — everything the admin cockpit renders in
+// one shot: kill switch, caps, allowlist, usage rollup, provider-config presence.
+export const AiConsoleOverview = z.object({
+  killSwitchEnabled: z.boolean(), // experimentalAiDm — the global opt-in/kill switch
+  serverTokenCap: z.number().int().nonnegative(), // 0 = unlimited
+  allowedModels: z.array(z.string()), // the #310 server allowlist ([] = unrestricted)
+  serverProviderConfigured: z.boolean(), // a server-default provider row exists
+  serverProviderType: AiProviderConfigType.nullable(),
+  usage: AiUsageRollup,
+});
+export type AiConsoleOverview = z.infer<typeof AiConsoleOverview>;
+
+// PUT /settings/ai/caps — set the server-wide token cap and/or per-campaign budgets.
+// Both optional; an omitted field is left unchanged. Per-campaign entries upsert the
+// seat's tokenBudget only (never touch usage counters).
+export const AiCapsUpdate = z
+  .object({
+    serverTokenCap: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    campaigns: z
+      .array(
+        z.object({
+          campaignId: Id,
+          tokenBudget: z.number().int().nonnegative().max(1_000_000_000),
+        }),
+      )
+      .max(500)
+      .optional(),
+  })
+  .strict();
+export type AiCapsUpdate = z.infer<typeof AiCapsUpdate>;
+
+// POST /settings/ai/kill — the kill switch. `enabled:false` pauses all AI immediately.
+export const AiKillSwitchUpdate = z.object({ enabled: z.boolean() }).strict();
+export type AiKillSwitchUpdate = z.infer<typeof AiKillSwitchUpdate>;
+
+// PUT /settings/ai/allowlist — replace the server model allowlist ([] = unrestricted).
+export const AiAllowlistUpdate = z
+  .object({ allowedModels: z.array(z.string().min(1).max(120)).max(200) })
+  .strict();
+export type AiAllowlistUpdate = z.infer<typeof AiAllowlistUpdate>;
+// ── AI scribe: scheduled / automatic server-side recap jobs (issue #316) ──────
+// The scribe runs the configured provider (#309/#310) on a trigger to draft a
+// session recap from the campaign's own material (resolved inbox + encounters),
+// filing it ALWAYS as a PROPOSAL for the DM to approve — nothing auto-publishes
+// to canon. Governance is the AI-DM seat's: the server-wide experimentalAiDm
+// flag + the per-campaign seat being enabled + its token budget (metered like a
+// turn). Triggers: on-demand (endpoint/MCP), a post-session sweep after a
+// scheduled game night ends, and an optional cron tick — the last two share one
+// idempotent `sweep()` so a re-run never duplicates a recap.
+
+// How a scribe run was initiated. `post_session`/`cron` fire from the periodic
+// sweep; `on_demand` from the REST endpoint or the run_scribe MCP tool.
+export const ScribeTrigger = z.enum(['on_demand', 'post_session', 'cron']);
+export type ScribeTrigger = z.infer<typeof ScribeTrigger>;
+
+// Terminal state of one recorded scribe run.
+//  - succeeded         : a recap proposal was drafted + filed.
+//  - skipped           : idempotent no-op (identical source already drafted, or a
+//                        scribe recap proposal is already pending review).
+//  - no_provider       : neither a configured provider (#310) nor an injected one.
+//  - no_material       : the campaign had no inbox/encounter material to recap.
+//  - disabled          : the experimental flag is off or the seat isn't enabled.
+//  - over_budget       : the seat's token budget is exhausted.
+//  - failed            : the provider call (or filing) threw.
+export const ScribeJobStatus = z.enum([
+  'succeeded',
+  'skipped',
+  'no_provider',
+  'no_material',
+  'disabled',
+  'over_budget',
+  'failed',
+]);
+export type ScribeJobStatus = z.infer<typeof ScribeJobStatus>;
+
+// Per-campaign scribe configuration (GET/PUT /campaigns/:id/scribe, dm only).
+// All triggers default OFF: the scribe is opt-in, so enabling the AI-DM seat
+// alone never makes recaps appear unrequested. `budgetPerRun` caps a single
+// run's output tokens (further clamped by the seat's remaining budget).
+export const ScribeConfig = z.object({
+  campaignId: Id,
+  postSession: z.boolean().default(false), // sweep + draft after a scheduled session ends
+  cron: z.boolean().default(false), // include this campaign in the periodic cron sweep
+  budgetPerRun: z.number().int().min(1).max(200_000).default(2000), // per-run output-token cap
+  ...timestamps,
+});
+export type ScribeConfig = z.infer<typeof ScribeConfig>;
+
+export const ScribeConfigUpdate = z.object({
+  postSession: z.boolean().optional(),
+  cron: z.boolean().optional(),
+  budgetPerRun: z.number().int().min(1).max(200_000).optional(),
+});
+export type ScribeConfigUpdate = z.infer<typeof ScribeConfigUpdate>;
+
+// A recorded scribe run (read via GET /campaigns/:id/scribe/jobs).
+export const ScribeJob = z.object({
+  id: Id,
+  campaignId: Id,
+  trigger: ScribeTrigger,
+  status: ScribeJobStatus,
+  proposalId: Id.nullable().default(null), // the filed recap proposal, when status=succeeded
+  proposalCount: z.number().int().nonnegative().default(0),
+  tokensUsed: z.number().int().nonnegative().default(0),
+  provider: z.string().default(''), // which provider produced it (e.g. 'mock','anthropic','noop')
+  detail: z.string().default(''), // human-readable note / skip reason / error
+  createdBy: z.string().default(''),
+  createdAt: IsoDate,
+});
+export type ScribeJob = z.infer<typeof ScribeJob>;
+
+// On-demand run request (POST /campaigns/:id/scribe/run). `dryRun` assembles +
+// generates but files no proposal — a preview the DM can inspect before committing.
+export const ScribeRunRequest = z.object({
+  dryRun: z.boolean().default(false),
+});
+export type ScribeRunRequest = z.infer<typeof ScribeRunRequest>;
+
+// Result of a run: the recorded job, the proposal ids filed (empty on skip/dry-run),
+// and — on a dry run — the drafted recap text for preview.
+export const ScribeRunResult = z.object({
+  job: ScribeJob,
+  proposalIds: z.array(Id).default([]),
+  dryRun: z.boolean().default(false),
+  preview: z.string().nullable().default(null), // drafted recap text (dry-run only)
+});
+export type ScribeRunResult = z.infer<typeof ScribeRunResult>;
 
 // ---------- attachments (uploaded images: character portraits, campaign maps) ----------
 export const AttachmentKind = z.enum(['portrait', 'map', 'image']);

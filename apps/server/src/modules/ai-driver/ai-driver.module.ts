@@ -1,0 +1,33 @@
+import { Module } from '@nestjs/common';
+import { AuditModule } from '../audit/audit.module';
+import { RoleAccessModule } from '../membership/role-access.module';
+import { AiDmModule } from '../ai-dm/ai-dm.module';
+import { McpModule } from '../mcp/mcp.module';
+import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config.module';
+import { AiDriverService } from './ai-driver.service';
+import { AiDriverController } from './ai-driver.controller';
+import { AiDmStreamService } from './ai-driver-stream.service';
+import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-resolver';
+
+/**
+ * Driver AI-DM runtime (#312) — the session loop that turns the AI DM seat into a
+ * live, streaming, tool-executing Dungeon Master. Composes the three AI foundations:
+ *   - AiDmModule           — seat gating + atomic budget metering (#28/#272).
+ *   - McpModule            — the FULL executable tool registry (buildToolset).
+ *   - AiProviderConfigModule — resolveEffectiveConfig (#310) → createAiProvider (#309),
+ *                              wired through the ConfigAiProviderResolver seam below.
+ *
+ * AI_PROVIDER_RESOLVER is a DI token so tests (#318 harness) can swap in a resolver
+ * that returns the deterministic mock provider — the whole loop then runs offline.
+ */
+@Module({
+  imports: [AuditModule, RoleAccessModule, AiDmModule, McpModule, AiProviderConfigModule],
+  controllers: [AiDriverController],
+  providers: [
+    AiDriverService,
+    AiDmStreamService,
+    { provide: AI_PROVIDER_RESOLVER, useClass: ConfigAiProviderResolver },
+  ],
+  exports: [AiDriverService, AiDmStreamService],
+})
+export class AiDriverModule {}

@@ -242,6 +242,41 @@ export class AiProviderConfigService {
     });
   }
 
+  /** The server admin's model allowlist (issue #310/#315). [] when unset/unrestricted. */
+  async getServerAllowedModels(): Promise<string[]> {
+    const row = await this.serverRow();
+    return row ? safeJson<string[]>(row.allowedModels, []) : [];
+  }
+
+  /**
+   * Replace the server admin's model allowlist (issue #315 console editor) without
+   * touching the provider/key/model fields. Requires an existing server-default row —
+   * an allowlist is only meaningful once a provider is configured. Audits the change
+   * (count only — model names are not secret but the audit stays terse). Returns the
+   * redacted server view.
+   */
+  async setServerAllowedModels(models: string[], user: RequestUser): Promise<ConfigView> {
+    const existing = await this.serverRow();
+    if (!existing) {
+      throw new BadRequestException(
+        'Configure the server-default AI provider first (PUT /settings/ai-provider) before setting a model allowlist.',
+      );
+    }
+    await this.db
+      .update(aiProviderConfigs)
+      .set({ allowedModels: JSON.stringify(models), updatedAt: nowIso() })
+      .where(eq(aiProviderConfigs.id, existing.id));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-provider.allowlist',
+      entityType: 'ai-provider',
+      detail: `server allowlist=${models.length} model(s)`,
+    });
+    const row = await this.serverRow();
+    return this.toView(row!);
+  }
+
   async deleteServer(user: RequestUser): Promise<void> {
     await this.db.delete(aiProviderConfigs).where(eq(aiProviderConfigs.scope, 'server'));
     await this.audit.log({

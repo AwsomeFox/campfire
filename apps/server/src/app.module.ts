@@ -51,7 +51,10 @@ import { InventoryModule } from './modules/inventory/inventory.module';
 import { ObservabilityModule } from './modules/observability/observability.module';
 import { BackupModule } from './modules/backup/backup.module';
 import { AiDmModule } from './modules/ai-dm/ai-dm.module';
+import { AiDriverModule } from './modules/ai-driver/ai-driver.module';
 import { AiProviderConfigModule } from './modules/ai-provider-config/ai-provider-config.module';
+import { AiConsoleModule } from './modules/ai-console/ai-console.module';
+import { ScribeModule } from './modules/scribe/scribe.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
 import { RevisionsModule } from './modules/revisions/revisions.module';
@@ -163,7 +166,10 @@ function serveStaticImports(): DynamicModule[] {
     ObservabilityModule,
     BackupModule,
     AiDmModule,
+    AiDriverModule,
     AiProviderConfigModule,
+    AiConsoleModule,
+    ScribeModule,
     TimelineModule,
     SessionZeroModule,
     RevisionsModule,
