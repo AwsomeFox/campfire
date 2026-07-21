@@ -346,7 +346,7 @@ h1, h2, h3, h4, h5, h6 {
    app's global `h1{…}` rule would balloon a markdown `#` heading, so rendered
    markdown — the compendium reader, quest/npc/location bodies, session recaps —
    needs its own contained type scale. Everything is expressed in the
-   --color-x, --cf-x and --space-x custom-property tokens so it tracks whatever
+   --color-, --cf- and --space- custom-property families so it tracks whatever
    theme is active (light or dark) rather than hard-coding colors. */
 .cf-prose {
   overflow-wrap: anywhere; /* long URLs / unbroken strings wrap, don't overflow */
