@@ -553,6 +553,9 @@ export default function RunSessionPage() {
       ),
     [characters, myUserId],
   );
+  // Precomputed id→character map so the combatant list's per-row card lookup is O(1)
+  // rather than a `.find` over all characters on every render (issue: large encounters).
+  const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
   function canEditCombatant(c: Combatant): boolean {
     if (isDm) return true;
@@ -906,7 +909,7 @@ export default function RunSessionPage() {
               canViewStatblock={isDm}
               canRemove={isDm}
               canSetInitiative={isDm && encounter.status !== 'ended'}
-              character={c.characterId != null ? characters.find((ch) => ch.id === c.characterId) ?? null : null}
+              character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
               openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}

@@ -89,6 +89,7 @@ export function CharacterStatCard({
         type="button"
         className="btn btn-ghost"
         aria-expanded={open}
+        aria-label={`${open ? 'Collapse' : 'Expand'} ${character.name}'s character sheet`}
         onClick={() => setOpen((v) => !v)}
         style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
       >
