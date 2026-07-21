@@ -173,12 +173,24 @@ export class AiDmService {
       await this.assertDriverAllowed(campaignId, resultingTokenBudget);
     }
 
+    // `enabled` is the legacy per-seat turn-gate; `mode` (off/co-dm/driver) is the operating
+    // control the UI actually exposes. Keep them consistent: choosing any active mode enables
+    // the seat and 'off' disables it, unless the caller sets `enabled` explicitly. Without this
+    // the UI's mode picker (which PUTs only {mode}) would leave enabled=false, and every turn —
+    // co-DM and Driver alike — would be refused with "seat is not enabled".
+    const nextEnabled: boolean | undefined =
+      input.enabled !== undefined
+        ? input.enabled
+        : input.mode !== undefined
+          ? input.mode !== 'off'
+          : undefined;
+
     if (!existing) {
       const base = defaultSeat(campaignId);
       await this.db.insert(aiDmSeats).values({
         campaignId,
         mode: input.mode ?? base.mode,
-        enabled: input.enabled ?? base.enabled,
+        enabled: nextEnabled ?? base.enabled,
         model: input.model ?? base.model,
         instructions: input.instructions ?? base.instructions,
         tokenBudget: input.tokenBudget ?? base.tokenBudget,
@@ -193,7 +205,7 @@ export class AiDmService {
         .update(aiDmSeats)
         .set({
           ...(input.mode !== undefined ? { mode: input.mode } : {}),
-          ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+          ...(nextEnabled !== undefined ? { enabled: nextEnabled } : {}),
           ...(input.model !== undefined ? { model: input.model } : {}),
           ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
           ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),

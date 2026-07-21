@@ -9,7 +9,7 @@
  * owned surfaces; this page covers the General + Rule system + Danger tab.
  */
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { Campaign, CampaignCloneMode, DangerLevel, RulePack } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -26,6 +26,7 @@ export default function CampaignSettingsPage() {
   const role = roleIn(id);
   const isDm = role === 'dm';
   const navigate = useNavigate();
+  const location = useLocation();
   const { refresh: refreshCampaigns } = useCampaigns();
 
   const [campaign, setCampaign] = useState<Campaign | null>(null);
@@ -49,6 +50,16 @@ export default function CampaignSettingsPage() {
     if (Number.isFinite(id) && role) void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, role]);
+
+  // Deep-link support (#343): the AI-DM onboarding checklist links to specific controls
+  // by hash (e.g. #ai-dm-provider). React Router doesn't auto-scroll to a hash, and the
+  // target only exists once the (lazy) page has loaded the campaign, so scroll it into
+  // view here once the anchor is present.
+  useEffect(() => {
+    if (!campaign || !location.hash) return;
+    const el = document.getElementById(location.hash.slice(1));
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [campaign, location.hash]);
 
   if (!Number.isFinite(id)) {
     return (

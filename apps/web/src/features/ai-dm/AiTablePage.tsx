@@ -51,6 +51,7 @@ import {
   type ToolEntry,
 } from './transcript';
 import { invalidateForToolEvent, resolveToolActivity, type ToolResource } from './toolActivity';
+import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
 import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
 import { Btn, Card, Chip, EmptyState, Skeleton, TextArea, TextInput, type ChipVariant } from '../../components/ui';
@@ -79,7 +80,7 @@ export default function AiTablePage() {
   const { t } = useTranslation();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
-  const { me, roleIn } = useAuth();
+  const { me, roleIn, isAdmin } = useAuth();
   const queryClient = useQueryClient();
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
@@ -290,13 +291,10 @@ export default function AiTablePage() {
   }
 
   if (seatQuery.isError) {
+    // Onboarding (#343): a blocked seat read maps to a friendly explainer + deep link
+    // (aiGate.ts) instead of a bare 403, and a DM gets the full setup checklist.
     return (
-      <Gate
-        title={t('table.gatedTitle')}
-        hint={translateApiError(seatQuery.error, t)}
-        campaignId={campaignId}
-        isDm={isDm}
-      />
+      <Gate campaignId={campaignId} isDm={isDm} isAdmin={isAdmin} error={seatQuery.error} />
     );
   }
 
@@ -304,11 +302,16 @@ export default function AiTablePage() {
     const off = seat?.mode === 'off';
     return (
       <Gate
+        campaignId={campaignId}
+        isDm={isDm}
+        isAdmin={isAdmin}
         icon={off ? '🌙' : '🤝'}
         title={off ? t('table.offTitle') : t('table.coDmTitle')}
         hint={off ? t('table.offHint') : t('table.coDmHint')}
-        campaignId={campaignId}
-        isDm={isDm}
+        // Off + DM → the setup checklist. Co-DM → the transparency explainer (the AI
+        // co-DMs via proposals, so the Table isn't where it's played).
+        showChecklist={off && isDm}
+        showTransparency={!off}
       />
     );
   }
@@ -614,33 +617,68 @@ function systemText(entry: SystemEntry, t: (k: string, o?: Record<string, unknow
   }
 }
 
-/** Minimal gated/off fallback (the onboarding issue #343 owns the rich explainer). */
+/**
+ * Gated/off/error fallback for the Table page (onboarding #343). This lives ABOVE and
+ * OUTSIDE the driver-mode render (and thus clear of the #340 SEAM): it's only reached by
+ * the early returns for the loading/error/off/co-DM states.
+ *
+ * Three shapes:
+ *   - `error` given → the mapped gate explainer (aiGate.ts) + link; DMs also get the
+ *     full setup checklist so a real gate is actionable, not a dead end.
+ *   - `showChecklist` → the DM setup stepper (seat is off).
+ *   - `showTransparency` → the player-facing "what the AI sees" note (co-DM state).
+ */
 function Gate({
   icon = '🚫',
   title,
   hint,
   campaignId,
   isDm,
+  isAdmin,
+  error,
+  showChecklist,
+  showTransparency,
 }: {
   icon?: string;
-  title: string;
-  hint: string;
+  title?: string;
+  hint?: string;
   campaignId: number | undefined;
   isDm: boolean;
+  isAdmin: boolean;
+  error?: unknown;
+  showChecklist?: boolean;
+  showTransparency?: boolean;
 }) {
   const { t } = useTranslation();
   return (
-    <div className="max-w-lg mx-auto px-4 mt-10">
-      <Card className="text-center space-y-3">
-        <p className="text-3xl">{icon}</p>
-        <p className="font-bold text-[var(--color-text)]">{title}</p>
-        <p className="text-sm text-[var(--color-neutral-400)]">{hint}</p>
-        {isDm && campaignId !== undefined && (
-          <Link to={`/c/${campaignId}/settings`} className="cf-btn inline-flex">
-            {t('table.openSettings')}
-          </Link>
+    <div className="max-w-lg mx-auto px-4 mt-10 space-y-4">
+      <Card className="space-y-3">
+        {error !== undefined ? (
+          <>
+            <p className="text-3xl text-center">{icon}</p>
+            {/* Only surface the fix link when the current viewer can act on it. */}
+            <AiGateExplainer err={error} campaignId={campaignId} canFix={isDm || isAdmin} />
+          </>
+        ) : (
+          <div className="text-center space-y-2">
+            <p className="text-3xl">{icon}</p>
+            {title && <p className="font-bold text-[var(--color-text)]">{title}</p>}
+            {hint && <p className="text-sm text-[var(--color-neutral-400)]">{hint}</p>}
+            {isDm && campaignId !== undefined && !showChecklist && (
+              <Link to={`/c/${campaignId}/settings#ai-dm`} className="cf-btn inline-flex no-underline">
+                {t('table.openSettings')}
+              </Link>
+            )}
+          </div>
         )}
+        {showTransparency && <AiTransparencyNote />}
       </Card>
+
+      {(showChecklist || (error !== undefined && isDm)) && campaignId !== undefined && (
+        <Card>
+          <AiSetupChecklist campaignId={campaignId} isAdmin={isAdmin} />
+        </Card>
+      )}
     </div>
   );
 }

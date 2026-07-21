@@ -23,6 +23,7 @@ import { NotesQuickRail } from './NotesQuickRail';
 import { DiceWidget } from './DiceWidget';
 import { HandoutsCard } from './HandoutsCard';
 import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
+import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
 
 // Slow poll so the summary (quests, party HP, notes, NPCs) picks up other
 // players' edits at the table without a manual reload; SSE only covers combat.
@@ -31,7 +32,7 @@ const POLL_MS = 5000;
 export default function DashboardPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const { roleIn } = useAuth();
+  const { roleIn, isAdmin } = useAuth();
   const role = roleIn(id);
   const { refresh: refreshCampaigns } = useCampaigns();
   const { lostAccess, handle: handleAccessError } = useCampaignAccessError();
@@ -157,6 +158,9 @@ export default function DashboardPage() {
           a DM-only "review it" nudge the instant the AI files a proposal. Renders nothing
           when the seat isn't in Driver mode. */}
       <AiDmDashboardActivity campaignId={id} isDm={role === 'dm'} />
+
+      {/* Onboarding nudge (#343) — DM-only, dismissible, shown only while the seat is off. */}
+      <AiDmDashboardOnboarding campaignId={id} isDm={role === 'dm'} isAdmin={isAdmin} />
 
       <InstallHintBanner />
 
