@@ -838,12 +838,13 @@ export const InboxResolve = z
 // last-write-wins clobber (a co-DM polishing a recap while a connected AI saves its
 // own edit). On every committed prose update the server snapshots the PRIOR content
 // here; the history can then be listed and any prior snapshot RESTORED (re-applied as
-// a new update, itself recorded). Scoped to the DM-authored world-building prose whose
-// edit path is uniformly dm-gated — sessions (recap), quests/npcs/locations (body).
-// Notes get optimistic concurrency (ExpectedUpdatedAt) but not this history layer:
-// their per-note visibility/author-only-edit model makes a generic revision endpoint a
-// redaction hazard.
-export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location', 'faction']);
+// a new update, itself recorded). Covers the DM-authored world-building prose whose
+// edit path is uniformly dm-gated — sessions (recap), quests/npcs/locations/factions
+// (body) — AND notes (body), which #157 cited by line as the destroyed prose. Notes
+// carry their own per-note visibility/author-only-edit model, so their revision reads
+// are gated on the note's OWN visibility (not a blanket dm-gate) and restore is
+// author-only — see RevisionsController — so history is never a redaction back-door.
+export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location', 'faction', 'note']);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
 
 export const EntityRevision = z.object({
@@ -852,8 +853,8 @@ export const EntityRevision = z.object({
   entityType: RevisionEntityType,
   entityId: Id,
   // The snapshotted PRIOR prose, keyed by the entity's prose field ('recap' for a
-  // session, 'body' for quest/npc/location). A plain string map so the shape is uniform
-  // across entity types and the web can render whichever key is present.
+  // session, 'body' for quest/npc/location/faction/note). A plain string map so the
+  // shape is uniform across entity types and the web can render whichever key is present.
   snapshot: z.record(z.string(), z.string()).default({}),
   authorUserId: z.string().max(120).default(''),
   authorName: z.string().max(120).default(''),

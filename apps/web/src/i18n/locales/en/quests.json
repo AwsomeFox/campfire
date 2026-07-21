@@ -76,6 +76,8 @@
     "loadCampaignFailed": "Couldn't load campaign data.",
     "loadOneFailed": "Couldn't load this quest.",
     "saveBodyFailed": "Couldn't save the quest body.",
+    "bodyConflict": "This quest changed since you opened it — reload to see the latest version before saving, so you don't erase the other edit.",
+    "reloadLatest": "Reload latest",
     "updateStatusFailed": "Couldn't update quest status.",
     "updateObjectiveFailed": "Couldn't update the objective.",
     "addObjectiveFailed": "Couldn't add the objective.",

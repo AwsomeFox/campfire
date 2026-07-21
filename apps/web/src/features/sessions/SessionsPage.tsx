@@ -14,7 +14,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character, EntityRevision } from '@campfire/schema';
+import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { formatDate as formatLocaleDate } from '../../lib/format';
@@ -25,6 +25,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { SchedulePanel } from './SchedulePanel';
 import { CommentsThread } from '../comments/CommentsThread';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
 export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -506,8 +507,10 @@ function SessionDetail({
       {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
           regretted edit can be recovered. Refetches whenever a save/restore happens. */}
       {isDm && !editing && (
-        <RecapHistoryPanel
-          sessionId={session.id}
+        <RevisionHistoryPanel
+          entityType="session"
+          entityId={session.id}
+          label="Recap history"
           reloadNonce={historyNonce}
           onRestored={() => {
             setHistoryNonce((n) => n + 1);
@@ -544,109 +547,6 @@ function SessionDetail({
         <CommentsThread campaignId={campaignId} entityType="session" entityId={session.id} />
       </Card>
     </div>
-  );
-}
-
-/**
- * Recap revision history + restore (issue #157). DM-only. Lists the prior-content
- * snapshots the server records on every committed recap change (newest first) and lets
- * the DM restore any of them — the restore is itself recorded, so it's reversible.
- * Collapsed by default so it doesn't crowd the recap; expands on demand.
- */
-function RecapHistoryPanel({
-  sessionId,
-  reloadNonce,
-  onRestored,
-}: {
-  sessionId: number;
-  reloadNonce: number;
-  onRestored: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [revisions, setRevisions] = useState<EntityRevision[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [restoringId, setRestoringId] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    setLoading(true);
-    api
-      .get<EntityRevision[]>(`${API}/revisions/session/${sessionId}`)
-      .then((rows) => {
-        if (!cancelled) setRevisions(rows);
-      })
-      .catch(() => {
-        if (!cancelled) setError("Couldn't load history.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, sessionId, reloadNonce]);
-
-  async function restore(revisionId: number) {
-    setRestoringId(revisionId);
-    setError(null);
-    try {
-      const res = await api.post<{ revisions: EntityRevision[] }>(
-        `${API}/revisions/session/${sessionId}/${revisionId}/restore`,
-      );
-      if (res?.revisions) setRevisions(res.revisions);
-      onRestored();
-    } catch {
-      setError("Couldn't restore that version.");
-    } finally {
-      setRestoringId(null);
-    }
-  }
-
-  return (
-    <Card>
-      <button
-        className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wide w-full"
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span>{open ? '▾' : '▸'}</span>
-        <span>Recap history</span>
-      </button>
-      {open && (
-        <div className="mt-2 space-y-2">
-          {error && <ErrorNote message={error} />}
-          {loading ? (
-            <p className="text-sm text-slate-600">Loading history…</p>
-          ) : revisions.length === 0 ? (
-            <p className="text-sm text-slate-600">No earlier versions yet — edits are recorded here from now on.</p>
-          ) : (
-            revisions.map((rev) => {
-              const prior = rev.snapshot.recap ?? '';
-              const preview = prior.replace(/\s+/g, ' ').trim().slice(0, 120);
-              return (
-                <div key={rev.id} className="flex items-start gap-2 border-t border-slate-800 pt-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs text-muted">
-                      {rev.authorName || 'Someone'} · {new Date(rev.createdAt).toLocaleString()}
-                    </div>
-                    <div className="text-[13px] text-slate-400 truncate">{preview || '(empty recap)'}</div>
-                  </div>
-                  <Btn
-                    ghost
-                    className="!min-h-0 !py-1 text-xs shrink-0"
-                    onClick={() => restore(rev.id)}
-                    disabled={restoringId !== null}
-                  >
-                    {restoringId === rev.id ? 'Restoring…' : 'Restore'}
-                  </Btn>
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
-    </Card>
   );
 }
 

@@ -26,6 +26,7 @@ import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { Toggle } from '../../components/Toggle';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
 type QuestWithObjectives = Quest & { objectives: QuestObjective[] };
 type QuestStatusValue = Quest['status'];
@@ -65,6 +66,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [editingBody, setEditingBody] = useState(false);
   const [bodyDraft, setBodyDraft] = useState('');
   const [savingBody, setSavingBody] = useState(false);
+  // Optimistic-concurrency guard (#157/#233): a stale body save 409s instead of
+  // clobbering a co-DM's or a connected AI's interleaved edit. `bodyConflict` shows a
+  // Reload-latest affordance; `historyNonce` refetches the edit-history panel on save.
+  const [bodyConflict, setBodyConflict] = useState(false);
+  const [historyNonce, setHistoryNonce] = useState(0);
 
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [savingStatus, setSavingStatus] = useState(false);
@@ -137,14 +143,41 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   async function saveBody() {
     if (!quest) return;
     setSavingBody(true);
+    setError(null);
+    setBodyConflict(false);
     try {
-      const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { body: bodyDraft });
+      const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, {
+        body: bodyDraft,
+        // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#233) instead
+        // of silently overwriting the other author's work.
+        ...(quest.updatedAt ? { expectedUpdatedAt: quest.updatedAt } : {}),
+      });
       setQuest({ ...quest, ...updated });
       setEditingBody(false);
-    } catch {
-      setError(t('quests.saveBodyFailed'));
+      setHistoryNonce((n) => n + 1);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // Someone saved between our load and this save — keep the draft, block the
+        // clobber, and prompt a reload of the latest before saving again.
+        setBodyConflict(true);
+        setError(t('quests.bodyConflict'));
+      } else {
+        setError(t('quests.saveBodyFailed'));
+      }
     } finally {
       setSavingBody(false);
+    }
+  }
+
+  async function reloadBody() {
+    setError(null);
+    setBodyConflict(false);
+    try {
+      const fresh = await api.get<QuestWithObjectives>(`${API}/quests/${questId}`);
+      setQuest(fresh);
+      setBodyDraft(fresh.body);
+    } catch {
+      setError(t('quests.loadOneFailed'));
     }
   }
 
@@ -432,6 +465,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                   placeholder={t('quests.bodyPlaceholder')}
                 />
                 <div className="flex gap-2 justify-end">
+                  {bodyConflict && (
+                    <Btn ghost onClick={reloadBody} disabled={savingBody} className="!min-h-0 !py-1.5 text-xs">
+                      {t('quests.reloadLatest')}
+                    </Btn>
+                  )}
                   <Btn ghost onClick={() => setEditingBody(false)} className="!min-h-0 !py-1.5 text-xs">
                     {t('quests.cancel')}
                   </Btn>
@@ -567,6 +605,20 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               </Link>
             )}
           </div>
+
+          {/* Body revision history + restore (#157/#233) — DM-only, so a clobbered or
+              regretted edit is recoverable. Refetches after each body save. */}
+          {isDm && (
+            <RevisionHistoryPanel
+              entityType="quest"
+              entityId={quest.id}
+              reloadNonce={historyNonce}
+              onRestored={() => {
+                setHistoryNonce((n) => n + 1);
+                void reloadBody();
+              }}
+            />
+          )}
 
           {showSecret && (
             <div

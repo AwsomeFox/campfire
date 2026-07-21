@@ -2,7 +2,7 @@ import { ConflictException, Inject, Injectable, NotFoundException } from '@nestj
 import { and, desc, eq } from 'drizzle-orm';
 import type { EntityRevision, Role, RevisionEntityType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { entityRevisions, factions, locations, npcs, quests, sessions } from '../../db/schema';
+import { entityRevisions, factions, locations, notes, npcs, quests, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { auditActor } from '../../common/user.types';
@@ -37,6 +37,7 @@ const PROSE_FIELD: Record<RevisionEntityType, 'recap' | 'body'> = {
   npc: 'body',
   location: 'body',
   faction: 'body',
+  note: 'body',
 };
 
 @Injectable()
@@ -151,7 +152,30 @@ export class RevisionsService {
         const [row] = await this.db.select().from(factions).where(eq(factions.id, entityId)).limit(1);
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
+      case 'note': {
+        const [row] = await this.db.select().from(notes).where(eq(notes.id, entityId)).limit(1);
+        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
+      }
     }
+  }
+
+  /**
+   * A note's access-relevant fields, for the RevisionsController's per-note visibility gate
+   * (notes don't share the uniform dm-only edit path of the world-building entities). A
+   * trashed note (soft-deleted, #116) reads as gone — same as its normal GET — so its
+   * history/restore is unreachable while it sits in the Trash. Returns null when absent.
+   */
+  async loadNoteAccess(
+    entityId: number,
+  ): Promise<{ campaignId: number; authorUserId: string; visibility: string; recipientUserId: string | null } | null> {
+    const [row] = await this.db.select().from(notes).where(eq(notes.id, entityId)).limit(1);
+    if (!row || row.deletedAt != null) return null;
+    return {
+      campaignId: row.campaignId,
+      authorUserId: row.authorUserId,
+      visibility: row.visibility,
+      recipientUserId: row.recipientUserId ?? null,
+    };
   }
 
   /** Write an entity's prose column back and bump updatedAt. */
@@ -171,6 +195,9 @@ export class RevisionsService {
         return;
       case 'faction':
         await this.db.update(factions).set({ body: prose, updatedAt: ts }).where(eq(factions.id, entityId));
+        return;
+      case 'note':
+        await this.db.update(notes).set({ body: prose, updatedAt: ts }).where(eq(notes.id, entityId));
         return;
     }
   }
