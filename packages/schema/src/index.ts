@@ -1859,6 +1859,11 @@ export const Encounter = z.object({
   // Shared AoE templates (issue #238) — circle/cone/line shapes every client sees, unlike the
   // original client-local circle. Empty by default; capped so the JSON blob stays bounded.
   aoe: z.array(AoeTemplate).max(50).default([]),
+  // Entity-level secrecy (issue #262) — see Quest.hidden. A hidden encounter is a
+  // DM's prepared (not-yet-sprung) fight: its combatant roster (Ancient Red Dragon ×3)
+  // and computed 5e difficulty stay DM-only, and the encounter is dropped WHOLESALE
+  // from every non-DM read (list/get/difficulty) until the DM reveals it (hidden=false).
+  hidden: z.boolean().default(false),
   endedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
@@ -1869,6 +1874,8 @@ export const EncounterCreate = z.object({
   locationId: Id.nullable().optional(),
   questId: Id.nullable().optional(),
   sessionId: Id.nullable().optional(),
+  // Entity-level secrecy (issue #262) — start an encounter hidden (DM prep). Default false.
+  hidden: z.boolean().optional(),
 });
 // Edit an encounter's name, its location/quest/session links (issue #126), and/or its
 // battle-map attachment (issue #39). Every field optional; `null` clears a link/map,
@@ -1893,6 +1900,9 @@ export const EncounterUpdate = z.object({
   fog: FogState.nullable().optional(),
   // Shared AoE templates (issue #238) — dm only. Replace the whole template list (empty clears).
   aoe: z.array(AoeTemplate).max(50).optional(),
+  // Entity-level secrecy (issue #262) — dm only. true hides the encounter (roster + difficulty)
+  // from non-DM reads; the DM "reveals" it by patching hidden back to false.
+  hidden: z.boolean().optional(),
 });
 
 // ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------

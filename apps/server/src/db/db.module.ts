@@ -774,6 +774,26 @@ function migrateCampaignsTableForDmControlsProgression(sqlite: Database.Database
 }
 
 /**
+ * Migration for DBs created before encounter-level secrecy (issue #262): `encounters.hidden`
+ * didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no table rebuild needed, same shape as
+ * migrateQuestsTableForHidden / migrateNpcsTableForHidden above. Existing encounters get 0
+ * (visible), preserving the pre-migration behavior where every member could read a preparing
+ * encounter's roster + difficulty; a DM retroactively hides prep material by patching hidden=true.
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateEncountersTableForHidden(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'hidden')) return;
+
+  sqlite.exec('ALTER TABLE encounters ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+}
+
+/**
  * Migration for DBs created before first-class factions (issue #221): `npcs.faction_id`
  * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same shape as
  * migrateLocationsTableForParentId above. The `factions` table itself is created by
@@ -843,6 +863,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0032_npcs_faction_id', run: migrateNpcsTableForFactionId },
   { name: '0033_encounters_aoe_hex', run: migrateEncountersTableForAoeHex },
   { name: '0034_campaigns_dm_controls_progression', run: migrateCampaignsTableForDmControlsProgression },
+  { name: '0035_encounters_hidden', run: migrateEncountersTableForHidden },
 ];
 
 /**

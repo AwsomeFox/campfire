@@ -1495,7 +1495,7 @@ export class CampaignsService {
       this.locations.listForCampaign(id, role),
       this.characters.listForCampaign(id, role),
       this.sessions.listForCampaign(id, role),
-      this.encounters.digestForCampaign(id),
+      this.encounters.digestForCampaign(id, role),
     ]);
 
     const currentLocation = campaign.currentLocationId

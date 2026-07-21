@@ -8,6 +8,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, quests, ruleEntries, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
+import { filterHidden, isVisibleTo } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { rollDice, rollInitiative } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
@@ -71,6 +72,7 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     gridType: (row.gridType as GridType) ?? 'square',
     fog: parseFog(row.fog),
     aoe: parseAoe(row.aoe),
+    hidden: row.hidden,
     endedAt: row.endedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -245,7 +247,13 @@ export class EncountersService {
     return rows.map(eventToDomain);
   }
 
-  async listForCampaign(campaignId: number, status?: EncounterStatus): Promise<Encounter[]> {
+  /**
+   * `viewerRole` drives entity-level secrecy (issue #262): a hidden encounter is a DM's
+   * prepared, not-yet-sprung fight and is dropped WHOLESALE for a non-DM viewer — mirroring
+   * how QuestsService/NpcsService filter hidden rows. Omit `viewerRole` (or pass `dm`) only
+   * for DM-facing callers (e.g. the full-backup export), which must see hidden encounters.
+   */
+  async listForCampaign(campaignId: number, status?: EncounterStatus, viewerRole?: Role): Promise<Encounter[]> {
     const conditions = [eq(encounters.campaignId, campaignId), status ? eq(encounters.status, status) : undefined].filter(
       (c): c is NonNullable<typeof c> => c !== undefined,
     );
@@ -253,7 +261,10 @@ export class EncountersService {
       .select()
       .from(encounters)
       .where(conditions.length > 1 ? and(...conditions) : conditions[0]);
-    return rows.map(encounterToDomain);
+    const list = rows.map(encounterToDomain);
+    // Drop hidden encounters wholesale for a non-DM viewer (issue #262). undefined role
+    // (DM-facing callers) is never filtered.
+    return viewerRole === undefined ? list : filterHidden(list, viewerRole);
   }
 
   /**
@@ -263,6 +274,13 @@ export class EncountersService {
    */
   async getWithCombatantsOrThrow(id: number, viewerRole?: Role): Promise<EncounterWithCombatants> {
     const row = await this.getRowOrThrow(id);
+    // Entity-level secrecy (issue #262): a hidden encounter (DM prep) must be
+    // indistinguishable from a nonexistent one for a non-DM — 404 (not 403), so its
+    // very existence + roster aren't leaked. Mirrors QuestsService.getOrThrow. undefined
+    // role (DM-facing callers like the export) always sees it.
+    if (viewerRole !== undefined && !isVisibleTo({ hidden: row.hidden }, viewerRole)) {
+      throw new NotFoundException(`Encounter ${id} not found`);
+    }
     const combatantRows = await this.listCombatantRows(id);
     const status = row.status as EncounterStatus;
     let list = sortCombatants(combatantRows.map(combatantToDomain), status);
@@ -345,6 +363,10 @@ export class EncountersService {
     if (input.fog !== undefined) set.fog = input.fog === null ? null : toJsonText(input.fog);
     // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
     if (input.aoe !== undefined) set.aoe = toJsonText(input.aoe);
+    // Entity-level secrecy (issue #262) — DM-only (this whole endpoint requires dm). true
+    // hides the encounter's roster + difficulty from non-DM reads; the DM reveals by
+    // patching hidden back to false.
+    if (input.hidden !== undefined) set.hidden = input.hidden;
 
     if (Object.keys(set).length === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
@@ -410,6 +432,8 @@ export class EncountersService {
         locationId: input.locationId ?? null,
         questId: input.questId ?? null,
         sessionId: input.sessionId ?? null,
+        // Entity-level secrecy (issue #262): start hidden (DM prep) when requested.
+        hidden: input.hidden ?? false,
         endedAt: null,
         createdAt: ts,
         updatedAt: ts,
@@ -481,8 +505,14 @@ export class EncountersService {
    * from the monster-combatants' linked rule entries (dataJson.challengeRating), then
    * runs the pure 5e XP-budget math. No new columns — everything is derived on read.
    */
-  async getDifficulty(encounterId: number): Promise<EncounterDifficulty> {
+  async getDifficulty(encounterId: number, viewerRole?: Role): Promise<EncounterDifficulty> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    // Entity-level secrecy (issue #262): a hidden encounter's 5e difficulty (monsterCount +
+    // adjustedXp) is DM-only prep — deny a non-DM the same way the roster read does (404, so
+    // existence isn't leaked). undefined role is DM-facing and always allowed.
+    if (viewerRole !== undefined && !isVisibleTo({ hidden: encounterRow.hidden }, viewerRole)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const combatantRows = await this.listCombatantRows(encounterId);
 
@@ -528,8 +558,11 @@ export class EncountersService {
    * without loading full combatant rows. One encounters query plus one grouped-count
    * query over combatants, both scoped to the campaign.
    */
-  async digestForCampaign(campaignId: number): Promise<EncounterDigest[]> {
-    const rows = await this.db.select().from(encounters).where(eq(encounters.campaignId, campaignId));
+  async digestForCampaign(campaignId: number, viewerRole?: Role): Promise<EncounterDigest[]> {
+    const allRows = await this.db.select().from(encounters).where(eq(encounters.campaignId, campaignId));
+    // Entity-level secrecy (issue #262): drop hidden encounters from a non-DM's campaign
+    // summary, mirroring how quests/npcs are role-filtered in CampaignsService.summary.
+    const rows = viewerRole === undefined || viewerRole === 'dm' ? allRows : allRows.filter((r) => !r.hidden);
     if (rows.length === 0) return [];
 
     const encounterIds = rows.map((r) => r.id);
