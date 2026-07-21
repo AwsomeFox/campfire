@@ -773,6 +773,34 @@ export const aiProviderConfigs = sqliteTable('ai_provider_configs', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// AI scribe config + jobs (issue #316). `ai_scribe_configs` holds the per-campaign
+// trigger toggles + per-run token cap (all opt-in; the scribe never runs unrequested).
+// `ai_scribe_jobs` records every run for idempotency (source_hash dedupe) + an audit
+// trail of what was drafted. Both cascade on campaign delete.
+export const aiScribeConfigs = sqliteTable('ai_scribe_configs', {
+  campaignId: integer('campaign_id').primaryKey(), // FK->campaigns ON DELETE CASCADE (bootstrap/migration)
+  postSession: integer('post_session', { mode: 'boolean' }).notNull().default(false),
+  cron: integer('cron', { mode: 'boolean' }).notNull().default(false),
+  budgetPerRun: integer('budget_per_run').notNull().default(2000),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const aiScribeJobs = sqliteTable('ai_scribe_jobs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
+  trigger: text('trigger').notNull(), // 'on_demand' | 'post_session' | 'cron'
+  status: text('status').notNull(), // ScribeJobStatus
+  sourceHash: text('source_hash'), // sha256 of assembled source material — idempotency dedupe
+  proposalId: integer('proposal_id'), // the filed recap proposal (status=succeeded)
+  proposalCount: integer('proposal_count').notNull().default(0),
+  tokensUsed: integer('tokens_used').notNull().default(0),
+  provider: text('provider').notNull().default(''),
+  detail: text('detail').notNull().default(''),
+  createdBy: text('created_by').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),

@@ -68,6 +68,15 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           'allowed_models',
         ]),
       );
+
+      // 0043 (issue #316): the AI scribe config + jobs tables are created as NEW
+      // tables by the migration, with the trigger/budget + job-record columns present.
+      expect(columnNames(sqlite, 'ai_scribe_configs')).toEqual(
+        expect.arrayContaining(['campaign_id', 'post_session', 'cron', 'budget_per_run']),
+      );
+      expect(columnNames(sqlite, 'ai_scribe_jobs')).toEqual(
+        expect.arrayContaining(['campaign_id', 'trigger', 'status', 'source_hash', 'proposal_id', 'proposal_count', 'tokens_used', 'provider']),
+      );
     } finally {
       sqlite.close();
     }

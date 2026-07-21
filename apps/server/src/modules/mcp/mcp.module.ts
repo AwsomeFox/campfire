@@ -18,6 +18,7 @@ import { MapsModule } from '../maps/maps.module';
 import { AuditModule } from '../audit/audit.module';
 import { ExportModule } from '../export/export.module';
 import { AiDmModule } from '../ai-dm/ai-dm.module';
+import { ScribeModule } from '../scribe/scribe.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
 import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { InventoryModule } from '../inventory/inventory.module';
@@ -48,6 +49,7 @@ import { McpController } from './mcp.controller';
     AuditModule,
     ExportModule,
     AiDmModule,
+    ScribeModule,
     AttachmentsModule,
     SessionZeroModule,
     InventoryModule,

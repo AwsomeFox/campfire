@@ -2337,6 +2337,94 @@ export const AiProviderTestResult = z.object({
 });
 export type AiProviderTestResult = z.infer<typeof AiProviderTestResult>;
 
+// ── AI scribe: scheduled / automatic server-side recap jobs (issue #316) ──────
+// The scribe runs the configured provider (#309/#310) on a trigger to draft a
+// session recap from the campaign's own material (resolved inbox + encounters),
+// filing it ALWAYS as a PROPOSAL for the DM to approve — nothing auto-publishes
+// to canon. Governance is the AI-DM seat's: the server-wide experimentalAiDm
+// flag + the per-campaign seat being enabled + its token budget (metered like a
+// turn). Triggers: on-demand (endpoint/MCP), a post-session sweep after a
+// scheduled game night ends, and an optional cron tick — the last two share one
+// idempotent `sweep()` so a re-run never duplicates a recap.
+
+// How a scribe run was initiated. `post_session`/`cron` fire from the periodic
+// sweep; `on_demand` from the REST endpoint or the run_scribe MCP tool.
+export const ScribeTrigger = z.enum(['on_demand', 'post_session', 'cron']);
+export type ScribeTrigger = z.infer<typeof ScribeTrigger>;
+
+// Terminal state of one recorded scribe run.
+//  - succeeded         : a recap proposal was drafted + filed.
+//  - skipped           : idempotent no-op (identical source already drafted, or a
+//                        scribe recap proposal is already pending review).
+//  - no_provider       : neither a configured provider (#310) nor an injected one.
+//  - no_material       : the campaign had no inbox/encounter material to recap.
+//  - disabled          : the experimental flag is off or the seat isn't enabled.
+//  - over_budget       : the seat's token budget is exhausted.
+//  - failed            : the provider call (or filing) threw.
+export const ScribeJobStatus = z.enum([
+  'succeeded',
+  'skipped',
+  'no_provider',
+  'no_material',
+  'disabled',
+  'over_budget',
+  'failed',
+]);
+export type ScribeJobStatus = z.infer<typeof ScribeJobStatus>;
+
+// Per-campaign scribe configuration (GET/PUT /campaigns/:id/scribe, dm only).
+// All triggers default OFF: the scribe is opt-in, so enabling the AI-DM seat
+// alone never makes recaps appear unrequested. `budgetPerRun` caps a single
+// run's output tokens (further clamped by the seat's remaining budget).
+export const ScribeConfig = z.object({
+  campaignId: Id,
+  postSession: z.boolean().default(false), // sweep + draft after a scheduled session ends
+  cron: z.boolean().default(false), // include this campaign in the periodic cron sweep
+  budgetPerRun: z.number().int().min(1).max(200_000).default(2000), // per-run output-token cap
+  ...timestamps,
+});
+export type ScribeConfig = z.infer<typeof ScribeConfig>;
+
+export const ScribeConfigUpdate = z.object({
+  postSession: z.boolean().optional(),
+  cron: z.boolean().optional(),
+  budgetPerRun: z.number().int().min(1).max(200_000).optional(),
+});
+export type ScribeConfigUpdate = z.infer<typeof ScribeConfigUpdate>;
+
+// A recorded scribe run (read via GET /campaigns/:id/scribe/jobs).
+export const ScribeJob = z.object({
+  id: Id,
+  campaignId: Id,
+  trigger: ScribeTrigger,
+  status: ScribeJobStatus,
+  proposalId: Id.nullable().default(null), // the filed recap proposal, when status=succeeded
+  proposalCount: z.number().int().nonnegative().default(0),
+  tokensUsed: z.number().int().nonnegative().default(0),
+  provider: z.string().default(''), // which provider produced it (e.g. 'mock','anthropic','noop')
+  detail: z.string().default(''), // human-readable note / skip reason / error
+  createdBy: z.string().default(''),
+  createdAt: IsoDate,
+});
+export type ScribeJob = z.infer<typeof ScribeJob>;
+
+// On-demand run request (POST /campaigns/:id/scribe/run). `dryRun` assembles +
+// generates but files no proposal — a preview the DM can inspect before committing.
+export const ScribeRunRequest = z.object({
+  dryRun: z.boolean().default(false),
+});
+export type ScribeRunRequest = z.infer<typeof ScribeRunRequest>;
+
+// Result of a run: the recorded job, the proposal ids filed (empty on skip/dry-run),
+// and — on a dry run — the drafted recap text for preview.
+export const ScribeRunResult = z.object({
+  job: ScribeJob,
+  proposalIds: z.array(Id).default([]),
+  dryRun: z.boolean().default(false),
+  preview: z.string().nullable().default(null), // drafted recap text (dry-run only)
+});
+export type ScribeRunResult = z.infer<typeof ScribeRunResult>;
+
 // ---------- attachments (uploaded images: character portraits, campaign maps) ----------
 export const AttachmentKind = z.enum(['portrait', 'map', 'image']);
 
