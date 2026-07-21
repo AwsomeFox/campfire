@@ -85,6 +85,25 @@ export class AiDmService {
     }
   }
 
+  /**
+   * Enforce the server-wide token cap (issue #315). 0 = unlimited. When positive,
+   * a turn is rejected once SUM(tokensUsed) across all seats reaches the cap. Read
+   * from ServerSettings so an admin can raise/lower it live from the AI console.
+   */
+  private async assertWithinServerTokenCap(): Promise<void> {
+    const { aiServerTokenCap: cap } = await this.settings.getAll();
+    if (!cap || cap <= 0) return;
+    const [agg] = await this.db
+      .select({ total: sql<number>`COALESCE(SUM(${aiDmSeats.tokensUsed}), 0)` })
+      .from(aiDmSeats);
+    const total = Number(agg?.total ?? 0);
+    if (total >= cap) {
+      throw new ForbiddenException(
+        `Server-wide AI token cap reached (${total}/${cap}). A server admin must raise it in the AI console (PUT /settings/ai/caps) or reset usage to continue.`,
+      );
+    }
+  }
+
   private async findRow(campaignId: number): Promise<(typeof aiDmSeats.$inferSelect) | undefined> {
     const [row] = await this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1);
     return row;
@@ -239,6 +258,12 @@ export class AiDmService {
         `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
       );
     }
+
+    // Server-wide HARD token cap (issue #315 admin console). When set (>0), the
+    // aggregate tokens metered across EVERY seat may not exceed it — a per-campaign
+    // budget still having room doesn't override the server ceiling. Checked here so
+    // a turn is stopped with a clear reason before any (potential) provider spend.
+    await this.assertWithinServerTokenCap();
 
     const maxTokens = Math.min(input.maxTokens ?? DEFAULT_MAX_TOKENS, remaining);
     const result = await this.provider.generate({

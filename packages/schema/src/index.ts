@@ -1909,8 +1909,16 @@ export const ServerSettings = z.object({
   allowSignup: z.boolean().default(false), // gate for self-service signup (POST /auth/signup) — off by default
   // Experimental server-side AI Dungeon Master (issue #28) — OFF by default. When
   // false, every AI-DM configure/turn path is 403-gated server-wide, so the feature
-  // is inert until an admin opts the whole server in. See modules/ai-dm.
+  // is inert until an admin opts the whole server in. See modules/ai-dm. This flag
+  // doubles as the admin console's KILL SWITCH (issue #315): flipping it off pauses
+  // all AI immediately.
   experimentalAiDm: z.boolean().default(false),
+  // Server-wide HARD token cap (issue #315) — a ceiling on total tokens metered
+  // across EVERY campaign's AI-DM seat. 0 = unlimited. When positive, a turn is
+  // rejected (403) once the aggregate tokensUsed across all seats reaches the cap,
+  // regardless of any per-campaign budget still remaining. Admin-managed from the
+  // AI console (PUT /settings/ai/caps).
+  aiServerTokenCap: z.number().int().nonnegative().max(1_000_000_000).default(0),
 });
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();
@@ -2351,6 +2359,107 @@ export const AiProviderTestResult = z.object({
   error: z.string().nullable().default(null),
 });
 export type AiProviderTestResult = z.infer<typeof AiProviderTestResult>;
+
+// ── Admin AI console (issue #315): opt-in, budgets & caps, usage, kill switch ──
+// A server-admin-only cockpit over the AI program: the global kill switch
+// (ServerSettings.experimentalAiDm), server-wide + per-campaign token caps, a usage
+// rollup aggregated from the existing per-seat metering (AiDmSeat.tokensUsed —
+// NO new ledger table), the model allowlist (#310's allowedModels) editor, and a
+// provider-health "test all". Every route lives under `/settings/ai/*` and is
+// @ServerRoles('admin'). No API key or raw prompt is ever surfaced here.
+
+// One row of the usage dashboard: a campaign's AI-DM seat metering. `model` is the
+// informational label of the model/agent occupying the seat (never a credential).
+export const AiUsageCampaignRow = z.object({
+  campaignId: Id,
+  campaignName: z.string(),
+  enabled: z.boolean(), // the seat's per-campaign on/off
+  model: z.string(),
+  tokenBudget: z.number().int().nonnegative(), // per-campaign hard cap (0 = seat can't run)
+  tokensUsed: z.number().int().nonnegative(),
+  turnCount: z.number().int().nonnegative(),
+  lastTurnAt: IsoDate.nullable(),
+});
+export type AiUsageCampaignRow = z.infer<typeof AiUsageCampaignRow>;
+
+// Tokens/turns grouped by the seat's model label — the "by model" dashboard axis.
+export const AiUsageModelRow = z.object({
+  model: z.string(), // '' = seats with no model label set
+  tokensUsed: z.number().int().nonnegative(),
+  turnCount: z.number().int().nonnegative(),
+  seats: z.number().int().nonnegative(), // how many campaign seats use this model
+});
+export type AiUsageModelRow = z.infer<typeof AiUsageModelRow>;
+
+// The full usage rollup (GET /settings/ai/usage) — aggregated live from seat counters.
+export const AiUsageRollup = z.object({
+  totalTokensUsed: z.number().int().nonnegative(),
+  totalTurns: z.number().int().nonnegative(),
+  seatCount: z.number().int().nonnegative(), // configured seats (persisted rows)
+  activeSeatCount: z.number().int().nonnegative(), // seats with enabled=true
+  serverTokenCap: z.number().int().nonnegative(), // 0 = unlimited
+  serverBudgetRemaining: z.number().int().nonnegative().nullable(), // null when uncapped
+  byCampaign: z.array(AiUsageCampaignRow),
+  byModel: z.array(AiUsageModelRow),
+});
+export type AiUsageRollup = z.infer<typeof AiUsageRollup>;
+
+// One provider-health probe result (GET-triggered POST /settings/ai/health). Reuses
+// the connection-test shape; `campaignId` is null for the server-default provider.
+export const AiProviderHealthEntry = z.object({
+  scope: z.enum(['server', 'campaign']),
+  campaignId: Id.nullable(),
+  campaignName: z.string().nullable(),
+  ok: z.boolean(),
+  // The effective provider type as reported by the live probe. A plain string (not
+  // the narrow config enum) because the provider factory's runtime type union is
+  // broader (e.g. 'custom'); a health readout just displays whatever ran.
+  providerType: z.string(),
+  model: z.string(),
+  error: z.string().nullable(),
+});
+export type AiProviderHealthEntry = z.infer<typeof AiProviderHealthEntry>;
+
+// The console overview (GET /settings/ai) — everything the admin cockpit renders in
+// one shot: kill switch, caps, allowlist, usage rollup, provider-config presence.
+export const AiConsoleOverview = z.object({
+  killSwitchEnabled: z.boolean(), // experimentalAiDm — the global opt-in/kill switch
+  serverTokenCap: z.number().int().nonnegative(), // 0 = unlimited
+  allowedModels: z.array(z.string()), // the #310 server allowlist ([] = unrestricted)
+  serverProviderConfigured: z.boolean(), // a server-default provider row exists
+  serverProviderType: AiProviderConfigType.nullable(),
+  usage: AiUsageRollup,
+});
+export type AiConsoleOverview = z.infer<typeof AiConsoleOverview>;
+
+// PUT /settings/ai/caps — set the server-wide token cap and/or per-campaign budgets.
+// Both optional; an omitted field is left unchanged. Per-campaign entries upsert the
+// seat's tokenBudget only (never touch usage counters).
+export const AiCapsUpdate = z
+  .object({
+    serverTokenCap: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    campaigns: z
+      .array(
+        z.object({
+          campaignId: Id,
+          tokenBudget: z.number().int().nonnegative().max(1_000_000_000),
+        }),
+      )
+      .max(500)
+      .optional(),
+  })
+  .strict();
+export type AiCapsUpdate = z.infer<typeof AiCapsUpdate>;
+
+// POST /settings/ai/kill — the kill switch. `enabled:false` pauses all AI immediately.
+export const AiKillSwitchUpdate = z.object({ enabled: z.boolean() }).strict();
+export type AiKillSwitchUpdate = z.infer<typeof AiKillSwitchUpdate>;
+
+// PUT /settings/ai/allowlist — replace the server model allowlist ([] = unrestricted).
+export const AiAllowlistUpdate = z
+  .object({ allowedModels: z.array(z.string().min(1).max(120)).max(200) })
+  .strict();
+export type AiAllowlistUpdate = z.infer<typeof AiAllowlistUpdate>;
 
 // ---------- attachments (uploaded images: character portraits, campaign maps) ----------
 export const AttachmentKind = z.enum(['portrait', 'map', 'image']);
