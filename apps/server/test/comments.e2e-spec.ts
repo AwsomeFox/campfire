@@ -180,6 +180,98 @@ describe('comments / threaded discussion (e2e)', () => {
     expect(replyGone.status).toBe(404);
   });
 
+  // Anchored-entity secrecy (issue #230, re: #123): a comment thread must be at least
+  // as secret as the entity it hangs off. A hidden quest/NPC leaks neither its existence
+  // nor its discussion to a non-DM — listing/posting 404s exactly as the entity's own GET
+  // does — while the DM works normally and a visible entity is unchanged.
+  describe('anchored-entity secrecy', () => {
+    let hiddenQuestId: number;
+    let hiddenNpcId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const q = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'The Secret Betrayal', hidden: true });
+      hiddenQuestId = q.body.id;
+      const n = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'The Masked Traitor', hidden: true });
+      hiddenNpcId = n.body.id;
+      // The DM seeds a thread on each hidden entity — the very content that must not leak.
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(dm)
+        .send({ entityType: 'quest', entityId: hiddenQuestId, body: 'DM-only plotting on a hidden quest' });
+    });
+
+    it('non-DM cannot LIST comments on a hidden quest/npc (404, existence not leaked)', async () => {
+      const server = ctx.app.getHttpServer();
+      for (const headers of [authorPlayer, otherPlayer, viewer]) {
+        const quest = await request(server)
+          .get(`/api/v1/campaigns/${campaignId}/comments`)
+          .query({ entityType: 'quest', entityId: hiddenQuestId })
+          .set(headers);
+        expect(quest.status).toBe(404);
+        const npc = await request(server)
+          .get(`/api/v1/campaigns/${campaignId}/comments`)
+          .query({ entityType: 'npc', entityId: hiddenNpcId })
+          .set(headers);
+        expect(npc.status).toBe(404);
+      }
+    });
+
+    it('non-DM cannot CREATE a comment on a hidden quest/npc (404)', async () => {
+      const server = ctx.app.getHttpServer();
+      const quest = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ entityType: 'quest', entityId: hiddenQuestId, body: 'Trying to speculate on a secret' });
+      expect(quest.status).toBe(404);
+      const npc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(otherPlayer)
+        .send({ entityType: 'npc', entityId: hiddenNpcId, body: 'Who is the traitor?' });
+      expect(npc.status).toBe(404);
+    });
+
+    it('the DM can list and create comments on a hidden entity', async () => {
+      const server = ctx.app.getHttpServer();
+      const list = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments`)
+        .query({ entityType: 'quest', entityId: hiddenQuestId })
+        .set(dm);
+      expect(list.status).toBe(200);
+      expect(list.body.some((c: { body: string }) => c.body === 'DM-only plotting on a hidden quest')).toBe(true);
+
+      const create = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(dm)
+        .send({ entityType: 'npc', entityId: hiddenNpcId, body: 'Reminder: reveal at session 5' });
+      expect(create.status).toBe(201);
+    });
+
+    it('once revealed, a non-DM can list/create on the (formerly hidden) entity', async () => {
+      const server = ctx.app.getHttpServer();
+      const reveal = await request(server).patch(`/api/v1/quests/${hiddenQuestId}`).set(dm).send({ hidden: false });
+      expect(reveal.status).toBe(200);
+
+      const list = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments`)
+        .query({ entityType: 'quest', entityId: hiddenQuestId })
+        .set(authorPlayer);
+      expect(list.status).toBe(200);
+
+      const create = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ entityType: 'quest', entityId: hiddenQuestId, body: 'Now I can finally comment!' });
+      expect(create.status).toBe(201);
+    });
+  });
+
   it('rejects an unknown body key (strict DTO)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
