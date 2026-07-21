@@ -466,7 +466,7 @@ function CenteredMessage({
       }}
     >
       <span className={pulse ? 'animate-pulse' : ''} style={{ display: 'flex', color: 'var(--color-neutral-400)' }}>
-        <GameIcon slug={icon} size={56} />
+        <GameIcon slug={icon} size={56} reserveSpace />
       </span>
       <p style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-text)', margin: 0 }}>{title}</p>
       {children}

@@ -656,13 +656,13 @@ function Gate({
       <Card className="space-y-3">
         {error !== undefined ? (
           <>
-            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug={icon} size={30} /></p>
+            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug={icon} size={30} reserveSpace /></p>
             {/* Only surface the fix link when the current viewer can act on it. */}
             <AiGateExplainer err={error} campaignId={campaignId} canFix={isDm || isAdmin} />
           </>
         ) : (
           <div className="text-center space-y-2">
-            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug={icon} size={30} /></p>
+            <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug={icon} size={30} reserveSpace /></p>
             {title && <p className="font-bold text-[var(--color-text)]">{title}</p>}
             {hint && <p className="text-sm text-[var(--color-neutral-400)]">{hint}</p>}
             {isDm && campaignId !== undefined && !showChecklist && (

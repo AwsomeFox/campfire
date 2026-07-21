@@ -24,7 +24,8 @@ export function GameIcon({
   size = 24,
   className = '',
   title,
-  fallback = null,
+  fallback,
+  reserveSpace = false,
 }: {
   slug: string | null | undefined;
   /** Pixel size of the square icon. */
@@ -34,6 +35,14 @@ export function GameIcon({
   title?: string;
   /** Rendered while a non-curated slug resolves, and permanently for an unknown slug. */
   fallback?: ReactNode;
+  /**
+   * When true, reserve a `size`×`size` box while a non-curated slug resolves
+   * (instead of rendering nothing), so the surrounding layout doesn't shift when
+   * the async icon lands. Ignored when an explicit `fallback` is given. Use on
+   * frequently-shown chrome (empty states, the DM panel) where the icon is
+   * usually non-curated; leave off where "unknown slug → nothing" is desired.
+   */
+  reserveSpace?: boolean;
 }) {
   const [icon, setIcon] = useState<GameIconEntry | undefined>(() => getIcon(slug));
 
@@ -54,7 +63,13 @@ export function GameIcon({
     };
   }, [slug]);
 
-  if (!icon) return <>{fallback}</>;
+  if (!icon) {
+    if (fallback !== undefined) return <>{fallback}</>;
+    if (reserveSpace) {
+      return <span aria-hidden="true" style={{ display: 'inline-block', width: size, height: size }} />;
+    }
+    return null;
+  }
   return (
     <svg
       viewBox={`0 0 ${ICON_VIEWBOX} ${ICON_VIEWBOX}`}

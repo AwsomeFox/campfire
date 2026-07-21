@@ -157,7 +157,7 @@ export default function NpcListPage() {
         )}
 
         {npcs.length === 0 ? (
-          <EmptyState icon="shaking-hands" title="No NPCs yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any NPCs yet.'} />
+          <EmptyState icon="hooded-figure" title="No NPCs yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any NPCs yet.'} />
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {npcs.map((npc) => (
