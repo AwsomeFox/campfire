@@ -3,6 +3,7 @@ import { AuditModule } from '../audit/audit.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { AiDmModule } from '../ai-dm/ai-dm.module';
 import { McpModule } from '../mcp/mcp.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config.module';
 import { AiDriverService } from './ai-driver.service';
 import { AiDriverController } from './ai-driver.controller';
@@ -21,7 +22,7 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
  * that returns the deterministic mock provider — the whole loop then runs offline.
  */
 @Module({
-  imports: [AuditModule, RoleAccessModule, AiDmModule, McpModule, AiProviderConfigModule],
+  imports: [AuditModule, RoleAccessModule, AiDmModule, McpModule, NotificationsModule, AiProviderConfigModule],
   controllers: [AiDriverController],
   providers: [
     AiDriverService,

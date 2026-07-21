@@ -1,7 +1,8 @@
-import { Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
-import type { RequestUser } from '../../common/user.types';
+import { ConflictException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { auditActor, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
 import { McpToolsService, type DriverToolset } from '../mcp/mcp-tools';
 import type { AiDmSeat } from '@campfire/schema';
@@ -49,13 +50,72 @@ export interface AiDmTurnRunResult {
 
 export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
 
+/**
+ * The stuck-ladder session state (#314). Distinct from the low-level `status` (which the
+ * turn loop / pause gate use): `state` is the player-facing lifecycle the recovery levers
+ * drive. `running` is healthy; `awaiting_players` means detection tripped and the table must
+ * pull a lever; `paused` is a deliberate freeze; `human_control` means a human holds the seat.
+ */
+export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
+
+/** Why the driver is considered stuck — any one of these trips the ladder (#314). */
+export type AiDmStuckReason =
+  | 'tool_error' // a tool call errored (surfaced by the turn loop's stop reason)
+  | 'budget_exhausted' // the per-campaign token budget hit its hard cap mid-turn
+  | 'max_steps' // the tool loop hit its ceiling without producing final narration
+  | 'no_narration' // the turn produced no narration at all
+  | 'loop' // the model repeated its previous narration verbatim
+  | 'dispute'; // a player flagged the AI's last ruling as wrong/unfair
+
+/** Snapshot of the current stuck condition; null when the seat is healthy. */
+export interface AiDmStuckInfo {
+  reason: AiDmStuckReason;
+  detail: string;
+  since: string;
+  turn: number;
+}
+
+/** A revocable, audited grant of the DM seat to a human while the AI is frozen (#314). */
+export interface AiDmActingDmGrant {
+  memberId: string;
+  grantedBy: string;
+  grantedAt: string;
+  note: string | null;
+}
+
+/** A lightweight table vote to override the AI's last ruling or pause the seat (#314). */
+export interface AiDmTableVote {
+  id: string;
+  kind: 'override' | 'pause';
+  openedBy: string;
+  openedAt: string;
+  /** memberId → their yes/no ballot. */
+  ballots: Record<string, boolean>;
+  /** Yes-votes needed to pass (majority of current members). */
+  threshold: number;
+  resolved: boolean;
+  outcome: 'passed' | 'failed' | null;
+}
+
 export interface AiDmSessionState {
   campaignId: number;
   status: AiDmSessionStatus;
+  /** Stuck-ladder lifecycle state (#314) — what the player levers act on. */
+  state: AiDmLadderState;
   scene: string | null;
   lastNarration: string | null;
   lastTurnAt: string | null;
   turnCount: number;
+  /** Current stuck condition, or null when healthy (#314). */
+  stuck: AiDmStuckInfo | null;
+  /** Player levers currently offered given the state (#314). */
+  levers: string[];
+  /** Human holding the seat while the AI is frozen, or null (#314). */
+  actingDm: AiDmActingDmGrant | null;
+  /** An open table vote, or null (#314). */
+  vote: AiDmTableVote | null;
+  /** The last player who asked for a human takeover (advisory), or null (#314). */
+  takeoverRequestedBy: string | null;
 }
 
 export interface RunTurnOptions {
@@ -174,12 +234,16 @@ export class AiDriverService {
   private readonly logger = new Logger(AiDriverService.name);
   /** In-memory per-campaign session state (single-instance deploy, like CampaignEventsService). */
   private readonly sessions = new Map<number, AiDmSessionState>();
+  /** Last player input per campaign — replayed by the retry/nudge/flag levers (#314). */
+  private readonly lastInputs = new Map<number, string>();
+  private voteSeq = 0;
 
   constructor(
     private readonly aiDm: AiDmService,
     private readonly mcpTools: McpToolsService,
     private readonly audit: AuditService,
     private readonly stream: AiDmStreamService,
+    private readonly notifications: NotificationsService,
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
   ) {}
 
@@ -191,11 +255,33 @@ export class AiDriverService {
   setPaused(campaignId: number, paused: boolean): AiDmSessionState {
     const session = this.ensureSession(campaignId);
     session.status = paused ? 'paused' : 'idle';
+    // A pause is a deliberate ladder state; resuming clears it (but never steals the seat back
+    // from a human who holds it — handback owns that transition).
+    if (paused) {
+      session.state = 'paused';
+    } else if (session.state === 'paused') {
+      session.state = session.stuck ? 'awaiting_players' : 'running';
+    }
+    session.levers = this.leversFor(session);
+    this.stream.emit({ type: 'state', campaignId, state: session.state });
     return session;
   }
 
   private freshSession(campaignId: number): AiDmSessionState {
-    return { campaignId, status: 'idle', scene: null, lastNarration: null, lastTurnAt: null, turnCount: 0 };
+    return {
+      campaignId,
+      status: 'idle',
+      state: 'running',
+      scene: null,
+      lastNarration: null,
+      lastTurnAt: null,
+      turnCount: 0,
+      stuck: null,
+      levers: this.leversFor({ state: 'running', stuck: null } as AiDmSessionState),
+      actingDm: null,
+      vote: null,
+      takeoverRequestedBy: null,
+    };
   }
 
   private ensureSession(campaignId: number): AiDmSessionState {
@@ -223,9 +309,18 @@ export class AiDriverService {
     const seat = await this.aiDm.assertRunnable(campaignId);
 
     const session = this.ensureSession(campaignId);
+    if (session.state === 'human_control') {
+      throw new ServiceUnavailableException(
+        `A human (${session.actingDm?.memberId ?? 'acting DM'}) is running the table. Hand the seat back (POST /ai-dm/handback) before the AI takes turns again.`,
+      );
+    }
     if (session.status === 'paused') {
       throw new ServiceUnavailableException('The AI Dungeon Master seat is paused. Resume it before sending input.');
     }
+
+    // Remember the input so the retry / nudge / flag levers can replay this turn (#314).
+    this.lastInputs.set(campaignId, input);
+    const prevNarration = session.lastNarration;
 
     const provider = await this.resolver.resolve(campaignId);
     if (!provider) {
@@ -333,6 +428,15 @@ export class AiDriverService {
       session.lastTurnAt = nowIso();
       session.turnCount += 1;
     }
+
+    // #314 — stuck detection: classify the turn's outcome and move the ladder. A stuck turn
+    // parks the seat in `awaiting_players` with the recovery levers; a clean turn clears it.
+    await this.detectAndTransition(campaignId, session, {
+      stopReason,
+      narration: finalNarration,
+      prevNarration,
+      triggeredBy,
+    });
 
     this.stream.emit({ type: 'turn.end', campaignId, stopReason, steps, tokensUsed: totalTokens, budgetRemaining });
 
@@ -458,6 +562,304 @@ export class AiDriverService {
     return { toolErrored };
   }
 
+  // ===================================================================================
+  // Stuck ladder (#314): detection + player levers. Everything below extends the driver
+  // WITHOUT touching the turn loop's guardrails (canon→proposals, budget, campaignId scope,
+  // experimentalAiDm flag): levers either replay a turn through the SAME runTurn() (so every
+  // guardrail re-applies) or only mutate the in-memory session state + audit trail.
+  // ===================================================================================
+
+  /**
+   * Classify a finished turn and move the ladder. A stuck turn parks the seat in
+   * `awaiting_players` (with the recovery levers surfaced), notifies the table, and emits a
+   * `stuck` stream signal; a clean turn clears any prior stuck state and emits `recovered`.
+   */
+  private async detectAndTransition(
+    campaignId: number,
+    session: AiDmSessionState,
+    ctx: { stopReason: AiDmStopReason; narration: string; prevNarration: string | null; triggeredBy: RequestUser },
+  ): Promise<void> {
+    const reason = classifyStuck(ctx);
+    if (reason) {
+      const detail = describeStuck(reason);
+      session.state = 'awaiting_players';
+      session.stuck = { reason, detail, since: nowIso(), turn: session.turnCount };
+      session.levers = this.leversFor(session);
+      this.stream.emit({ type: 'stuck', campaignId, reason, detail, state: session.state, levers: session.levers });
+      await this.audit.log({
+        actor: `ai-dm-seat:${campaignId}`,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.stuck',
+        entityType: 'ai-dm',
+        campaignId,
+        detail: `${reason}: ${detail}`,
+      });
+      await this.notify(campaignId, ctx.triggeredBy, 'The AI Dungeon Master needs help', `${detail} — the table can retry, nudge, flag, vote, or take over.`);
+      return;
+    }
+    // Clean turn: if we were stuck, announce the recovery.
+    const wasStuck = session.stuck !== null || session.state === 'awaiting_players';
+    session.stuck = null;
+    session.state = 'running';
+    session.levers = this.leversFor(session);
+    if (wasStuck) this.stream.emit({ type: 'recovered', campaignId, state: session.state });
+  }
+
+  /** The player levers currently offered given the session state (#314). */
+  private leversFor(session: Pick<AiDmSessionState, 'state' | 'stuck'>): string[] {
+    switch (session.state) {
+      case 'paused':
+        return ['resume', 'request_takeover'];
+      case 'human_control':
+        return ['handback'];
+      case 'awaiting_players':
+        // The full recovery set — the table must never be without a way forward.
+        return ['retry', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+      case 'running':
+      default:
+        // Levers are available in healthy play too (flag a ruling, call a vote, etc.).
+        return ['nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+    }
+  }
+
+  /**
+   * Retry / nudge (#314): replay the last player input through the driver, optionally injecting
+   * a table hint. Runs through the SAME runTurn() so budget, proposals, and scope re-apply — if
+   * it succeeds the turn's own detection clears the stuck state. Budget-aware: assertRunnable
+   * inside runTurn 403s a nudge once the budget is gone.
+   */
+  async nudge(campaignId: number, user: RequestUser, hint?: string): Promise<AiDmTurnRunResult> {
+    const base = this.requireReplayInput(campaignId);
+    const input = hint ? `${base}\n\n[Table hint for the DM — steer the scene using this: ${hint}]` : base;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.nudge',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: hint ? `nudge with hint by ${user.id}` : `retry by ${user.id}`,
+    });
+    return this.runTurn(campaignId, user, input);
+  }
+
+  /**
+   * Flag a ruling (#314): a player disputes the AI's last decision. The objection is injected
+   * back into context and the turn is re-run so the AI must RE-DECIDE with the dispute in view.
+   * The dispute itself is audited and notified regardless of the re-decision's outcome.
+   */
+  async flag(campaignId: number, user: RequestUser, objection: string): Promise<AiDmTurnRunResult> {
+    const base = this.requireReplayInput(campaignId);
+    const session = this.ensureSession(campaignId);
+    const lastRuling = session.lastNarration ? `\n\nYour last ruling was: "${excerpt(session.lastNarration, 400)}"` : '';
+    const input = `${base}${lastRuling}\n\n[A player DISPUTES that ruling as wrong or unfair: ${objection}. Reconsider it, cite the rule or fact you rely on, and re-decide.]`;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.flag',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `dispute by ${user.id}: ${excerpt(objection, 160)}`,
+    });
+    await this.notify(campaignId, user, 'A ruling was disputed', `${excerpt(objection, 160)} — the AI is re-deciding.`);
+    return this.runTurn(campaignId, user, input);
+  }
+
+  /**
+   * Rules lookup (#314): route a rules question to the compendium (retrieval) instead of the
+   * generative model — cheaper and authoritative. Reads through the SAME permission-checked
+   * tool layer (lookup_rule) the AI itself uses, so nothing the seat can't see leaks.
+   */
+  async rulesLookup(campaignId: number, user: RequestUser, query: string): Promise<{ query: string; result: string }> {
+    const seatPrincipal: RequestUser = { id: `ai-dm-seat:${campaignId}`, name: 'AI Dungeon Master', serverRole: 'user', devRole: 'dm' };
+    const toolset = this.mcpTools.buildToolset(seatPrincipal);
+    const res = await toolset.call('lookup_rule', { query });
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.rules_lookup',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `rules lookup by ${user.id}: ${excerpt(query, 120)}`,
+    });
+    return { query, result: res.text };
+  }
+
+  /**
+   * Open a table vote (#314) to override the AI's last ruling or pause the seat. Majority of
+   * current members carries it. Only one vote may be open at a time.
+   */
+  async openVote(campaignId: number, user: RequestUser, kind: 'override' | 'pause'): Promise<AiDmSessionState> {
+    const session = this.ensureSession(campaignId);
+    if (session.vote && !session.vote.resolved) {
+      throw new ConflictException('A table vote is already open. Resolve it before opening another.');
+    }
+    const memberCount = (await this.notifications.memberRoles(campaignId)).size;
+    const threshold = Math.max(1, Math.floor(memberCount / 2) + 1);
+    session.vote = {
+      id: `vote-${++this.voteSeq}`,
+      kind,
+      openedBy: user.id,
+      openedAt: nowIso(),
+      ballots: {},
+      threshold,
+      resolved: false,
+      outcome: null,
+    };
+    session.levers = this.leversFor(session);
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.vote.open',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `${kind} vote opened by ${user.id} (threshold ${threshold})`,
+    });
+    this.stream.emit({ type: 'vote', campaignId, action: 'opened', kind });
+    await this.notify(campaignId, user, 'A table vote was called', `Vote to ${kind} the AI DM's last ruling — cast your ballot.`);
+    return session;
+  }
+
+  /**
+   * Cast a ballot on the open vote (#314). Resolves the moment the yes-tally reaches the
+   * majority threshold: a passed `override` clears the stuck state and marks the last ruling
+   * overridden; a passed `pause` freezes the seat. Every ballot + the resolution is audited.
+   */
+  async castVote(campaignId: number, user: RequestUser, choice: boolean): Promise<AiDmSessionState> {
+    const session = this.ensureSession(campaignId);
+    const vote = session.vote;
+    if (!vote || vote.resolved) throw new ConflictException('No open table vote to cast on.');
+    vote.ballots[user.id] = choice;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.vote.cast',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `${user.id} voted ${choice ? 'yes' : 'no'} on ${vote.kind}`,
+    });
+    this.stream.emit({ type: 'vote', campaignId, action: 'cast', kind: vote.kind });
+
+    const yes = Object.values(vote.ballots).filter(Boolean).length;
+    if (yes >= vote.threshold) {
+      vote.resolved = true;
+      vote.outcome = 'passed';
+      if (vote.kind === 'pause') {
+        session.status = 'paused';
+        session.state = 'paused';
+      } else {
+        // override: discard the disputed ruling and let play resume.
+        session.stuck = null;
+        session.state = session.status === 'paused' ? 'paused' : 'running';
+        session.lastNarration = null;
+      }
+      session.levers = this.leversFor(session);
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'ai-dm.driver.vote.resolve',
+        entityType: 'ai-dm',
+        campaignId,
+        detail: `${vote.kind} vote PASSED (${yes}/${vote.threshold})`,
+      });
+      this.stream.emit({ type: 'vote', campaignId, action: 'resolved', kind: vote.kind, outcome: 'passed' });
+      await this.notify(campaignId, user, 'Table vote passed', `The table voted to ${vote.kind} the AI DM.`);
+    }
+    return session;
+  }
+
+  /** Request a human takeover (#314) — advisory: flags the ask + notifies so a DM/owner can grant it. */
+  async requestTakeover(campaignId: number, user: RequestUser): Promise<AiDmSessionState> {
+    const session = this.ensureSession(campaignId);
+    session.takeoverRequestedBy = user.id;
+    session.levers = this.leversFor(session);
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.takeover.request',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `human takeover requested by ${user.id}`,
+    });
+    this.stream.emit({ type: 'takeover', campaignId, action: 'requested', memberId: user.id });
+    await this.notify(campaignId, user, 'Human takeover requested', `${user.id} is offering to run the table for the AI DM.`);
+    return session;
+  }
+
+  /**
+   * Grant the DM seat to a human (#314): a revocable, audited 'acting DM' grant. The AI seat is
+   * frozen (status paused, state human_control) so no AI turn can run until handback. `memberId`
+   * defaults to whoever last requested the takeover (or the granter).
+   */
+  async grantTakeover(campaignId: number, granter: RequestUser, memberId?: string, note?: string): Promise<AiDmSessionState> {
+    const session = this.ensureSession(campaignId);
+    const holder = memberId ?? session.takeoverRequestedBy ?? granter.id;
+    session.actingDm = { memberId: holder, grantedBy: granter.id, grantedAt: nowIso(), note: note ?? null };
+    session.status = 'paused'; // freeze the AI seat while a human holds it
+    session.state = 'human_control';
+    session.takeoverRequestedBy = null;
+    session.levers = this.leversFor(session);
+    await this.audit.log({
+      actor: auditActor(granter),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.takeover.grant',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `acting-DM seat granted to ${holder} by ${granter.id}`,
+    });
+    this.stream.emit({ type: 'takeover', campaignId, action: 'granted', memberId: holder });
+    await this.notify(campaignId, granter, 'A human took the DM seat', `${holder} is now acting DM. The AI is paused.`);
+    return session;
+  }
+
+  /**
+   * Hand the seat back to the AI (#314): revoke the acting-DM grant, unfreeze the seat, and
+   * clear any stuck state. `note` records the call the human made while in control (audited).
+   */
+  async handback(campaignId: number, user: RequestUser, note?: string): Promise<AiDmSessionState> {
+    const session = this.ensureSession(campaignId);
+    const prior = session.actingDm;
+    session.actingDm = null;
+    session.stuck = null;
+    session.status = 'idle';
+    session.state = 'running';
+    session.levers = this.leversFor(session);
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-dm.driver.handback',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `seat handed back to the AI by ${prior?.memberId ?? user.id}${note ? ` — ruling: ${excerpt(note, 200)}` : ''}`,
+    });
+    this.stream.emit({ type: 'takeover', campaignId, action: 'handback', memberId: prior?.memberId ?? user.id });
+    await this.notify(campaignId, user, 'The AI DM resumed', `${prior?.memberId ?? user.id} handed the seat back to the AI.`);
+    return session;
+  }
+
+  private requireReplayInput(campaignId: number): string {
+    const input = this.lastInputs.get(campaignId);
+    if (!input) {
+      throw new ConflictException('There is no prior AI DM turn to retry. Send input via POST /ai-dm/message first.');
+    }
+    return input;
+  }
+
+  /** Best-effort table notification for a stuck/lever event (#263 + #314). Never throws. */
+  private async notify(campaignId: number, actor: RequestUser, title: string, body: string): Promise<void> {
+    try {
+      await this.notifications.notifyCampaign(campaignId, actor, {
+        type: 'ai_dm_alert',
+        title,
+        body: excerpt(body, 500),
+        entityType: null,
+        entityId: null,
+        actorName: actor.name ?? '',
+      });
+    } catch {
+      /* best-effort — a notification failure must never break a lever */
+    }
+  }
+
   /**
    * Assemble the system prompt: the grounding preamble, the DM's seat steering, and a
    * compact, permission-checked context block (campaign summary + session-zero charter)
@@ -490,4 +892,43 @@ async function safeRead(toolset: DriverToolset, name: string, args: Record<strin
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+/**
+ * Map a finished turn onto a stuck reason, or null if the turn was healthy (#314). Order
+ * matters: a hard stop (tool error / budget / max-steps) outranks a soft signal (empty
+ * narration / a verbatim loop) since it's the more actionable diagnosis.
+ */
+function classifyStuck(ctx: {
+  stopReason: AiDmStopReason;
+  narration: string;
+  prevNarration: string | null;
+}): AiDmStuckReason | null {
+  if (ctx.stopReason === 'tool_error') return 'tool_error';
+  if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
+  if (ctx.stopReason === 'max_steps') return 'max_steps';
+  const narration = ctx.narration.trim();
+  if (narration === '') return 'no_narration';
+  if (ctx.prevNarration && narration === ctx.prevNarration.trim()) return 'loop';
+  return null;
+}
+
+/** A short, player-readable explanation of why the seat is stuck (#314). */
+function describeStuck(reason: AiDmStuckReason): string {
+  switch (reason) {
+    case 'tool_error':
+      return 'The AI hit a tool error and stopped mid-turn.';
+    case 'budget_exhausted':
+      return 'The AI ran out of its token budget for this campaign.';
+    case 'max_steps':
+      return 'The AI kept working without producing narration and hit its step limit.';
+    case 'no_narration':
+      return 'The AI produced no narration this turn.';
+    case 'loop':
+      return 'The AI repeated its previous narration verbatim (looping).';
+    case 'dispute':
+      return 'A player disputed the AI’s last ruling.';
+    default:
+      return 'The AI needs help.';
+  }
 }
