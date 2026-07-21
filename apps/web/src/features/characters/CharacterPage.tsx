@@ -18,7 +18,7 @@
  */
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, DiceRoll, SkillRank } from '@campfire/schema';
+import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpForLevel, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
@@ -29,8 +29,6 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
-import { useAnnounce } from '../../components/Announcer';
-import { RolledDice } from '../dice/RolledDice';
 import { initials } from './avatar';
 import {
   ABILITY_KEYS,
@@ -46,93 +44,8 @@ import {
   toHitExpr,
   damageExpr,
 } from '../../lib/characterStats';
-
-export interface Roller {
-  /** POST the expression to the shared dice log with a character-attributed label. */
-  roll: (expr: string, label: string) => Promise<DiceRoll | null>;
-  rolling: boolean;
-}
-
-/**
- * Posts sheet rolls to the exact endpoint the Dice tray / dashboard Dice card use
- * (POST /campaigns/:id/roll — see SharedDiceLog.submitExpr), so a save/skill/attack
- * rolled from the sheet appears in the same shared feed everyone at the table watches.
- * There is no per-character roll field on the API, so the character name rides in the
- * label ("Aldra · Athletics check") to attribute the roll; the user identity is still
- * recorded server-side as the roller.
- */
-function useRoller(campaignId: number, onError: (msg: string | null) => void): Roller & {
-  last: DiceRoll | null;
-  dismiss: () => void;
-} {
-  const [rolling, setRolling] = useState(false);
-  const [last, setLast] = useState<DiceRoll | null>(null);
-  const announce = useAnnounce();
-
-  const roll = useCallback(
-    async (expr: string, label: string): Promise<DiceRoll | null> => {
-      setRolling(true);
-      onError(null);
-      try {
-        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
-        setLast(result);
-        const crit = /\bd20\b/i.test(result.expr) && result.rolls.includes(20);
-        const fumble = /\bd20\b/i.test(result.expr) && result.rolls.includes(1);
-        announce(
-          `${result.label ? `${result.label}: ` : ''}rolled ${result.expr}, total ${result.total}` +
-            (crit ? ' — natural 20!' : fumble ? ' — natural 1.' : ''),
-        );
-        return result;
-      } catch (err) {
-        onError(err instanceof ApiError ? err.message : "Couldn't roll the dice.");
-        return null;
-      } finally {
-        setRolling(false);
-      }
-    },
-    [campaignId, onError, announce],
-  );
-
-  return { roll, rolling, last, dismiss: () => setLast(null) };
-}
-
-/**
- * Ephemeral readout of the last sheet roll — the sheet has no dice log of its own, so
- * this gives immediate feedback (label, dice, total, crit/fumble flavour) while the
- * roll also flows to the shared feed. A natural 20 / natural 1 on a d20 gets the same
- * gold/rose flourish as the shared log.
- */
-function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismiss: () => void }) {
-  const isD20 = /\bd20\b/i.test(roll.expr);
-  const crit = isD20 && roll.rolls.includes(20);
-  const fumble = isD20 && roll.rolls.includes(1);
-  const totalColor = crit ? 'var(--cf-crit, #fbbf24)' : fumble ? 'var(--color-danger, #f87171)' : 'var(--color-accent)';
-  return (
-    <div className="cf-inset flex items-center gap-3 px-3.5 py-2" role="status">
-      <div className="min-w-0 flex-1">
-        <p className="text-[13px] font-semibold truncate">{roll.label || roll.expr}</p>
-        <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
-          <span>{roll.expr}</span>
-          <RolledDice rolls={roll.rolls} kept={roll.kept} fontSize={11} />
-          {crit && <span style={{ color: totalColor }}>nat 20!</span>}
-          {fumble && <span style={{ color: totalColor }}>nat 1</span>}
-        </p>
-      </div>
-      <span className="font-heading leading-none" style={{ fontSize: 26, color: totalColor }}>
-        {roll.total}
-      </span>
-      <button
-        type="button"
-        aria-label="Dismiss roll result"
-        onClick={onDismiss}
-        className="text-slate-500 hover:text-slate-300 shrink-0"
-        style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 14 }}
-      >
-        ✕
-      </button>
-    </div>
-  );
-}
+import { useRoller, type Roller } from '../../lib/useRoller';
+import { RollResultBanner } from '../../components/RollResultBanner';
 
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
