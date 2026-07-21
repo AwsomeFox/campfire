@@ -10,8 +10,8 @@
  * a crash.
  */
 
-/** Entity-type → slug. Keys match the entity `type`/`entityType` strings used across notes, search, proposals, trash, inbox, etc. */
-export const ENTITY_ICON: Record<string, string> = {
+/** Entity-type → slug. Keys match the entity `type`/`entityType` strings used across notes, search, proposals, trash, inbox, etc. `as const` keeps the literal keys/values so misspelled lookups fail to compile. */
+export const ENTITY_ICON = {
   quest: 'scroll-unfurled',
   npc: 'hooded-figure',
   faction: 'black-flag',
@@ -26,12 +26,12 @@ export const ENTITY_ICON: Record<string, string> = {
   comment: 'chat-bubble',
   arc: 'oak-leaf',
   beat: 'film-strip',
-};
+} as const;
 
-/** Note visibility → slug (private / shared-with-DM / shared-with-party / whisper). */
-export const NOTE_VISIBILITY_ICON: Record<string, string> = {
+/** Note visibility → slug (private / shared-with-DM / shared-with-party / whisper). `as const` for `keyof`-checked, typo-proof lookups. */
+export const NOTE_VISIBILITY_ICON = {
   private: 'padlock',
   dm_shared: 'top-hat',
   party_shared: 'meeple',
   whisper: 'secret-book',
-};
+} as const;
