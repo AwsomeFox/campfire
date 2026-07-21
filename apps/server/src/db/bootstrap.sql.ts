@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS npcs (
   faction_id INTEGER REFERENCES factions(id) ON DELETE SET NULL,
   body TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
+  icon_slug TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
