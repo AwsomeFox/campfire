@@ -11,6 +11,7 @@ import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
+import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
 import { NotificationsBell } from '../features/notifications/NotificationsBell';
@@ -245,6 +246,12 @@ export function Layout() {
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
+
+  // AI-DM seat mode drives the "Table" nav item (issue #339): the player-facing table
+  // only exists when the AI holds the DM seat (Driver mode). The seat read stops on a
+  // 4xx (feature off / not a member), so the item simply stays hidden then — no error.
+  const aiSeatQuery = useAiDmSeat(campaignId);
+  const aiDriverActive = aiSeatQuery.data?.mode === 'driver';
   const roleLabel =
     role === 'dm'
       ? t('nav.roleDm')
@@ -369,6 +376,8 @@ export function Layout() {
         { key: 'timeline', label: t('nav.timeline'), to: `/c/${campaignId}/timeline` },
         { key: 'session-zero', label: t('nav.sessionZero'), to: `/c/${campaignId}/session-zero` },
         { key: 'encounters', label: t('nav.encounters'), to: `/c/${campaignId}/encounters` },
+        // Only surfaced while the AI holds the DM seat (Driver mode) — issue #339.
+        ...(aiDriverActive ? [{ key: 'table', label: t('nav.table'), to: `/c/${campaignId}/table` }] : []),
         { key: 'compendium', label: t('nav.compendium'), to: `/c/${campaignId}/compendium` },
         { key: 'notes', label: t('nav.myNotes'), to: `/c/${campaignId}/notes` },
         // Non-DM members get a self-view of the proposals they've submitted (issue #124);
