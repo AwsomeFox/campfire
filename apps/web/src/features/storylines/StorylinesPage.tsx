@@ -11,7 +11,7 @@
  * Data: GET/POST /api/v1/campaigns/:campaignId/arcs, plus /arcs/:id and /beats/:id routes.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import type {
   StoryArcWithBeats,
   StoryBeatWithBranches,
@@ -22,6 +22,15 @@ import type {
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+
+/** Minimal shapes for the play-record link-picker option lists (issue #264). */
+type NamedRow = { id: number; name?: string; title?: string; number?: number };
+type LinkOptions = { sessions: NamedRow[]; quests: NamedRow[]; encounters: NamedRow[] };
+const EMPTY_LINK_OPTIONS: LinkOptions = { sessions: [], quests: [], encounters: [] };
+
+function sessionLabel(s: NamedRow): string {
+  return s.title || `Session ${s.number ?? s.id}`;
+}
 
 const ARC_STATUSES: ArcStatus[] = ['planned', 'active', 'resolved', 'abandoned'];
 const BEAT_STATUSES: BeatStatus[] = ['planned', 'active', 'done', 'skipped'];
@@ -52,6 +61,9 @@ export default function StorylinesPage() {
   const [forbidden, setForbidden] = useState(false);
   const [newArcTitle, setNewArcTitle] = useState('');
   const [busy, setBusy] = useState(false);
+  // Play-record link options (issue #264) — the sessions/quests/encounters a beat can
+  // link to. Fetched once; empty lists just leave the pickers showing "— none —".
+  const [linkOptions, setLinkOptions] = useState<LinkOptions>(EMPTY_LINK_OPTIONS);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -74,6 +86,25 @@ export default function StorylinesPage() {
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
   }, [cid, load]);
+
+  // Load the play-record link options once the campaign is known (issue #264). The whole
+  // page is DM-only, so these DM-scoped lists are always available here. Failures degrade
+  // gracefully to empty pickers rather than blocking the arc/beat view.
+  useEffect(() => {
+    if (!Number.isFinite(cid)) return;
+    let cancelled = false;
+    void Promise.all([
+      api.get<NamedRow[]>(`${API}/campaigns/${cid}/sessions`).catch(() => [] as NamedRow[]),
+      api.get<NamedRow[]>(`${API}/campaigns/${cid}/quests`).catch(() => [] as NamedRow[]),
+      api.get<NamedRow[]>(`${API}/campaigns/${cid}/encounters`).catch(() => [] as NamedRow[]),
+    ]).then(([sessions, quests, encounters]) => {
+      if (cancelled) return;
+      setLinkOptions({ sessions, quests, encounters });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cid]);
 
   // Every beat across all arcs, so a branch's target (which may live in another arc)
   // can be shown by title and offered in the "link to beat" picker.
@@ -160,7 +191,7 @@ export default function StorylinesPage() {
         <EmptyState icon="🌿" title="No storylines yet" hint={isDm ? 'Create an arc to start planning.' : undefined} />
       ) : (
         arcs.map((arc) => (
-          <ArcCard key={arc.id} arc={arc} isDm={isDm} allBeats={allBeats} onChange={load} />
+          <ArcCard key={arc.id} arc={arc} cid={cid} isDm={isDm} allBeats={allBeats} linkOptions={linkOptions} onChange={load} />
         ))
       )}
     </div>
@@ -169,13 +200,17 @@ export default function StorylinesPage() {
 
 function ArcCard({
   arc,
+  cid,
   isDm,
   allBeats,
+  linkOptions,
   onChange,
 }: {
   arc: StoryArcWithBeats;
+  cid: number;
   isDm: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
+  linkOptions: LinkOptions;
   onChange: () => Promise<void>;
 }) {
   const [newBeatTitle, setNewBeatTitle] = useState('');
@@ -263,7 +298,7 @@ function ArcCard({
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {arc.beats.map((beat) => (
-            <BeatRow key={beat.id} beat={beat} isDm={isDm} allBeats={allBeats} onChange={onChange} />
+            <BeatRow key={beat.id} beat={beat} cid={cid} isDm={isDm} allBeats={allBeats} linkOptions={linkOptions} onChange={onChange} />
           ))}
         </div>
       )}
@@ -291,19 +326,41 @@ function ArcCard({
 
 function BeatRow({
   beat,
+  cid,
   isDm,
   allBeats,
+  linkOptions,
   onChange,
 }: {
   beat: StoryBeatWithBranches;
+  cid: number;
   isDm: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
+  linkOptions: LinkOptions;
   onChange: () => Promise<void>;
 }) {
   const [addingBranch, setAddingBranch] = useState(false);
   const [branchLabel, setBranchLabel] = useState('');
   const [branchTarget, setBranchTarget] = useState<string>('');
+  const [editingLinks, setEditingLinks] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  // The play-record this beat corresponds to (issue #264): resolve each linked id to a
+  // display label + deep-link, so a done beat shows where it landed.
+  const linkedSession = beat.sessionId != null ? linkOptions.sessions.find((s) => s.id === beat.sessionId) : undefined;
+  const linkedQuest = beat.questId != null ? linkOptions.quests.find((q) => q.id === beat.questId) : undefined;
+  const linkedEncounter = beat.encounterId != null ? linkOptions.encounters.find((e) => e.id === beat.encounterId) : undefined;
+  const hasLinks = beat.sessionId != null || beat.questId != null || beat.encounterId != null;
+
+  const saveLinks = async (patch: { sessionId?: number | null; questId?: number | null; encounterId?: number | null }) => {
+    setBusy(true);
+    try {
+      await api.patch(`${API}/beats/${beat.id}`, patch);
+      await onChange();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const setStatus = async (status: BeatStatus) => {
     setBusy(true);
@@ -388,6 +445,90 @@ function BeatRow({
       </div>
 
       {beat.body && <p className="text-muted" style={{ margin: '0 0 0 22px', fontSize: 12 }}>{beat.body}</p>}
+
+      {/* Play-record links (issue #264): where this planned beat landed in play. */}
+      {hasLinks && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 22, flexWrap: 'wrap', fontSize: 12 }}>
+          {beat.sessionId != null && (
+            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/sessions?session=${beat.sessionId}`}>
+              📓 {linkedSession ? sessionLabel(linkedSession) : `Session #${beat.sessionId}`}
+            </Link>
+          )}
+          {beat.questId != null && (
+            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/quests/${beat.questId}`}>
+              📜 {linkedQuest?.title ?? `Quest #${beat.questId}`}
+            </Link>
+          )}
+          {beat.encounterId != null && (
+            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/encounters/${beat.encounterId}`}>
+              ⚔ {linkedEncounter?.name ?? `Encounter #${beat.encounterId}`}
+            </Link>
+          )}
+        </div>
+      )}
+
+      {isDm &&
+        (editingLinks ? (
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginLeft: 22, flexWrap: 'wrap' }}>
+            <select
+              className="input"
+              value={beat.sessionId != null ? String(beat.sessionId) : ''}
+              disabled={busy}
+              onChange={(e) => void saveLinks({ sessionId: e.target.value ? Number(e.target.value) : null })}
+              style={{ fontSize: 12, width: 'auto' }}
+              aria-label="Linked session"
+            >
+              <option value="">📓 — no session —</option>
+              {linkOptions.sessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {sessionLabel(s)}
+                </option>
+              ))}
+            </select>
+            <select
+              className="input"
+              value={beat.questId != null ? String(beat.questId) : ''}
+              disabled={busy}
+              onChange={(e) => void saveLinks({ questId: e.target.value ? Number(e.target.value) : null })}
+              style={{ fontSize: 12, width: 'auto' }}
+              aria-label="Linked quest"
+            >
+              <option value="">📜 — no quest —</option>
+              {linkOptions.quests.map((q) => (
+                <option key={q.id} value={q.id}>
+                  {q.title ?? `#${q.id}`}
+                </option>
+              ))}
+            </select>
+            <select
+              className="input"
+              value={beat.encounterId != null ? String(beat.encounterId) : ''}
+              disabled={busy}
+              onChange={(e) => void saveLinks({ encounterId: e.target.value ? Number(e.target.value) : null })}
+              style={{ fontSize: 12, width: 'auto' }}
+              aria-label="Linked encounter"
+            >
+              <option value="">⚔ — no encounter —</option>
+              {linkOptions.encounters.map((en) => (
+                <option key={en.id} value={en.id}>
+                  {en.name ?? `#${en.id}`}
+                </option>
+              ))}
+            </select>
+            <button className="btn btn-ghost" style={{ fontSize: 11 }} disabled={busy} onClick={() => setEditingLinks(false)}>
+              Done
+            </button>
+          </div>
+        ) : (
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 11, marginLeft: 22, alignSelf: 'flex-start' }}
+            disabled={busy}
+            onClick={() => setEditingLinks(true)}
+          >
+            🔗 {hasLinks ? 'Edit links' : 'Link to play'}
+          </button>
+        ))}
 
       {beat.branches.map((branch) => {
         const target = branch.toBeatId != null ? allBeats.get(branch.toBeatId) : undefined;

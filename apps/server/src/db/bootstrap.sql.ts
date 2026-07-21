@@ -122,6 +122,9 @@ CREATE TABLE IF NOT EXISTS story_beats (
   body TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'planned',
   sort_order INTEGER NOT NULL DEFAULT 0,
+  session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+  quest_id INTEGER REFERENCES quests(id) ON DELETE SET NULL,
+  encounter_id INTEGER REFERENCES encounters(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

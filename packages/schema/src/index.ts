@@ -450,6 +450,13 @@ export const StoryBeat = z.object({
   body: z.string().max(50_000).default(''), // markdown — the DM's notes for the beat
   status: BeatStatus.default('planned'),
   sortOrder: z.number().int().default(0),
+  // Optional links to the play record this planned beat corresponds to (issue #264) —
+  // WHEN it landed (session), the quest it advanced, and the encounter that resolved it.
+  // Mirrors how Encounter carries its location/quest/session links (issue #126). All
+  // nullable; absent in older DBs pre-migration (0036_story_beats_links).
+  sessionId: Id.nullable().default(null),
+  questId: Id.nullable().default(null),
+  encounterId: Id.nullable().default(null),
   ...timestamps,
 });
 export type StoryBeat = z.infer<typeof StoryBeat>;

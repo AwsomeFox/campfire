@@ -12,7 +12,7 @@ import {
 } from '@campfire/schema';
 import type { StoryArc, StoryBeat, StoryBranch, StoryBeatWithBranches, StoryArcWithBeats, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { storyArcs, storyBeats, storyBranches } from '../../db/schema';
+import { storyArcs, storyBeats, storyBranches, sessions, quests, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -48,6 +48,10 @@ function beatToDomain(row: typeof storyBeats.$inferSelect): StoryBeat {
     body: row.body,
     status: row.status as StoryBeat['status'],
     sortOrder: row.sortOrder,
+    // Optional links to the play record this beat corresponds to (issue #264).
+    sessionId: row.sessionId,
+    questId: row.questId,
+    encounterId: row.encounterId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -198,6 +202,20 @@ export class StorylinesService {
 
   // ---------- beats ----------
 
+  /**
+   * Guard that a play-record link target (session/quest/encounter) exists in the SAME
+   * campaign as the beat (issue #264) — mirrors EncountersService.assertEntityInCampaign
+   * (issue #126). A cross-campaign or nonexistent ref is rejected (400) rather than stored,
+   * so a beat can never point at play records outside its own campaign.
+   */
+  private async assertEntityInCampaign(kind: 'session' | 'quest' | 'encounter', id: number, campaignId: number): Promise<void> {
+    const table = kind === 'session' ? sessions : kind === 'quest' ? quests : encounters;
+    const [row] = await this.db.select({ campaignId: table.campaignId }).from(table).where(eq(table.id, id)).limit(1);
+    if (!row || row.campaignId !== campaignId) {
+      throw new BadRequestException(`${kind} ${id} does not exist in this campaign`);
+    }
+  }
+
   private async beatsForArc(arcId: number): Promise<StoryBeatWithBranches[]> {
     const rows = await this.db
       .select()
@@ -224,6 +242,10 @@ export class StorylinesService {
 
   async addBeat(arcId: number, input: StoryBeatCreateInput, user: RequestUser, role: Role): Promise<StoryBeat> {
     const arc = await this.getArcRowOrThrow(arcId);
+    // Validate any play-record links belong to the same campaign as the arc (issue #264).
+    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, arc.campaignId);
+    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, arc.campaignId);
+    if (input.encounterId != null) await this.assertEntityInCampaign('encounter', input.encounterId, arc.campaignId);
     // Append to the end by default so new beats don't all collide at sortOrder 0.
     let sortOrder = input.sortOrder;
     if (sortOrder == null) {
@@ -243,6 +265,10 @@ export class StorylinesService {
         body: input.body ?? '',
         status: input.status ?? 'planned',
         sortOrder,
+        // Optional play-record links (issue #264). undefined -> null.
+        sessionId: input.sessionId ?? null,
+        questId: input.questId ?? null,
+        encounterId: input.encounterId ?? null,
         createdAt: ts,
         updatedAt: ts,
       })
@@ -260,6 +286,11 @@ export class StorylinesService {
 
   async updateBeat(id: number, input: StoryBeatUpdateInput, user: RequestUser, role: Role): Promise<StoryBeat> {
     const existing = await this.getBeatRowOrThrow(id);
+    // Validate any play-record links being SET (non-null) belong to the beat's campaign
+    // (issue #264). `null` clears a link; an omitted field leaves it unchanged.
+    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, existing.campaignId);
+    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, existing.campaignId);
+    if (input.encounterId != null) await this.assertEntityInCampaign('encounter', input.encounterId, existing.campaignId);
     const [row] = await this.db
       .update(storyBeats)
       .set({ ...input, updatedAt: nowIso() })
