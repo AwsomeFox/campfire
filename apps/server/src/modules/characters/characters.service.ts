@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { characters, combatants, encounters } from '../../db/schema';
+import { campaigns, characters, combatants, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
@@ -105,6 +105,24 @@ export class CharactersService {
     if (role === 'dm') return;
     if (row.ownerUserId && row.ownerUserId === user.id) return;
     throw new ForbiddenException('Only dm or the owning player may modify this character');
+  }
+
+  /**
+   * When a campaign has `dmControlsProgression` enabled (issue #270), XP awards and
+   * level-ups are DM-only — a non-DM (even a character's owning player) is rejected.
+   * When the flag is off (the default), this is a no-op and any owner may self-progress,
+   * preserving the original behavior. Only called on the XP/level write paths.
+   */
+  private async assertProgressionAllowed(campaignId: number, role: Role): Promise<void> {
+    if (role === 'dm') return;
+    const [row] = await this.db
+      .select({ dmControlsProgression: campaigns.dmControlsProgression })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    if (row?.dmControlsProgression) {
+      throw new ForbiddenException('This campaign restricts XP awards and level-ups to the DM');
+    }
   }
 
   /**
@@ -221,6 +239,11 @@ export class CharactersService {
   async update(id: number, input: CharacterUpdateInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
+    // Editing xp/level through the general PATCH is progression too — gate it the same
+    // way as patchXp/levelUp so dmControlsProgression can't be bypassed here (issue #270).
+    if (input.xp !== undefined || input.level !== undefined) {
+      await this.assertProgressionAllowed(existing.campaignId, role);
+    }
 
     const update: Partial<typeof characters.$inferInsert> = { updatedAt: nowIso() };
     if (input.name !== undefined) update.name = input.name;
@@ -365,6 +388,7 @@ export class CharactersService {
   async patchXp(id: number, patch: XpPatchInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
+    await this.assertProgressionAllowed(existing.campaignId, role);
 
     // Mirrors patchHp: { delta } is relative, { set } absolute; XP never goes negative.
     let xp: number;
@@ -441,6 +465,7 @@ export class CharactersService {
   async levelUp(id: number, input: LevelUpInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
+    await this.assertProgressionAllowed(existing.campaignId, role);
     if (existing.level >= 20) throw new BadRequestException('Already at level 20 — there is no level 21');
 
     const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nowIso() };

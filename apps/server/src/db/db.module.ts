@@ -755,6 +755,25 @@ function migrateEncountersTableForAoeHex(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before the optional DM-gated progression flag (issue #270):
+ * `campaigns.dm_controls_progression` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN —
+ * existing campaigns get 0 (false), preserving the pre-migration behavior where any
+ * character owner may self-award XP / level up. A DM opts a campaign into DM-only
+ * progression by setting the flag. Same idempotent shape as the ADD COLUMN migrations above.
+ */
+function migrateCampaignsTableForDmControlsProgression(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'dm_controls_progression')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN dm_controls_progression INTEGER NOT NULL DEFAULT 0');
+}
+
+/**
  * Migration for DBs created before first-class factions (issue #221): `npcs.faction_id`
  * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same shape as
  * migrateLocationsTableForParentId above. The `factions` table itself is created by
@@ -823,6 +842,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0031_soft_delete', run: migrateSoftDeleteColumns },
   { name: '0032_npcs_faction_id', run: migrateNpcsTableForFactionId },
   { name: '0033_encounters_aoe_hex', run: migrateEncountersTableForAoeHex },
+  { name: '0034_campaigns_dm_controls_progression', run: migrateCampaignsTableForDmControlsProgression },
 ];
 
 /**

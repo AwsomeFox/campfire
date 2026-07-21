@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   status TEXT NOT NULL DEFAULT 'active',
   current_location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
   danger_level TEXT NOT NULL DEFAULT 'low',
+  dm_controls_progression INTEGER NOT NULL DEFAULT 0,
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
