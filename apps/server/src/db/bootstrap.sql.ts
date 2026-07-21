@@ -544,6 +544,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   fog TEXT,
   grid_type TEXT NOT NULL DEFAULT 'square',
   aoe TEXT,
+  hidden INTEGER NOT NULL DEFAULT 0,
   ended_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

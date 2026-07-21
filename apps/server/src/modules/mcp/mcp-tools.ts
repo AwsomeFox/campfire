@@ -660,8 +660,10 @@ export class McpToolsService {
       { encounterId: Id.describe('Encounter id — from list_encounters') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
-        await this.access.requireMember(user, row.campaignId);
-        return this.encounters.getDifficulty(encounterId as number);
+        // Pass the caller's role so a hidden encounter's difficulty (prep) is denied to a
+        // non-DM the same way get_encounter's roster is (issue #262).
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.getDifficulty(encounterId as number, role);
       },
     );
 
@@ -675,8 +677,10 @@ export class McpToolsService {
         status: z.enum(['preparing', 'running', 'ended']).optional().describe('Filter by encounter status'),
       },
       async ({ campaignId, status }) => {
-        await this.access.requireMember(user, campaignId as number);
-        return this.encounters.listForCampaign(campaignId as number, status as 'preparing' | 'running' | 'ended' | undefined);
+        // Pass the caller's role so a hidden (prepared, not-yet-sprung) encounter is dropped
+        // from a non-DM's list, mirroring the REST route (issue #262).
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.encounters.listForCampaign(campaignId as number, status as 'preparing' | 'running' | 'ended' | undefined, role);
       },
     );
 
@@ -2017,19 +2021,21 @@ export class McpToolsService {
       'create_encounter',
       'DM only: create a new encounter (combat tracker) in a campaign, status=preparing. Auto-adds every campaign ' +
         'character as a combatant with hp from their sheet and initiative modifier from DEX. Optionally attach it to a ' +
-        'location/quest/session (issue #126) so combat is tied to where/why/when it happened.',
+        'location/quest/session (issue #126) so combat is tied to where/why/when it happened. Pass hidden=true to keep ' +
+        'the encounter DM-only prep (issue #262): its roster + difficulty stay invisible to players until you reveal it.',
       {
         campaignId: CampaignIdArg,
         name: z.string().min(1).max(120).describe('Encounter name'),
         locationId: Id.optional().describe('Attach the encounter to a location (where it happens)'),
         questId: Id.optional().describe('Attach the encounter to a quest (why it happens)'),
         sessionId: Id.optional().describe('Attach the encounter to a session (when it happens)'),
+        hidden: z.boolean().optional().describe('Create the encounter hidden (DM-only prep) — its roster + difficulty are withheld from players until revealed (issue #262)'),
       },
-      async ({ campaignId, name, locationId, questId, sessionId }) => {
+      async ({ campaignId, name, locationId, questId, sessionId, hidden }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.encounters.create(
           campaignId as number,
-          { name: name as string, locationId: locationId as number | undefined, questId: questId as number | undefined, sessionId: sessionId as number | undefined },
+          { name: name as string, locationId: locationId as number | undefined, questId: questId as number | undefined, sessionId: sessionId as number | undefined, hidden: hidden as boolean | undefined },
           user,
           role,
         );
@@ -2042,8 +2048,9 @@ export class McpToolsService {
       'update_encounter',
       'DM only: edit an encounter\'s name, its location/quest/session links (issue #126), and/or its battle map ' +
         '(issue #39: mapAttachmentId = an uploaded image attachment id, kind map|image, rendered as the run-session ' +
-        'background; combatant token positions are set with update_combatant tokenX/tokenY, 0–100). Pass null to clear ' +
-        'a link or the map; omit a field to leave it unchanged.',
+        'background; combatant token positions are set with update_combatant tokenX/tokenY, 0–100). Toggle hidden to ' +
+        'hide/reveal the encounter as DM-only prep (issue #262: hidden=true withholds its roster + difficulty from ' +
+        'players; hidden=false reveals it). Pass null to clear a link or the map; omit a field to leave it unchanged.',
       { encounterId: Id.describe('Encounter id — from list_encounters'), ...EncounterUpdate.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
