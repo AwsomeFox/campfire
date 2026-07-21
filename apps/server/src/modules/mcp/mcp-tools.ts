@@ -1949,6 +1949,37 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'reveal_map_region',
+      'DM only: reveal a rectangular region of an encounter\'s battle-map fog of war (issue #40) ' +
+        'so players can see it. Enables fog on the encounter if it isn\'t already, and appends the ' +
+        'rectangle to the revealed area (call repeatedly to light the board as the party explores). ' +
+        'Coordinates are 0–100 percent of the map surface: x/y = the top-left corner, w/h = width/' +
+        'height. Player clients only ever receive combatant token positions that lie INSIDE a ' +
+        'revealed region — tokens in the dark are withheld server-side — so this is how an AI DM ' +
+        'controls what the table can see. To hide the map again or reset the mask, use update_encounter ' +
+        'with fog ({enabled,revealed:[]} or null). Move tokens with update_combatant tokenX/tokenY.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        x: z.number().min(0).max(100).describe('Left edge of the revealed rectangle, 0–100 percent of map width'),
+        y: z.number().min(0).max(100).describe('Top edge of the revealed rectangle, 0–100 percent of map height'),
+        w: z.number().min(0).max(100).describe('Width of the revealed rectangle, 0–100 percent of map width'),
+        h: z.number().min(0).max(100).describe('Height of the revealed rectangle, 0–100 percent of map height'),
+      },
+      async ({ encounterId, x, y, w, h }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.revealFogRegion(
+          encounterId as number,
+          { x: x as number, y: y as number, w: w as number, h: h as number },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'add_combatant',
       '`kind` ("character"|"monster") is required. DM only: add a combatant to an encounter. Pass ruleEntryId (a ' +
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +

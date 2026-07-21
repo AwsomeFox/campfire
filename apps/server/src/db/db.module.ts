@@ -645,6 +645,48 @@ function migrateDiceRollsTableForKeepDrop(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before the VTT grid + fog of war (issue #40, phases 2–3):
+ * `encounters` gained `grid_size` / `grid_scale` / `grid_unit` (measurement ruler config),
+ * `grid_snap` (snap-to-grid flag), and `fog` (JSON FogState mask). Plain nullable/defaulted
+ * ADD COLUMNs — no table rebuild needed, same shape as migrateDiceRollsTableForKeepDrop
+ * above. Existing encounters get NULL grid config (no grid) and NULL fog (fully visible),
+ * exactly preserving the issue-#39 battle-map behaviour. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the columns.
+ */
+function migrateEncountersTableForVtt(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('grid_size')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_size REAL');
+  if (!has('grid_scale')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_scale REAL');
+  if (!has('grid_unit')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_unit TEXT');
+  if (!has('grid_snap')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_snap INTEGER NOT NULL DEFAULT 0');
+  if (!has('fog')) sqlite.exec('ALTER TABLE encounters ADD COLUMN fog TEXT');
+}
+
+/**
+ * Migration for DBs created before token size categories (issue #40, phase 2):
+ * `combatants.token_size` didn't exist. Plain NOT NULL DEFAULT 'medium' ADD COLUMN — no
+ * table rebuild needed, same shape as migrateCharactersTableForStatus above. Existing rows
+ * backfill to 'medium' (a 1×1 footprint, the pre-migration default). New DBs never hit this
+ * path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCombatantsTableForTokenSize(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'token_size')) return;
+  sqlite.exec("ALTER TABLE combatants ADD COLUMN token_size TEXT NOT NULL DEFAULT 'medium'");
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -686,6 +728,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0026_locations_parent_id', run: migrateLocationsTableForParentId },
   { name: '0027_rule_entries_source', run: migrateRuleEntriesTableForSource },
   { name: '0028_dice_rolls_keep_drop', run: migrateDiceRollsTableForKeepDrop },
+  { name: '0029_encounters_vtt_grid_fog', run: migrateEncountersTableForVtt },
+  { name: '0030_combatants_token_size', run: migrateCombatantsTableForTokenSize },
 ];
 
 /**
