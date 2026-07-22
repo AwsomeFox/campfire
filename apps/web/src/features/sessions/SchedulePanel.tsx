@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -25,7 +26,6 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   useFormattingLocale();
   const { me } = useAuth();
   const [schedules, setSchedules] = useState<ScheduledSessionWithRsvps[]>([]);
-  const [feed, setFeed] = useState<CalendarFeed | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -37,15 +37,14 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
     return new Set([String(me.user.id), `dev:${me.user.username}`]);
   }, [me]);
 
+  // Core content (the schedule list) loads on its own. The optional calendar-feed
+  // panel loads independently below in <FeedCard> so a feed outage can never blank
+  // the schedule or set this page-level error (issue #697).
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [list, feedInfo] = await Promise.all([
-        api.get<ScheduledSessionWithRsvps[]>(`${API}/campaigns/${campaignId}/schedule`),
-        api.get<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`),
-      ]);
+      const list = await api.get<ScheduledSessionWithRsvps[]>(`${API}/campaigns/${campaignId}/schedule`);
       setSchedules(list);
-      setFeed(feedInfo);
     } catch (e) {
       if (!(e instanceof ApiError && (e.status === 401 || e.status === 403))) {
         setError("Couldn't load the schedule.");
@@ -118,7 +117,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         </>
       )}
 
-      <FeedCard campaignId={campaignId} isDm={isDm} feed={feed} onChange={load} />
+      <FeedCard campaignId={campaignId} isDm={isDm} onChange={load} />
 
       {past.length > 0 && (
         <div className="space-y-1">
@@ -358,28 +357,43 @@ function ScheduleForm({
 function FeedCard({
   campaignId,
   isDm,
-  feed,
   onChange,
 }: {
   campaignId: number;
   isDm: boolean;
-  feed: CalendarFeed | null;
+  /** Schedule-level reload — invoked after rotate/disable so the list stays fresh. */
   onChange: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [mutateError, setMutateError] = useState<string | null>(null);
+
+  // The calendar feed is an AUXILIARY panel (issue #697): it loads on its own so a
+  // feed outage degrades only this card — never the schedule list above, and never a
+  // page-level error/not-found. `retry` re-fetches only this feed.
+  const feedPanel = usePanelData<CalendarFeed>(
+    useCallback(() => api.get<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`), [campaignId]),
+    true,
+    "Couldn't load the calendar feed.",
+  );
+  const feed = feedPanel.data;
+  const feedError = feedPanel.error;
 
   const absoluteUrl = feed?.url ? `${window.location.origin}${feed.url}` : null;
 
   async function rotate() {
     setBusy(true);
-    setError(null);
+    setMutateError(null);
     try {
-      await api.post<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`);
+      // The rotate endpoint returns the new feed directly (see
+      // CampaignCalendarFeedController.rotate) — fold it into the panel cache instead
+      // of an extra GET via feedPanel.retry(), which also avoids rendering a stale URL
+      // if that follow-up fetch failed.
+      const next = await api.post<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`);
+      feedPanel.setData(next);
       onChange();
     } catch {
-      setError("Couldn't update the calendar feed.");
+      setMutateError("Couldn't update the calendar feed.");
     } finally {
       setBusy(false);
     }
@@ -387,12 +401,16 @@ function FeedCard({
 
   async function disable() {
     setBusy(true);
-    setError(null);
+    setMutateError(null);
     try {
-      await api.delete(`${API}/campaigns/${campaignId}/calendar-feed`);
+      // DELETE returns the disabled feed payload (null token/url); use it to update the
+      // panel directly instead of a follow-up GET, so the URL vanishes immediately even
+      // if a later fetch would have failed.
+      const next = await api.delete<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`);
+      feedPanel.setData(next);
       onChange();
     } catch {
-      setError("Couldn't disable the calendar feed.");
+      setMutateError("Couldn't disable the calendar feed.");
     } finally {
       setBusy(false);
     }
@@ -430,8 +448,13 @@ function FeedCard({
           </Btn>
         )}
       </div>
-      {error && <ErrorNote message={error} />}
-      {absoluteUrl ? (
+      {mutateError && <ErrorNote message={mutateError} />}
+      {/* Auxiliary panel failure: inline, panel-scoped, retry-only-this-feed (#697). */}
+      {feedError && !feed ? (
+        <ErrorNote message={feedError} onRetry={feedPanel.retry} />
+      ) : feedPanel.loading && !feed ? (
+        <Skeleton lines={2} />
+      ) : absoluteUrl ? (
         <>
           <p className="text-muted text-xs m-0">
             Subscribe from Google / Apple / Outlook calendar — scheduled sessions show up automatically. Anyone with this URL can

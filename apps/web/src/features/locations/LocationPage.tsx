@@ -11,6 +11,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
 import { LocationStatusLabel } from '../../components/LocationStatusLabel';
@@ -42,19 +43,49 @@ export default function LocationPage() {
   const { campaignId, locationId } = useParams<{ campaignId: string; locationId: string }>();
   const cid = Number(campaignId);
   const id = Number(locationId);
+  // Gate the auxiliary panels (and the core fetch) on finite ids so a route with a
+  // missing/garbage param doesn't fire `/campaigns/NaN/...` on mount. Mirrors the
+  // `Number.isFinite` guard the core `load()` already applies (issue #697 review).
+  const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
   const { roleIn } = useAuth();
   const role = roleIn(cid);
   const isDm = role === 'dm';
 
   const [location, setLocation] = useState<Location | null>(null);
-  const [allLocations, setAllLocations] = useState<Location[]>([]);
-  const [campaign, setCampaign] = useState<Campaign | null>(null);
-  const [npcs, setNpcs] = useState<Npc[]>([]);
-  const [quests, setQuests] = useState<Quest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+
+  // Auxiliary panels (issue #697): the full location list (breadcrumb/children/
+  // parent-picker), the NPC roster (the "Here" card), the quest list (connected
+  // quests), and the campaign (the map background) all load independently. A
+  // failure in any of these degrades only its own card/control with an inline
+  // retry — it can NEVER set the page-level `error`/`notFound` reserved for the
+  // core location fetch below.
+  const locationsPanel = usePanelData<Location[]>(
+    useCallback(() => api.get<Location[]>(`${API}/campaigns/${cid}/locations`), [cid]),
+    idReady,
+    "Couldn't load the location list.",
+  );
+  const npcsPanel = usePanelData<Npc[]>(
+    useCallback(() => api.get<Npc[]>(`${API}/campaigns/${cid}/npcs`), [cid]),
+    idReady,
+    "Couldn't load NPCs for this location.",
+  );
+  const questsPanel = usePanelData<Quest[]>(
+    useCallback(() => api.get<Quest[]>(`${API}/campaigns/${cid}/quests`), [cid]),
+    idReady,
+    "Couldn't load connected quests.",
+  );
+  const campaignPanel = usePanelData<Campaign>(
+    useCallback(() => api.get<Campaign>(`${API}/campaigns/${cid}`), [cid]),
+    idReady,
+    "Couldn't load the campaign map.",
+  );
+  const allLocations = locationsPanel.data ?? [];
+  const npcs = npcsPanel.data ?? [];
+  const campaign = campaignPanel.data;
 
   const [editing, setEditing] = useState(false);
   // Propose mode (issue #240): a non-DM member editing this location submits the change
@@ -81,23 +112,15 @@ export default function LocationPage() {
   const [pinY, setPinY] = useState('50');
   const [pinSaving, setPinSaving] = useState(false);
 
+  // Core fetch: ONLY the location can set the page-level error/not-found state.
+  // The auxiliary panels above own their own error/retry and never reach here (#697).
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     setNotFound(false);
     try {
-      const [locData, allLocData, npcsData, questsData, campaignData] = await Promise.all([
-        api.get<Location>(`${API}/locations/${id}`),
-        api.get<Location[]>(`${API}/campaigns/${cid}/locations`),
-        api.get<Npc[]>(`${API}/campaigns/${cid}/npcs`),
-        api.get<Quest[]>(`${API}/campaigns/${cid}/quests`),
-        api.get<Campaign>(`${API}/campaigns/${cid}`),
-      ]);
+      const locData = await api.get<Location>(`${API}/locations/${id}`);
       setLocation(locData);
-      setAllLocations(allLocData);
-      setNpcs(npcsData);
-      setQuests(questsData);
-      setCampaign(campaignData);
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true);
@@ -107,7 +130,7 @@ export default function LocationPage() {
     } finally {
       setLoading(false);
     }
-  }, [cid, id]);
+  }, [id]);
 
   useEffect(() => {
     if (Number.isFinite(cid) && Number.isFinite(id)) void load();
@@ -116,9 +139,19 @@ export default function LocationPage() {
   const hereNpcs = useMemo(() => npcs.filter((n) => n.locationId === id), [npcs, id]);
   const hereNpcIds = useMemo(() => new Set(hereNpcs.map((n) => n.id)), [hereNpcs]);
   const connectedQuests = useMemo(
-    () => quests.filter((q) => q.giverNpcId != null && hereNpcIds.has(q.giverNpcId)),
-    [quests, hereNpcIds],
+    () => (questsPanel.data ?? []).filter((q) => q.giverNpcId != null && hereNpcIds.has(q.giverNpcId)),
+    [questsPanel.data, hereNpcIds],
   );
+
+  // "Here & connected" empty-state guard (#697 review): the combined list is empty
+  // both while the panels are still loading AND after they fail (a failed panel
+  // yields null data -> empty filtered list). Without distinguishing those from a
+  // genuine "nothing is connected" we'd show the cheerful empty state over a load
+  // failure. Only treat it as truly empty once both panels have settled
+  // successfully with no results.
+  const panelsLoading = (npcsPanel.loading && !npcsPanel.data) || (questsPanel.loading && !questsPanel.data);
+  const panelsFailed = (!!npcsPanel.error && !npcsPanel.data) || (!!questsPanel.error && !questsPanel.data);
+  const nothingConnected = hereNpcs.length === 0 && connectedQuests.length === 0;
 
   const locById = useMemo(() => new Map(allLocations.map((l) => [l.id, l])), [allLocations]);
 
@@ -219,7 +252,9 @@ export default function LocationPage() {
           ...(location?.updatedAt ? { expectedUpdatedAt: location.updatedAt } : {}),
         });
         setLocation(updated);
-        setAllLocations((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
+        // Fold the saved edit into the auxiliary locations panel's cache so the
+        // breadcrumb/children/parent-picker reflect it without a full reload.
+        locationsPanel.setData((prev) => (prev ?? []).map((l) => (l.id === updated.id ? updated : l)));
         setEditing(false);
         setHistoryNonce((n) => n + 1);
       }
@@ -537,7 +572,24 @@ export default function LocationPage() {
 
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Here &amp; connected</h2>
-                {hereNpcs.length === 0 && connectedQuests.length === 0 ? (
+                {/* NPCs + quests are auxiliary (#697): a failure degrades only this card
+                    with an inline retry — the location above stays fully rendered. */}
+                {npcsPanel.error && !npcsPanel.data && (
+                  <ErrorNote message={npcsPanel.error} onRetry={npcsPanel.retry} />
+                )}
+                {questsPanel.error && !questsPanel.data && (
+                  <ErrorNote message={questsPanel.error} onRetry={questsPanel.retry} />
+                )}
+                {/* Distinguish "still loading", "failed to load", and "genuinely empty"
+                    (#697 review): previously the empty state rendered whenever the
+                    combined list was empty, which is also true mid-load and post-failure.
+                    Now the empty state only shows once both panels settled successfully
+                    with no results. A failure shows just the inline alerts above (no
+                    misleading "Nothing connected here yet"); a pending load shows a
+                    skeleton. */}
+                {nothingConnected && panelsFailed ? null : nothingConnected && panelsLoading ? (
+                  <Skeleton lines={2} />
+                ) : nothingConnected ? (
                   <EmptyState icon="shaking-hands" title="Nothing connected here yet" />
                 ) : (
                   <div className="grid sm:grid-cols-2 gap-3">

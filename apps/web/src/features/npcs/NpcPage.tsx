@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Faction, Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
@@ -33,18 +34,41 @@ export default function NpcPage() {
   const { campaignId, npcId } = useParams<{ campaignId: string; npcId: string }>();
   const cid = Number(campaignId);
   const id = Number(npcId);
+  // Gate the auxiliary panels (and the core fetch) on finite ids so a route with a
+  // missing/garbage param doesn't fire `/campaigns/NaN/...` on mount. Mirrors the
+  // `Number.isFinite` guard the core `load()` already applies (issue #697 review).
+  const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
   const { roleIn } = useAuth();
   const role = roleIn(cid);
   const isDm = role === 'dm';
 
   const [npc, setNpc] = useState<Npc | null>(null);
-  const [locations, setLocations] = useState<Location[]>([]);
-  const [factions, setFactions] = useState<Faction[]>([]);
-  const [quests, setQuests] = useState<Quest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+
+  // Auxiliary panels (issue #697): locations/factions feed the DM edit form's
+  // dropdowns; quests feed the "Connected" card. Each loads independently so a
+  // failure here degrades only that control/card — it can NEVER set the page-level
+  // `error`/`notFound` (which are reserved for the core NPC fetch below).
+  const locationsPanel = usePanelData<Location[]>(
+    useCallback(() => api.get<Location[]>(`${API}/campaigns/${cid}/locations`), [cid]),
+    idReady,
+    "Couldn't load locations for the editor.",
+  );
+  const factionsPanel = usePanelData<Faction[]>(
+    useCallback(() => api.get<Faction[]>(`${API}/campaigns/${cid}/factions`), [cid]),
+    idReady,
+    "Couldn't load factions for the editor.",
+  );
+  const questsPanel = usePanelData<Quest[]>(
+    useCallback(() => api.get<Quest[]>(`${API}/campaigns/${cid}/quests`), [cid]),
+    idReady,
+    "Couldn't load connected quests.",
+  );
+  const locations = locationsPanel.data ?? [];
+  const factions = factionsPanel.data ?? [];
 
   const [editing, setEditing] = useState(false);
   // Propose mode (issue #240): a non-DM member editing this NPC submits the change
@@ -65,21 +89,15 @@ export default function NpcPage() {
   const [conflict, setConflict] = useState(false);
   const [historyNonce, setHistoryNonce] = useState(0);
 
+  // Core fetch: ONLY the NPC can set the page-level error/not-found state. The
+  // auxiliary panels above own their own error/retry and never reach here (#697).
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     setNotFound(false);
     try {
-      const [npcData, locationsData, factionsData, questsData] = await Promise.all([
-        api.get<Npc>(`${API}/npcs/${id}`),
-        api.get<Location[]>(`${API}/campaigns/${cid}/locations`),
-        api.get<Faction[]>(`${API}/campaigns/${cid}/factions`),
-        api.get<Quest[]>(`${API}/campaigns/${cid}/quests`),
-      ]);
+      const npcData = await api.get<Npc>(`${API}/npcs/${id}`);
       setNpc(npcData);
-      setLocations(locationsData);
-      setFactions(factionsData);
-      setQuests(questsData);
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true);
@@ -89,7 +107,7 @@ export default function NpcPage() {
     } finally {
       setLoading(false);
     }
-  }, [cid, id]);
+  }, [id]);
 
   useEffect(() => {
     if (Number.isFinite(cid) && Number.isFinite(id)) void load();
@@ -100,7 +118,10 @@ export default function NpcPage() {
     [npc, locations],
   );
 
-  const connectedQuests = useMemo(() => quests.filter((q) => q.giverNpcId === id), [quests, id]);
+  const connectedQuests = useMemo(
+    () => (questsPanel.data ?? []).filter((q) => q.giverNpcId === id),
+    [questsPanel.data, id],
+  );
   const factionName = useMemo(
     () => (npc?.factionId ? factions.find((f) => f.id === npc.factionId)?.name : null),
     [npc, factions],
@@ -371,7 +392,13 @@ export default function NpcPage() {
 
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Connected</h2>
-                {connectedQuests.length === 0 ? (
+                {/* Connected quests are auxiliary (#697): a quests outage degrades only this
+                    card with an inline retry — the NPC above stays fully rendered. */}
+                {questsPanel.error && !questsPanel.data ? (
+                  <ErrorNote message={questsPanel.error} onRetry={questsPanel.retry} />
+                ) : questsPanel.loading && !questsPanel.data ? (
+                  <Skeleton lines={2} />
+                ) : connectedQuests.length === 0 ? (
                   <EmptyState icon="scroll-unfurled" title="No connected quests" />
                 ) : (
                   <div className="grid sm:grid-cols-2 gap-3">
@@ -453,6 +480,10 @@ export default function NpcPage() {
             </p>
           )}
           {saveError && <ErrorNote message={saveError} />}
+          {/* Editor dropdowns are auxiliary (#697): a locations/factions outage leaves the
+              dropdowns short but the rest of the form usable; retry reloads only the failed list. */}
+          {locationsPanel.error && <ErrorNote message={locationsPanel.error} onRetry={locationsPanel.retry} />}
+          {factionsPanel.error && <ErrorNote message={factionsPanel.error} onRetry={factionsPanel.retry} />}
           <div className="grid sm:grid-cols-2 gap-3">
             <div className="space-y-1">
               <label className="text-[10px] text-slate-500 font-bold uppercase">Name</label>
