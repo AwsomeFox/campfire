@@ -40,7 +40,8 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
   }
 
   return (
-    <Card className="space-y-3">
+    <div data-testid="membership-integrity">
+      <Card className="space-y-3">
       <div className="border-b border-slate-700 pb-3">
         <h2 className="font-bold text-white text-sm">Campaign authority integrity</h2>
         <p className="text-[11px] text-slate-400 mt-1">
@@ -63,10 +64,14 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
                   {campaign.usableDmCount} enabled DM{campaign.usableDmCount === 1 ? '' : 's'}
                 </span>
                 {campaign.disabledDmUserIds.length > 0 && (
-                  <span className="text-xs text-slate-400">{campaign.disabledDmUserIds.length} disabled DM seat(s)</span>
+                  <span className="text-xs text-slate-400">
+                    {campaign.disabledDmUserIds.length} disabled DM {campaign.disabledDmUserIds.length === 1 ? 'seat' : 'seats'}
+                  </span>
                 )}
                 {campaign.removedGhostMembershipCount > 0 && (
-                  <span className="text-xs text-slate-400">{campaign.removedGhostMembershipCount} ghost row(s) repaired</span>
+                  <span className="text-xs text-slate-400">
+                    {campaign.removedGhostMembershipCount} ghost {campaign.removedGhostMembershipCount === 1 ? 'row' : 'rows'} repaired
+                  </span>
                 )}
               </div>
               {campaign.repairRequired && (
@@ -104,6 +109,7 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
           Migration repair history: {report.repairs.length} row{report.repairs.length === 1 ? '' : 's'} recorded.
         </p>
       )}
-    </Card>
+      </Card>
+    </div>
   );
 }
