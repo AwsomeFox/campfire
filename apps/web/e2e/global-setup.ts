@@ -36,6 +36,9 @@ export const CREDS = {
 /** The dmSecret string that must be visible to the DM and invisible to everyone else. */
 export const NPC_SECRET = 'THE-INNKEEPER-IS-A-DISGUISED-DRAGON';
 export const NPC_NAME = 'Bram the Innkeeper';
+export const QUEST_NEXT_OBJECTIVE =
+  'Follow the moonlit switchback through the ruined observatory, compare the weathered star-map inscriptions, and bring the encoded waystone fragment to the Lantern Archivist before the midsummer bell rings — waypoint-' +
+  'emberglasswaypointemberglasswaypointemberglasswaypointemberglasswaypointemberglass.';
 
 export const MONSTERS = [
   { name: 'Goblin Boss', hpMax: 30, initiative: 18 },
@@ -462,6 +465,26 @@ export default async function globalSetup(config: FullConfig) {
       body: `${fixture.title} body`,
     });
     semanticQuests[fixture.status] = { id: created.id, title: fixture.title };
+  }
+
+  const completedObjective = await okJson(dm, 'post', `/api/v1/quests/${semanticQuests.active.id}/objectives`, {
+    text: 'Recover the weathered star map',
+    sortOrder: 10,
+  });
+  await okJson(dm, 'post', `/api/v1/quests/${semanticQuests.active.id}/objectives`, {
+    text: QUEST_NEXT_OBJECTIVE,
+    sortOrder: 20,
+  });
+  await okJson(dm, 'post', `/api/v1/quests/${semanticQuests.active.id}/objectives`, {
+    text: 'Return to the observatory after the archive visit',
+    sortOrder: 30,
+  });
+  const completedPatch = await dm.patch(
+    `/api/v1/quests/${semanticQuests.active.id}/objectives/${completedObjective.id}`,
+    { data: { done: true } },
+  );
+  if (!completedPatch.ok()) {
+    throw new Error(`PATCH semantic objective -> ${completedPatch.status()}: ${await completedPatch.text()}`);
   }
 
   // --- capture a real session storageState per role ----------------------------
