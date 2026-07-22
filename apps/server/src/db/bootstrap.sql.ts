@@ -512,6 +512,7 @@ CREATE TABLE IF NOT EXISTS oauth_access_tokens (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token_hash TEXT NOT NULL UNIQUE,
   refresh_hash TEXT UNIQUE,
+  family_id TEXT NOT NULL,
   client_id TEXT NOT NULL,
   user_id INTEGER NOT NULL,
   scope TEXT,
@@ -520,6 +521,9 @@ CREATE TABLE IF NOT EXISTS oauth_access_tokens (
   campaign_id INTEGER,
   expires_at TEXT NOT NULL,
   refresh_expires_at TEXT,
+  refresh_consumed_at TEXT,
+  revoked_at TEXT,
+  family_revoked_at TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -815,6 +819,7 @@ CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id
 CREATE INDEX IF NOT EXISTS idx_campaign_invites_campaign ON campaign_invites(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_user ON oauth_access_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_client ON oauth_auth_codes(client_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_campaign ON proposals(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
