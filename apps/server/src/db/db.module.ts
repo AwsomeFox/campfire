@@ -1346,6 +1346,31 @@ function migrateServerMetaTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #679: retain consumed refresh-token generations as replay sentinels and
+ * link rotations into a revocable family. Existing live rows each become the
+ * root of their own family, preserving every issued token while allowing the
+ * first post-upgrade rotation to use the same atomic CAS path as new grants.
+ */
+function migrateOAuthAccessTokensForAtomicRotation(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='oauth_access_tokens'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(oauth_access_tokens)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((column) => column.name === name);
+  const migrate = sqlite.transaction(() => {
+    if (!has('family_id')) sqlite.exec('ALTER TABLE oauth_access_tokens ADD COLUMN family_id TEXT');
+    if (!has('refresh_consumed_at')) sqlite.exec('ALTER TABLE oauth_access_tokens ADD COLUMN refresh_consumed_at TEXT');
+    if (!has('revoked_at')) sqlite.exec('ALTER TABLE oauth_access_tokens ADD COLUMN revoked_at TEXT');
+    if (!has('family_revoked_at')) sqlite.exec('ALTER TABLE oauth_access_tokens ADD COLUMN family_revoked_at TEXT');
+    sqlite.exec("UPDATE oauth_access_tokens SET family_id = 'legacy-' || id WHERE family_id IS NULL");
+    sqlite.exec('CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id)');
+  });
+  migrate();
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1410,6 +1435,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0050_rule_entries_licensing', run: migrateRuleEntriesTableForLicensing },
   { name: '0051_server_meta', run: migrateServerMetaTable },
   { name: '0052_public_recap_share_policy', run: migratePublicRecapSharePolicy },
+  { name: '0053_oauth_atomic_rotation', run: migrateOAuthAccessTokensForAtomicRotation },
 ];
 
 /**
