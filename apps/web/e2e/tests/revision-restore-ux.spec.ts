@@ -44,6 +44,16 @@ function revisionFixtures(currentBody: string): EntityRevision[] {
       authorName: 'Morgan Vale',
       createdAt: '2026-07-20T12:00:00.000Z',
     },
+    {
+      id: 8842,
+      campaignId,
+      entityType: 'quest',
+      entityId: navigation.questId,
+      snapshot: { legacy_note: 'Legacy-only readable preview.' },
+      authorUserId: 'fixture-editor',
+      authorName: 'Morgan Vale',
+      createdAt: '2026-07-19T12:00:00.000Z',
+    },
   ];
 }
 
@@ -82,8 +92,9 @@ test.describe('revision restore preview and confirmation', () => {
     await page.goto(`/c/${campaignId}/quests/${navigation.questId}`);
     const panelTrigger = await openHistory(page);
     await expect(page.getByRole('status')).toContainText('Loading revision history');
-    await expect(page.getByText('Differs from current content').first()).toBeVisible();
-    await expect(page.getByText('Matches current content')).toBeVisible();
+    await expect(page.getByText('Quest description differs from current content').first()).toBeVisible();
+    await expect(page.getByText('Quest description matches current content')).toBeVisible();
+    await expect(page.getByText('Legacy-only readable preview.')).toBeVisible();
 
     const previewTrigger = page.getByRole('button', { name: /Preview version .* by Morgan Vale/ }).first();
     await previewTrigger.focus();
@@ -179,7 +190,7 @@ test.describe('revision restore preview and confirmation', () => {
     await openHistory(page);
     await expect(page.getByRole('alert').filter({ hasText: "Couldn't load revision history" })).toBeVisible();
     await page.getByRole('button', { name: 'Retry' }).click();
-    await expect(page.getByText('Differs from current content').first()).toBeVisible();
+    await expect(page.getByText('Quest description differs from current content').first()).toBeVisible();
     expect(historyAttempts()).toBe(2);
 
     await page.getByRole('button', { name: /Preview version .* by Morgan Vale/ }).first().click();

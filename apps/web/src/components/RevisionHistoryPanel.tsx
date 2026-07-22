@@ -358,11 +358,12 @@ export function RevisionHistoryPanel({
             <ul className="divide-y divide-slate-800" aria-label={`${label} versions`}>
               {revisions.map((revision) => {
                 const fields = snapshotFields(revision.snapshot, currentSnapshot);
-                const previewField = fields[0];
+                const previewField = fields.find((field) => field in revision.snapshot);
                 const prior = previewField ? revision.snapshot[previewField] ?? '' : '';
                 const preview = prior.replace(/\s+/g, ' ').trim().slice(0, 120);
                 const author = revisionAuthor(revision);
                 const timestamp = formatDate(revision.createdAt);
+                const restoreLabel = fieldLabel(entityType, restorableField(entityType));
                 const unchanged = valuesMatch(entityType, revision.snapshot, currentSnapshot);
                 return (
                   <li key={revision.id} className="flex flex-col gap-2 py-3 first:pt-0 sm:flex-row sm:items-start">
@@ -372,7 +373,7 @@ export function RevisionHistoryPanel({
                       </p>
                       <p className="mt-0.5 line-clamp-2 break-words text-[13px] text-slate-400">{preview || '(empty)'}</p>
                       <p className={`mt-1 text-[11px] font-semibold ${unchanged ? 'text-emerald-300' : 'text-amber-300'}`}>
-                        {unchanged ? 'Matches current content' : 'Differs from current content'}
+                        {restoreLabel} {unchanged ? 'matches' : 'differs from'} current content
                       </p>
                     </div>
                     <Btn
