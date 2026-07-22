@@ -57,7 +57,8 @@
     "memoryOnlyBody": "Your browser blocked storage (private mode or quota), so this preset is in-memory only and won't survive a reload.",
     "memoryOnlyConfirm": "OK",
     "undo": "Undo",
-    "savedAnnounce": "Roll \"{{label}}\" saved."    "retentionCapped": "Showing the latest rolls — the newest {{count}} per campaign are kept.",
+    "savedAnnounce": "Roll \"{{label}}\" saved.",
+    "retentionCapped": "Showing the latest rolls — the newest {{count}} per campaign are kept.",
     "retentionCapped_one": "Showing the latest rolls — the newest {{count}} per campaign is kept.",
     "retentionCapped_other": "Showing the latest rolls — the newest {{count}} per campaign are kept.",
     "retentionUnbounded": "Showing the latest rolls — full history is kept for this campaign."
