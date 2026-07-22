@@ -1,10 +1,14 @@
-import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes, scryptSync } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import { AiProviderConfigView, type AiProviderConfigUpdate } from '@campfire/schema';
+import {
+  AiProviderConfigView,
+  type AiProviderConfigUpdate,
+  type AiProviderCredentialSource,
+} from '@campfire/schema';
 import { DB, type DrizzleDb, resolveDataDir } from '../../db/db.module';
 import { aiProviderConfigs } from '../../db/schema';
 import { encryptSecret, decryptSecret, secretLast4 } from '../../common/crypto';
@@ -122,7 +126,7 @@ export class AiProviderConfigService {
 
   // ── redacted view (NEVER carries the key) ────────────────────────────────────
 
-  private toView(row: Row): ConfigView {
+  private toView(row: Row, credentialSource: AiProviderCredentialSource): ConfigView {
     return AiProviderConfigView.parse({
       scope: row.scope as Scope,
       campaignId: row.campaignId ?? null,
@@ -132,6 +136,8 @@ export class AiProviderConfigService {
       params: safeJson(row.params, {}),
       configured: !!row.encryptedApiKey,
       keyLast4: row.keyLast4 ?? null,
+      credentialSource,
+      ready: credentialSource !== 'none',
       allowedModels: safeJson<string[]>(row.allowedModels, []),
       createdBy: row.createdBy,
       createdAt: row.createdAt,
@@ -141,12 +147,12 @@ export class AiProviderConfigService {
 
   async getServerView(): Promise<ConfigView | null> {
     const row = await this.serverRow();
-    return row ? this.toView(row) : null;
+    return row ? this.toView(row, localCredentialSource(row)) : null;
   }
 
   async getCampaignView(campaignId: number): Promise<ConfigView | null> {
-    const row = await this.campaignRow(campaignId);
-    return row ? this.toView(row) : null;
+    const [row, server] = await Promise.all([this.campaignRow(campaignId), this.serverRow()]);
+    return row ? this.toView(row, campaignCredentialSource(row, server)) : null;
   }
 
   /**
@@ -154,23 +160,51 @@ export class AiProviderConfigService {
    *
    * A campaign DM cannot read the admin-only server-default config, but the campaign
    * AI settings still need to show which provider is actually resolved and whether it
-   * comes from the SERVER default or a CAMPAIGN override. This returns ONLY the type +
-   * model + source scope — NEVER any key material (no `configured`/`keyLast4` about the
-   * key itself, only whether *any* provider is resolvable). It mirrors the
+   * comes from the SERVER default or a CAMPAIGN override. This returns ONLY the type,
+   * model, source scope, and non-secret credential readiness — NEVER key material
+   * (`keyLast4`, ciphertext, and environment values are all absent). It mirrors the
    * `resolveEffectiveConfig` precedence (`campaign ?? server`) without decrypting.
    */
   async getEffectiveView(
     campaignId: number,
-  ): Promise<{ configured: boolean; providerType: AiProviderType | null; model: string | null; source: 'server' | 'campaign' | null }> {
+  ): Promise<{
+    configured: boolean;
+    providerType: AiProviderType | null;
+    model: string | null;
+    source: 'server' | 'campaign' | null;
+    credentialSource: AiProviderCredentialSource;
+    ready: boolean;
+  }> {
     const server = await this.serverRow();
     const camp = await this.campaignRow(campaignId);
     const primary = camp ?? server;
-    if (!primary) return { configured: false, providerType: null, model: null, source: null };
+    if (!primary) {
+      return {
+        configured: false,
+        providerType: null,
+        model: null,
+        source: null,
+        credentialSource: 'none',
+        ready: false,
+      };
+    }
+    const credentialSource = camp
+      ? campaignCredentialSource(camp, server)
+      : localCredentialSource(primary);
+    // A keyless campaign override borrows provider type + endpoint from the
+    // credential-owning server row (issue #373). Reflect that actual type here,
+    // rather than claiming the override's type will receive the server credential.
+    const effectiveProviderType =
+      camp && (credentialSource === 'server' || credentialSource === 'environment') && server
+        ? server.providerType
+        : primary.providerType;
     return {
       configured: true,
-      providerType: primary.providerType as AiProviderType,
+      providerType: effectiveProviderType as AiProviderType,
       model: primary.model,
       source: camp ? 'campaign' : 'server',
+      credentialSource,
+      ready: credentialSource !== 'none',
     };
   }
 
@@ -181,7 +215,7 @@ export class AiProviderConfigService {
     const existing = await this.serverRow();
     await this.upsert('server', null, existing, input, user);
     const row = await this.serverRow();
-    return this.toView(row!);
+    return this.toView(row!, localCredentialSource(row!));
   }
 
   /**
@@ -200,7 +234,8 @@ export class AiProviderConfigService {
     const existing = await this.campaignRow(campaignId);
     await this.upsert('campaign', campaignId, existing, input, user, campaignId);
     const row = await this.campaignRow(campaignId);
-    return this.toView(row!);
+    const serverAfter = await this.serverRow();
+    return this.toView(row!, campaignCredentialSource(row!, serverAfter));
   }
 
   private async upsert(
@@ -301,7 +336,44 @@ export class AiProviderConfigService {
       detail: `server allowlist=${models.length} model(s)`,
     });
     const row = await this.serverRow();
-    return this.toView(row!);
+    return this.toView(row!, localCredentialSource(row!));
+  }
+
+  /**
+   * Clear only the encrypted credential for a scope. This intentionally does not
+   * reuse the full config PUT: a stale browser must not overwrite provider/model,
+   * endpoint, sampling params, or the server allowlist while revoking a secret.
+   * The audit records the action and scope only — never the key or its last four.
+   */
+  async clearServerKey(user: RequestUser): Promise<ConfigView> {
+    const existing = await this.serverRow();
+    if (!existing) throw new NotFoundException('No server-default AI provider is configured.');
+    await this.clearStoredKey(existing, user);
+    const row = (await this.serverRow())!;
+    return this.toView(row, localCredentialSource(row));
+  }
+
+  async clearCampaignKey(campaignId: number, user: RequestUser): Promise<ConfigView> {
+    const existing = await this.campaignRow(campaignId);
+    if (!existing) throw new NotFoundException('No campaign AI provider override is configured.');
+    await this.clearStoredKey(existing, user, campaignId);
+    const [row, server] = await Promise.all([this.campaignRow(campaignId), this.serverRow()]);
+    return this.toView(row!, campaignCredentialSource(row!, server));
+  }
+
+  private async clearStoredKey(row: Row, user: RequestUser, campaignId?: number): Promise<void> {
+    await this.db
+      .update(aiProviderConfigs)
+      .set({ encryptedApiKey: null, keyLast4: null, updatedAt: nowIso() })
+      .where(eq(aiProviderConfigs.id, row.id));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'ai-provider.key-clear',
+      entityType: 'ai-provider',
+      campaignId: campaignId ?? null,
+      detail: row.scope,
+    });
   }
 
   async deleteServer(user: RequestUser): Promise<void> {
@@ -381,6 +453,36 @@ export class AiProviderConfigService {
       };
     }
 
+    // A keyless campaign override may also inherit the server default's matching
+    // environment credential. As with a stored server key, providerType + baseUrl
+    // stay bound to the admin-controlled server row; a DM-controlled endpoint never
+    // receives an operator environment secret.
+    const serverEnvironmentKey = server ? environmentApiKey(server.providerType) : undefined;
+    if (camp && serverEnvironmentKey) {
+      return {
+        providerType: server!.providerType as AiProviderType,
+        model: primary.model,
+        apiKey: serverEnvironmentKey,
+        baseUrl: server!.baseUrl ?? undefined,
+        params: safeJson(primary.params, {}),
+      };
+    }
+
+    // The server row itself falls back to the standard provider environment key
+    // when its encrypted key has been deliberately cleared.
+    if (!camp) {
+      const environmentKey = environmentApiKey(primary.providerType);
+      if (environmentKey) {
+        return {
+          providerType: primary.providerType as AiProviderType,
+          model: primary.model,
+          apiKey: environmentKey,
+          baseUrl: primary.baseUrl ?? undefined,
+          params: safeJson(primary.params, {}),
+        };
+      }
+    }
+
     // No key resolvable in any scope (e.g. a keyless provider like `mock`, or an
     // override on a server default that itself has no key). Return the primary scope's
     // own endpoint/type — no server key is in play, so there is nothing to leak.
@@ -430,11 +532,45 @@ export class AiProviderConfigService {
     return {
       providerType: server.providerType as AiProviderType,
       model: server.model,
-      apiKey: server.encryptedApiKey ? decryptSecret(server.encryptedApiKey, this.key) : undefined,
+      apiKey: server.encryptedApiKey
+        ? decryptSecret(server.encryptedApiKey, this.key)
+        : environmentApiKey(server.providerType),
       baseUrl: server.baseUrl ?? undefined,
       params: safeJson(server.params, {}),
     };
   }
+}
+
+/** Standard vendor credentials used only when the matching configured row has no stored key. */
+function environmentApiKey(providerType: string): string | undefined {
+  const raw =
+    providerType === 'openai'
+      ? process.env.OPENAI_API_KEY
+      : providerType === 'anthropic'
+        ? process.env.ANTHROPIC_API_KEY
+        : undefined;
+  const value = raw?.trim();
+  return value ? value : undefined;
+}
+
+function localCredentialSource(row: Row): AiProviderCredentialSource {
+  if (row.encryptedApiKey) return 'stored';
+  if (row.providerType === 'mock') return 'not-required';
+  return environmentApiKey(row.providerType) ? 'environment' : 'none';
+}
+
+function campaignCredentialSource(campaign: Row, server: Row | undefined): AiProviderCredentialSource {
+  // Environment keys are operator credentials. A campaign row may use its own
+  // stored key (and a keyless mock needs none), but it may not pair an environment
+  // key with its DM-controlled baseUrl. Environment fallback is therefore only
+  // inherited through an admin-controlled server-default row.
+  if (campaign.encryptedApiKey) return 'stored';
+  if (campaign.providerType === 'mock') return 'not-required';
+  if (!server) return 'none';
+  const fallback = localCredentialSource(server);
+  if (fallback === 'stored') return 'server';
+  if (fallback === 'environment') return 'environment';
+  return 'none';
 }
 
 /** Parse a stored JSON blob, falling back to `fallback` on absence/corruption. */
