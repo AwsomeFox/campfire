@@ -1178,6 +1178,10 @@ function migrateOAuthAccessTokensForAtomicRotation(sqlite: Database.Database): v
     if (!has('revoked_at')) sqlite.exec('ALTER TABLE oauth_access_tokens ADD COLUMN revoked_at TEXT');
     if (!has('family_revoked_at')) sqlite.exec('ALTER TABLE oauth_access_tokens ADD COLUMN family_revoked_at TEXT');
     sqlite.exec("UPDATE oauth_access_tokens SET family_id = 'legacy-' || id WHERE family_id IS NULL");
+    // Fresh databases receive this index from bootstrap.sql.ts. Create it here as
+    // well so upgraded installations get the same schema and family revocation
+    // never degrades into a full oauth_access_tokens table scan.
+    sqlite.exec('CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id)');
   });
   migrate();
 }

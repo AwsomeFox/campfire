@@ -53,6 +53,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'oauth_access_tokens')).toEqual(
         expect.arrayContaining(['family_id', 'refresh_consumed_at', 'revoked_at', 'family_revoked_at']),
       );
+      expect(
+        (sqlite.pragma('index_list(oauth_access_tokens)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_oauth_access_tokens_family');
       expect(columnNames(sqlite, 'proposals')).toContain('snapshot');
       expect(columnNames(sqlite, 'encounters')).toEqual(
         expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id', 'hidden']),
@@ -228,6 +231,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'oauth_access_tokens')).toEqual(
         expect.arrayContaining(['family_id', 'refresh_consumed_at', 'revoked_at', 'family_revoked_at']),
       );
+      expect(
+        (sqlite.pragma('index_list(oauth_access_tokens)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_oauth_access_tokens_family');
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');
     } finally {
