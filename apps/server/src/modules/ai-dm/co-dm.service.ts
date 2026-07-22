@@ -108,6 +108,12 @@ export class CoDmService {
     const count = MULTI_TARGETS.has(input.target) ? input.count ?? 1 : 1;
     const maxTokens = Math.min(DRAFT_MAX_TOKENS, remaining);
 
+    // Issue #564: the executable model derives ONLY from the effective provider config
+    // (allowlist-validated at execution via AiDmService.resolveExecutionModel), NEVER from
+    // the legacy `seat.model` label. Falling back to '' for an unconfigured provider keeps
+    // the legacy no-op seam's behavior unchanged.
+    const execModel = (await this.aiDm.resolveExecutionModel(campaignId)) ?? '';
+
     // Ask the provider for structured content. The persona (seat.instructions) is combined
     // with a target-specific "reply as JSON" directive; the DM's brief is the user turn.
     const result = await this.provider.generate({
@@ -115,7 +121,7 @@ export class CoDmService {
       kind: input.target === 'recap' ? 'recap' : 'narrate',
       prompt: input.prompt,
       instructions: this.buildInstructions(seat.instructions, input.target, count),
-      model: seat.model,
+      model: execModel,
       maxTokens,
     });
 
@@ -124,7 +130,13 @@ export class CoDmService {
     const payloads = this.toPayloads(input.target, result.narration, count);
 
     // Attribute the proposal to the AI seat + model, not the triggering DM (issue #313).
-    const modelLabel = seat.model || 'unconfigured';
+    // The label reflects the model that actually served the draft when a provider is
+    // configured (resolved + allowlisted, issue #564). When NO provider is configured
+    // (the legacy no-op seam — the shipped default), there is no executable model, so the
+    // informational label falls back to the legacy `seat.model` text the DM set. That label
+    // is DISPLAY-ONLY: it never drives execution (execModel above is '' in this branch, and
+    // the no-op provider ignores it).
+    const modelLabel = execModel || seat.model || 'unconfigured';
     const attribution = {
       proposer: `AI DM (${modelLabel})`,
       proposerUserId: `ai-dm:${campaignId}`,
@@ -151,7 +163,9 @@ export class CoDmService {
     return {
       target: input.target,
       provider: this.provider.name,
-      model: seat.model,
+      // Issue #564: report the EXACT model that served the draft (resolved + allowlisted),
+      // not the legacy seat.model label.
+      model: execModel,
       entityType,
       proposalIds: proposals.map((p) => p.id),
       proposals,

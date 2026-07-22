@@ -14,4 +14,9 @@ module.exports = {
   moduleFileExtensions: ['js', 'json', 'ts'],
   testTimeout: 30000,
   maxWorkers: 1,
+  // The integration-heavy suite creates a fresh Nest application and SQLite
+  // database for many files. Recycle Jest's lone worker between files once it
+  // grows past this bound instead of letting retained module state accumulate
+  // until the GitHub runner's Node heap is exhausted.
+  workerIdleMemoryLimit: '1024MB',
 };

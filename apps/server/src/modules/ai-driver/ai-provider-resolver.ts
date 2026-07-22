@@ -22,6 +22,15 @@ export const AI_PROVIDER_RESOLVER = Symbol('AI_PROVIDER_RESOLVER');
 export interface AiProviderResolver {
   /** The provider for this campaign, or null when no provider is configured (server or campaign scope). */
   resolve(campaignId: number): Promise<AiProvider | null>;
+  /**
+   * Resolve the provider AND the executable model for a turn, revalidating the model
+   * against the server admin's allowlist at EXECUTION time (issue #564). The returned
+   * `model` is what the caller MUST send to the provider — it derives ONLY from the
+   * effective provider config, never from the legacy `seat.model`. Throws
+   * `BadRequestException` when the resolved model is not on the (non-empty) allowlist.
+   * Returns `null` when no provider is configured.
+   */
+  resolveForExecution(campaignId: number): Promise<{ provider: AiProvider; model: string } | null>;
 }
 
 /**
@@ -39,4 +48,39 @@ export class ConfigAiProviderResolver implements AiProviderResolver {
     if (!effective) return null;
     return createAiProvider(effective);
   }
+
+  async resolveForExecution(campaignId: number): Promise<{ provider: AiProvider; model: string } | null> {
+    // resolveExecutionModel is the single execution-time choke point: it revalidates the
+    // resolved model against the admin allowlist (issue #564) and returns the SAME
+    // decrypted config the model was validated against, so the provider we build here
+    // cannot diverge from the policy decision.
+    const resolved = await this.config.resolveExecutionModel(campaignId);
+    if (!resolved) return null;
+    return { provider: createAiProvider(resolved.config), model: resolved.model };
+  }
+}
+
+/** A resolver result used by tests that override AI_PROVIDER_RESOLVER with a canned provider. */
+export type ResolvedExecution = { provider: AiProvider; model: string };
+
+/**
+ * Test helper: invoke whichever resolve method a (possibly test-overridden) resolver
+ * exposes. Production resolvers implement `resolveForExecution`; the offline eval
+ * harness binds a plain `{ resolve }` shim, so fall back to `resolve` + the mock's own
+ * model label when the execution-aware method is absent (the mock already echoes a
+ * deterministic model and there is no real allowlist in evals).
+ */
+export async function resolveProviderForExecution(
+  resolver: AiProviderResolver,
+  campaignId: number,
+): Promise<ResolvedExecution | null> {
+  if (resolver.resolveForExecution) {
+    return resolver.resolveForExecution(campaignId);
+  }
+  const provider = await resolver.resolve(campaignId);
+  if (!provider) return null;
+  // Mock/test providers carry their own informational model label; real resolvers go
+  // through resolveForExecution above, so this branch only runs in the offline harness.
+  const model = (provider as { model?: string }).model ?? '';
+  return { provider, model };
 }
