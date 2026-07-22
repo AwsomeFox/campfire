@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, DdbCharacterImport } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt } from '@campfire/schema';
 
 // .strict() applied here at the DTO layer only — see encounters.dto.ts header
 // comment for why the shared @campfire/schema exports themselves stay lenient
@@ -8,7 +8,12 @@ import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPa
 // field (e.g. an agent sending `hp` instead of `hpCurrent`) now 400s instead of
 // silently no-op'ing.
 export class CharacterCreateDto extends createZodDto(CharacterCreate.strict()) {}
-export class CharacterUpdateDto extends createZodDto(CharacterUpdate.strict()) {}
+// expectedUpdatedAt (issue #746) added here, not in the shared CharacterUpdate — it's a
+// request-time CAS concern, not a stored field (see encounters.dto.ts / npcs.dto.ts for
+// the same pattern). A character sheet is a blind last-write-wins clobber victim (two
+// tabs / a player + DM tab / a connected AI), so it gets the same optimistic-concurrency
+// invariant as its quest/npc/location/session/encounter peers.
+export class CharacterUpdateDto extends createZodDto(CharacterUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
 
 // HpPatch is a z.union(...) — a union can't be a class's instance type when
 // using `extends`, so we build the DTO class without extending (nestjs-zod's
