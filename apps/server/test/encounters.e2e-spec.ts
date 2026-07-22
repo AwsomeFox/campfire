@@ -958,6 +958,107 @@ describe('encounters (e2e)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Issue #532 — optimistic concurrency for encounters. Live combat is the
+// highest-contention entity (the same encounter open across multiple DM devices
+// — a laptop + a tablet at the table), so PATCH /encounters/:id enforces the
+// same `expectedUpdatedAt` CAS invariant as quests/npcs/locations/sessions.
+// A stale tab's save 409s instead of silently clobbering the fresher edit (the
+// "lost fog/grid edit looks like the map reverted" failure).
+// ---------------------------------------------------------------------------
+describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'CAS Encounter Campaign' })).body.id;
+    encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush at the Crossroads' })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('omitting expectedUpdatedAt is unchanged back-compat (unconditional write)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ name: 'Ambush' });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Ambush');
+  });
+
+  it('a stale expectedUpdatedAt PATCH 409s with STALE_WRITE and does NOT mutate the row', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(before.body.name).toBe('Ambush');
+
+    const conflict = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ name: 'CLOBBER', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('STALE_WRITE');
+
+    // The row is untouched — no clobber.
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(after.body.name).toBe('Ambush');
+    expect(after.body.updatedAt).toBe(before.body.updatedAt);
+  });
+
+  it('a matching expectedUpdatedAt PATCH succeeds', async () => {
+    const server = ctx.app.getHttpServer();
+    const current = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+
+    const ok = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ name: 'Crossroads Ambush', expectedUpdatedAt: current.body.updatedAt });
+    expect(ok.status).toBe(200);
+    expect(ok.body.name).toBe('Crossroads Ambush');
+  });
+
+  // The headline regression: two DM tabs both load the encounter, both save. The
+  // first write commits (and bumps updatedAt); the second tab's stale expectedUpdatedAt
+  // must now 409 instead of overwriting the first edit. This is the exact repro from
+  // the issue (Tab A saves a fog edit; stale Tab B's name edit would silently win).
+  it('two concurrent updates: the second (stale) one gets 409 and the first edit survives', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Both tabs load the same version.
+    const tabA = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const tabB = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(tabA.body.updatedAt).toBe(tabB.body.updatedAt);
+    const loadedAt = tabA.body.updatedAt;
+
+    // Tab A saves a fog edit first — succeeds and bumps updatedAt.
+    const fog = { enabled: true, revealed: [{ x: 0, y: 0, w: 50, h: 50 }] };
+    const firstSave = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ fog, expectedUpdatedAt: loadedAt });
+    expect(firstSave.status).toBe(200);
+    expect(firstSave.body.fog.enabled).toBe(true);
+    expect(firstSave.body.updatedAt).not.toBe(loadedAt); // bumped
+
+    // Tab B (still holding the pre-A updatedAt) tries a name edit — must 409, not clobber.
+    const staleSave = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ name: 'Tab B Wins', expectedUpdatedAt: loadedAt });
+    expect(staleSave.status).toBe(409);
+    expect(staleSave.body.code).toBe('STALE_WRITE');
+
+    // Tab A's fog edit survives; Tab B's name change did NOT land.
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(after.body.name).toBe('Crossroads Ambush'); // unchanged from the prior test
+    expect(after.body.fog.enabled).toBe(true); // Tab A's edit survived
+  });
+});
+
 // Dev-auth headers (x-dev-role/x-dev-user) always resolve to serverRole 'admin', and admins
 // are always treated as dm regardless of campaign membership (see RoleResolver.baseEffectiveRole)
 // — so a genuine "not a member" 403 can't be expressed with dev-auth users. Use real
@@ -1157,6 +1258,64 @@ describe('encounters — issue #49: identity-based turn pointer (e2e)', () => {
     const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     expect(getRes.body.currentCombatantId).toBe(m2Id);
     expect(getRes.body.turnIndex).toBe(0); // M2 is now the top of the order
+  });
+});
+
+describe('encounters — issue #528: removeCombatant increments round on turn wrap (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let c1Id: number; // top of initiative
+  let c2Id: number; // middle
+  let c3Id: number; // LAST in initiative (the wrap point)
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Round Wrap' })).body.id;
+
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Wrap Fight' });
+    encounterId = encRes.body.id;
+
+    c1Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'C1', hpMax: 10 })).body.id;
+    c2Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'C2', hpMax: 10 })).body.id;
+    c3Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'C3', hpMax: 10 })).body.id;
+
+    // Deterministic order via explicit initiatives: C1=20, C2=10, C3=5.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${c1Id}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${c2Id}`).set(dm).send({ initiative: 10 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${c3Id}`).set(dm).send({ initiative: 5 });
+
+    // Start (round=1, turnIndex=0, current=C1) then advance twice so C3 (the LAST in
+    // initiative order) is the current actor.
+    const startRes = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(startRes.status).toBe(201);
+    expect(startRes.body.currentCombatantId).toBe(c1Id);
+    expect(startRes.body.round).toBe(1);
+
+    const next1 = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(next1.body.currentCombatantId).toBe(c2Id);
+    const next2 = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(next2.body.currentCombatantId).toBe(c3Id);
+    expect(next2.body.round).toBe(1); // still round 1 — C3 is the last actor this round
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('removing the last-in-order current combatant wraps to the top AND increments the round (matches advanceTurn)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Current is C3 (last in initiative). Removing it must wrap the pointer to C1
+    // (top of the next round) and bump the round — exactly as advanceTurn does when
+    // stepping past the end of the order.
+    const del = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${c3Id}`).set(dm);
+    expect(del.status).toBe(200);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.currentCombatantId).toBe(c1Id); // wrapped to the top
+    expect(getRes.body.turnIndex).toBe(0);
+    expect(getRes.body.round).toBe(2); // regression: was 1 before the fix
   });
 });
 

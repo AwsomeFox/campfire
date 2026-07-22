@@ -1,18 +1,52 @@
 /**
  * Implements the AuthState contract declared in ./auth.tsx.
  * On mount: GET /me. 401 -> me:null. Exposes ready/isAdmin/roleIn/refresh/logout.
+ *
+ * #579 — STALE VS LOGGED OUT: `/me` is excluded from the SW runtime cache (see
+ * vite.config.ts), so a successful `/me` is PROVEN-LIVE — it cannot have been
+ * served from cache. AuthProvider therefore decides what to do from the FETCH
+ * OUTCOME alone, never `navigator.onLine`:
+ *
+ *   - /me ok            -> live identity. If it differs from the prior session,
+ *                          that's a proven identity change (sign-in / account
+ *                          switch) -> wipe caches, persist the new snapshot.
+ *   - /me 401           -> proven logged out -> clear caches + persisted snapshot.
+ *   - /me network error -> could not reach the server. NOT logged out. Restore the
+ *                          persisted last-known identity (if any) flagged
+ *                          `staleIdentity`, leave the SW cache intact so the
+ *                          authed UI can keep rendering cached campaign data.
+ *
+ * This is what makes "router up but Campfire down" safe: the cached `/me` is no
+ * longer in play (it's not cached), so it can never be mistaken for a live one,
+ * and an offline reload no longer wipes the very cache it depends on.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Me, Role, TextSize } from '@campfire/schema';
+import type { Me, Role, ServerInstance, TextSize } from '@campfire/schema';
 import { api, ApiError, API } from '../lib/api';
 import { queryClient } from '../lib/query';
-import { clearApiCache } from '../lib/swCache';
+import {
+  clearApiCache,
+  clearMeSnapshot,
+  persistMeSnapshot,
+  readMeSnapshot,
+  subscribeToCachePurges,
+} from '../lib/swCache';
 import { AuthContext, type AuthState } from './auth';
 import {
   clearAuthStorage,
   setAuthStorage,
   useAuthStorageListener,
 } from '../features/auth/useAuthStorageListener';
+// Re-exported here so feature code that imports from './AuthProvider' (and the
+// e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
+// can be unit-tested without JSX and without React.
+export {
+  decideAuthOutcome,
+  type AuthDecision,
+  type AuthDecisionInputs,
+  type MeFetchOutcome,
+} from './authDecision';
+import { decideAuthOutcome, type MeFetchOutcome } from './authDecision';
 
 /**
  * Blends a #rrggbb hex color toward white by `ratio` (0-1). Used to derive a
@@ -57,21 +91,42 @@ function applyTextSize(textSize: TextSize): void {
   }
 }
 
+/** Translates a thrown /me error into a MeFetchOutcome. */
+function outcomeFromError(err: unknown): MeFetchOutcome {
+  if (err instanceof ApiError && err.status === 401) return { kind: 'loggedOut' };
+  // Any other ApiError (5xx etc) or a network failure means we couldn't get a
+  // proven-live identity — treat as unreachable, never as logged out.
+  return { kind: 'unreachable' };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [ready, setReady] = useState(false);
   const [connectionError, setConnectionError] = useState(false);
+  const [staleIdentity, setStaleIdentity] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   // Last authenticated user id we've seen this page-session. Lets us detect a
-  // change of identity (first sign-in or an account switch) so we can drop any
-  // cached campaign data belonging to a prior session before it renders.
+  // proven-live change of identity (first sign-in or an account switch) so we can
+  // drop any cached campaign data belonging to a prior session before it renders.
   const lastUserIdRef = useRef<number | null>(null);
+  // #723: last data-generation identity confirmed live THIS page-session. Lets us
+  // detect a restore mid-session (no reload): a polling /me that now reports a
+  // different generation than the one this tab already saw wipes the cache even
+  // though the user id is unchanged. Only a PROVEN-LIVE /me updates this (never a
+  // stale/restored identity), so it can't itself be poisoned by offline artifacts.
+  const lastInstanceRef = useRef<ServerInstance | null>(null);
 
   const handleMultiTabSignOut = useCallback(() => {
     setMe(null);
     lastUserIdRef.current = null;
+    lastInstanceRef.current = null;
     applyAccentColor(null);
     applyTextSize('default');
     clearAuthStorage();
+    clearMeSnapshot();
+    setStaleIdentity(false);
+    setLastSyncedAt(null);
+    setConnectionError(false);
     void clearApiCache();
     queryClient.clear();
   }, []);
@@ -79,50 +134,83 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useAuthStorageListener(handleMultiTabSignOut);
 
   const refresh = useCallback(async () => {
+    let outcome: MeFetchOutcome;
     try {
       const nextMe = await api.get<Me>(`${API}/me`);
-      if (navigator.onLine && lastUserIdRef.current !== nextMe.user.id) {
-        // Auth identity resolved to a (new) user while online: a fresh sign-in or
-        // an account switch. Purge the SW's global /api cache and the in-memory
-        // Query cache so a previous session's — or a pre-seed — HP, members and
-        // quests can never render as truth for this user (issue #268); the reads
-        // that follow simply refill from the live API.
-        //
-        // The `navigator.onLine` guard matters because /me is itself an /api GET
-        // and can therefore resolve from the SW cache when offline. Without it, an
-        // OFFLINE reload of a returning session would trip this branch and wipe the
-        // very offline-fallback cache the SW exists to preserve. When offline we
-        // leave the cache untouched and keep showing last-known state.
-        lastUserIdRef.current = nextMe.user.id;
-        await clearApiCache();
-        queryClient.clear();
-      }
-      setMe(nextMe);
-      setConnectionError(false);
-      applyAccentColor(nextMe.user.accentColor);
-      applyTextSize(nextMe.user.textSize);
-      setAuthStorage(nextMe.user);
+      outcome = { kind: 'live', me: nextMe };
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        setMe(null);
-        setConnectionError(false);
-        applyAccentColor(null);
-        applyTextSize('default');
-        clearAuthStorage();
-      } else {
-        // Network error or non-401 server failure (API down, 5xx, etc). Don't treat
-        // this as "not logged in" — that would bounce a real session to /login. Surface
-        // it as a connection error instead so AuthedLayout can offer a retry.
-        setConnectionError(true);
-      }
-    } finally {
-      setReady(true);
+      outcome = outcomeFromError(err);
     }
+
+    const snapshot = readMeSnapshot<Me>();
+    const decision = decideAuthOutcome(outcome, {
+      currentUserId: lastUserIdRef.current,
+      currentInstance: lastInstanceRef.current,
+      snapshot,
+    });
+
+    if (decision.shouldWipeCaches) {
+      await clearApiCache();
+      queryClient.clear();
+    }
+    if (decision.shouldClearSnapshot) {
+      clearMeSnapshot();
+    }
+    if (decision.snapshotToPersist) {
+      persistMeSnapshot(
+        decision.snapshotToPersist.me,
+        decision.snapshotToPersist.confirmedAt,
+        decision.snapshotToPersist.instance,
+      );
+    }
+    if (outcome.kind === 'live') {
+      // Record the proven-live id so a later account switch on this same tab is
+      // detected as a change. Stale/restored identities never update this — only
+      // a confirmed live identity counts toward the "has the session changed?" test.
+      lastUserIdRef.current = decision.me?.user.id ?? lastUserIdRef.current;
+      // #723: record the proven-live data-generation identity for the same reason
+      // — a later /me reporting a different generation (a restore happened) wipes
+      // the cache on this tab even without a reload.
+      lastInstanceRef.current = decision.me?.instance ?? lastInstanceRef.current;
+    }
+
+    setMe(decision.me);
+    setConnectionError(decision.connectionError);
+    setStaleIdentity(decision.staleIdentity);
+    setLastSyncedAt(decision.lastSyncedAt);
+
+    if (decision.me) {
+      applyAccentColor(decision.me.user.accentColor);
+      applyTextSize(decision.me.user.textSize);
+      if (outcome.kind === 'live') setAuthStorage(decision.me.user);
+    } else {
+      applyAccentColor(null);
+      applyTextSize('default');
+      if (outcome.kind === 'loggedOut') clearAuthStorage();
+    }
+
+    setReady(true);
   }, []);
 
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // #723 cross-tab purge: when ANOTHER tab of this origin clears the SW cache
+  // (account switch, restore, logout — anything that calls clearApiCache), it
+  // broadcasts on 'cf.cache-purge'. The SW Cache Storage deletion is already
+  // origin-wide, but THIS tab's React Query cache is in-memory and per-tab;
+  // without this listener we'd keep rendering the now-stale data until our own
+  // next /me detects the change. Clearing the query cache forces the next read
+  // to revalidate against the network. We do NOT touch lastInstanceRef here:
+  // a peer's wipe doesn't tell us the NEW generation, so the next live /me is
+  // still the authority that re-validates it (and may wipe again if needed).
+  useEffect(() => {
+    const unsubscribe = subscribeToCachePurges(() => {
+      queryClient.clear();
+    });
+    return unsubscribe;
   }, []);
 
   const logout = useCallback(async () => {
@@ -132,10 +220,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearAuthStorage();
       setMe(null);
       // Drop this account's cached campaign data so the next person to sign in on
-      // this device never inherits it (issue #268).
+      // this device never inherits it (issue #268), and clear the persisted
+      // offline identity so an offline reload no longer restores this account.
       lastUserIdRef.current = null;
+      lastInstanceRef.current = null;
       await clearApiCache();
       queryClient.clear();
+      clearMeSnapshot();
+      setStaleIdentity(false);
+      setLastSyncedAt(null);
+      setConnectionError(false);
+      applyAccentColor(null);
+      applyTextSize('default');
     }
   }, []);
 
@@ -153,10 +249,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<AuthState>(
-    () => ({ me, ready, connectionError, isAdmin, roleIn, refresh, logout }),
-    [me, ready, connectionError, isAdmin, roleIn, refresh, logout],
+    () => ({ me, ready, connectionError, staleIdentity, lastSyncedAt, isAdmin, roleIn, refresh, logout }),
+    [me, ready, connectionError, staleIdentity, lastSyncedAt, isAdmin, roleIn, refresh, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
-

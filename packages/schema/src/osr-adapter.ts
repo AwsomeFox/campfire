@@ -173,6 +173,12 @@ export const OsrAdapter: RuleSystemAdapter = {
   // OSR initiative is individual d6 + DEX modifier (Basic Fantasy's optional-but-common
   // individual rule; group-initiative clones still roll a d6, just per side).
   initiativeDie: 6,
+  // The OSR family has no single system-wide level cap: caps are per-class and per-clone
+  // (a B/X magic-user tops out near 26, a fighter near 9-14, Basic Fantasy differs again, and
+  // high-level "name level" play is open-ended). This shared adapter therefore reports Infinity
+  // rather than picking one clone's number, so a retroclone campaign isn't artificially held to
+  // the 5e ceiling (issue #535). The per-class progression table remains the real gate.
+  maxLevel: Infinity,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     const dex = osrDexScore(abilities);
     return dex === null ? 0 : osrAbilityModifier(dex);

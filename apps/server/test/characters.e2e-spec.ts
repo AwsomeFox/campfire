@@ -1,5 +1,8 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { campaigns, characters } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const owner = { 'x-dev-role': 'player', 'x-dev-user': 'owner-1' };
@@ -627,5 +630,207 @@ describe('dmControlsProgression flag gates XP/level-up (issue #270)', () => {
     const dmLvl = await request(server).post(`/api/v1/characters/${characterId}/level-up`).set(dm).send({});
     expect(dmLvl.status).toBe(201);
     expect(dmLvl.body.level).toBe(3);
+  });
+});
+
+/**
+ * Issue #535: levelUp must consult the campaign's RuleSystemAdapter.maxLevel instead of a
+ * hardcoded 5e `20`. A 5e campaign still caps at 20 (regression guard), but a campaign on a
+ * no-cap system (an OSR retroclone → Infinity) lets a level-20 character advance to 21 — the
+ * exact advance the old hardcoded `>= 20` check wrongly rejected.
+ *
+ * The campaign's `ruleSystem` is written straight to the DB (the campaigns-service POST/PATCH
+ * path validates the slug against an installed rule pack, which is out of scope for this fix);
+ * `levelUp` reads it back through the same adapter resolver the live service uses.
+ */
+describe('levelUp honors the rule-system level cap (issue #535)', () => {
+  const capDm = { 'x-dev-role': 'dm', 'x-dev-user': 'cap-dm-1' };
+  let ctx: TestAppContext;
+  let server: import('http').Server;
+  let db: DrizzleDb;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    db = ctx.app.get<DrizzleDb>(DB);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a 5e (default) campaign still rejects level-up at 20', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: '5e Cap Camp' });
+    expect(camp.status).toBe(201);
+    expect(camp.body.ruleSystem).toBe(''); // default → 5e adapter → maxLevel 20
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Five E Hero', hpMax: 20, hpCurrent: 20 });
+    expect(char.status).toBe(201);
+
+    // Seed the character to level 20 via the PATCH escape hatch (ruleSystem '' stays 5e).
+    const at20 = await request(server).patch(`/api/v1/characters/${char.body.id}`).set(capDm).send({ level: 20 });
+    expect(at20.status).toBe(200);
+    expect(at20.body.level).toBe(20);
+
+    // levelUp at 20 is rejected: the 5e adapter's cap is 20.
+    const denied = await request(server).post(`/api/v1/characters/${char.body.id}/level-up`).set(capDm).send({});
+    expect(denied.status).toBe(400);
+  });
+
+  it('a no-cap OSR campaign lets a level-20 character advance to 21 (the #535 regression)', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: 'OSR No-Cap Camp' });
+    expect(camp.status).toBe(201);
+
+    // Write a no-cap rule-system slug directly (bypassing the campaigns-service pack validation,
+    // which is unrelated to the cap logic under test). 'basic-fantasy' resolves to the OSR
+    // adapter, whose maxLevel is Infinity.
+    await db.update(campaigns).set({ ruleSystem: 'basic-fantasy' }).where(eq(campaigns.id, camp.body.id)).run();
+    const reloaded = await request(server).get(`/api/v1/campaigns/${camp.body.id}`).set(capDm);
+    expect(reloaded.body.ruleSystem).toBe('basic-fantasy');
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Old School Delver', hpMax: 16, hpCurrent: 16 });
+    expect(char.status).toBe(201);
+
+    // Seed to level 20; the old hardcoded `>= 20` check would block the next levelUp here.
+    const at20 = await request(server).patch(`/api/v1/characters/${char.body.id}`).set(capDm).send({ level: 20 });
+    expect(at20.status).toBe(200);
+    expect(at20.body.level).toBe(20);
+
+    // The fix: a no-cap system's levelUp succeeds past 20.
+    const leveled = await request(server).post(`/api/v1/characters/${char.body.id}/level-up`).set(capDm).send({});
+    expect(leveled.status).toBe(201);
+    expect(leveled.body.level).toBe(21);
+
+    // Sanity: the character row really persisted 21 (not just the response body).
+    const [row] = await db.select({ level: characters.level }).from(characters).where(eq(characters.id, char.body.id)).limit(1);
+    expect(row?.level).toBe(21);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #746 — optimistic concurrency for characters. A character sheet is the
+// classic blind last-write-wins clobber victim: two tabs (or a player tab + a
+// DM tab, or a connected AI over MCP) both load the sheet, one applies a live
+// HP/level change or a DM-secret edit, and the other's stale full-snapshot save
+// silently restores the old HP max, level, status, or ability scores. PATCH
+// /characters/:id now enforces the same `expectedUpdatedAt` CAS invariant as
+// quests/npcs/locations/sessions/encounters (#157/#532) — a stale save 409s
+// with STALE_WRITE instead of clobbering the fresher edit.
+// ---------------------------------------------------------------------------
+describe('characters — optimistic concurrency (issue #746, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let characterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'CAS Character Campaign' })).body.id;
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(owner)
+      .send({ name: 'Stale Sheet', hpMax: 20, hpCurrent: 20, ac: 15 });
+    expect(char.status).toBe(201);
+    characterId = char.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('omitting expectedUpdatedAt is unchanged back-compat (unconditional write)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(owner).send({ name: 'Fresh Sheet' });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Fresh Sheet');
+  });
+
+  it('a stale expectedUpdatedAt PATCH 409s with STALE_WRITE and does NOT mutate the row', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(before.body.name).toBe('Fresh Sheet');
+
+    const conflict = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ name: 'CLOBBER', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('STALE_WRITE');
+
+    // The row is untouched — no clobber.
+    const after = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(after.body.name).toBe('Fresh Sheet');
+    expect(after.body.updatedAt).toBe(before.body.updatedAt);
+  });
+
+  it('a matching expectedUpdatedAt PATCH succeeds', async () => {
+    const server = ctx.app.getHttpServer();
+    const current = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+
+    const ok = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ ac: 17, expectedUpdatedAt: current.body.updatedAt });
+    expect(ok.status).toBe(200);
+    expect(ok.body.ac).toBe(17);
+    expect(ok.body.updatedAt).not.toBe(current.body.updatedAt); // bumped
+  });
+
+  // The headline regression from the issue: two tabs both load the sheet, both save.
+  // Tab A applies a live HP change (the common mid-session case); Tab B (still holding
+  // the pre-A updatedAt) then PATCHes its stale full snapshot — which used to silently
+  // restore the old HP. The CAS guard must now 409 Tab B and leave Tab A's HP intact.
+  it('two concurrent updates: the second (stale) one gets 409 and the first edit survives', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Both tabs load the same version.
+    const tabA = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    const tabB = await request(server).get(`/api/v1/characters/${characterId}`).set(dm);
+    expect(tabA.body.updatedAt).toBe(tabB.body.updatedAt);
+    const loadedAt = tabA.body.updatedAt;
+    const loadedHp = tabA.body.hpCurrent;
+
+    // Tab A applies a live HP change first — succeeds and bumps updatedAt. (This is the
+    // mid-session heal/damage path: a real second writer, not just a field echo.)
+    const firstSave = await request(server).post(`/api/v1/characters/${characterId}/hp`).set(dm).send({ set: 4 });
+    expect(firstSave.status).toBe(201);
+    expect(firstSave.body.hpCurrent).toBe(4);
+    expect(firstSave.body.updatedAt).not.toBe(loadedAt); // bumped
+
+    // Tab B (still holding the pre-A updatedAt) PATCHes its stale full snapshot — must
+    // 409, NOT silently restore the old hpCurrent.
+    const staleSave = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(dm)
+      .send({ hpCurrent: loadedHp, expectedUpdatedAt: loadedAt });
+    expect(staleSave.status).toBe(409);
+    expect(staleSave.body.code).toBe('STALE_WRITE');
+
+    // Tab A's HP edit survived — the stale save did not clobber it.
+    const after = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(after.body.hpCurrent).toBe(4);
+  });
+
+  // A proposal-applied update never carries expectedUpdatedAt (the DM applies a queued
+  // edit later, so any guard would be stale-by-design) — the CAS guard must be a no-op
+  // when the field is omitted, so the proposal path stays unaffected.
+  it('the proposal path (no expectedUpdatedAt) is unaffected', async () => {
+    const server = ctx.app.getHttpServer();
+    const proposal = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .query('proposed=true')
+      .send({ name: 'Proposed Rename' });
+    expect(proposal.status).toBe(202);
+    expect(proposal.body.proposal).toBeDefined();
+    // The live row is unchanged until the DM approves.
+    const live = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(live.body.name).not.toBe('Proposed Rename');
   });
 });

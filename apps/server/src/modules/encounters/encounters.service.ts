@@ -15,6 +15,7 @@ import { rollDice, rollInitiative } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { advanceTurn, applyCombatantHp, computeEncounterDifficulty, crToXp, generateEncounterGroup, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
@@ -163,6 +164,7 @@ export class EncountersService {
     private readonly audit: AuditService,
     private readonly events: CampaignEventsService,
     private readonly rolls: RollsService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
@@ -349,9 +351,25 @@ export class EncountersService {
    * Handouts card, defeating fog-of-war. The fogged encounter canvas still renders it for
    * players — the file route (GET /attachments/:id/file) serves an encounter's map to non-DM
    * even while hidden (see AttachmentsService.isEncounterMap).
+   *
+   * Optimistic concurrency (issue #532): live combat is the highest-contention entity (the
+   * same encounter open across multiple DM devices — a laptop + a tablet at the table), so it
+   * enforces the same `expectedUpdatedAt` CAS invariant as quests/npcs/locations/sessions. A
+   * stale tab's save (its `expectedUpdatedAt` no longer matches the row's current `updatedAt`)
+   * 409s before any write rather than silently clobbering the fresher edit — the classic
+   * "lost fog/grid edit looks like the map reverted" failure. Omitted => unconditional write
+   * (unchanged back-compat for any client that hasn't opted in).
    */
-  async updateEncounter(encounterId: number, input: EncounterUpdateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+  async updateEncounter(
+    encounterId: number,
+    input: EncounterUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    // Optimistic concurrency (#532): 409 on a stale expectedUpdatedAt before any write.
+    this.revisions.assertNotStale(encounterRow, opts?.expectedUpdatedAt);
 
     const set: Partial<typeof encounters.$inferInsert> = {};
     const changedPredicates: SQL[] = [];
@@ -1035,17 +1053,12 @@ export class EncountersService {
       }
     }
 
-    // Non-HP field writes computed up front (conditions/initiative/identity). The
-    // HP + death-save fields are computed INSIDE the transaction below off a fresh
-    // read, so concurrent damage still composes atomically (issue #86).
+    // Non-HP field writes computed up front (initiative/identity). The HP +
+    // death-save fields AND the condition add/remove deltas are computed INSIDE
+    // the transaction below off a fresh read, so concurrent damage and concurrent
+    // condition changes both compose atomically (issues #86, #747).
     const staticUpdate: Partial<typeof combatants.$inferInsert> = {};
 
-    if (patch.addConditions !== undefined || patch.removeConditions !== undefined) {
-      const current = new Set(fromJsonText<string[]>(existing.conditions, []));
-      for (const c of patch.removeConditions ?? []) current.delete(c);
-      for (const c of patch.addConditions ?? []) current.add(c);
-      staticUpdate.conditions = toJsonText([...current]);
-    }
     if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
@@ -1068,12 +1081,18 @@ export class EncountersService {
       patch.hpSet !== undefined ||
       patch.hpTemp !== undefined ||
       patch.deathSaveSuccesses !== undefined ||
-      patch.deathSaveFailures !== undefined;
+      patch.deathSaveFailures !== undefined ||
+      patch.deathSaveRoll !== undefined;
     // A recompute is needed if any HP field changed OR hpMax moved (hpCurrent may
     // need re-clamping to a lowered max, and the death state re-derived).
     const recomputeHp = hpFieldsTouched || hpMaxChanged;
+    // Condition add/remove deltas — applied INSIDE the transaction below off the
+    // fresh row, so two concurrent condition changes (one adds while another
+    // removes a different condition) compose instead of the loser's whole-array
+    // write silently clobbering the winner's (issue #747, same class as #86/#657).
+    const conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
 
-    if (Object.keys(staticUpdate).length === 0 && !recomputeHp) {
+    if (Object.keys(staticUpdate).length === 0 && !recomputeHp && !conditionsTouched) {
       return combatantToDomain(existing);
     }
 
@@ -1099,12 +1118,35 @@ export class EncountersService {
     let afterHp = 0;
     let afterTemp = 0;
     let afterDeath = 'none';
+    // Condition snapshots captured inside the tx (off the fresh row + the write
+    // result) so combat-log events derive from the actual committed before/after
+    // state, not a stale pre-await read (issue #747, mirroring the HP snapshots).
+    let beforeConditions: Set<string> = new Set();
+    let afterConditions: Set<string> = new Set();
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
       beforeHp = fresh.hpCurrent;
       beforeTemp = fresh.hpTemp;
       beforeDeath = fresh.deathState;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+      if (conditionsTouched) {
+        // Rebase the add/remove deltas against the FRESH row's conditions (issue
+        // #747). A stale whole-array write — derived outside the tx from the
+        // pre-await read — let two concurrent callers clobber each other: caller A
+        // adds 'poisoned' while caller B removes 'prone', and whichever wrote
+        // second replaced the array entirely, dropping the other's change. By
+        // reading `fresh.conditions` inside the serialized transaction and applying
+        // both deltas as set union/difference, concurrent changes compose — the
+        // same read-from-fresh pattern the HP path uses. Retries (re-adding an
+        // already-present or re-removing an absent condition) are idempotent: the
+        // set ops are no-ops and `afterConditions` equals `beforeConditions`.
+        const current = new Set(fromJsonText<string[]>(fresh.conditions, []));
+        beforeConditions = new Set(current);
+        for (const c of patch.removeConditions ?? []) current.delete(c);
+        for (const c of patch.addConditions ?? []) current.add(c);
+        afterConditions = new Set(current);
+        writeSet.conditions = toJsonText([...current]);
+      }
       if (recomputeHp) {
         const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
         const state: CombatantHpState = {
@@ -1122,6 +1164,7 @@ export class EncountersService {
           hpTemp: patch.hpTemp,
           deathSaveSuccesses: patch.deathSaveSuccesses,
           deathSaveFailures: patch.deathSaveFailures,
+          deathSaveRoll: patch.deathSaveRoll,
         });
         if (hpMaxChanged) writeSet.hpMax = effectiveHpMax;
         writeSet.hpCurrent = result.hpCurrent;
@@ -1135,6 +1178,12 @@ export class EncountersService {
       afterHp = updated.hpCurrent;
       afterTemp = updated.hpTemp;
       afterDeath = updated.deathState;
+      // Re-derive afterConditions from the committed row so combat-log events
+      // reflect the actual persisted state even if a future trigger rewrites the
+      // column (defense-in-depth; today the write above is the only mutator).
+      if (conditionsTouched) {
+        afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
+      }
       if (mirrorHp) {
         tx.update(characters).set({ hpCurrent: updated.hpCurrent, updatedAt: nowIso() }).where(eq(characters.id, existing.characterId!)).run();
       }
@@ -1147,7 +1196,7 @@ export class EncountersService {
     // identity edits (rename / hpMax / initMod, issue #114) — which are rare and
     // worth a trail. An update that ONLY touched HP/death-save fields is skipped.
     const changedNonHp =
-      staticUpdate.conditions !== undefined ||
+      conditionsTouched ||
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
@@ -1191,14 +1240,42 @@ export class EncountersService {
       await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'dropped to 0 HP' });
     }
 
-    // Conditions actually changed (adding an already-present, or removing an absent one,
-    // is a no-op and not logged).
-    const conditionsBefore = new Set(fromJsonText<string[]>(existing.conditions, []));
-    for (const c of patch.addConditions ?? []) {
-      if (!conditionsBefore.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `gained ${c}` });
+    // A rolled death save (issue #619) — record the roll + its 5e outcome so the combat
+    // log shows the provenance of a sudden two-failure nat 1 or a nat-20 revival. The
+    // death event above already fires if the roll killed or the revival shows as HP gain;
+    // this line adds the roll itself.
+    if (patch.deathSaveRoll !== undefined) {
+      const outcome =
+        afterDeath === 'dead'
+          ? 'failed their last death save'
+          : afterDeath === 'stable'
+            ? 'stabilized'
+            : afterHp > 0
+              ? 'revived at 1 HP'
+              : patch.deathSaveRoll === 20
+                ? 'revived at 1 HP'
+                : 'marked a death save';
+      await this.appendEvent(encounterId, round, 'roll', {
+        target: targetName,
+        detail: `death save d20 ${patch.deathSaveRoll} — ${outcome}`,
+      });
     }
-    for (const c of patch.removeConditions ?? []) {
-      if (conditionsBefore.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `cleared ${c}` });
+
+    // Conditions actually changed (adding an already-present, or removing an absent one,
+    // is a no-op and not logged). Derived from the committed before/after snapshots
+    // captured inside the transaction (issue #747) — NOT the pre-await `existing`
+    // read — so a condition that a concurrent writer added/removed between the stale
+    // read and the tx is attributed correctly (or recognized as a no-op by this
+    // caller). Logging the symmetric difference of the two committed sets means a
+    // retry that landed nothing new logs nothing, while a real concurrent change
+    // still logs exactly the conditions this caller's delta flipped.
+    if (conditionsTouched) {
+      for (const c of afterConditions) {
+        if (!beforeConditions.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `gained ${c}` });
+      }
+      for (const c of beforeConditions) {
+        if (!afterConditions.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `cleared ${c}` });
+      }
     }
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
@@ -1218,23 +1295,43 @@ export class EncountersService {
     // pointer we only need to react when the CURRENT combatant is the one leaving:
     // advance to the next in the sorted order (wrapping to the top if it was last).
     let newCurrentId = encounterRow.currentCombatantId;
+    // Round only changes when the removed actor was the LAST in initiative order —
+    // removing it wraps the pointer to the top of the NEXT round, exactly as
+    // advanceTurn does (issue #528). We track the wrap here and apply it below so the
+    // round counter can never desync from the turn pointer mid-combat.
+    let wrappedToNextRound = false;
     if (encounterRow.status === 'running' && encounterRow.currentCombatantId === combatantId) {
       const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
       const idx = sorted.findIndex((c) => c.id === combatantId);
       const remaining = sorted.filter((c) => c.id !== combatantId);
-      newCurrentId = remaining.length === 0 ? null : (sorted[idx + 1]?.id ?? remaining[0].id);
+      if (remaining.length === 0) {
+        newCurrentId = null;
+      } else {
+        const next = sorted[idx + 1];
+        if (next) {
+          newCurrentId = next.id;
+        } else {
+          // The current actor was last in the (pre-removal) sorted order, so stepping
+          // past it wraps to the top of the next round — mirror advanceTurn's wrap+round
+          // increment (idx + 1 >= count => round + 1).
+          newCurrentId = remaining[0].id;
+          wrappedToNextRound = true;
+        }
+      }
     }
 
     await this.db.delete(combatants).where(eq(combatants.id, combatantId));
 
     // Re-derive turnIndex against the post-removal sorted order so it stays in lockstep
-    // with the (possibly advanced) identity pointer.
+    // with the (possibly advanced) identity pointer. The round is bumped in the same
+    // UPDATE when the removal wrapped the pointer past the end (issue #528).
     if (encounterRow.status === 'running') {
       const sortedAfter = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
       const turnIndex = turnIndexFor(sortedAfter, newCurrentId);
+      const round = wrappedToNextRound ? encounterRow.round + 1 : encounterRow.round;
       await this.db
         .update(encounters)
-        .set({ currentCombatantId: newCurrentId, turnIndex, updatedAt: nowIso() })
+        .set({ currentCombatantId: newCurrentId, turnIndex, round, updatedAt: nowIso() })
         .where(eq(encounters.id, encounterId));
     }
 

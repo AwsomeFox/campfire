@@ -29,6 +29,12 @@ export const campaigns = sqliteTable('campaigns', {
   // the feed URL can be re-displayed to members — see modules/sessions/scheduling.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   icsToken: text('ics_token'),
+  // Issue #554: absolute expiry (ISO UTC) after which the feed token stops authorizing
+  // the public .ics endpoint (a leaked URL self-destructs on a schedule). Nullable for
+  // back-compat — legacy rows written before this column existed have no expiry and keep
+  // working until the DM rotates (which always stamps a fresh expiry). Cleared alongside
+  // icsToken on disableFeed. See migrateCampaignsTableForIcsTokenExpiresAt.
+  icsTokenExpiresAt: text('ics_token_expires_at'),
   // Per-campaign upload quota in bytes, or NULL for no limit (issue #24). Admin-set
   // via the storage console; enforced on attachment upload. Nullable in older DBs
   // pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -369,6 +375,17 @@ export const comments = sqliteTable('comments', {
   // Who tombstoned it: String(users.id), 'dev:<name>', or 'token:<name>' — same
   // identity space as author_user_id. Null on a live row. Cleared on restore.
   deletedBy: text('deleted_by'),
+  // Editor provenance for the TRUST case (issue #783): a DM editing another
+  // member's comment must NOT leave the original author as the apparent writer of
+  // text they didn't write. edited_at is stamped (alongside the usual updated_at
+  // bump) ONLY when the editor is not the original author, and edited_by records
+  // that editor in the same identity space as author_user_id / deleted_by. A
+  // self-edit leaves both NULL — the author editing their own prose is not a
+  // provenance event, and updated_at already drives the UI's "edited" badge.
+  // The original author_user_id / author_name are NEVER overwritten by an edit,
+  // so the player who wrote the comment stays its author of record.
+  editedAt: text('edited_at'),
+  editedBy: text('edited_by'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -456,6 +473,33 @@ export const settings = sqliteTable('settings', {
   value: text('value').notNull(),
 });
 
+/**
+ * Single-row install-identity table (issue #723). Carries the per-install UUID
+ * (stable across backup/restore — it lives INSIDE the DB that gets restored) and
+ * a monotonic `data_generation` that the server bumps on every whole-server
+ * restore. Both are surfaced on /me (Me.instance) so the PWA can namespace its
+ * SW runtime cache by `${instanceId}:${dataGeneration}` — a restore bumps the
+ * generation, the next proven-live /me carries the new value, and the client
+ * purges the prior cache so stale pre-restore bytes can't render (online or
+ * offline). See modules/server-meta/server-meta.service.ts and
+ * apps/web/src/lib/swCache.ts.
+ *
+ * The row is seeded lazily on first read (ServerMetaService.get) so a fresh DB
+ * and a restored DB alike always have exactly one row with a real UUID.
+ */
+export const SERVER_META_KEY = 'singleton';
+export const serverMeta = sqliteTable('server_meta', {
+  key: text('key').primaryKey(),
+  // Per-install UUID (e.g. "550e8400-e29b-..."). Generated once, then stable for
+  // the life of the install — travels inside a backup so the same box keeps it
+  // across restores (which is exactly why we ALSO need data_generation).
+  instanceId: text('instance_id').notNull(),
+  // Monotonic integer bumped by ServerMetaService.bumpGeneration() on a restore.
+  // Starts at 0; the first restore moves it to 1, etc.
+  dataGeneration: integer('data_generation').notNull().default(0),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const campaignMembers = sqliteTable('campaign_members', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
@@ -491,7 +535,9 @@ export const membershipIntegrityRepairs = sqliteTable('membership_integrity_repa
 // an invite code is a shareable capability the DM re-displays and re-copies from
 // the UI, and it can only create a NEW membership at a capped role (never dm) —
 // it cannot impersonate an existing user. It is 128-bit random, always expiring,
-// optionally use-capped, and revocable (row delete).
+// optionally use-capped, and revocable (row delete). Expired/exhausted rows are
+// retained for operator inspection and whole-server backup; public code resolution
+// and the DM list API filter them out, while revoke/campaign deletion remove them.
 export const campaignInvites = sqliteTable('campaign_invites', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
@@ -621,6 +667,15 @@ export const ruleEntries = sqliteTable('rule_entries', {
   // different rulebooks are distinguishable and attributable (issue #143). Nullable-as-''
   // in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   source: text('source').notNull().default(''),
+  // Per-entry provenance (issue #734): a pack may mix licenses, and the reader must credit
+  // each entry under its OWN license rather than the pack's. license/attribution/author/
+  // sourceUrl capture the entry's effective open-license metadata; '' on rows written
+  // before migration 0050 (callers treat '' as "inherit the pack's value"). See
+  // migrateRuleEntriesTableForLicensing().
+  license: text('license').notNull().default(''),
+  attribution: text('attribution').notNull().default(''),
+  author: text('author').notNull().default(''),
+  sourceUrl: text('source_url').notNull().default(''),
   // Optional manual icon override (issue #305): slug of a bundled game-icons.net entity
   // icon, or '' to let the web app derive a default from type/dataJson. Nullable/absent
   // in older DBs pre-migration; see db/db.module.ts migrateRuleEntriesTableForIconSlug().
@@ -723,6 +778,10 @@ export const diceRolls = sqliteTable('dice_rolls', {
   rolls: text('rolls').notNull().default('[]'),
   // JSON array of the kept dice (issue #130) — null when no keep/drop clause applied.
   kept: text('kept'),
+  // Per-term breakdown JSON for compound expressions (issue #536) — null for a classic
+  // single-term roll. Each entry: {term, value, rolls?, kept?}. Same nullable-JSON
+  // convention as `kept`.
+  terms: text('terms'),
   total: integer('total').notNull(),
   // Optional check context (issue #130): label + difficulty class. success is derived.
   label: text('label'),

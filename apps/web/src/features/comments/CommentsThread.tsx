@@ -211,7 +211,14 @@ function CommentCard({
         <span className="font-bold text-slate-300">{comment.authorName || comment.authorUserId}</span>
         {comment.inCharacter && <span className="tag tag-accent">In character</span>}
         <span className="text-slate-600">{timeAgo(comment.createdAt)}</span>
-        {comment.updatedAt !== comment.createdAt && <span className="text-slate-600 italic">edited</span>}
+        {comment.updatedAt !== comment.createdAt && (
+          // Issue #783: when a NON-author edited the comment (editedBy set), say so
+          // honestly instead of a bare "edited" — the author of record never wrote
+          // the current body. A self-edit has no editedBy, so it stays a plain badge.
+          <span className="text-slate-600 italic">
+            {comment.editedBy ? `edited by ${comment.editedBy}` : 'edited'}
+          </span>
+        )}
       </div>
       {error && <ErrorNote message={error} />}
       {editing ? (

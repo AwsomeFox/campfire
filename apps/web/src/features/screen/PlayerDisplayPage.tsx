@@ -39,6 +39,7 @@ import {
 } from './playerSafe';
 
 const POLL_MS = 12_000;
+const CONTROLS_HIDE_MS = 3_500;
 
 const HP_BAND_LABEL: Record<HpBand, string> = {
   healthy: 'Healthy',
@@ -264,42 +265,81 @@ export default function PlayerDisplayPage() {
   // focused controls and recovery guidance remain visible.
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
+    let active = true;
+
     function clearHideTimer() {
-      if (hideTimer.current) clearTimeout(hideTimer.current);
+      if (hideTimer.current !== null) clearTimeout(hideTimer.current);
       hideTimer.current = null;
     }
 
     function scheduleHide() {
       clearHideTimer();
       hideTimer.current = setTimeout(() => {
+        hideTimer.current = null;
         if (!controlsRef.current?.contains(document.activeElement)) setControlsVisible(false);
-      }, 3500);
+      }, CONTROLS_HIDE_MS);
     }
 
     function ping(event?: Event) {
       setControlsVisible(true);
-      if (event?.type === 'focusin' && controlsRef.current?.contains(event.target as Node)) {
+      if (
+        event?.type === 'focusin' &&
+        event.target instanceof Node &&
+        controlsRef.current?.contains(event.target)
+      ) {
         clearHideTimer();
       } else {
         scheduleHide();
       }
     }
 
+    function reportFullscreenExitFailure(error: unknown) {
+      if (!active) return;
+      setFullscreenSupported(fullscreenAvailable());
+      setFullscreenNotice({ kind: 'error', message: fullscreenFailure('exit', error) });
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      ping(event);
+      if (event.key !== 'Escape' || event.defaultPrevented || event.repeat) return;
+
+      event.preventDefault();
+      if (fullscreenActive()) {
+        // Handle this ourselves so fullscreen state is sampled before a browser
+        // (or test double) processes its own Escape behavior. This guarantees
+        // the same keypress cannot both leave fullscreen and navigate away.
+        try {
+          // fullscreenchange is the authoritative state transition. Avoid a
+          // promise continuation that can outlive this route after a second
+          // Escape navigates away.
+          void document.exitFullscreen().catch(reportFullscreenExitFailure);
+        } catch (fullscreenError) {
+          reportFullscreenExitFailure(fullscreenError);
+        }
+        return;
+      }
+
+      navigate(Number.isFinite(cid) ? `/c/${cid}` : '/');
+    }
+
     window.addEventListener('pointermove', ping, { passive: true });
     window.addEventListener('pointerdown', ping, { passive: true });
-    window.addEventListener('keydown', ping);
+    // Capture is intentional: the browser may leave fullscreen before a bubble-
+    // phase listener runs, which would make one Escape also exit this route.
+    window.addEventListener('keydown', handleKeyDown, true);
     window.addEventListener('focusin', ping);
     window.addEventListener('focusout', ping);
     ping();
     return () => {
+      active = false;
       window.removeEventListener('pointermove', ping);
       window.removeEventListener('pointerdown', ping);
-      window.removeEventListener('keydown', ping);
+      window.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('focusin', ping);
       window.removeEventListener('focusout', ping);
       clearHideTimer();
     };
-  }, []);
+  }, [cid, navigate]);
 
   const toggleFullscreen = useCallback(async () => {
     if (!fullscreenAvailable()) {
@@ -334,28 +374,83 @@ export default function PlayerDisplayPage() {
     }
   }, [syncFullscreen]);
 
+  const displayedFullscreenNotice = fullscreenSupported
+    ? fullscreenNotice
+    : ({ kind: 'info', message: FULLSCREEN_UNSUPPORTED } satisfies FullscreenNotice);
+  const keepControlsVisible = controlsVisible || displayedFullscreenNotice != null;
+  const exitPath = Number.isFinite(cid) ? `/c/${cid}` : '/';
+  const operatorControls = (
+    <div
+      ref={controlsRef}
+      className="cf-screen-control-stack"
+      style={{ opacity: keepControlsVisible ? 1 : 0, pointerEvents: keepControlsVisible ? 'auto' : 'none' }}
+    >
+      <div className="cf-screen-controls">
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => navigate(exitPath)}
+          aria-label="Exit player display"
+          title="Exit the display"
+        >
+          <span aria-hidden="true">✕</span> Exit
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => void toggleFullscreen()}
+          disabled={!fullscreenSupported || fullscreenPending}
+          aria-pressed={isFullscreen}
+          aria-busy={fullscreenPending}
+          aria-describedby={displayedFullscreenNotice ? 'cf-screen-fullscreen-notice' : undefined}
+          title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        >
+          <span aria-hidden="true">⛶</span> {isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        </button>
+      </div>
+      {displayedFullscreenNotice && (
+        <p
+          id="cf-screen-fullscreen-notice"
+          className={`cf-screen-fullscreen-notice ${displayedFullscreenNotice.kind === 'error' ? 'error' : ''}`}
+          role={displayedFullscreenNotice.kind === 'error' ? 'alert' : 'status'}
+        >
+          {displayedFullscreenNotice.message}
+        </p>
+      )}
+    </div>
+  );
+  const renderScreen = (content: ReactNode, centered = false) => (
+    <main className={`cf-screen${centered ? ' centered' : ''}`}>
+      <style>{SCREEN_CSS}</style>
+      {operatorControls}
+      {content}
+    </main>
+  );
+
   if (!Number.isFinite(cid)) {
-    return <CenteredMessage icon="tv" title="No campaign selected." />;
+    return renderScreen(<CenteredMessage icon="tv" title="No campaign selected." />, true);
   }
   if (role == null && !loading) {
-    return (
+    return renderScreen(
       <CenteredMessage icon="padlock" title="You don't have access to this campaign.">
         <Link to="/" className="btn btn-primary" style={{ marginTop: 12 }}>
           Back to your campaigns
         </Link>
-      </CenteredMessage>
+      </CenteredMessage>,
+      true,
     );
   }
   if (loading && !summary) {
-    return <CenteredMessage icon="campfire" title="Loading display…" pulse />;
+    return renderScreen(<CenteredMessage icon="campfire" title="Loading display…" pulse />, true);
   }
   if (error && !summary) {
-    return (
+    return renderScreen(
       <CenteredMessage icon="hazard-sign" title={error}>
         <button className="btn btn-primary" style={{ marginTop: 12 }} onClick={() => void load()}>
           Retry
         </button>
-      </CenteredMessage>
+      </CenteredMessage>,
+      true,
     );
   }
   if (!summary) return null;
@@ -367,54 +462,8 @@ export default function PlayerDisplayPage() {
   const combatants = encounter ? safeCombatants(encounter.combatants) : [];
   const currentId =
     encounter && encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
-  const displayedFullscreenNotice = fullscreenSupported
-    ? fullscreenNotice
-    : ({ kind: 'info', message: FULLSCREEN_UNSUPPORTED } satisfies FullscreenNotice);
-  const keepControlsVisible = controlsVisible || displayedFullscreenNotice != null;
-
-  return (
-    <main className="cf-screen">
-      <style>{SCREEN_CSS}</style>
-
-      {/* Floating operator chrome stays outside the player-facing content panels. */}
-      <div
-        ref={controlsRef}
-        className="cf-screen-control-stack"
-        style={{ opacity: keepControlsVisible ? 1 : 0, pointerEvents: keepControlsVisible ? 'auto' : 'none' }}
-      >
-        <div className="cf-screen-controls">
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => navigate(`/c/${cid}`)}
-            title="Exit the display"
-          >
-            ✕ Exit
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => void toggleFullscreen()}
-            disabled={!fullscreenSupported || fullscreenPending}
-            aria-pressed={isFullscreen}
-            aria-busy={fullscreenPending}
-            aria-describedby={displayedFullscreenNotice ? 'cf-screen-fullscreen-notice' : undefined}
-            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-          >
-            <span aria-hidden="true">⛶</span> {isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-          </button>
-        </div>
-        {displayedFullscreenNotice && (
-          <p
-            id="cf-screen-fullscreen-notice"
-            className={`cf-screen-fullscreen-notice ${displayedFullscreenNotice.kind === 'error' ? 'error' : ''}`}
-            role={displayedFullscreenNotice.kind === 'error' ? 'alert' : 'status'}
-          >
-            {displayedFullscreenNotice.message}
-          </p>
-        )}
-      </div>
-
+  return renderScreen(
+    <>
       {/* Header: campaign + where the party is */}
       <header className="cf-screen-head">
         <h1>{summary.campaign.name}</h1>
@@ -548,7 +597,7 @@ export default function PlayerDisplayPage() {
           </section>
         )}
       </div>
-    </main>
+    </>,
   );
 }
 
@@ -651,6 +700,7 @@ const SCREEN_CSS = `
   padding: clamp(16px, 3vw, 48px);
   font-family: var(--font-body);
 }
+.cf-screen.centered { padding: 0; }
 .cf-screen-control-stack {
   position: fixed;
   top: 14px;
@@ -839,4 +889,10 @@ const SCREEN_CSS = `
 .cf-npc-name { display: block; font-weight: 600; color: #fff; font-size: clamp(14px, 1.3vw, 19px); }
 .cf-npc-role { color: var(--color-neutral-400); font-size: clamp(12px, 1.1vw, 15px); }
 .cf-npc-disposition { margin-top: 8px; }
+@media (prefers-reduced-motion: reduce) {
+  .cf-screen-control-stack,
+  .cf-hp > div {
+    transition: none;
+  }
+}
 `;

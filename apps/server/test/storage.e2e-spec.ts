@@ -223,5 +223,142 @@ describe('Issue #24: admin storage management (e2e)', () => {
       expect(run.body.bytesReclaimed).toBeGreaterThanOrEqual(TINY_PNG.length);
       expect(fs.existsSync(strayPath)).toBe(false); // gone
     });
+
+    // Issue #695 — orphan cleanup must clear encounter.mapAttachmentId references for
+    // the orphan rows it drops, mirroring remove(). Otherwise the encounter keeps
+    // pointing at a deleted row and renders a broken battle map.
+    it('clears encounter.mapAttachmentId when cleaning an orphaned battle map row', async () => {
+      const server = ctx.app.getHttpServer();
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'orphan-encounter-map.png', contentType: 'image/png' });
+      const orphanId = up.body.id;
+
+      const enc = await adminAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Orphan Cleanup Fight' });
+      const encounterId = enc.body.id;
+      const patch = await adminAgent.patch(`/api/v1/encounters/${encounterId}`).send({ mapAttachmentId: orphanId });
+      expect(patch.body.mapAttachmentId).toBe(orphanId);
+
+      // Manufacture a row-without-file so cleanupOrphans targets it.
+      const diskPath = path.join(ctx.dataDir, 'uploads', String(campaignId), `${orphanId}.png`);
+      expect(fs.existsSync(diskPath)).toBe(true);
+      fs.rmSync(diskPath);
+
+      const run = await adminAgent.post('/api/v1/admin/storage/cleanup');
+      expect(run.status).toBe(201);
+      expect(run.body.rowsDeleted).toBeGreaterThanOrEqual(1);
+
+      const getRes = await adminAgent.get(`/api/v1/encounters/${encounterId}`);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.mapAttachmentId).toBeNull();
+    });
+  });
+
+  // Issue #722 — FAIL CLOSED regression. The orphan-cleanup path used to treat a
+  // missing/unreadable upload root as an empty directory, which made EVERY
+  // attachment row look orphaned (its file lives under that very volume). A real
+  // cleanup run would then hard-delete all that metadata AND clear the campaign
+  // map / encounter map / character portrait references — destroying good data
+  // behind what was merely a transiently unmounted volume.
+  //
+  // The fix: refuse to mark rows as orphans when the storage root is unavailable
+  // (missing or unreadable). cleanupOrphans throws 503 and leaves every DB row
+  // intact, so the admin can restore the volume and retry. These tests pin both
+  // halves (refusal + data preservation) for the two infra failure modes
+  // (vanished volume, perms flip), and confirm cleanup resumes once storage is
+  // healthy again.
+  describe('orphan cleanup fails closed when storage is unavailable (issue #722)', () => {
+    let keepId: number;
+    let keepDiskPath: string;
+    const uploadsPath = () => path.join(ctx.dataDir, 'uploads');
+
+    beforeEach(async () => {
+      // Seed a healthy attachment whose bytes live on disk. During the outage
+      // below its file will (correctly) be unreachable, but its DB row MUST
+      // survive cleanup — that is the whole point of fail-closed.
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'keep-during-outage.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      keepId = up.body.id;
+      keepDiskPath = path.join(ctx.dataDir, 'uploads', String(campaignId), `${keepId}.png`);
+      expect(fs.existsSync(keepDiskPath)).toBe(true);
+    });
+
+    async function expectRowSurvives(): Promise<void> {
+      const list = await adminAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+      expect(list.status).toBe(200);
+      expect(list.body.some((a: { id: number }) => a.id === keepId)).toBe(true);
+    }
+
+    it('refuses to clean up (503) when the upload volume is MISSING, and preserves every row', async () => {
+      // Simulate a vanished/unmounted volume: move the uploads dir out of the way.
+      const moved = `${uploadsPath()}.quarantined-missing`;
+      fs.rmSync(moved, { recursive: true, force: true });
+      fs.renameSync(uploadsPath(), moved);
+      expect(fs.existsSync(uploadsPath())).toBe(false);
+
+      try {
+        // Dry-run must also refuse: a preview that reports "all rows are orphans"
+        // while the disk is gone is itself dangerous (the admin could act on it).
+        const dry = await adminAgent.post('/api/v1/admin/storage/cleanup?dryRun=true');
+        expect(dry.status).toBe(503);
+
+        const run = await adminAgent.post('/api/v1/admin/storage/cleanup');
+        expect(run.status).toBe(503);
+
+        // The DB row — whose file is now unreachable because the VOLUME is gone,
+        // not because the file was deleted — must still be present.
+        await expectRowSurvives();
+      } finally {
+        // Restore the volume so subsequent tests have a healthy root.
+        fs.rmSync(uploadsPath(), { recursive: true, force: true });
+        fs.renameSync(moved, uploadsPath());
+        expect(fs.existsSync(keepDiskPath)).toBe(true);
+      }
+    });
+
+    it('refuses to clean up (503) when the upload volume is UNREADABLE (EACCES), and preserves every row', async () => {
+      // Skip when the test process can read anything regardless of mode bits
+      // (root bypasses POSIX perms, so an EACCES test would be a false pass).
+      if (process.getuid && process.getuid() === 0) {
+        // eslint-disable-next-line no-console
+        console.warn('skipping EACCES fail-closed test under root');
+        return;
+      }
+
+      fs.chmodSync(uploadsPath(), 0o000);
+      try {
+        expect(fs.existsSync(uploadsPath())).toBe(true); // present, but unreadable
+
+        const dry = await adminAgent.post('/api/v1/admin/storage/cleanup?dryRun=true');
+        expect(dry.status).toBe(503);
+
+        const run = await adminAgent.post('/api/v1/admin/storage/cleanup');
+        expect(run.status).toBe(503);
+
+        await expectRowSurvives();
+      } finally {
+        // Always restore perms so the cleanup below (and other suites) can run.
+        fs.chmodSync(uploadsPath(), 0o755);
+      }
+    });
+
+    it('cleanup resumes normally once the volume is healthy again (no permanent lockout)', async () => {
+      // Sanity that the fail-closed guard doesn't leave cleanup wedged: with a
+      // present + readable root, a genuine row-without-file is still cleaned.
+      expect(fs.existsSync(uploadsPath())).toBe(true);
+      fs.rmSync(keepDiskPath, { force: true });
+      expect(fs.existsSync(keepDiskPath)).toBe(false);
+
+      const run = await adminAgent.post('/api/v1/admin/storage/cleanup');
+      expect(run.status).toBe(201);
+      expect(run.body.rowsDeleted).toBeGreaterThanOrEqual(1);
+
+      const list = await adminAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+      expect(list.body.some((a: { id: number }) => a.id === keepId)).toBe(false);
+    });
   });
 });

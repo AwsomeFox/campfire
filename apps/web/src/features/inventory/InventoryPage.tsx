@@ -5,11 +5,12 @@
  * writable only by the dm or the character's owning player (server-enforced,
  * mirrored here so read-only rows don't render controls).
  */
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useParams } from 'react-router-dom';
 import type { Character, InventoryItem, Treasury } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
@@ -42,6 +43,11 @@ export default function InventoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  // Bumped whenever a `treasury.updated` SSE tick arrives from ANOTHER user. The
+  // TreasuryCard watches this to mark its open editor stale (issue #582) instead of
+  // silently overwriting a concurrent change on save. Echoes of our own writes are
+  // ignored (same userId) so a save never flags its own editor.
+  const [treasuryRemoteEpoch, setTreasuryRemoteEpoch] = useState(0);
 
   const load = useCallback(async () => {
     setError(null);
@@ -64,6 +70,36 @@ export default function InventoryPage() {
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  // Live invalidation for the treasury (issue #582). A `treasury.updated` tick from
+  // another player refreshes the displayed totals and — if the editor is open — bumps
+  // the remote epoch so the card can surface a "changed by another player" state
+  // rather than letting a stale form clobber the concurrent write on save. We keep
+  // myUserId in a ref so the handler identity is stable (the SSE hook re-subscribes
+  // only on campaignId, not on every render).
+  const myUserIdRef = useRef(myUserId);
+  myUserIdRef.current = myUserId;
+  const refreshTreasury = useCallback(async () => {
+    try {
+      const coins = await api.get<Treasury>(`${API}/campaigns/${id}/treasury`);
+      setTreasury(coins);
+    } catch {
+      /* the page-level load/error path will surface a persistent failure */
+    }
+  }, [id]);
+  useCampaignEvents(Number.isFinite(id) ? id : undefined, {
+    onEvent: useCallback(
+      (event) => {
+        if (event.type !== 'treasury.updated') return;
+        // Ignore our own write echoing back through the stream.
+        if (event.userId === myUserIdRef.current) return;
+        void refreshTreasury();
+        setTreasuryRemoteEpoch((n) => n + 1);
+      },
+      [refreshTreasury],
+    ),
+    onReconnect: useCallback(() => void refreshTreasury(), [refreshTreasury]),
+  });
 
   const ownsCharacter = useCallback(
     (characterId: number | null) => {
@@ -131,7 +167,15 @@ export default function InventoryPage() {
         </Card>
       ) : (
         <>
-          {treasury && <TreasuryCard campaignId={id} treasury={treasury} canEdit={canEdit} onChanged={setTreasury} />}
+          {treasury && (
+            <TreasuryCard
+              campaignId={id}
+              treasury={treasury}
+              canEdit={canEdit}
+              onChanged={setTreasury}
+              remoteEpoch={treasuryRemoteEpoch}
+            />
+          )}
 
           {adding && canEdit && (
             <AddItemForm
@@ -182,23 +226,66 @@ export default function InventoryPage() {
   );
 }
 
+/**
+ * Party treasury editor (issue #582).
+ *
+ * Two write shapes, each mapped to the safest server semantics:
+ *
+ *  - Quick add/spend (the −/+ buttons on each coin) sends a pure { delta } patch.
+ *    Deltas never conflict — two players spending coin at the same time compose
+ *    atomically on the server (one `UPDATE col = col + ?` per denomination), so
+ *    this is the preferred path for at-the-table coin flow.
+ *
+ *  - The Edit form is a full reconciliation: the DM sets exact totals. Absolute
+ *    writes are inherently racy, so the form sends only the CHANGED denominations
+ *    as { set, expectedUpdatedAt }, where expectedUpdatedAt is the row version the
+ *    DM snapshotted. If another player wrote in between, the server returns 409
+ *    with the fresh values and the editor offers to reapply against them rather
+ *    than silently clobbering the concurrent change.
+ *
+ * While the editor is open, a `treasury.updated` SSE tick from another player
+ * (signalled by `remoteEpoch` bumping) marks it stale — "Another player changed
+ * the treasury" — so the DM reloads fresh values before saving. Echoes of the
+ * DM's own writes are filtered upstream (InventoryPage) and never bump the epoch.
+ */
 function TreasuryCard({
   campaignId,
   treasury,
   canEdit,
   onChanged,
+  remoteEpoch,
 }: {
   campaignId: number;
   treasury: Treasury;
   canEdit: boolean;
   onChanged: (t: Treasury) => void;
+  remoteEpoch: number;
 }) {
   const [editing, setEditing] = useState(false);
   const [values, setValues] = useState<Record<CoinKey, string>>({ pp: '', gp: '', ep: '', sp: '', cp: '' });
+  // The row version the edit form snapshotted from — sent as the CAS token on save.
+  const [editBaseUpdatedAt, setEditBaseUpdatedAt] = useState<string | null>(null);
+  // The coin BALANCES the editor snapshotted at open (issue #582 review). The DM's
+  // "changed denominations" must be computed against THIS snapshot — NOT the live
+  // `treasury` prop, which SSE refreshes on every other-player write. Diffing against
+  // the live prop would include coins another player changed (and the DM never
+  // touched), reintroducing the exact overwrite risk this PR closes. After a 409,
+  // editBase is advanced to the server's fresh values so a reapply diffs against THOSE.
+  const [editBase, setEditBase] = useState<Record<CoinKey, number>>({ pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A 409 conflict: the server's current values. While present, the form shows the
+  // diff against the DM's intent and offers "Reapply" (which re-sends only the
+  // changed denominations, pinned to the fresh row version). Cleared on reload/reapply.
+  const [conflict, setConflict] = useState<Treasury | null>(null);
+  // The remoteEpoch the editor was opened against. If it changes while open,
+  // another player updated the treasury — flag the editor stale.
+  const [openedAtEpoch, setOpenedAtEpoch] = useState(remoteEpoch);
+  const stale = editing && remoteEpoch !== openedAtEpoch && !conflict;
 
   function startEdit() {
+    const base: Record<CoinKey, number> = { pp: treasury.pp, gp: treasury.gp, ep: treasury.ep, sp: treasury.sp, cp: treasury.cp };
+    setEditBase(base);
     setValues({
       pp: String(treasury.pp),
       gp: String(treasury.gp),
@@ -206,8 +293,36 @@ function TreasuryCard({
       sp: String(treasury.sp),
       cp: String(treasury.cp),
     });
+    setEditBaseUpdatedAt(treasury.updatedAt);
+    setOpenedAtEpoch(remoteEpoch);
     setError(null);
+    setConflict(null);
     setEditing(true);
+  }
+
+  // Parse the form into the DM's intended absolute values (defensive: blank or
+  // non-numeric -> 0, clamped to non-negative integers to match the server schema).
+  function parseIntended(): Record<CoinKey, number> {
+    const out = { pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 } as Record<CoinKey, number>;
+    for (const { key } of COINS) {
+      const n = Number(values[key]);
+      out[key] = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+    }
+    return out;
+  }
+
+  // Build the CHANGED-only set against the snapshot the DM is diffing from, so we
+  // don't resubmit untouched denominations (a stale form restoring gp another
+  // player just spent was the original bug). The base is `editBase` — the balances
+  // the editor opened against (or, after a 409, the server's fresh values) — NEVER
+  // the live `treasury` prop, which SSE refreshes on other-player writes and would
+  // contaminate the changed-coin set with coins the DM never touched.
+  function buildSet(base: Record<CoinKey, number>, intended: Record<CoinKey, number>): Partial<Record<CoinKey, number>> {
+    const set: Partial<Record<CoinKey, number>> = {};
+    for (const { key } of COINS) {
+      if (intended[key] !== base[key]) set[key] = intended[key];
+    }
+    return set;
   }
 
   async function save(e: FormEvent) {
@@ -215,18 +330,63 @@ function TreasuryCard({
     setSaving(true);
     setError(null);
     try {
-      const set: Partial<Record<CoinKey, number>> = {};
-      for (const { key } of COINS) {
-        const n = Number(values[key]);
-        set[key] = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+      const intended = parseIntended();
+      // Diff against the stable snapshot the DM opened against (editBase) — not the
+      // live treasury prop, which may have moved under them via SSE. Only the coins
+      // the DM ACTUALLY edited go in the { set } patch; on a 409-reapply, editBase
+      // was advanced to the server's fresh values so only genuinely-edited coins are
+      // re-sent, pinned to the fresh row version.
+      const set = buildSet(editBase, intended);
+      if (Object.keys(set).length === 0) {
+        // Nothing changed — close the editor without a round-trip.
+        setConflict(null);
+        setEditing(false);
+        return;
       }
-      const updated = await api.patch<Treasury>(`${API}/campaigns/${campaignId}/treasury`, { set });
+      const updated = await api.patch<Treasury>(`${API}/campaigns/${campaignId}/treasury`, {
+        set,
+        expectedUpdatedAt: editBaseUpdatedAt ?? undefined,
+      });
       onChanged(updated);
+      setConflict(null);
       setEditing(false);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // Stale base: ApiError does NOT carry the server's fresh values (only
+        // status/message/code/fieldErrors), so fetch them, then show the diff and
+        // offer reapply. editBase advances to the fresh values so a reapply diffs
+        // against THOSE (and only the DM's truly-edited coins are re-sent).
+        try {
+          const fresh = await api.get<Treasury>(`${API}/campaigns/${campaignId}/treasury`);
+          setConflict(fresh);
+          setEditBase({ pp: fresh.pp, gp: fresh.gp, ep: fresh.ep, sp: fresh.sp, cp: fresh.cp });
+          setEditBaseUpdatedAt(fresh.updatedAt);
+          setOpenedAtEpoch(remoteEpoch); // fresh values are current as of now
+          return;
+        } catch {
+          // The follow-up GET itself failed — fall through to the generic error.
+        }
+      }
       setError(err instanceof ApiError ? err.message : "Couldn't update the treasury.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Quick add/spend: a pure { delta } patch. Never conflicts. Disabled to 0 floor
+  // on spend (a spend past 0 is a server 400 and would just bounce), unlimited add.
+  async function quickDelta(coin: CoinKey, by: number) {
+    // Clear any prior error (e.g. a 400 "cannot go negative" from a previous failed
+    // spend) so a stale message doesn't linger after a successful +/- click. A new
+    // failure below re-sets it.
+    setError(null);
+    try {
+      const updated = await api.patch<Treasury>(`${API}/campaigns/${campaignId}/treasury`, { delta: { [coin]: by } });
+      onChanged(updated);
+    } catch (err) {
+      // A negative-going spend surfaces the server's plain message ("Treasury cannot
+      // go negative…"); other errors fall back to the generic string.
+      setError(err instanceof ApiError ? err.message : "Couldn't adjust the treasury.");
     }
   }
 
@@ -244,6 +404,50 @@ function TreasuryCard({
       {error && <p className="text-sm text-rose-400">{error}</p>}
       {editing ? (
         <form onSubmit={save} className="space-y-3">
+          {stale && (
+            <p className="text-sm rounded-md p-2" style={{ background: 'var(--color-neutral-800)', color: 'var(--color-amber, #f59e0b)' }}>
+              Another player changed the treasury since you opened this editor. Reload fresh values before saving to avoid overwriting their change.
+              <Btn
+                ghost
+                type="button"
+                className="!min-h-0 !py-0.5 !px-2 text-xs ml-2"
+                onClick={() => {
+                  // Drop the editor and re-open against the latest snapshot the
+                  // page already refetched on the SSE tick.
+                  setError(null);
+                  setConflict(null);
+                  setEditing(false);
+                  startEdit();
+                }}
+              >
+                Reload
+              </Btn>
+            </p>
+          )}
+          {conflict && (
+            <div className="text-sm rounded-md p-2 space-y-1" style={{ background: 'var(--color-neutral-800)' }}>
+              <p className="text-amber-400 font-semibold">Another player changed the treasury since you loaded.</p>
+              <p className="text-slate-400">Fresh values shown below — reapply your change against them?</p>
+              <div className="grid grid-cols-5 gap-2 pt-1">
+                {COINS.map(({ key, label }) => {
+                  const fresh = conflict[key];
+                  const intent = parseIntended()[key];
+                  // Only show the reapply arrow for a coin the DM ACTUALLY edited
+                  // (intent differs from the snapshot they opened against). Arrows
+                  // for every fresh !== intent would falsely suggest the DM meant
+                  // to overwrite other players' changes on coins they never touched.
+                  const dmEdited = intent !== editBase[key];
+                  return (
+                    <div key={key} className="text-center">
+                      <p className="text-[10px] text-slate-500 uppercase">{label}</p>
+                      <p className="text-white font-bold">{fresh}</p>
+                      {dmEdited && intent !== fresh && <p className="text-[11px] text-amber-400">→ {intent}</p>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-3 md:grid-cols-5 gap-3">
             {COINS.map(({ key, label }) => (
               <label key={key} className="space-y-1">
@@ -262,7 +466,7 @@ function TreasuryCard({
               Cancel
             </Btn>
             <Btn type="submit" disabled={saving}>
-              {saving ? 'Saving…' : 'Save'}
+              {conflict ? 'Reapply' : saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>
         </form>
@@ -279,6 +483,27 @@ function TreasuryCard({
               <p className="text-[11px] text-slate-500 uppercase tracking-wide mt-1">
                 {label} ({key})
               </p>
+              {canEdit && (
+                <div className="flex items-center justify-center gap-1 mt-1">
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-0.5 !px-2 text-xs"
+                    onClick={() => void quickDelta(key, -1)}
+                    disabled={treasury[key] <= 0}
+                    aria-label={`Spend one ${label}`}
+                  >
+                    −
+                  </Btn>
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-0.5 !px-2 text-xs"
+                    onClick={() => void quickDelta(key, +1)}
+                    aria-label={`Add one ${label}`}
+                  >
+                    +
+                  </Btn>
+                </div>
+              )}
             </div>
           ))}
         </div>

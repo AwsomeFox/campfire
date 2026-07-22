@@ -79,7 +79,19 @@ export function SetupPage() {
         displayName: displayName.trim() || undefined,
       });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 429) {
+      if (err instanceof ApiError && err.status === 409) {
+        // Another first-run browser may have won the atomic setup claim while
+        // this page still had setupRequired=true cached. Refresh that gate and
+        // send this (cookie-less) loser to normal login instead of leaving a
+        // bootstrap form on screen that can never succeed again.
+        try {
+          await refreshAuthStatus();
+          navigate('/login', { replace: true });
+        } catch {
+          window.location.replace('/login');
+        }
+        return;
+      } else if (err instanceof ApiError && err.status === 429) {
         setError('Too many attempts — wait a minute and try again.');
       } else {
         setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');

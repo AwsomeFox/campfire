@@ -232,7 +232,7 @@ function ScheduleItem({
             <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setEditing(true)}>
               Edit
             </Btn>
-            <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={() => setConfirmingCancel(true)} disabled={busy}>
+            <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={() => setConfirmingCancel(true)} busy={busy}>
               Cancel session
             </Btn>
           </div>
@@ -419,7 +419,7 @@ function FeedCard({
             <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={rotate} disabled={busy} title="Generate a new URL; the old one stops working">
               Rotate
             </Btn>
-            <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={disable} disabled={busy}>
+            <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={disable} busy={busy}>
               Disable
             </Btn>
           </>

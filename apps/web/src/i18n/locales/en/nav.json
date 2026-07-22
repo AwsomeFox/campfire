@@ -53,6 +53,8 @@
     "backToCampaigns": "Back to your campaigns",
     "archivedBanner": "This campaign is {{status}} — archived and read-only.",
     "archivedDmHint": " Set its status back to active in Settings to make changes.",
+    "offlineBanner": "Offline — showing last-known data.",
+    "offlineSyncedAt": " Last synced {{when}}.",
     "signedInAs": "Signed in as {{name}}",
     "viewingAs": " · viewing as {{role}}",
     "passwordModalTitle": "Change password",

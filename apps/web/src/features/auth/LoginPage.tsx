@@ -1,11 +1,11 @@
 /**
  * Sign-in + landing screen. A visitor's first impression of a Campfire server:
- * an enticing hero (what Campfire is + what it does) beside the sign-in card.
+ * a compact value statement followed by authentication and the fuller pitch.
  * Mirrors design/claude-design/Campfire.dc.html's "Login" screen aesthetic —
  * flame mark on a radial-gradient ground — extended into a two-column landing on
- * wide screens (hero + auth) that stacks to a single column on phones. SSO-first
- * when OIDC is configured; local username/password always available (primary when
- * OIDC is off, secondary/collapsible when it's on).
+ * wide screens while preserving one semantic intro -> auth -> pitch order at
+ * every viewport. SSO is first when OIDC is configured; local authentication is
+ * the primary option when OIDC is off and secondary/collapsible when both are available.
  */
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
@@ -68,35 +68,26 @@ const FEATURES: { icon: string; title: string; body: string }[] = [
   },
 ];
 
-function LandingHero() {
+function BrandIntro() {
   return (
-    <section className="flex flex-col gap-6 max-w-xl">
+    <header className="login-intro">
       <div className="flex items-center gap-3">
-        <FlameMark size={40} />
+        <FlameMark size={36} />
         <span style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.01em', color: 'var(--color-text)' }}>Campfire</span>
       </div>
 
-      <div className="flex flex-col gap-3">
-        <h1
-          style={{
-            margin: 0,
-            fontSize: 'clamp(28px, 4vw, 42px)',
-            lineHeight: 1.08,
-            fontWeight: 800,
-            letterSpacing: '-0.02em',
-            color: 'var(--color-text)',
-          }}
-        >
-          Gather your whole campaign
-          <br />
-          around one fire.
-        </h1>
-        <p className="text-muted" style={{ margin: 0, fontSize: 'clamp(14px, 1.5vw, 16px)', lineHeight: 1.55, maxWidth: '46ch' }}>
-          The self-hosted home for your tabletop game — an AI DM, live battle maps, real rule systems and every quest, NPC
-          and session in one place. Bring your table; it runs on your server.
-        </p>
-      </div>
+      <h1>Gather your whole campaign around one fire.</h1>
+      <p className="text-muted">
+        The self-hosted home for your tabletop game — private, shared, and ready when your table is.
+      </p>
+    </header>
+  );
+}
 
+function LandingPitch() {
+  return (
+    <section className="login-pitch" aria-labelledby="login-pitch-title">
+      <h2 id="login-pitch-title">Everything your table needs</h2>
       <div className="grid gap-x-5 gap-y-4 sm:grid-cols-2">
         {FEATURES.map((f) => (
           <div key={f.title} className="flex gap-3">
@@ -136,6 +127,7 @@ function LocalLoginForm({
   setPassword,
   error,
   primary,
+  focusOnMount = false,
 }: {
   submitting: boolean;
   onSubmit: (e: FormEvent) => void;
@@ -145,6 +137,7 @@ function LocalLoginForm({
   setPassword: (v: string) => void;
   error: string | null;
   primary: boolean;
+  focusOnMount?: boolean;
 }) {
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-3">
@@ -156,7 +149,9 @@ function LocalLoginForm({
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           autoComplete="username"
-          autoFocus={primary}
+          autoFocus={primary || focusOnMount}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? 'login-error' : undefined}
           required
         />
       </div>
@@ -169,11 +164,13 @@ function LocalLoginForm({
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="current-password"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? 'login-error' : undefined}
           required
         />
       </div>
 
-      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {error && <p id="login-error" role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>{error}</p>}
 
       <button type="submit" className={`btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-block`} style={{ minHeight: 44 }} disabled={submitting}>
         {submitting ? 'Signing in…' : 'Sign in'}
@@ -267,6 +264,7 @@ export function LoginPage() {
   }
 
   const oidcEnabled = Boolean(status?.oidcEnabled);
+  const localLoginEnabled = Boolean(status?.localLoginEnabled);
   const oidcProviderName = status?.oidcProviderName?.trim() || 'SSO';
   // Forward the intended target through SSO. The OIDC flow is a full-page server
   // round-trip (callback currently always redirects to `/`), so honoring this
@@ -281,17 +279,23 @@ export function LoginPage() {
     && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
   const authCard = (
-    <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
-      <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
-        <FlameMark />
-        <div>
-          <h3 style={{ margin: 0 }}>Campfire</h3>
-          <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
-            Self-hosted campaign server
-          </p>
+    <div className="login-auth-stack">
+      <div className="card elev-md items-center text-center login-auth-card">
+        <div className="login-auth-heading">
+          <span className="login-auth-mark" aria-hidden="true"><FlameMark /></span>
+          <div>
+            <h2 id="login-title" style={{ margin: 0 }}>Sign in</h2>
+            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
+              to your Campfire server
+            </p>
+          </div>
         </div>
 
-        {oidcEnabled ? (
+        {loading ? (
+          <p role="status" className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+            Checking sign-in options…
+          </p>
+        ) : oidcEnabled ? (
           <>
             <a href={oidcLoginHref} className="btn btn-primary btn-block" style={{ minHeight: 44 }}>
               Sign in with {oidcProviderName}
@@ -304,6 +308,11 @@ export function LoginPage() {
             {showLocalForm ? (
               <div className="w-full flex flex-col gap-3" style={{ marginTop: 6 }}>
                 <div className="hr" style={{ margin: 0 }} />
+                {!localLoginEnabled && (
+                  <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+                    Local sign-in is restricted to server administrators.
+                  </p>
+                )}
                 <LocalLoginForm
                   submitting={submitting}
                   onSubmit={onSubmit}
@@ -313,6 +322,7 @@ export function LoginPage() {
                   setPassword={setPassword}
                   error={error}
                   primary={false}
+                  focusOnMount
                 />
               </div>
             ) : (
@@ -322,12 +332,19 @@ export function LoginPage() {
                 style={{ fontSize: 12.5, marginTop: 2 }}
                 onClick={() => setShowLocalForm(true)}
               >
-                Sign in with username &amp; password instead
+                {localLoginEnabled
+                  ? 'Sign in with username & password instead'
+                  : 'Administrator local sign-in'}
               </button>
             )}
           </>
         ) : (
           <div className="w-full">
+            {!localLoginEnabled && (
+              <p className="text-muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
+                Local sign-in is restricted to server administrators.
+              </p>
+            )}
             <LocalLoginForm
               submitting={submitting}
               onSubmit={onSubmit}
@@ -341,7 +358,7 @@ export function LoginPage() {
           </div>
         )}
 
-        {signupEnabled && (
+        {!loading && signupEnabled && (
           <Link to="/signup" className="btn btn-ghost" style={{ fontSize: 12.5, marginTop: 2 }}>
             New here? Create an account
           </Link>
@@ -369,29 +386,26 @@ export function LoginPage() {
         </div>
       )}
 
-      <p className="text-center text-muted" style={{ fontSize: 11 }}>
+      <p className="text-center text-muted" style={{ margin: 0, fontSize: 11 }}>
         Self-hosted with ❤️ · campfire v{__APP_VERSION__}
       </p>
     </div>
   );
 
   return (
-    <div
-      className="min-h-screen w-full"
+    <main
+      className="login-page"
       style={{
         background: 'radial-gradient(90% 55% at 15% 0%, var(--color-neutral-900) 0%, var(--color-bg) 65%)',
       }}
     >
-      <div className="mx-auto w-full max-w-6xl px-6 py-10 min-h-screen grid items-center gap-12 lg:grid-cols-[1.15fr_minmax(320px,380px)]">
-        {/* Hero: full pitch on desktop; on phones it sits above the card so the
-            value prop is the first thing a new player sees, then they scroll to sign in. */}
-        <div className="order-1 lg:order-none">
-          <LandingHero />
-        </div>
-        <div className="order-2 lg:order-none justify-self-center lg:justify-self-end w-full grid place-items-center">
+      <div className="login-shell">
+        <BrandIntro />
+        <section className="login-auth" aria-labelledby="login-title">
           {authCard}
-        </div>
+        </section>
+        <LandingPitch />
       </div>
-    </div>
+    </main>
   );
 }

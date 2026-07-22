@@ -17,6 +17,8 @@ test.describe('encounter dice — apply rolled damage', () => {
 
     const playerCtx = await request.newContext({ baseURL });
     const dm = await request.newContext({ baseURL });
+    let characterId: number | null = null;
+    let encounterId: number | null = null;
     try {
       await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
       const me = await (await playerCtx.get('/api/v1/me')).json();
@@ -43,8 +45,10 @@ test.describe('encounter dice — apply rolled damage', () => {
         })
       ).json();
       expect(character.id).toBeTruthy();
+      characterId = character.id;
       // A fresh encounter auto-adds the active character; add a monster the player can't edit.
       const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill' } })).json();
+      encounterId = enc.id;
       await dm.post(`/api/v1/encounters/${enc.id}/combatants`, { data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 } });
       await dm.post(`/api/v1/encounters/${enc.id}/start`);
 
@@ -66,6 +70,8 @@ test.describe('encounter dice — apply rolled damage', () => {
       await expect(applyBar).toHaveCount(0);
       await expect(page.getByText(/Brixi Applybar took \d+ damage/i)).toBeVisible();
     } finally {
+      if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
+      if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
       // Dispose the API contexts so they don't leak across the worker.
       await playerCtx.dispose();
       await dm.dispose();

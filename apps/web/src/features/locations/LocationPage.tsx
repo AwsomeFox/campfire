@@ -665,7 +665,7 @@ export default function LocationPage() {
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (
-              <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
+              <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
                 {deleting ? 'Deleting…' : 'Delete location'}
               </Btn>
             ) : (

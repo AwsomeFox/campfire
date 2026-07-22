@@ -2,11 +2,11 @@
  * Campaign dashboard — the home screen for a campaign.
  * Mirrors design/02-dashboard.html structure/classes; see README-less DoD notes in PR.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { CampaignSummary, Encounter } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
@@ -26,43 +26,67 @@ import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
 import { GameIcon } from '../../components/GameIcon';
 
-// Slow poll so the summary (quests, party HP, notes, NPCs) picks up other
-// players' edits at the table without a manual reload; SSE only covers combat.
+// Slow fallback poll for summary entities that do not have campaign events yet.
+// Scheduling is event-driven (#790) and does not add a second polling path.
 const POLL_MS = 5000;
+
+type ScheduleSyncState = 'live' | 'stale' | 'offline';
 
 export default function DashboardPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const { roleIn, isAdmin } = useAuth();
+  const { roleIn, isAdmin, staleIdentity } = useAuth();
   const role = roleIn(id);
   const { refresh: refreshCampaigns } = useCampaigns();
   const { lostAccess, handle: handleAccessError } = useCampaignAccessError();
 
-  const [summary, setSummary] = useState<CampaignSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [liveEncounter, setLiveEncounter] = useState<Encounter | null>(null);
+  // Keep the campaign id beside the projection/failure. React reuses this route
+  // component when :campaignId changes; keying state prevents one campaign's
+  // last response (including DM-only fields) from flashing in another campaign.
+  const [projection, setProjection] = useState<{ campaignId: number; data: CampaignSummary } | null>(null);
+  const projectionRef = useRef(projection);
+  projectionRef.current = projection;
+  const [failure, setFailure] = useState<{ campaignId: number; message: string } | null>(null);
+  const [liveEncounterProjection, setLiveEncounterProjection] = useState<{ campaignId: number; data: Encounter | null } | null>(null);
+  const [summaryStale, setSummaryStale] = useState(false);
+  const [eventStatus, setEventStatus] = useState<CampaignEventsStatus>('connecting');
+  const requestSequence = useRef(0);
+  const activeCampaignId = useRef(id);
+  activeCampaignId.current = id;
+
+  const summary = projection?.campaignId === id ? projection.data : null;
+  const error = failure?.campaignId === id ? failure.message : null;
+  const liveEncounter = liveEncounterProjection?.campaignId === id ? liveEncounterProjection.data : null;
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+    const requestId = ++requestSequence.current;
+    setFailure((current) => (current?.campaignId === id ? null : current));
     try {
       const data = await api.get<CampaignSummary>(`${API}/campaigns/${id}/summary`);
-      setSummary(data);
+      if (requestId !== requestSequence.current || activeCampaignId.current !== id) return;
+      // Replace the complete server projection in one state transition. In
+      // particular, nextSession is never field-merged: reschedules replace every
+      // detail and cancellation replaces the object with null atomically.
+      setProjection({ campaignId: id, data });
+      setSummaryStale(false);
       // Keep the sidebar/topbar/Home tiles in sync — StatusHeader can rename the
       // campaign from here, and CampaignContext is the shared source for its name.
       void refreshCampaigns();
     } catch (err) {
+      if (requestId !== requestSequence.current || activeCampaignId.current !== id) return;
       if (!handleAccessError(err)) {
-        setError(err instanceof ApiError ? err.message : "Couldn't load the campaign dashboard.");
+        setFailure({ campaignId: id, message: err instanceof ApiError ? err.message : "Couldn't load the campaign dashboard." });
+        if (projectionRef.current?.campaignId === id) setSummaryStale(true);
       }
-    } finally {
-      setLoading(false);
     }
   }, [id, refreshCampaigns, handleAccessError]);
 
   useEffect(() => {
-    if (Number.isFinite(id)) void load();
+    if (Number.isFinite(id)) {
+      setEventStatus('connecting');
+      setSummaryStale(false);
+      void load();
+    }
   }, [id, load]);
 
   // Keep the summary live while the tab is open (issue #113): the quest/party/notes
@@ -75,9 +99,9 @@ export default function DashboardPage() {
     if (!Number.isFinite(id)) return;
     try {
       const running = await api.get<Encounter[]>(`${API}/campaigns/${id}/encounters?status=running`);
-      setLiveEncounter(running[0] ?? null);
+      if (activeCampaignId.current === id) setLiveEncounterProjection({ campaignId: id, data: running[0] ?? null });
     } catch {
-      setLiveEncounter(null);
+      if (activeCampaignId.current === id) setLiveEncounterProjection({ campaignId: id, data: null });
     }
   }, [id]);
 
@@ -85,12 +109,29 @@ export default function DashboardPage() {
     if (summary) void refreshLiveEncounter();
   }, [summary, refreshLiveEncounter]);
 
-  // Live updates over SSE (replaces polling, issue #4): keep the "Live" chip in sync
-  // the moment the DM starts/ends/deletes an encounter, without a manual reload.
+  // One campaign stream invalidates each affected authoritative read. Scheduling
+  // events refetch the whole dashboard projection; this is also the reconnect
+  // catch-up path for anything changed while this tab was offline (#790).
   useCampaignEvents(Number.isFinite(id) ? id : undefined, {
-    onEvent: useCallback(() => void refreshLiveEncounter(), [refreshLiveEncounter]),
-    onReconnect: useCallback(() => void refreshLiveEncounter(), [refreshLiveEncounter]),
+    onEvent: useCallback((event) => {
+      if (event.type === 'schedule.updated') {
+        void load();
+      } else if (event.type === 'encounter.updated' || event.type === 'encounter.deleted') {
+        void refreshLiveEncounter();
+      }
+    }, [load, refreshLiveEncounter]),
+    onReconnect: useCallback(() => {
+      void load();
+      void refreshLiveEncounter();
+    }, [load, refreshLiveEncounter]),
+    onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
+
+  const scheduleSync: ScheduleSyncState = staleIdentity || eventStatus === 'offline'
+    ? 'offline'
+    : summaryStale || eventStatus === 'reconnecting' || eventStatus === 'stopped'
+      ? 'stale'
+      : 'live';
 
   if (!Number.isFinite(id)) {
     return (
@@ -114,7 +155,7 @@ export default function DashboardPage() {
     );
   }
 
-  if (loading && !summary) {
+  if (!summary && !error) {
     return (
       <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5">
         <Card>
@@ -171,7 +212,12 @@ export default function DashboardPage() {
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <RegionMap campaignId={id} campaign={summary.campaign} locations={summary.locations} role={role} onChange={load} />
           <QuestsCard campaignId={id} quests={summary.quests} role={role} onChange={load} />
-          <SessionLog campaignId={id} sessions={summary.sessions} />
+          <SessionLog
+            campaignId={id}
+            sessions={summary.sessions}
+            nextSession={summary.nextSession}
+            scheduleSync={scheduleSync}
+          />
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>

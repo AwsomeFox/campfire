@@ -436,6 +436,141 @@ describe('comments / threaded discussion (e2e)', () => {
     });
   });
 
+  // ── issue #783: honest edit attribution (no DM forgery under a player's name) ─
+  // The regression: a DM could edit any player's comment and the row kept the
+  // PLAYER as author with only a generic "edited" marker — so the player was the
+  // apparent author of prose the player never wrote. Now a non-author edit stamps
+  // edited_at/edited_by (distinct from the author of record) and never overwrites
+  // author_user_id/author_name, so the UI can honestly render "edited by DM Y".
+  describe('issue #783 — DM edit records the editor, never the author', () => {
+    it('a DM editing a player comment preserves the player as author and records the DM as editor', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Player authored this' });
+      const id = created.body.id;
+
+      // The DM rewrites the body (moderation). It succeeds — the moderation path
+      // is still allowed — but the attribution must be honest.
+      const dmEdit = await request(server)
+        .patch(`/api/v1/comments/${id}`)
+        .set(dm)
+        .send({ body: 'DM rewrote the player text' });
+      expect(dmEdit.status).toBe(200);
+      expect(dmEdit.body.body).toBe('DM rewrote the player text');
+
+      // The PLAYER stays the author of record — the DM did not forge authorship.
+      expect(dmEdit.body.authorUserId).toBe('dev:author-1');
+      expect(dmEdit.body.authorName).toBe('author-1');
+
+      // The DM is recorded as the editor, with a timestamp distinct from createdAt.
+      expect(dmEdit.body.editedBy).toBe('dev:dm-1');
+      expect(dmEdit.body.editedAt).not.toBeNull();
+      expect(dmEdit.body.editedAt).not.toBe(dmEdit.body.createdAt);
+    });
+
+    it('a self-edit (the author editing their own comment) does NOT record an editor', async () => {
+      // The trust fix only cares about NON-author edits — a self-edit is ordinary,
+      // and stamping editedBy there would be noise. updated_at still bumps (the
+      // generic "edited" badge), but editedBy/editedAt stay null so the UI doesn't
+      // falsely claim a moderator touched it.
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Self-edit me' });
+      const id = created.body.id;
+
+      const selfEdit = await request(server)
+        .patch(`/api/v1/comments/${id}`)
+        .set(authorPlayer)
+        .send({ body: 'Author rewrote their own text' });
+      expect(selfEdit.status).toBe(200);
+      expect(selfEdit.body.body).toBe('Author rewrote their own text');
+      expect(selfEdit.body.authorUserId).toBe('dev:author-1');
+      expect(selfEdit.body.editedBy).toBeNull();
+      expect(selfEdit.body.editedAt).toBeNull();
+      // updated_at still advances for the generic "edited" badge.
+      expect(selfEdit.body.updatedAt).not.toBe(selfEdit.body.createdAt);
+    });
+
+    it('editedBy/editedAt are visible to OTHER members reading the thread (public attribution)', async () => {
+      // Provenance must survive a fresh read: a third party who lists the thread
+      // sees that the DM (not the player) authored the current body. This is the
+      // acceptance criterion "Existing DM-edited comments reveal editor".
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(otherPlayer)
+        .send({ ...anchor(), body: 'Other player wrote this' });
+      const id = created.body.id;
+      await request(server).patch(`/api/v1/comments/${id}`).set(dm).send({ body: 'DM moderated it' });
+
+      // A different member reads the comment via GET — editor provenance is present.
+      const read = await request(server).get(`/api/v1/comments/${id}`).set(authorPlayer);
+      expect(read.status).toBe(200);
+      expect(read.body.body).toBe('DM moderated it');
+      expect(read.body.authorUserId).toBe('dev:other-1');
+      expect(read.body.authorName).toBe('other-1');
+      expect(read.body.editedBy).toBe('dev:dm-1');
+      expect(read.body.editedAt).not.toBeNull();
+
+      // And via the thread list (the path the UI renders from).
+      const list = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments`)
+        .query({ entityType: 'session', entityId: sessionId })
+        .set(authorPlayer);
+      const inList = list.body.find((c: { id: number }) => c.id === id);
+      expect(inList.editedBy).toBe('dev:dm-1');
+      expect(inList.authorUserId).toBe('dev:other-1');
+    });
+
+    it('audits a moderator edit distinctly (actor=DM, detail flags it; self-edit has no such detail)', async () => {
+      // The audit log is the durable provenance path: an incident reviewer must be
+      // able to tell a DM-rewritten player comment from an ordinary author edit.
+      const server = ctx.app.getHttpServer();
+      const playerComment = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(otherPlayer)
+        .send({ ...anchor(), body: 'Audited player comment' });
+      const playerId = playerComment.body.id;
+      // DM moderates the player's comment.
+      await request(server).patch(`/api/v1/comments/${playerId}`).set(dm).send({ body: 'Audited DM rewrite' });
+
+      // A separate self-edit for contrast.
+      const ownComment = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Audited self comment' });
+      const ownId = ownComment.body.id;
+      await request(server).patch(`/api/v1/comments/${ownId}`).set(authorPlayer).send({ body: 'Audited self rewrite' });
+
+      const auditRes = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/audit`)
+        .query({ limit: 500 })
+        .set(dm);
+      expect(auditRes.status).toBe(200);
+      const updates = auditRes.body.filter(
+        (a: { action: string; entityType: string; entityId: number }) =>
+          a.action === 'comment.update' && a.entityType === 'comment',
+      );
+
+      const modRow = updates.find((a: { entityId: number }) => a.entityId === playerId);
+      expect(modRow).toBeDefined();
+      expect(modRow.actorRole).toBe('dm');
+      expect(modRow.actor).toBe('dev:dm-1');
+      expect(modRow.detail).toContain('moderator edit');
+
+      // The self-edit row has the player as actor and no moderator-edit detail.
+      const selfRow = updates.find((a: { entityId: number }) => a.entityId === ownId);
+      expect(selfRow).toBeDefined();
+      expect(selfRow.actorRole).toBe('player');
+      expect(selfRow.actor).toBe('dev:author-1');
+      expect(selfRow.detail).not.toContain('moderator edit');
+    });
+  });
+
   // Anchored-entity secrecy (issue #230, re: #123): a comment thread must be at least
   // as secret as the entity it hangs off. A hidden quest/NPC leaks neither its existence
   // nor its discussion to a non-DM — listing/posting 404s exactly as the entity's own GET

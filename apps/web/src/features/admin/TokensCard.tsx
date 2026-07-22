@@ -22,21 +22,37 @@ const SCOPE_CHIP: Record<TokenScope, string> = {
 };
 const SCOPE_LABEL: Record<TokenScope, string> = { dm: 'DM', player: 'Player', viewer: 'Viewer' };
 const SCOPE_HELP: Record<TokenScope, string> = {
-  dm: 'DM — reads everything (secrets, hidden context, full export) and can approve proposals.',
-  player: 'Player — scoped to that player; DM secrets are stripped.',
-  viewer: 'Viewer — read-only view; DM secrets are stripped.',
+  dm: 'Read scope: DM — can read everything (secrets, hidden context, full export) and approve proposals. Read scope only caps WHAT the token can see, not whether writes land.',
+  player: 'Read scope: Player — scoped to that player; DM secrets are stripped.',
+  viewer: 'Read scope: Viewer — read-only view; DM secrets are stripped.',
 };
 
-// Server-enforced WRITE authority, independent of read scope (issue #158).
+// Server-enforced WRITE authority, INDEPENDENT of read scope (issue #158).
+// Read scope (DM/Player/Viewer) decides what the token can SEE; write mode
+// below decides what the token can CHANGE and whether a human reviews first.
+// Issue #575: the safe default for new tokens is "Propose" — AI changes land
+// in the DM approval queue, never directly on canon.
 const WRITE_SCOPE_LABEL: Record<WriteScope, string> = {
   direct: 'Direct write',
-  propose: 'Propose only',
-  none: 'Read-only',
+  propose: 'Propose (safe)',
+  none: 'No writes',
 };
 const WRITE_SCOPE_HELP: Record<WriteScope, string> = {
-  direct: 'Direct — writes apply immediately (subject to the read scope above). The default, matching older tokens.',
-  propose: 'Propose only — every write (including deletes) is forced into the DM proposal queue server-side, even if the AI omits the flag. Recommended for AI agents.',
-  none: 'Read-only — every write is rejected outright, no proposal path.',
+  direct:
+    'Direct — writes apply IMMEDIATELY to canon (characters, notes, dice, objectives, deletes…), subject only to the read scope above. NO human review. High blast radius: a misbehaving AI can rewrite or delete data before anyone notices. Choose this only for trusted, human-supervised integrations.',
+  propose:
+    'Propose (safe, RECOMMENDED for AI) — every write, including deletes, is forced into the DM proposal queue server-side, even if the AI omits the flag. Nothing touches canon until a DM clicks Approve. Reads are unaffected by this setting. Default for new tokens (issue #575).',
+  none:
+    'No writes — every write is rejected outright server-side (no proposal path, no canon changes, no queue). Use for purely read-only AI agents (summarization, lookup, analysis). Reads are unaffected.',
+};
+
+// Per-mode chip class for the existing-token row — surfaces blast radius at a
+// glance: rose for direct (treat with caution), proposal-accent for the safe
+// default, neutral for read-only.
+const WRITE_SCOPE_CHIP: Record<WriteScope, string> = {
+  direct: 'cf-chip-failed',
+  propose: 'cf-chip-proposal',
+  none: 'cf-chip-private',
 };
 
 function mcpConnectCommand(origin: string, token?: string): string {
@@ -209,7 +225,7 @@ function TokenRow({ token, onRevoke }: { token: ApiToken; onRevoke: () => void }
         <p className="text-sm font-semibold text-white">
           {token.name}{' '}
           <span className={`cf-chip ${SCOPE_CHIP[token.scope]} ml-1`}>{SCOPE_LABEL[token.scope]} read</span>{' '}
-          <span className="cf-chip cf-chip-private ml-1">{WRITE_SCOPE_LABEL[token.writeScope]}</span>{' '}
+          <span className={`cf-chip ${WRITE_SCOPE_CHIP[token.writeScope]} ml-1`}>{WRITE_SCOPE_LABEL[token.writeScope]}</span>{' '}
           <span className="cf-chip cf-chip-private ml-1">{campaignBadge}</span>
         </p>
         <p className="text-[11px] text-slate-500">
@@ -236,7 +252,9 @@ function NewTokenForm({
 }) {
   const [name, setName] = useState('');
   const [scope, setScope] = useState<TokenScope>('player');
-  const [writeScope, setWriteScope] = useState<WriteScope>('direct');
+  // Safe default for new tokens (issue #575): AI changes land in the DM
+  // proposal queue, never directly on canon. Admin opts into Direct explicitly.
+  const [writeScope, setWriteScope] = useState<WriteScope>('propose');
   const [campaignId, setCampaignId] = useState<string>('');
   const [saving, setSaving] = useState(false);
 
@@ -262,6 +280,14 @@ function NewTokenForm({
   return (
     <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
       <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">New token</p>
+      <p className="text-[11px] text-slate-400">
+        Two independent controls decide what an AI (or REST/MCP caller) can do
+        with this token: <span className="text-slate-200 font-semibold">Read scope</span>{' '}
+        caps what it can <em>see</em>; <span className="text-slate-200 font-semibold">Write mode</span>{' '}
+        caps what it can <em>change</em> and whether a DM reviews first. Default
+        is Propose — changes queue for DM approval and never touch canon
+        directly.
+      </p>
       <div className="grid sm:grid-cols-2 gap-2">
         <TextInput
           className="!min-h-0 !py-2 text-sm"
@@ -290,9 +316,9 @@ function NewTokenForm({
           onChange={(e) => setWriteScope(e.target.value as WriteScope)}
           aria-label="Write mode"
         >
-          <option value="direct">Write: Direct</option>
-          <option value="propose">Write: Propose only</option>
-          <option value="none">Write: Read-only</option>
+          <option value="propose">Write: Propose (safe — recommended)</option>
+          <option value="none">Write: No writes (read-only)</option>
+          <option value="direct">Write: Direct (no review)</option>
         </select>
         <select
           className="cf-select !min-h-0 !py-2 text-sm"
@@ -310,6 +336,12 @@ function NewTokenForm({
       </div>
       <p className="text-[11px] text-slate-500">{SCOPE_HELP[scope]}</p>
       <p className="text-[11px] text-slate-500">{WRITE_SCOPE_HELP[writeScope]}</p>
+      {writeScope === 'direct' && (
+        <p className="text-[11px] text-rose-400 font-semibold">
+          ⚠ Direct writes apply immediately with no human review. Confirm this
+          integration is trusted before minting.
+        </p>
+      )}
       <div className="flex items-center gap-2 justify-end">
         {!name.trim() && <p className="text-[11px] text-slate-500 mr-auto">Name your token to enable Create.</p>}
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>

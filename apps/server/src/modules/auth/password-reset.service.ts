@@ -2,11 +2,18 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { and, eq } from 'drizzle-orm';
 import type { PasswordResetApproval, PasswordResetRequest } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { passwordResetRequests, users } from '../../db/schema';
+import { apiTokens, passwordResetRequests, userSessions, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import { generateResetCode, hashResetCode } from '../../common/crypto';
+import { generateResetCode, hashPassword, hashResetCode } from '../../common/crypto';
 import { UsersService } from '../users/users.service';
 import { RESET_CODE_MAX_AGE_MS } from './auth.constants';
+
+/**
+ * better-sqlite3's tx object shares the same query API as the root db (the
+ * `SyncDb` alias in users.service). Typed here so the consume+redeem
+ * transaction body reads as plain synchronous code with full ORM help.
+ */
+type SyncTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 /**
  * Forgot-password flow (issue #10). This server may have no mail transport,
@@ -128,17 +135,35 @@ export class PasswordResetService {
   }
 
   /**
-   * @Public redemption. Every failure mode (unknown code, expired, account
-   * disabled/SSO since approval) throws the SAME generic 400 — the code is the
-   * only credential here, so nothing else may be inferred from the response.
+   * @Public redemption. Unknown / expired / disabled-SSO codes throw the SAME
+   * generic 400 — the code is the only credential here, so nothing else may be
+   * inferred from the response. The ONE exception is a genuinely-concurrent
+   * double-redemption of a real, valid code, which throws 409 conflict so the
+   * losing client can tell its user "this code was just used" (issue #696).
+   *
+   * The read of the code, its single-use consumption, the password change, and
+   * the session/PAT revocation all run inside ONE synchronous better-sqlite3
+   * transaction (BEGIN IMMEDIATE). The consume is a conditional DELETE whose
+   * rows-affected (`changes`) is the atomic claim: two concurrent redemptions
+   * of the same code cannot both see `changes > 0`, so exactly one commits a
+   * password change and the other rolls back having changed nothing — the old
+   * password and session state stay intact on the losing side. A failure mid
+   * transaction (throw) rolls the whole thing back: no half-consumed code, no
+   * changed password with stale sessions.
    */
   async confirm(code: string, newPassword: string): Promise<void> {
     const invalid = () => new BadRequestException('Invalid or expired reset code');
+    const codeHash = hashResetCode(code);
 
+    // Pre-flight read OUTSIDE the write transaction: the no-enumeration failure
+    // modes (unknown code, expired, disabled/SSO) and their housekeeping (revert
+    // an expired approval back to pending so the admin can re-approve, or delete
+    // a request whose account went disabled/SSO) need no write lock and must not
+    // serialize against the real redemption path.
     const [row] = await this.db
       .select()
       .from(passwordResetRequests)
-      .where(and(eq(passwordResetRequests.codeHash, hashResetCode(code)), eq(passwordResetRequests.status, 'approved')))
+      .where(and(eq(passwordResetRequests.codeHash, codeHash), eq(passwordResetRequests.status, 'approved')))
       .limit(1);
     if (!row) throw invalid();
 
@@ -154,11 +179,63 @@ export class PasswordResetService {
       throw invalid();
     }
 
-    await this.usersService.setPassword(user.id, newPassword);
-    // Single-use: the request is gone, and every existing session dies — whoever
-    // holds the OLD password (the reason for the reset) is logged out everywhere.
-    await this.db.delete(passwordResetRequests).where(eq(passwordResetRequests.id, row.id));
-    await this.usersService.killOtherSessions(user.id);
+    this.db.transaction(
+      (tx) => {
+        // Atomic consume: DELETE only if the row is STILL the same approved code
+        // we pre-flighted. `changes === 0` means a concurrent redemption already
+        // consumed it (status flipped / row gone / code rotated) — this is the
+        // CAS that makes single-use hold under concurrent redemption.
+        const consumed = this.consumeCodeTx(tx, row.id, codeHash);
+        if (!consumed) {
+          throw new ConflictException('This reset code has already been used');
+        }
+
+        // All in the same transaction: password change + session + PAT revocation
+        // commit atomically with the code consumption. A failure here rolls back
+        // the consume too, leaving the code reusable and the password untouched.
+        this.applyPasswordResetTx(tx, user.id, newPassword);
+      },
+      // BEGIN IMMEDIATE takes the writer slot before the DELETE, so two
+      // concurrent confirm() calls serialize: the second doesn't see the row
+      // deleted by the first until the first commits, then its consume hits
+      // changes === 0 and returns the 409. Mirrors AuthService.setup()'s claim.
+      { behavior: 'immediate' },
+    );
+  }
+
+  /**
+   * The atomic single-use claim. Deletes the reset request ONLY if it still
+   * carries the exact approved code hash we pre-flighted, returning whether a
+   * row was removed (changes > 0). A concurrent redemption that consumed the
+   * row first leaves changes === 0 here.
+   */
+  private consumeCodeTx(tx: SyncTx, requestId: number, codeHash: string): boolean {
+    const result = tx
+      .delete(passwordResetRequests)
+      .where(
+        and(
+          eq(passwordResetRequests.id, requestId),
+          eq(passwordResetRequests.codeHash, codeHash),
+          eq(passwordResetRequests.status, 'approved'),
+        ),
+      )
+      .run();
+    const changes = (result as unknown as { changes?: number }).changes ?? 0;
+    return changes > 0;
+  }
+
+  /**
+   * Password change + every-session + every-PAT revocation, run inside the
+   * caller's transaction. Mirrors UsersService.setPassword (#44: a reset is a
+   * credential-compromise response, so it cuts off sessions AND PATs too) but
+   * inlined so the writes commit with the code consume in one transaction
+   * rather than as three separate statements across the TOCTOU window.
+   */
+  private applyPasswordResetTx(tx: SyncTx, userId: number, newPassword: string): void {
+    const ts = nowIso();
+    tx.update(users).set({ passwordHash: hashPassword(newPassword), updatedAt: ts }).where(eq(users.id, userId)).run();
+    tx.delete(userSessions).where(eq(userSessions.userId, userId)).run();
+    tx.delete(apiTokens).where(eq(apiTokens.userId, userId)).run();
   }
 
   private async expireStaleApprovals(): Promise<void> {

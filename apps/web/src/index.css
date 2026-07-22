@@ -51,6 +51,25 @@
   --color-accent-2-800: #423e5d;
   --color-accent-2-900: #2b293a;
 
+  /* Destructive actions are a closed semantic family. None of these tokens
+     derive from --color-accent, so a personal accent can never recolor delete,
+     revoke, reject, or other irreversible controls. Solid states keep at least
+     5.4:1 text contrast; ghost text is 5.6:1 or better on app surfaces. */
+  --color-danger: #fb7185;
+  --color-danger-solid: #be123c;
+  --color-danger-solid-hover: #c21845;
+  --color-danger-solid-active: #9f1239;
+  --color-danger-solid-busy: #881337;
+  --color-danger-solid-foreground: #fff1f2;
+  --color-danger-border: #fb7185;
+  --color-danger-focus: #fecdd3;
+  --color-danger-ghost-hover: color-mix(in srgb, #fb7185 14%, transparent);
+  --color-danger-ghost-active: color-mix(in srgb, #fb7185 24%, transparent);
+  --color-danger-ghost-busy: color-mix(in srgb, #fb7185 18%, transparent);
+  --color-danger-disabled-background: #4f2630;
+  --color-danger-disabled-foreground: #d6bdc2;
+  --color-danger-disabled-border: #8c5d68;
+
   --font-heading: "Inter", system-ui, sans-serif;
   --font-heading-weight: 500;
   --font-body: "Inter", system-ui, sans-serif;
@@ -87,7 +106,7 @@
   --cf-accent: var(--color-accent);
   --cf-accent-2: var(--color-accent-2);
   --cf-success: #34d399; /* emerald — completed / explored / healthy */
-  --cf-danger: #fb7185; /* rose — danger / failed / low HP */
+  --cf-danger: var(--color-danger); /* rose — danger / failed / low HP */
   --cf-arcane: var(--color-accent-2); /* lore, magic, proposals */
   --cf-threat: #38bdf8; /* sky — threats, movement paths (unchanged) */
   --cf-crit: #fbbf24; /* amber — natural-20 crit flourish (issue #67) */
@@ -112,6 +131,265 @@ body {
   font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Login information architecture (#862): one source order at every size —
+   compact value statement, applicable authentication, then the full pitch. */
+.login-page {
+  min-height: 100vh;
+  min-height: 100svh;
+  width: 100%;
+}
+
+.login-shell {
+  width: 100%;
+  max-width: 72rem;
+  min-height: 100vh;
+  min-height: 100svh;
+  margin-inline: auto;
+  padding: 40px 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 380px);
+  grid-template-areas:
+    "intro auth"
+    "pitch auth";
+  align-content: center;
+  align-items: start;
+  column-gap: 48px;
+  row-gap: 24px;
+}
+
+.login-intro {
+  grid-area: intro;
+  width: 100%;
+  max-width: 36rem;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-intro h1 {
+  max-width: 17ch;
+  margin: 0;
+  color: var(--color-text);
+  font-size: clamp(28px, 4vw, 42px);
+  font-weight: 800;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+}
+
+.login-intro p {
+  max-width: 46ch;
+  margin: 0;
+  font-size: clamp(14px, 1.5vw, 16px);
+  line-height: 1.55;
+}
+
+.login-auth {
+  grid-area: auth;
+  width: 100%;
+  align-self: center;
+  justify-self: end;
+}
+
+.login-auth-stack {
+  width: min(380px, 100%);
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.login-auth-card {
+  padding: 28px 26px;
+  gap: 14px;
+}
+
+.login-auth-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.login-auth-mark {
+  display: grid;
+  place-items: center;
+}
+
+.login-pitch {
+  grid-area: pitch;
+  width: 100%;
+  max-width: 36rem;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.login-pitch h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--color-text);
+}
+
+@media (max-width: 1023px) {
+  .login-shell {
+    min-height: 0;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "intro"
+      "auth"
+      "pitch";
+    align-content: start;
+    row-gap: 18px;
+  }
+
+  .login-intro,
+  .login-pitch {
+    max-width: 380px;
+    margin-inline: auto;
+  }
+
+  .login-intro {
+    gap: 8px;
+  }
+
+  .login-intro h1 {
+    max-width: none;
+    font-size: clamp(24px, 7.4vw, 30px);
+  }
+
+  .login-intro p {
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  .login-auth {
+    justify-self: center;
+  }
+
+  .login-auth-card {
+    padding: 20px 18px;
+    gap: 12px;
+  }
+
+  .login-auth-heading {
+    flex-direction: row;
+    justify-content: center;
+    text-align: left;
+  }
+
+  .login-auth-mark {
+    display: none;
+  }
+
+  .login-pitch {
+    padding-top: 14px;
+    border-top: 1px solid var(--color-divider);
+  }
+}
+
+/* 200% browser zoom on the widest supported handset (430x932) reflows to a
+   215x466 CSS viewport. The headline remains the compact value statement;
+   only its redundant supporting sentence and card subtitle are suppressed. */
+@media (max-width: 280px) {
+  .login-shell {
+    padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+    row-gap: 10px;
+  }
+
+  .login-intro h1 {
+    font-size: 20px;
+  }
+
+  .login-intro > p {
+    display: none;
+  }
+
+  .login-auth-card {
+    padding: 12px 10px;
+    gap: 8px;
+  }
+
+  .login-auth-heading > div > p {
+    display: none;
+  }
+
+  .login-auth-heading h2 {
+    font-size: 20px;
+  }
+}
+
+/* A short landscape viewport still exposes the complete local submit path.
+   The fields become a compact row only when there is enough horizontal room;
+   DOM and tab order remain username -> password -> submit. */
+@media (min-width: 560px) and (max-width: 1023px) and (max-height: 500px) {
+  .login-shell {
+    padding-block: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-bottom));
+    row-gap: 8px;
+  }
+
+  .login-intro {
+    max-width: 100%;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    column-gap: 12px;
+  }
+
+  .login-intro > div {
+    grid-row: 1 / span 2;
+  }
+
+  .login-intro h1 {
+    font-size: 20px;
+  }
+
+  .login-intro p {
+    font-size: 12px;
+  }
+
+  .login-auth-stack {
+    width: min(620px, 100%);
+    gap: 6px;
+  }
+
+  .login-auth-card {
+    padding: 10px 14px;
+    gap: 7px;
+  }
+
+  .login-auth-heading p,
+  .login-auth-mark {
+    display: none;
+  }
+
+  .login-auth-heading h2 {
+    font-size: 18px;
+  }
+
+  .login-auth-card form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 8px;
+  }
+
+  .login-auth-card form > [role="alert"],
+  .login-auth-card form > p {
+    grid-column: 1 / -1;
+  }
+
+  .login-auth-card form .btn {
+    width: auto;
+    min-width: 100px;
+    margin-top: 0;
+  }
+
+  .login-pitch {
+    padding-top: 10px;
+  }
 }
 
 /* Personal "Text size" preference (Preferences page). The app's type scale is
@@ -243,12 +521,12 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--radius-md);
   cursor: pointer;
   min-height: 44px; /* tap target */
-  transition: background-color 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
-.cf-btn:hover {
+.cf-btn:not(:disabled):hover {
   background: color-mix(in srgb, var(--color-accent) 12%, transparent);
 }
-.cf-btn:active {
+.cf-btn:not(:disabled):active {
   background: color-mix(in srgb, var(--color-accent) 22%, transparent);
 }
 .cf-btn:disabled {
@@ -261,10 +539,66 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--cf-dim);
   border: 1px solid var(--color-divider);
 }
-.cf-btn-ghost:hover {
+.cf-btn-ghost:not(:disabled):hover {
   color: var(--cf-ink);
   border-color: color-mix(in srgb, var(--color-text) 45%, transparent);
   background: transparent;
+}
+
+/* Destructive buttons deliberately override every ordinary primary/ghost
+   interaction state. Keep these selectors after the base variants. */
+.cf-btn-danger {
+  color: var(--color-danger-solid-foreground);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-solid);
+}
+.cf-btn-danger:not(:disabled):hover {
+  color: var(--color-danger-solid-foreground);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-solid-hover);
+}
+.cf-btn-danger:not(:disabled):active {
+  background: var(--color-danger-solid-active);
+}
+.cf-btn-danger:focus-visible {
+  outline-color: var(--color-danger-focus);
+}
+.cf-btn-danger.cf-btn-ghost {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: transparent;
+}
+.cf-btn-danger.cf-btn-ghost:not(:disabled):hover {
+  color: var(--color-danger-focus);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-ghost-hover);
+}
+.cf-btn-danger.cf-btn-ghost:not(:disabled):active {
+  color: var(--color-danger-focus);
+  background: var(--color-danger-ghost-active);
+}
+.cf-btn-danger:disabled {
+  color: var(--color-danger-disabled-foreground);
+  border-color: var(--color-danger-disabled-border);
+  background: var(--color-danger-disabled-background);
+  opacity: 1;
+}
+.cf-btn-danger.cf-btn-ghost:disabled {
+  color: var(--color-danger-disabled-foreground);
+  border-color: var(--color-danger-disabled-border);
+  background: transparent;
+}
+.cf-btn-danger[aria-busy='true'] {
+  color: var(--color-danger-solid-foreground);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-solid-busy);
+  cursor: wait;
+  opacity: 1;
+}
+.cf-btn-danger.cf-btn-ghost[aria-busy='true'] {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-ghost-busy);
 }
 
 .cf-input {
@@ -438,6 +772,105 @@ h1, h2, h3, h4, h5, h6 {
 
 .cf-prose img { max-width: 100%; height: auto; border-radius: var(--radius-md); }
 
+/* Quest-board progress (#786). The board is intentionally read-only: objective
+   toggles stay on the detail screen, while this compact projection remains easy
+   to scan and gives the detail action a full-size keyboard/touch target. */
+.quest-list-card,
+.quest-card-heading,
+.quest-card-progress,
+.quest-next-step,
+.quest-subquest-row {
+  min-width: 0;
+}
+.quest-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.quest-card-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.quest-card-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2) var(--space-4);
+  align-items: center;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-divider);
+}
+.quest-progress-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  color: var(--cf-dim);
+  font-size: 12px;
+}
+.quest-progress-track {
+  display: block;
+  flex: 0 1 120px;
+  width: 120px;
+  max-width: 35%;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: var(--color-neutral-800);
+}
+.quest-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--cf-success);
+}
+.quest-next-step {
+  grid-column: 1;
+  margin: 0;
+  min-width: 0;
+  color: var(--color-neutral-200);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.quest-next-step strong {
+  color: var(--color-accent-300);
+}
+.quest-detail-link {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  min-height: 44px;
+  white-space: normal;
+  text-align: center;
+}
+.quest-subquest-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding-left: 4px;
+}
+
+@media (max-width: 479px) {
+  .quest-card-progress {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .quest-detail-link {
+    grid-column: 1;
+    grid-row: auto;
+    width: 100%;
+  }
+  .quest-progress-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .quest-progress-track {
+    width: 100%;
+    max-width: none;
+  }
+}
+
 /* Tables — markdown emits a bare `<table>` (Nocturne only styles the `.table`
    class), so give it borders + padding here. `display:block` + `overflow-x`
    turns the table into its own horizontal-scroll container so wide SRD
@@ -610,6 +1043,9 @@ h1, h2, h3, h4, h5, h6 {
    above. The persistent, non-motion cues (gold/rose roll totals, the level-up
    banner text) remain so the feedback is never motion-only. */
 @media (prefers-reduced-motion: reduce) {
+  .cf-btn {
+    transition: none;
+  }
   .cf-anim-roll,
   .cf-anim-crit,
   .cf-crit-spark,
@@ -621,6 +1057,37 @@ h1, h2, h3, h4, h5, h6 {
   .cf-anim-levelup,
   .cf-sparkle {
     animation: none !important;
+  }
+}
+
+/* Preserve an obvious destructive affordance in Windows high-contrast mode
+   without forcing authored rose colors over the user's system palette. */
+@media (forced-colors: active) {
+  .cf-btn-danger {
+    color: MarkText;
+    border-color: Mark;
+    background: Mark;
+    forced-color-adjust: none;
+  }
+  .cf-btn-danger.cf-btn-ghost {
+    color: Mark;
+    border-color: Mark;
+    background: Canvas;
+  }
+  .cf-btn-danger:focus-visible {
+    outline-color: Highlight;
+  }
+  .cf-btn-danger:disabled,
+  .cf-btn-danger.cf-btn-ghost:disabled {
+    color: GrayText;
+    border-color: GrayText;
+    background: Canvas;
+  }
+  .cf-btn-danger[aria-busy='true'],
+  .cf-btn-danger.cf-btn-ghost[aria-busy='true'] {
+    color: MarkText;
+    border-color: Mark;
+    background: Mark;
   }
 }
 

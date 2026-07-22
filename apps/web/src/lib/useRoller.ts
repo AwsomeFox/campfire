@@ -26,10 +26,27 @@ export interface Roller {
  * a word char — while excluding `d200` via the negative lookahead. Checks the KEPT
  * die when a keep/drop clause is present (advantage/disadvantage), so a nat-20/nat-1
  * reflects the die that actually counted, not any rolled die.
+ *
+ * For a COMPOUND expression (issue #536, e.g. "2d20kh1+1d4") the flat `kept` is omitted
+ * (ambiguous across terms), so we read each d20 term's own kept dice from `terms[]`
+ * instead — a nat-20/nat-1 must reflect a d20 term's kept die, not a dropped d20 or a
+ * coincidental 1 on a different die in the flat rolls array.
  */
 export function d20Flavor(r: DiceRoll): 'crit' | 'fumble' | null {
   if (!/d20(?!\d)/i.test(r.expr)) return null;
-  const dice = r.kept && r.kept.length > 0 ? r.kept : r.rolls;
+  let dice: number[];
+  if (r.terms) {
+    // Gather the kept (or all, when no keep clause) dice from every d20 term only.
+    dice = [];
+    for (const t of r.terms) {
+      if (!/^1?d20(?!\d)/i.test(t.term)) continue;
+      const termDice = t.kept && t.kept.length > 0 ? t.kept : t.rolls;
+      if (termDice) dice.push(...termDice);
+    }
+    if (dice.length === 0) return null; // expr had d20 but no d20 term survived (shouldn't happen)
+  } else {
+    dice = r.kept && r.kept.length > 0 ? r.kept : r.rolls;
+  }
   if (dice.includes(20)) return 'crit';
   if (dice.includes(1)) return 'fumble';
   return null;

@@ -16,6 +16,7 @@ import {
   ObjectiveCreateDto,
   ObjectivePatchDto,
   ObjectiveReorderDto,
+  QuestListItemDto,
 } from './quests.dto';
 
 @ApiTags('quests')
@@ -28,16 +29,20 @@ export class CampaignQuestsController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List quests in a campaign (with objectives)', description: 'Requires campaign membership. dmSecret is stripped for non-dm.' })
+  @ApiOperation({
+    summary: 'List quests in a campaign with bounded objective progress',
+    description:
+      'Requires campaign membership. Each quest includes completed/total objective counts and only its first incomplete objective in objective order; full objective collections remain on quest detail. Hidden quests are excluded and dmSecret is stripped for non-dm.',
+  })
   @ApiQuery({ name: 'status', required: false, enum: ['available', 'active', 'completed', 'failed'], description: 'Filter to a single quest status.' })
-  @ApiResponse({ status: 200, description: 'Quests, each with its objectives.' })
+  @ApiResponse({ status: 200, description: 'Bounded quest-list items in board order.', type: QuestListItemDto, isArray: true })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('status') status: string | undefined,
     @CurrentUser() user: RequestUser,
   ) {
     const role = await this.access.requireMember(user, campaignId);
-    return this.quests.listForCampaignByStatusWithObjectives(campaignId, status, role);
+    return this.quests.listForCampaignByStatusWithProgress(campaignId, status, role);
   }
 
   @Get('changes')

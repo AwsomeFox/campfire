@@ -81,6 +81,10 @@ export interface ImportedEntry {
   license: string;
   /** Human-readable source/document label (e.g. "Starfinder Core Rulebook" via Starjammer SRD). */
   source: string;
+  /** Per-entry provenance (issue #734); '' → inherit the pack's value via the service layer. */
+  attribution?: string;
+  author?: string;
+  sourceUrl?: string;
 }
 
 export interface StarfinderImportLogger {

@@ -58,7 +58,10 @@ describe('Issue #41: a PAT can never mint a broader PAT (e2e)', () => {
       const server = ctx.app.getHttpServer();
 
       // daisy (a DM member) mints herself a read-only viewer PAT via her cookie session.
-      const viewerMint = await daisyAgent.post('/api/v1/tokens').send({ name: 'daisy-viewer', scope: 'viewer' });
+      // writeScope: 'direct' explicit (issue #575 default is 'propose') — the
+      // sanity check below asserts viewer scope BLOCKS a direct write (403); under
+      // the propose default the same call would route to the DM queue (202).
+      const viewerMint = await daisyAgent.post('/api/v1/tokens').send({ name: 'daisy-viewer', scope: 'viewer', writeScope: 'direct' });
       expect(viewerMint.status).toBe(201);
       expect(viewerMint.body.apiToken.scope).toBe('viewer');
       const viewerToken = viewerMint.body.token;
@@ -73,10 +76,13 @@ describe('Issue #41: a PAT can never mint a broader PAT (e2e)', () => {
       // Exact repro: the viewer PAT mints a dm-scoped sibling PAT. Previously the
       // request stored scope:'dm' verbatim (capped only by daisy's dm membership).
       // Now the minted token's scope must be silently downgraded to 'viewer'.
+      // writeScope: 'direct' explicit on the child (issue #575 default is
+      // 'propose') so the closure assertion below exercises a DIRECT write blocked
+      // by viewer scope (403), not a propose-routed 202.
       const escalateMint = await request(server)
         .post('/api/v1/tokens')
         .set('Authorization', `Bearer ${viewerToken}`)
-        .send({ name: 'daisy-escalated-dm', scope: 'dm' });
+        .send({ name: 'daisy-escalated-dm', scope: 'dm', writeScope: 'direct' });
       expect(escalateMint.status).toBe(201); // request succeeds, but...
       expect(escalateMint.body.apiToken.scope).toBe('viewer'); // ...capped to the minting token's scope.
 
@@ -199,7 +205,10 @@ describe('Issue #41: a PAT can never mint a broader PAT (e2e)', () => {
   describe('non-token paths are unchanged', () => {
     it('cookie-session minting still honors the requested scope up to membership semantics (no cap applied)', async () => {
       const server = ctx.app.getHttpServer();
-      const dmMint = await daisyAgent.post('/api/v1/tokens').send({ name: 'daisy-cookie-dm', scope: 'dm', campaignId });
+      // writeScope: 'direct' is explicit — the safe default is 'propose' now
+      // (issue #575), but this test asserts a DIRECT quest create (201), so we
+      // opt in rather than rely on the default.
+      const dmMint = await daisyAgent.post('/api/v1/tokens').send({ name: 'daisy-cookie-dm', scope: 'dm', campaignId, writeScope: 'direct' });
       expect(dmMint.status).toBe(201);
       expect(dmMint.body.apiToken.scope).toBe('dm');
 

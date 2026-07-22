@@ -14,7 +14,9 @@ that selected it.)
 
 Every install runs as a **background job**: the screen shows per-section progress
 while it works, so you can keep building. Installs are also **incremental** — add a
-section later and it merges in without reinstalling what's already there.
+section later and it merges in without reinstalling what's already there. Reinstalling
+an Open5e section refreshes its imported fields in place, so older monster entries gain
+newly supported statblock details without losing their ids or manual icon choices.
 
 ### Live, one-click sources
 
@@ -53,11 +55,15 @@ background job as a live install.
 
 ## Using it
 
-- **Compendium** screen — search by name, filter by type, open an entry in the
-  reader.
+- **Compendium** screen — search by name, filter by type, and open an entry in
+  the reader. Imported Open5e monsters show their full structured statblock,
+  including traits, actions, reactions, legendary actions, recharge/per-day
+  limits, attack and damage details, and saving throws when the source provides
+  them. The original rules descriptions remain visible in full.
 - **In combat** — the *Add combatant → Compendium* tab searches monsters and pulls a
-  creature's HP and initiative modifier from its statblock automatically (see
-  [Combat](combat.md)).
+  creature's HP and initiative modifier from its statblock automatically. Expand
+  **Statblock** on its combat card to read the same traits and action sections shown
+  in the compendium reader (see [Combat](combat.md)).
 - **Over MCP** — an AI assistant can `lookup_rule` and `get_rule_entry` to cite rules
   and build encounters (see [Connect an AI](../ai/connect.md)).
 
