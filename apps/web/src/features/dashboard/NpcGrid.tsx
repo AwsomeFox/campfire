@@ -35,7 +35,7 @@ export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] 
               <span style={{ fontSize: 13.5 }}>
                 {npc.name}
               </span>
-              <span className="text-muted" style={{ display: 'block', fontSize: 11 }}>
+              <span className="text-muted" style={{ display: 'block', fontSize: 'var(--type-meta)' }}>
                 {npc.role}
               </span>
             </span>

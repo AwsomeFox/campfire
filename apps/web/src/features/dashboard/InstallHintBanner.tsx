@@ -56,7 +56,7 @@ export function InstallHintBanner() {
       </svg>
       <div style={{ flex: 1, minWidth: 0, fontSize: 13 }}>
         Install Campfire on this device
-        <div className="text-muted" style={{ fontSize: 11.5 }}>
+        <div className="text-muted reading-supporting">
           Browser menu → Add to Home Screen. Works offline between sessions.
         </div>
       </div>

@@ -113,24 +113,24 @@ h1, h2, h3, h4 { font-family: var(--font-heading); font-weight: var(--font-headi
    ══════════════════════════════════════════════════════════════════════ */
 
 *, *::before, *::after { box-sizing: border-box; }
-body { margin: 0; font-size: 15px; line-height: 1.55; font-weight: 400; }
+body { margin: 0; font-size: var(--type-body); line-height: 1.55; font-weight: 400; }
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
   line-height: 1.12; letter-spacing: -0.015em; margin: 0 0 var(--space-2);
 }
-h1 { font-size: 42px; }
-h2 { font-size: 32px; }
-h3 { font-size: 25px; }
-h4 { font-size: 20px; }
-h5 { font-size: 16px; }
-h6 { font-size: 13px; }
+h1 { font-size: 2.625rem; }
+h2 { font-size: 2rem; }
+h3 { font-size: 1.5625rem; }
+h4 { font-size: 1.25rem; }
+h5 { font-size: 1rem; }
+h6 { font-size: 0.8125rem; }
 h6 { letter-spacing: 0.08em; text-transform: uppercase; }
 p { margin: 0 0 var(--space-3); }
 a { color: var(--color-accent); text-underline-offset: 3px; }
 img { display: block; max-width: 100%; }
 figure { margin: 0; }
 figcaption {
-  font-size: 11px; margin-top: var(--space-1);
+  font-size: var(--type-meta); margin-top: var(--space-1);
   color: color-mix(in srgb, var(--color-text) 55%, transparent);
 }
 .text-muted { color: color-mix(in srgb, var(--color-text) 55%, transparent); }
@@ -161,7 +161,7 @@ figcaption {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   cursor: pointer; text-decoration: none;
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
-  font-size: 14px; line-height: 1.2; color: var(--color-text); /* matches the .input's 14px —
+  font-size: var(--type-control); line-height: 1.2; color: var(--color-text); /* matches the .input —
      the pair sits side by side in sign-up rows */
   background: transparent; border: 1px solid transparent;
   padding: var(--space-2) calc(var(--space-3) * 1.2);
@@ -226,19 +226,19 @@ figcaption {
 
 /* — forms — */
 .field > label {
-  display: block; font-size: 12px; margin-bottom: 5px;
+  display: block; font-size: var(--type-label); margin-bottom: 5px;
   color: color-mix(in srgb, var(--color-text) 70%, transparent);
 }
 .input {
   width: 100%; min-height: 36px; padding: 6px 10px; font: inherit;
-  font-size: 14px; color: var(--color-text); caret-color: var(--color-accent);
+  font-size: var(--type-control); line-height: 1.2; color: var(--color-text); caret-color: var(--color-accent);
   background: var(--color-surface);
   border: 1px solid var(--color-divider); border-radius: var(--radius-md);
 }
 .input:hover { border-color: color-mix(in srgb, var(--color-text) 45%, transparent); }
 .input:focus-visible { border-color: var(--color-accent); outline-offset: 0; }
-textarea.input { min-height: 90px; resize: vertical; }
-.radio { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; }
+textarea.input { min-height: 90px; line-height: 1.45; resize: vertical; }
+.radio { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: var(--type-control); }
 .radio input, .seg-opt input {
   position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;
 }
@@ -258,7 +258,7 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 .seg-opt {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 12px; font-size: 13px; cursor: pointer;
+  padding: 7px 12px; font-size: var(--type-control); line-height: 1.2; cursor: pointer;
 }
 /* On a narrow rail (e.g. an NPC's Notes panel at ~1280px) a 4-option segmented
    control can't fit on one row; without wrapping the last option ('🤫 Whisper')
@@ -278,14 +278,14 @@ textarea.input { min-height: 90px; resize: vertical; }
   display: flex; flex-direction: column; gap: var(--space-2);
   padding: var(--space-3); border-radius: var(--radius-md); background: var(--color-surface);
 }
-.card-kicker { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-accent); }
+.card-kicker { font-size: var(--type-kicker); letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-accent); }
 .card-title {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
-  font-size: 17px; line-height: 1.2;
+  font-size: 1.0625rem; line-height: 1.2;
 }
-.card-body { margin: 0; font-size: 13px; opacity: 0.8; flex: 1; }
+.card-body { margin: 0; font-size: var(--type-supporting); opacity: 0.8; flex: 1; }
 .card-meta {
-  display: flex; align-items: center; gap: 6px; font-size: 11px;
+  display: flex; align-items: center; gap: 6px; font-size: var(--type-meta);
   color: color-mix(in srgb, var(--color-text) 50%, transparent);
 }
 .elev-sm { box-shadow: var(--shadow-sm); }
@@ -294,7 +294,7 @@ textarea.input { min-height: 90px; resize: vertical; }
 
 /* — tags — */
 .tag {
-  display: inline-flex; align-items: center; font-size: 11px;
+  display: inline-flex; align-items: center; font-size: var(--type-meta);
   letter-spacing: 0.02em; padding: 3px 10px;
   border-radius: calc(var(--radius-md) * 0.75);
 }
@@ -311,15 +311,15 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 .nav-brand {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
-  font-size: 18px; margin-right: auto;
+  font-size: 1.125rem; margin-right: auto;
 }
-.nav a { color: inherit; text-decoration: none; font-size: 14px; }
+.nav a { color: inherit; text-decoration: none; font-size: var(--type-control); }
 .nav a:hover, .nav a[aria-current='page'] { color: var(--color-accent); }
 
 /* — tables — */
-.table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table { width: 100%; border-collapse: collapse; font-size: var(--type-control); }
 .table th {
-  text-align: left; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  text-align: left; font-size: var(--type-label); letter-spacing: 0.08em; text-transform: uppercase;
   color: color-mix(in srgb, var(--color-text) 60%, transparent);
   padding: var(--space-2); border-bottom: 1px solid transparent; /* keeps layout; the row paints the fading rule */
 }
@@ -362,7 +362,7 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 .dialog-title {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
-  font-size: 20px;
+  font-size: 1.25rem;
 }
-.dialog-body { min-height: 0; overflow-y: auto; font-size: 14px; opacity: 0.85; }
+.dialog-body { min-height: 0; overflow-y: auto; font-size: var(--type-control); opacity: 0.85; }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }

@@ -127,10 +127,10 @@ export function NotesQuickRail({
                 'linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent) no-repeat top / 100% 1px',
             }}
           >
-            <Markdown className="!text-[13px] !text-[color:var(--color-neutral-200)]">{n.body}</Markdown>
+            <Markdown className="!text-[color:var(--color-neutral-200)]">{n.body}</Markdown>
             <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center' }}>
               <Chip variant={visMeta[n.visibility].chip}><span className="inline-flex items-center gap-1"><GameIcon slug={visMeta[n.visibility].slug} size={12} /> {visMeta[n.visibility].label}</span></Chip>
-              <span className="text-muted" style={{ fontSize: 10.5 }}>
+              <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>
                 {timeAgo(n.updatedAt)}
               </span>
             </div>

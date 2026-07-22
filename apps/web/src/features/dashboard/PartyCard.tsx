@@ -64,7 +64,7 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
                     {!isActive && <StatusTag status={c.status} />}
                   </span>
-                  <span className="text-muted" style={{ fontSize: 11, flex: 'none' }}>
+                  <span className="text-muted" style={{ fontSize: 'var(--type-meta)', flex: 'none' }}>
                     {c.hpCurrent}/{c.hpMax}
                   </span>
                 </span>
@@ -91,7 +91,7 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
                 {c.conditions.length > 0 && (
                   <span style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
                     {c.conditions.map((cond) => (
-                      <span key={cond} className="tag tag-neutral" style={{ fontSize: 9 }}>
+                      <span key={cond} className="tag tag-neutral">
                         {cond}
                       </span>
                     ))}

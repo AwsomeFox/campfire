@@ -229,6 +229,27 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('keeps legacy large rows compatible and stores comfortable in the existing TEXT column', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const first = openDatabase(dataDir);
+    first.sqlite.prepare("UPDATE users SET text_size = 'large' WHERE id = 1").run();
+    first.sqlite.close();
+
+    const second = openDatabase(dataDir);
+    expect((second.sqlite.prepare('SELECT text_size FROM users WHERE id = 1').get() as { text_size: string }).text_size).toBe('large');
+    second.sqlite.prepare("UPDATE users SET text_size = 'comfortable' WHERE id = 1").run();
+    second.sqlite.close();
+
+    const third = openDatabase(dataDir);
+    try {
+      expect((third.sqlite.prepare('SELECT text_size FROM users WHERE id = 1').get() as { text_size: string }).text_size).toBe('comfortable');
+    } finally {
+      third.sqlite.close();
+    }
+  });
+
   it('creates a fully-formed DB from scratch and reports FTS availability', () => {
     dataDir = makeTempDataDir();
     const { sqlite, orm, ftsAvailable } = openDatabase(dataDir);

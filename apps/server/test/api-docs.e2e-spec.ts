@@ -76,6 +76,19 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
     expect(properties).not.toHaveProperty('objectives');
   });
 
+  it('documents every strict semantic reading preference value', async () => {
+    const res = await request(app.getHttpServer()).get('/api/openapi.json');
+    const operation = res.body.paths?.['/api/v1/me/preferences']?.patch;
+    const requestSchema = operation?.requestBody?.content?.['application/json']?.schema as { $ref?: string } | undefined;
+    const schemaName = requestSchema?.$ref?.split('/').pop();
+    expect(schemaName).toBeTruthy();
+    expect(res.body.components?.schemas?.[schemaName!]?.properties?.textSize?.enum).toEqual([
+      'default',
+      'comfortable',
+      'large',
+    ]);
+  });
+
   it('documents exact XP recipients and the explicit non-active opt-in (issue #814)', async () => {
     const res = await request(app.getHttpServer()).get('/api/openapi.json');
     const operation = res.body.paths?.['/api/v1/campaigns/{campaignId}/characters/xp']?.post;

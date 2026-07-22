@@ -74,6 +74,19 @@
   --font-heading-weight: 500;
   --font-body: "Inter", system-ui, sans-serif;
 
+  /* Semantic type roles. Spatial/control type remains fixed while the three
+     reading roles are overridden by an account's reading-mode attribute. */
+  --type-body: 0.9375rem;
+  --type-control: 0.875rem;
+  --type-label: 0.75rem;
+  --type-meta: 0.75rem;
+  --type-kicker: 0.75rem;
+  --type-supporting: 0.8125rem;
+  --type-reading: 0.9375rem;
+  --leading-reading: 1.6;
+  --space-reading-paragraph: 0.625em;
+  --reading-measure: 100%;
+
   --space-1: 2.8px;
   --space-2: 5.6px;
   --space-3: 8.4px;
@@ -145,10 +158,11 @@ body {
     ui-sans-serif,
     system-ui,
     sans-serif;
-  font-size: 15px;
+  font-size: var(--type-body);
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
+
 
 /* Login information architecture (#862): one source order at every size —
    compact value statement, applicable authentication, then the full pitch. */
@@ -418,6 +432,131 @@ body {
   zoom: 1.15;
 }
 
+/* Reading preferences alter semantic reading variables only. They do not
+   change root/body scale, CSS zoom, controls, VTT canvases, maps, or tokens. */
+:root[data-reading-mode='comfortable'] {
+  --type-reading: 1rem;
+  --type-supporting: 0.875rem;
+  --leading-reading: 1.7;
+  --space-reading-paragraph: 0.75em;
+  --reading-measure: 68ch;
+}
+
+:root[data-reading-mode='large'] {
+  --type-reading: 1.125rem;
+  --type-supporting: 1rem;
+  --leading-reading: 1.75;
+  --space-reading-paragraph: 0.875em;
+}
+
+.reading-surface,
+.reading-text {
+  font-size: var(--type-reading);
+  line-height: var(--leading-reading);
+}
+
+.reading-supporting {
+  font-size: var(--type-supporting);
+  line-height: 1.55;
+}
+
+/* Explicit escape hatch for maps/canvases nested in a reading-aware route. */
+.reading-exempt {
+  font-size: var(--type-body);
+  line-height: 1.55;
+}
+
+.reading-preview {
+  --preview-reading-size: var(--type-reading);
+  --preview-reading-leading: var(--leading-reading);
+  --preview-reading-measure: var(--reading-measure);
+}
+.reading-preview[data-preview-reading-mode='default'] {
+  --preview-reading-size: 0.9375rem;
+  --preview-reading-leading: 1.6;
+  --preview-reading-measure: 100%;
+}
+.reading-preview[data-preview-reading-mode='comfortable'] {
+  --preview-reading-size: 1rem;
+  --preview-reading-leading: 1.7;
+  --preview-reading-measure: 68ch;
+}
+.reading-preview[data-preview-reading-mode='large'] {
+  --preview-reading-size: 1.125rem;
+  --preview-reading-leading: 1.75;
+  --preview-reading-measure: 100%;
+}
+.reading-preview > p {
+  width: min(100%, var(--preview-reading-measure));
+  font-size: var(--preview-reading-size);
+  line-height: var(--preview-reading-leading);
+  margin: 0;
+}
+
+.reading-preference-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.reading-preference-fieldset > legend {
+  margin-bottom: var(--space-2);
+  font-size: var(--type-supporting);
+}
+.reading-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.reading-option {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 44px;
+  padding: 9px 10px;
+  cursor: pointer;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+}
+.reading-option input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+  opacity: 0;
+}
+.reading-option > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  pointer-events: none;
+}
+.reading-option strong {
+  font-size: var(--type-control);
+  font-weight: 600;
+}
+.reading-option small {
+  color: var(--color-neutral-400);
+  font-size: var(--type-label);
+  line-height: 1.35;
+}
+.reading-option:has(input:checked) {
+  color: var(--color-accent-200);
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+.reading-option:has(input:focus-visible) {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+@media (max-width: 520px) {
+  .reading-options { grid-template-columns: 1fr; }
+}
+
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
@@ -454,7 +593,7 @@ h1, h2, h3, h4, h5, h6 {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  font-size: 10px;
+  font-size: var(--type-kicker);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -706,6 +845,9 @@ h1, h2, h3, h4, h5, h6 {
    --color-, --cf- and --space- custom-property families so it tracks whatever
    theme is active (light or dark) rather than hard-coding colors. */
 .cf-prose {
+  width: min(100%, var(--reading-measure));
+  font-size: var(--type-reading);
+  line-height: var(--leading-reading);
   overflow-wrap: anywhere; /* long URLs / unbroken strings wrap, don't overflow */
   word-break: break-word;
 }
@@ -731,7 +873,7 @@ h1, h2, h3, h4, h5, h6 {
 .cf-prose h5,
 .cf-prose h6 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--cf-dim); }
 
-.cf-prose p { margin: 0.5em 0; }
+.cf-prose p { margin: var(--space-reading-paragraph) 0; }
 
 .cf-prose a {
   color: var(--color-accent);
@@ -948,7 +1090,7 @@ h1, h2, h3, h4, h5, h6 {
   align-items: center;
   gap: 2px;
   padding: 0.5rem 0 max(0.5rem, env(safe-area-inset-bottom));
-  font-size: 10px;
+  font-size: var(--type-label);
   font-weight: 600;
   color: var(--cf-faint);
   text-decoration: none;

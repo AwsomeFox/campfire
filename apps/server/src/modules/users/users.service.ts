@@ -239,7 +239,7 @@ export class UsersService {
     });
   }
 
-  /** Self-service preferences (display name + accent color + text size) — PATCH /me/preferences. */
+  /** Self-service preferences (display name + accent color + reading mode) — PATCH /me/preferences. */
   async updatePreferences(id: number, input: PreferencesUpdateInput): Promise<User> {
     await this.getRowOrThrow(id);
 

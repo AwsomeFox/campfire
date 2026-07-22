@@ -2,8 +2,8 @@
  * Preferences — /preferences, available to every authenticated user.
  * Mirrors design/claude-design/Campfire.dc.html "Preferences" screen
  * (~L1156-1227): Theme card (accent swatches + free hex input, live preview),
- * text size (default/large — persisted as PreferencesUpdate.textSize, applied
- * globally by AuthProvider via data-text-size on <html>), and a display-name
+ * semantic reading mode (persisted as the backwards-compatible
+ * PreferencesUpdate.textSize field and applied by AuthProvider), and a display-name
  * field. The design's Notifications card was removed rather than shipped as a
  * dead placeholder — notifications are their own larger feature (issue #6).
  * The AI scribe card is live — MCP is a real, shipped API (see /tokens +
@@ -38,6 +38,7 @@ const ACCENT_SWATCHES: Array<{ name: string; hex: string }> = [
 
 const DEFAULT_ACCENT = '#9184d9';
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
+const READING_MODES = ['default', 'comfortable', 'large'] as const satisfies readonly TextSize[];
 
 export default function PreferencesPage() {
   const { t } = useTranslation();
@@ -212,28 +213,41 @@ export default function PreferencesPage() {
           </span>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <span style={{ flex: 1, minWidth: 120, fontSize: 13.5 }}>{t('preferences.textSize')}</span>
-          <div className="seg">
-            {(['default', 'large'] as const).map((size) => (
-              <button
-                key={size}
-                type="button"
-                onClick={() => setTextSize(size)}
-                className="seg-opt"
-                style={
-                  textSize === size
-                    ? { color: 'var(--color-accent)', boxShadow: 'inset 0 0 0 1px var(--color-accent)' }
-                    : undefined
-                }
-              >
-                {size === 'default' ? t('preferences.textSizeDefault') : t('preferences.textSizeLarge')}
-              </button>
+        <fieldset className="reading-preference-fieldset" aria-describedby="reading-mode-help">
+          <legend>{t('preferences.readingMode')}</legend>
+          <div className="reading-options">
+            {READING_MODES.map((mode) => (
+              <label key={mode} className="reading-option">
+                <input
+                  type="radio"
+                  name="reading-mode"
+                  value={mode}
+                  checked={textSize === mode}
+                  onChange={() => setTextSize(mode)}
+                />
+                <span>
+                  <strong>{t(`preferences.textSize${mode[0].toUpperCase()}${mode.slice(1)}`)}</strong>
+                  <small>{t(`preferences.textSize${mode[0].toUpperCase()}${mode.slice(1)}Description`)}</small>
+                </span>
+              </label>
             ))}
           </div>
+        </fieldset>
+
+        <div
+          className="cf-inset reading-preview"
+          data-preview-reading-mode={textSize}
+          data-testid="reading-preview"
+          style={{ padding: '12px 14px' }}
+        >
+          <span className="card-kicker">{t('preferences.readingPreview')}</span>
+          <p>{t('preferences.readingPreviewText')}</p>
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {t('preferences.readingPreviewAnnouncement', { mode: t(`preferences.textSize${textSize[0].toUpperCase()}${textSize.slice(1)}`) })}
+          </span>
         </div>
 
-        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        <p id="reading-mode-help" className="text-muted reading-supporting" style={{ margin: 0 }}>
           {t('preferences.themeNote')}
         </p>
       </div>
@@ -256,7 +270,7 @@ export default function PreferencesPage() {
             ))}
           </select>
         </div>
-        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        <p className="text-muted reading-supporting" style={{ margin: 0 }}>
           {t('preferences.languageNote')}
         </p>
       </div>
@@ -278,13 +292,13 @@ export default function PreferencesPage() {
       <div className="card elev-sm">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="card-kicker" style={{ margin: 0 }}>{t('preferences.mcpTitle')}</span>
-          <span className="tag tag-accent" style={{ fontSize: 9 }}>{t('preferences.mcpLive')}</span>
+          <span className="tag tag-accent">{t('preferences.mcpLive')}</span>
         </div>
         <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
           {t('preferences.mcpBlurb')}
         </p>
         <div className="cf-inset" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span className="text-muted" style={{ fontSize: 11 }}>{t('preferences.mcpEndpoint')}</span>
+          <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>{t('preferences.mcpEndpoint')}</span>
           <code style={{ fontSize: 12, fontFamily: 'ui-monospace, monospace', flex: 1, minWidth: 0, wordBreak: 'break-all' }}>
             {mcpUrl}
           </code>
@@ -293,7 +307,7 @@ export default function PreferencesPage() {
           <Link to="/tokens" className="btn btn-primary" style={{ fontSize: 12.5 }}>
             {t('preferences.mcpCreateToken')}
           </Link>
-          <span className="text-muted" style={{ fontSize: 11.5 }}>{t('preferences.mcpThenConnect')}</span>
+          <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>{t('preferences.mcpThenConnect')}</span>
         </div>
       </div>
 

@@ -532,6 +532,40 @@ describe('me/preferences (e2e)', () => {
     expect(meRes.body.user.displayName).toBe('Prefs User');
   });
 
+  it('setting textSize comfortable persists through /me', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ textSize: 'comfortable' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.textSize).toBe('comfortable');
+
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.textSize).toBe('comfortable');
+  });
+
+  it('keeps reading preferences isolated per user in the real database', async () => {
+    const created = await agent.post('/api/v1/users').send({
+      username: 'prefssecond',
+      password: 'second-password-1',
+      serverRole: 'user',
+    });
+    expect(created.status).toBe(201);
+
+    const second = request.agent(ctx.app.getHttpServer());
+    const login = await second.post('/api/v1/auth/login').send({
+      username: 'prefssecond',
+      password: 'second-password-1',
+    });
+    expect(login.status).toBe(201);
+
+    const secondBefore = await second.get('/api/v1/me');
+    expect(secondBefore.body.user.textSize).toBe('default');
+    expect((await second.patch('/api/v1/me/preferences').send({ textSize: 'large' })).status).toBe(200);
+
+    const [firstAfter, secondAfter] = await Promise.all([agent.get('/api/v1/me'), second.get('/api/v1/me')]);
+    expect(firstAfter.body.user.textSize).toBe('comfortable');
+    expect(secondAfter.body.user.textSize).toBe('large');
+  });
+
   it('invalid textSize -> 400', async () => {
     const res = await agent.patch('/api/v1/me/preferences').send({ textSize: 'enormous' });
     expect(res.status).toBe(400);
