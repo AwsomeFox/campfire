@@ -806,16 +806,23 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    // write-gated (#522): files a pending proposal + spends the AI seat budget, so a
+    // read-only/propose PAT must NOT trigger it. Registered via writeTool so the wrapper runs
+    // assertDirectWriteAllowed(user) and tags mutating:true — the same tier as the REST
+    // POST /campaigns/:id/scribe/run endpoint (no @Proposable path: a propose token can't
+    // route it through review either, so it is direct-write gated, not propose-capable).
+    this.writeTool(
       server,
+      user,
       'run_scribe',
       'DM only: run the automatic AI scribe now. Unlike draft_session_recap (which hands YOU the source material to write ' +
         'from), this has the campaign\'s CONFIGURED provider write the recap prose server-side, then files it as a PENDING ' +
         'PROPOSAL for DM approval — nothing is published to canon. Gated like an AI-DM turn: the server experimentalAiDm flag ' +
-        'must be on, the AI-DM seat enabled, and token budget must remain (the cost is metered against it). Idempotent: a ' +
-        're-run over unchanged material, or while a scribe recap proposal is still pending, is a no-op that returns the ' +
-        'existing proposal. Pass dryRun:true to generate a preview without filing anything. Returns the recorded job + any ' +
-        'filed proposal ids.',
+        'must be on, the AI-DM seat enabled, and token budget must remain (the cost is metered against it). Write-gated: a ' +
+        'propose/none writeScope token is refused (this spends the AI budget + files a proposal) — only a direct-write token ' +
+        '(or a session) may trigger it. Idempotent: a re-run over unchanged material, or while a scribe recap proposal is ' +
+        'still pending, is a no-op that returns the existing proposal. Pass dryRun:true to generate a preview without filing ' +
+        'anything. Returns the recorded job + any filed proposal ids.',
       { campaignId: CampaignIdArg, dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal') },
       async ({ campaignId, dryRun }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
