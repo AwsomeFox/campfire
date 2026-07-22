@@ -19,6 +19,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { DiceTray } from './DiceTray';
 import { RolledDice } from './RolledDice';
 import { RolledTerms } from './RolledTerms';
+import { canonicalizeDiceExpr } from '../../lib/i18nNumbers';
 
 const POLL_MS = 5000;
 
@@ -96,7 +97,14 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   // the tray can surface a per-roll result (e.g. the kept die on an advantage roll).
   const submitExpr = useCallback(
     async (raw: string): Promise<DiceRoll | null> => {
-      const cleaned = raw.trim();
+      // Issue #633: canonicalize the expression before submit so non-ASCII
+      // decimal digits (Arabic-Indic ٠-٩, Persian ۰-۹, Devanagari ०-९) typed or
+      // pasted by international rollers are normalized to ASCII and lowercase,
+      // matching the server's ASCII-only DiceExprPattern. The server remains
+      // the authority on shape (zod regex) and bounds (parseCompoundDiceExpr);
+      // this is purely input normalization, documented at DiceExprPattern in
+      // @campfire/schema.
+      const cleaned = canonicalizeDiceExpr(raw.trim());
       if (!cleaned) return null;
       setRolling(true);
       setError(null);

@@ -55,6 +55,8 @@ import { useRoller, type Roller } from '../../lib/useRoller';
 import { RollResultBanner } from '../../components/RollResultBanner';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
+import { parseLocalizedInteger } from '../../lib/i18nNumbers';
+import { useFormattingLocale } from '../../lib/format';
 
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
@@ -414,22 +416,55 @@ function SheetEditForm({
     return init;
   });
   const [saving, setSaving] = useState(false);
+  // Per-field parse errors (issue #633): level/AC/HP/stats are parsed in the
+  // viewer's locale; an unparseable value keeps the field's current text and
+  // surfaces a message here rather than silently coercing to 0/1.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const formatLocale = useFormattingLocale();
 
   async function save() {
     if (!name.trim()) return;
+    // Issue #633: parse each numeric field in the viewer's locale. On any
+    // failure, surface the per-field errors, keep the current field values,
+    // and abort — do NOT fall back to 0/1 and silently corrupt the sheet.
+    const errs: Record<string, string> = {};
+    const levelParsed = parseLocalizedInteger(level, formatLocale, { min: 1, max: 20 });
+    if (!levelParsed.ok) errs.level = levelParsed.error;
+    // AC may be blank (cleared to null on the server); only validate when present.
+    let acValue: number | null = null;
+    if (ac.trim() !== '') {
+      const acParsed = parseLocalizedInteger(ac, formatLocale);
+      if (!acParsed.ok) errs.ac = acParsed.error;
+      else acValue = acParsed.value;
+    }
+    const hpMaxParsed = parseLocalizedInteger(hpMax, formatLocale, { min: 1 });
+    if (!hpMaxParsed.ok) errs.hpMax = hpMaxParsed.error;
+    const statNums: Record<string, number> = {};
+    for (const k of ABILITY_KEYS) {
+      const parsed = parseLocalizedInteger(stats[k], formatLocale);
+      if (!parsed.ok) errs[k] = parsed.error;
+      else statNums[k] = parsed.value;
+    }
+    if (Object.keys(errs).length > 0) {
+      setFieldErrors(errs);
+      return;
+    }
+    setFieldErrors({});
+    // Every field parsed cleanly above (we returned otherwise), so the ok
+    // branches are guaranteed here. Re-bind to plain numbers for the payload.
+    const levelNum = (levelParsed as { ok: true; value: number }).value;
+    const hpMaxNum = (hpMaxParsed as { ok: true; value: number }).value;
     setSaving(true);
     onError(null);
     try {
-      const statNums: Record<string, number> = {};
-      for (const k of ABILITY_KEYS) statNums[k] = Number(stats[k]) || 0;
       await api.patch(`${API}/characters/${character.id}`, {
         name: name.trim(),
         species: species.trim(),
         className: className.trim(),
         background: background.trim(),
-        level: Math.max(1, Math.min(20, Number(level) || 1)),
-        ac: ac.trim() === '' ? null : Number(ac),
-        hpMax: Math.max(1, Number(hpMax) || 1),
+        level: levelNum,
+        ac: acValue,
+        hpMax: hpMaxNum,
         status,
         stats: statNums,
       });
@@ -450,19 +485,56 @@ function SheetEditForm({
       </div>
       <div className="grid grid-cols-3 gap-2.5">
         <TextInput value={background} onChange={(e) => setBackground(e.target.value)} placeholder="Background" />
-        <TextInput type="number" min={1} max={20} value={level} onChange={(e) => setLevel(e.target.value)} placeholder="Level" />
-        <TextInput type="number" value={ac} onChange={(e) => setAc(e.target.value)} placeholder="AC" />
+        {/* type="text" + inputMode="numeric" (issue #633): a type="number" field
+            silently strips locale grouping (en "1,000" → "", de "1.000" → "1")
+            before the parser sees it, so the localized path is bypassed. */}
+        <div className="space-y-1">
+          <TextInput
+            type="text"
+            inputMode="numeric"
+            min={1}
+            max={20}
+            value={level}
+            aria-invalid={fieldErrors.level != null}
+            onChange={(e) => {
+              setLevel(e.target.value);
+              setFieldErrors((fe) => ({ ...fe, level: '' }));
+            }}
+            placeholder="Level"
+          />
+          {fieldErrors.level && <span className="block text-[11px] text-rose-400">{fieldErrors.level}</span>}
+        </div>
+        <div className="space-y-1">
+          <TextInput
+            type="text"
+            inputMode="numeric"
+            value={ac}
+            aria-invalid={fieldErrors.ac != null}
+            onChange={(e) => {
+              setAc(e.target.value);
+              setFieldErrors((fe) => ({ ...fe, ac: '' }));
+            }}
+            placeholder="AC"
+          />
+          {fieldErrors.ac && <span className="block text-[11px] text-rose-400">{fieldErrors.ac}</span>}
+        </div>
       </div>
       <div className="grid grid-cols-3 gap-2.5">
         <div className="space-y-1">
           <TextInput
-            type="number"
+            type="text"
+            inputMode="numeric"
             min={1}
             value={hpMax}
-            onChange={(e) => setHpMax(e.target.value)}
+            aria-invalid={fieldErrors.hpMax != null}
+            onChange={(e) => {
+              setHpMax(e.target.value);
+              setFieldErrors((fe) => ({ ...fe, hpMax: '' }));
+            }}
             placeholder="Max HP"
             title="Current HP is clamped to the new max automatically."
           />
+          {fieldErrors.hpMax && <span className="block text-[11px] text-rose-400">{fieldErrors.hpMax}</span>}
         </div>
         <label className="space-y-1 col-span-2">
           <span className="text-[10px] text-slate-500 font-bold uppercase">Status</span>
@@ -486,10 +558,16 @@ function SheetEditForm({
           <div key={k} className="space-y-1">
             <label className="text-[10px] text-slate-500 font-bold uppercase">{k}</label>
             <TextInput
-              type="number"
+              type="text"
+              inputMode="numeric"
               value={stats[k]}
-              onChange={(e) => setStats((s) => ({ ...s, [k]: e.target.value }))}
+              aria-invalid={fieldErrors[k] != null}
+              onChange={(e) => {
+                setStats((s) => ({ ...s, [k]: e.target.value }));
+                setFieldErrors((fe) => ({ ...fe, [k]: '' }));
+              }}
             />
+            {fieldErrors[k] && <span className="block text-[11px] text-rose-400">{fieldErrors[k]}</span>}
           </div>
         ))}
       </div>
@@ -526,6 +604,12 @@ function XpCard({
   const [busy, setBusy] = useState(false);
   const [levellingUp, setLevellingUp] = useState(false);
   const [newHpMax, setNewHpMax] = useState(String(character.hpMax));
+  // Per-field parse errors (issue #633): XP award and level-up HP are parsed in
+  // the viewer's locale; an unparseable value keeps the field's current text and
+  // surfaces a message here rather than being silently dropped.
+  const [amountError, setAmountError] = useState<string | null>(null);
+  const [hpMaxError, setHpMaxError] = useState<string | null>(null);
+  const formatLocale = useFormattingLocale();
   // Level-up celebration (issue #67): the level a confirm just reached; the
   // banner clears itself after a beat (timeout, not animationEnd, so it also
   // clears under prefers-reduced-motion where no animation fires).
@@ -546,12 +630,25 @@ function XpCard({
       : Math.max(0, Math.min(100, ((character.xp - currentThreshold) / (nextThreshold - currentThreshold)) * 100));
 
   async function addXp() {
-    const delta = Number(amount);
-    if (!Number.isFinite(delta) || !Number.isInteger(delta) || delta === 0 || busy) return;
+    if (busy) return;
+    // Issue #633: parse the XP amount in the viewer's locale. On failure,
+    // surface a field error and keep the current text — do NOT silently drop
+    // the award (the old `Number(amount)` path returned early on NaN, hiding
+    // the problem from the user).
+    const parsed = parseLocalizedInteger(amount, formatLocale);
+    if (!parsed.ok) {
+      setAmountError(parsed.error);
+      return;
+    }
+    if (parsed.value === 0) {
+      setAmountError('Enter an amount other than 0.');
+      return;
+    }
+    setAmountError(null);
     setBusy(true);
     onError(null);
     try {
-      await api.post(`${API}/characters/${character.id}/xp`, { delta });
+      await api.post(`${API}/characters/${character.id}/xp`, { delta: parsed.value });
       setAmount('');
       onChange();
     } catch (err) {
@@ -563,8 +660,15 @@ function XpCard({
 
   async function confirmLevelUp() {
     if (busy) return;
-    const hpMaxNum = Number(newHpMax);
-    if (!Number.isInteger(hpMaxNum) || hpMaxNum < 1) return;
+    // Issue #633: parse the new max HP in the viewer's locale; surface a field
+    // error instead of silently no-op'ing on unparseable input.
+    const parsed = parseLocalizedInteger(newHpMax, formatLocale, { min: 1 });
+    if (!parsed.ok) {
+      setHpMaxError(parsed.error);
+      return;
+    }
+    setHpMaxError(null);
+    const hpMaxNum = parsed.value;
     setBusy(true);
     onError(null);
     try {
@@ -627,10 +731,17 @@ function XpCard({
       </p>
       {canEdit && (
         <div className="flex gap-2 flex-wrap items-center">
+          {/* type="text" + inputMode="numeric" (issue #633): preserves locale
+              grouping/Arabic digits for the localized parser. */}
           <input
-            type="number"
+            type="text"
+            inputMode="numeric"
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
+            aria-invalid={amountError != null}
+            onChange={(e) => {
+              setAmount(e.target.value);
+              setAmountError(null);
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') void addXp();
             }}
@@ -641,6 +752,7 @@ function XpCard({
           <Btn className="!min-h-0" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
             + Award XP
           </Btn>
+          {amountError && <span className="text-xs text-rose-400">{amountError}</span>}
           {!atCap && !levellingUp && (
             <Btn
               ghost={!ready}
@@ -668,20 +780,26 @@ function XpCard({
           <div className="flex gap-2 items-center flex-wrap">
             <div className="w-32">
               <TextInput
-                type="number"
+                type="text"
+                inputMode="numeric"
                 min={1}
                 value={newHpMax}
-                onChange={(e) => setNewHpMax(e.target.value)}
+                aria-invalid={hpMaxError != null}
+                onChange={(e) => {
+                  setNewHpMax(e.target.value);
+                  setHpMaxError(null);
+                }}
                 placeholder="New max HP"
               />
             </div>
+            {hpMaxError && <span className="text-xs text-rose-400">{hpMaxError}</span>}
             <div className="flex-1" />
             <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy} onClick={() => setLevellingUp(false)}>
               Cancel
             </Btn>
             <Btn
               className="!min-h-0 !py-1.5 text-xs"
-              disabled={busy || !Number.isInteger(Number(newHpMax)) || Number(newHpMax) < 1}
+              disabled={busy || !newHpMax.trim()}
               onClick={confirmLevelUp}
             >
               {busy ? 'Levelling…' : `Confirm level ${character.level + 1}`}
@@ -1032,6 +1150,11 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [maxima, setMaxima] = useState<Record<string, string>>({});
+  // Per-level parse errors (issue #633): a slot maximum that can't be parsed in
+  // the viewer's locale surfaces a message here rather than silently coercing
+  // to 0 (which would erase the configured maximum on save).
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const formatLocale = useFormattingLocale();
 
   const levels = SPELL_LEVELS.filter((lvl) => (character.spellSlots[lvl]?.max ?? 0) > 0);
 
@@ -1053,19 +1176,35 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
     const init: Record<string, string> = {};
     for (const lvl of SPELL_LEVELS) init[lvl] = String(character.spellSlots[lvl]?.max ?? 0);
     setMaxima(init);
+    setFieldErrors({});
     setEditing(true);
   }
 
   async function saveMaxima() {
     if (busy) return;
+    // Issue #633: parse each level's maximum in the viewer's locale. On any
+    // failure, surface the per-field errors and keep the current values — do
+    // NOT silently coerce to 0, which would erase configured slots on save.
+    const errs: Record<string, string> = {};
+    const next: Record<string, { max: number; used: number }> = {};
+    for (const lvl of SPELL_LEVELS) {
+      const parsed = parseLocalizedInteger(maxima[lvl] ?? '0', formatLocale, { min: 0, max: 20 });
+      if (!parsed.ok) {
+        errs[lvl] = parsed.error;
+        continue;
+      }
+      if (parsed.value > 0) {
+        next[lvl] = { max: parsed.value, used: Math.min(character.spellSlots[lvl]?.used ?? 0, parsed.value) };
+      }
+    }
+    if (Object.keys(errs).length > 0) {
+      setFieldErrors(errs);
+      return;
+    }
+    setFieldErrors({});
     setBusy(true);
     onError(null);
     try {
-      const next: Record<string, { max: number; used: number }> = {};
-      for (const lvl of SPELL_LEVELS) {
-        const max = Math.max(0, Math.min(20, Number(maxima[lvl]) || 0));
-        if (max > 0) next[lvl] = { max, used: Math.min(character.spellSlots[lvl]?.used ?? 0, max) };
-      }
       await api.patch(`${API}/characters/${character.id}`, { spellSlots: next });
       setEditing(false);
       onChange();
@@ -1092,13 +1231,21 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
             {SPELL_LEVELS.map((lvl) => (
               <div key={lvl} className="space-y-1">
                 <label className="text-[10px] text-slate-500 font-bold uppercase">Lv {lvl}</label>
+                {/* type="text" + inputMode="numeric" (issue #633): preserves
+                    locale grouping for the localized parser. */}
                 <TextInput
-                  type="number"
+                  type="text"
+                  inputMode="numeric"
                   min={0}
                   max={20}
                   value={maxima[lvl] ?? '0'}
-                  onChange={(e) => setMaxima((m) => ({ ...m, [lvl]: e.target.value }))}
+                  aria-invalid={fieldErrors[lvl] != null}
+                  onChange={(e) => {
+                    setMaxima((m) => ({ ...m, [lvl]: e.target.value }));
+                    setFieldErrors((fe) => ({ ...fe, [lvl]: '' }));
+                  }}
                 />
+                {fieldErrors[lvl] && <span className="block text-[10px] text-rose-400">{fieldErrors[lvl]}</span>}
               </div>
             ))}
           </div>

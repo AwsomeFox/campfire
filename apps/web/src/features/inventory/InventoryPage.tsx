@@ -18,6 +18,8 @@ import { IconPicker } from '../../components/IconPicker';
 import { Markdown } from '../../components/Markdown';
 import { getIcon } from '../../lib/icons';
 import { itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
+import { parseLocalizedInteger } from '../../lib/i18nNumbers';
+import { useFormattingLocale } from '../../lib/format';
 
 const COINS = [
   { key: 'pp', label: 'Platinum' },
@@ -274,6 +276,12 @@ function TreasuryCard({
   const [editBase, setEditBase] = useState<Record<CoinKey, number>>({ pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Per-field parse errors (issue #633): when a coin value can't be parsed in
+  // the viewer's locale (e.g. "1,2,3" or stray letters), the OLD value is
+  // preserved and the offending field shows an inline message instead of the
+  // value being silently coerced to 0.
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<CoinKey, string>>>({});
+  const formatLocale = useFormattingLocale();
   // A 409 conflict: the server's current values. While present, the form shows the
   // diff against the DM's intent and offers "Reapply" (which re-sends only the
   // changed denominations, pinned to the fresh row version). Cleared on reload/reapply.
@@ -296,19 +304,34 @@ function TreasuryCard({
     setEditBaseUpdatedAt(treasury.updatedAt);
     setOpenedAtEpoch(remoteEpoch);
     setError(null);
+    setFieldErrors({});
     setConflict(null);
     setEditing(true);
   }
 
-  // Parse the form into the DM's intended absolute values (defensive: blank or
-  // non-numeric -> 0, clamped to non-negative integers to match the server schema).
-  function parseIntended(): Record<CoinKey, number> {
+  // Parse the form into the DM's intended absolute values. Issue #633: never
+  // silently coerce an unparseable field to 0 — return { ok: false, errors }
+  // mapping each offending coin to a short message; the caller keeps the field's
+  // current value and shows the error. parseLocalizedInteger honors the viewer's
+  // locale (de/fr grouping, Arabic-Indic digits) so a correct international value
+  // is no longer misread as 0. Coins are non-negative per the server schema, so
+  // min:0 is enforced here; the bound is reported in the error message rather
+  // than silently clamped.
+  function parseIntended():
+    | { ok: true; values: Record<CoinKey, number> }
+    | { ok: false; errors: Partial<Record<CoinKey, string>> } {
     const out = { pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 } as Record<CoinKey, number>;
+    const errors: Partial<Record<CoinKey, string>> = {};
     for (const { key } of COINS) {
-      const n = Number(values[key]);
-      out[key] = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+      const parsed = parseLocalizedInteger(values[key], formatLocale, { min: 0 });
+      if (parsed.ok) {
+        out[key] = parsed.value;
+      } else {
+        errors[key] = parsed.error;
+      }
     }
-    return out;
+    if (Object.keys(errors).length > 0) return { ok: false, errors };
+    return { ok: true, values: out };
   }
 
   // Build the CHANGED-only set against the snapshot the DM is diffing from, so we
@@ -327,10 +350,21 @@ function TreasuryCard({
 
   async function save(e: FormEvent) {
     e.preventDefault();
+    // Issue #633: parse BEFORE entering the saving state so a validation
+    // failure never flashes the "Saving…" affordance for a no-op round-trip.
+    // On parse failure, surface the per-field errors and keep the current field
+    // values — do NOT submit a patch that silently wrote 0 for the unparseable
+    // coins.
+    const parsed = parseIntended();
+    if (!parsed.ok) {
+      setFieldErrors(parsed.errors);
+      return;
+    }
     setSaving(true);
     setError(null);
+    setFieldErrors({});
     try {
-      const intended = parseIntended();
+      const intended = parsed.values;
       // Diff against the stable snapshot the DM opened against (editBase) — not the
       // live treasury prop, which may have moved under them via SSE. Only the coins
       // the DM ACTUALLY edited go in the { set } patch; on a 409-reapply, editBase
@@ -424,14 +458,22 @@ function TreasuryCard({
               </Btn>
             </p>
           )}
-          {conflict && (
+          {conflict && (() => {
+            // The conflict panel is reached only after a 409 on a PATCH that
+            // already passed parse, so every field is parseable here; but guard
+            // anyway — an unparseable field falls back to its base value, so its
+            // "dmEdited" diff is false and no misleading arrow is shown.
+            const parsed = parseIntended();
+            const intentFor = (key: CoinKey): number =>
+              parsed.ok ? parsed.values[key] : editBase[key];
+            return (
             <div className="text-sm rounded-md p-2 space-y-1" style={{ background: 'var(--color-neutral-800)' }}>
               <p className="text-amber-400 font-semibold">Another player changed the treasury since you loaded.</p>
               <p className="text-slate-400">Fresh values shown below — reapply your change against them?</p>
               <div className="grid grid-cols-5 gap-2 pt-1">
                 {COINS.map(({ key, label }) => {
                   const fresh = conflict[key];
-                  const intent = parseIntended()[key];
+                  const intent = intentFor(key);
                   // Only show the reapply arrow for a coin the DM ACTUALLY edited
                   // (intent differs from the snapshot they opened against). Arrows
                   // for every fresh !== intent would falsely suggest the DM meant
@@ -447,17 +489,32 @@ function TreasuryCard({
                 })}
               </div>
             </div>
-          )}
+            );
+          })()}
           <div className="grid grid-cols-3 md:grid-cols-5 gap-3">
             {COINS.map(({ key, label }) => (
               <label key={key} className="space-y-1">
                 <span className="block text-[11px] text-slate-500 uppercase tracking-wide">{label}</span>
+                {/* type="text" + inputMode="numeric" (issue #633): a type="number"
+                    field silently strips locale grouping separators (en "1,234"
+                    → "", de "1.234" → "1") before our parser ever sees them, so
+                    the localized parse path is bypassed. A text field with a
+                    numeric IME hint hands us the raw, locale-correct string. */}
                 <TextInput
-                  type="number"
-                  min={0}
+                  type="text"
+                  inputMode="numeric"
                   value={values[key]}
-                  onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))}
+                  aria-invalid={fieldErrors[key] != null}
+                  onChange={(e) => {
+                    setValues((v) => ({ ...v, [key]: e.target.value }));
+                    // Clear this coin's error as the DM retypes; a fresh error
+                    // is computed on the next save attempt.
+                    setFieldErrors((fe) => (fe[key] ? { ...fe, [key]: undefined } : fe));
+                  }}
                 />
+                {fieldErrors[key] && (
+                  <span className="block text-[11px] text-rose-400">{fieldErrors[key]}</span>
+                )}
               </label>
             ))}
           </div>
@@ -723,6 +780,11 @@ function AddItemForm({
   const [pickingIcon, setPickingIcon] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Per-field error (issue #633): qty is parsed in the viewer's locale; an
+  // unparseable value keeps the field's current text and shows this message
+  // rather than silently defaulting to 1.
+  const [qtyError, setQtyError] = useState<string | null>(null);
+  const formatLocale = useFormattingLocale();
 
   // Live preview: the DM's explicit pick, else the name-derived default so they
   // see what the row will show before saving.
@@ -731,12 +793,20 @@ function AddItemForm({
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!name.trim()) return;
+    // Issue #633: parse qty in the viewer's locale. On failure, surface a
+    // field error and keep the current value — do NOT fall back to 1.
+    const qtyParsed = parseLocalizedInteger(qty, formatLocale, { min: 0 });
+    if (!qtyParsed.ok) {
+      setQtyError(qtyParsed.error);
+      return;
+    }
+    setQtyError(null);
     setSaving(true);
     setError(null);
     try {
       const body: Record<string, unknown> = {
         name: name.trim(),
-        qty: Math.max(0, Math.trunc(Number(qty) || 1)),
+        qty: qtyParsed.value,
         notes: notes.trim(),
         iconSlug, // '' keeps the auto (name-derived) default
       };
@@ -760,8 +830,21 @@ function AddItemForm({
       <form onSubmit={submit} className="space-y-3">
         <div className="grid grid-cols-[1fr_90px] gap-3">
           <TextInput placeholder="Item name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          <TextInput type="number" min={0} placeholder="Qty" value={qty} onChange={(e) => setQty(e.target.value)} />
+          {/* type="text" + inputMode="numeric" (issue #633): see TreasuryCard for
+              why a numeric text field beats type="number" for locale-aware input. */}
+          <TextInput
+            type="text"
+            inputMode="numeric"
+            placeholder="Qty"
+            value={qty}
+            aria-invalid={qtyError != null}
+            onChange={(e) => {
+              setQty(e.target.value);
+              setQtyError(null);
+            }}
+          />
         </div>
+        {qtyError && <p className="text-xs text-rose-400 -mt-1">{qtyError}</p>}
         <div className="grid grid-cols-2 gap-3">
           <select className="cf-select" value={owner} onChange={(e) => setOwner(e.target.value)} aria-label="Owner">
             <option value="party">Party stash</option>
