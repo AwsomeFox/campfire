@@ -157,7 +157,8 @@ export class SessionsController {
     summary: 'Get session attendance',
     description:
       'Requires campaign membership. The characters that played this session (issue #121) — the West Marches ' +
-      '"who was there" record. Empty when attendance was never set.',
+      '"who was there" record. Character names reflect the current roster name, including for retired or trashed ' +
+      'characters; a stored snapshot is returned if the character row is unavailable. Empty when attendance was never set.',
   })
   @ApiResponse({ status: 200, description: 'Attendees (characters) for this session.' })
   async getAttendance(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<SessionAttendee[]> {

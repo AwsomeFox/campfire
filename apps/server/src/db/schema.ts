@@ -264,7 +264,9 @@ export const sessions = sqliteTable('sessions', {
 // Per-session attendance (issue #121) — which characters played a given session.
 // West Marches / rotating-cast tables need a "who was there" record instead of the
 // party being all-or-nothing. One row per (session, character); the set is replaced
-// wholesale on write. character_name is denormalized so recaps/cards don't join.
+// wholesale on write. character_name is a write-time snapshot retained as a
+// compatibility fallback; normal reads prefer the current characters.name via a
+// LEFT JOIN so character renames cannot make attendance drift (issue #659).
 export const sessionAttendees = sqliteTable('session_attendees', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   sessionId: integer('session_id').notNull(),
