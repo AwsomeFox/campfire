@@ -39,10 +39,15 @@ function toDomain(row: typeof sessionShares.$inferSelect): SessionShare {
   };
 }
 
-function assertFutureExpiry(expiresAt: string | null): void {
-  if (expiresAt !== null && Date.parse(expiresAt) <= Date.now()) {
+function normalizeFutureExpiry(expiresAt: string | null): string | null {
+  if (expiresAt === null) return null;
+  const timestamp = Date.parse(expiresAt);
+  if (!Number.isFinite(timestamp) || timestamp <= Date.now()) {
     throw new BadRequestException('expiresAt must be in the future, or null for a deliberately non-expiring link');
   }
+  // SQLite compares ISO timestamps as TEXT, so every persisted value must use
+  // one canonical UTC representation rather than a caller-provided offset.
+  return new Date(timestamp).toISOString();
 }
 
 function isExtension(previous: string | null, next: string | null | undefined): boolean {
@@ -101,7 +106,7 @@ export class SessionSharesService {
     user: RequestUser,
     role: Role,
   ): Promise<SessionShareCreated> {
-    assertFutureExpiry(input.expiresAt);
+    const expiresAt = normalizeFutureExpiry(input.expiresAt);
     const token = generateShareToken();
     const ts = nowIso();
     const row = this.db.transaction((tx) => {
@@ -122,7 +127,7 @@ export class SessionSharesService {
           createdBy: user.name,
           tokenHash: hashShareToken(token),
           tokenPrefix: shareTokenPrefix(token),
-          expiresAt: input.expiresAt,
+          expiresAt,
           accessCount: 0,
           firstAccessedAt: null,
           lastAccessedAt: null,
@@ -160,7 +165,7 @@ export class SessionSharesService {
     user: RequestUser,
     role: Role,
   ): Promise<SessionShare> {
-    if (input.expiresAt !== undefined) assertFutureExpiry(input.expiresAt);
+    const expiresAt = input.expiresAt === undefined ? undefined : normalizeFutureExpiry(input.expiresAt);
     const ts = nowIso();
     const { row, extended } = this.db.transaction((tx) => {
       const campaign = tx.select().from(campaigns).where(eq(campaigns.id, session.campaignId)).limit(1).get();
@@ -188,13 +193,13 @@ export class SessionSharesService {
         .update(sessionShares)
         .set({
           ...(input.label !== undefined ? { label: input.label } : {}),
-          ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+          ...(expiresAt !== undefined ? { expiresAt } : {}),
           updatedAt: ts,
         })
         .where(eq(sessionShares.id, shareId))
         .returning()
         .get();
-      return { row: updated, extended: isExtension(existing.expiresAt, input.expiresAt) };
+      return { row: updated, extended: isExtension(existing.expiresAt, expiresAt) };
     });
 
     await this.audit.log({

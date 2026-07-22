@@ -186,6 +186,14 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
     expect(never.status).toBe(201);
     expect(never.body.share.expiresAt).toBeNull();
     await request(server).delete(`/api/v1/sessions/${sessionId}/shares/${never.body.share.id}`).set(dm);
+
+    const offset = await request(server)
+      .post(`/api/v1/sessions/${sessionId}/shares`)
+      .set(dm)
+      .send({ label: 'Offset timestamp', expiresAt: '2099-01-01T12:00:00+02:00' });
+    expect(offset.status).toBe(201);
+    expect(offset.body.share.expiresAt).toBe('2099-01-01T10:00:00.000Z');
+    await request(server).delete(`/api/v1/sessions/${sessionId}/shares/${offset.body.share.id}`).set(dm);
   });
 
   it('expires links, supports forwarding, and records first/last access plus count', async () => {
@@ -239,6 +247,13 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
       .send({ label: 'Press copy', expiresAt: futureExpiry(30) });
     expect(extended.status).toBe(200);
     expect(extended.body).toEqual(expect.objectContaining({ label: 'Press copy', expiresAt: expect.any(String) }));
+
+    const offsetUpdate = await request(server)
+      .patch(`/api/v1/sessions/${sessionId}/shares/${created.body.share.id}`)
+      .set(dm)
+      .send({ expiresAt: '2099-01-02T04:30:00-05:00' });
+    expect(offsetUpdate.status).toBe(200);
+    expect(offsetUpdate.body.expiresAt).toBe('2099-01-02T09:30:00.000Z');
 
     const edited = 'The recap changed after the URL was sent.';
     expect((await request(server).patch(`/api/v1/sessions/${sessionId}`).set(dm).send({ recap: edited })).status).toBe(200);
