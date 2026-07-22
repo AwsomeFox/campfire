@@ -308,6 +308,11 @@ export function LoginPage() {
             {showLocalForm ? (
               <div className="w-full flex flex-col gap-3" style={{ marginTop: 6 }}>
                 <div className="hr" style={{ margin: 0 }} />
+                {!localLoginEnabled && (
+                  <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+                    Local sign-in is restricted to server administrators.
+                  </p>
+                )}
                 <LocalLoginForm
                   submitting={submitting}
                   onSubmit={onSubmit}
@@ -320,16 +325,18 @@ export function LoginPage() {
                   focusOnMount
                 />
               </div>
-            ) : localLoginEnabled ? (
+            ) : (
               <button
                 type="button"
                 className="btn btn-ghost"
                 style={{ fontSize: 12.5, marginTop: 2 }}
                 onClick={() => setShowLocalForm(true)}
               >
-                Sign in with username &amp; password instead
+                {localLoginEnabled
+                  ? 'Sign in with username & password instead'
+                  : 'Administrator local sign-in'}
               </button>
-            ) : null}
+            )}
           </>
         ) : (
           <div className="w-full">

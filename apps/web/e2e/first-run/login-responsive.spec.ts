@@ -107,7 +107,7 @@ test.describe('mobile login information architecture', () => {
     });
   }
 
-  test('keeps SSO-only and mixed authentication truthful and keyboard ordered', async ({ page }) => {
+  test('keeps OIDC-first and mixed authentication truthful, recoverable, and keyboard ordered', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await mockSignedOutLogin(page, {
       localLoginEnabled: false,
@@ -117,12 +117,17 @@ test.describe('mobile login information architecture', () => {
     await page.goto('/login');
 
     const sso = page.getByRole('link', { name: 'Sign in with Keycloak' });
+    const adminLocal = page.getByRole('button', { name: 'Administrator local sign-in' });
     await expectInInitialViewport(page, sso);
-    await expect(page.getByRole('button', { name: /username & password/i })).toHaveCount(0);
     await expect(page.getByLabel('Username')).toHaveCount(0);
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press('Tab');
     await expect(sso).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(adminLocal).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('Local sign-in is restricted to server administrators.')).toBeVisible();
+    await expect(page.getByLabel('Username')).toBeFocused();
 
     await page.unrouteAll({ behavior: 'wait' });
     await mockSignedOutLogin(page, {
