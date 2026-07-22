@@ -68,6 +68,7 @@ import {
   RsvpSet,
   GenerateMapParams,
   CoDmDraftTarget,
+  CampaignDmRepair,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
@@ -99,6 +100,7 @@ import { CommentsService } from '../comments/comments.service';
 import { SchedulingService } from '../sessions/scheduling.service';
 import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
+import { UsersService } from '../users/users.service';
 
 const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
 
@@ -346,6 +348,7 @@ export class McpToolsService {
     private readonly comments: CommentsService,
     private readonly scheduling: SchedulingService,
     private readonly scribe: ScribeService,
+    private readonly users: UsersService,
   ) {}
 
   buildServer(user: RequestUser, collector?: Map<string, DriverTool>): McpServer {
@@ -376,7 +379,7 @@ export class McpToolsService {
         '(personal access token) additionally CAPS the effective role to min(token scope, ' +
         'real membership role) and, if the token is bound to one campaignId, 403s on every other campaign. ' +
         'SERVER-admin power (install_rule_pack, and ' +
-        'REST-only routes like POST /users and /settings) is capped separately and more strictly: a PAT never ' +
+        'server-wide operations) is capped separately and more strictly: a PAT never ' +
         'carries server-admin power unless it was explicitly minted with adminEnabled:true by a caller who ' +
         'currently held real server-admin power themselves — an admin\'s ordinary/viewer-scoped token is NOT an ' +
         'admin token by default.\n\n' +
@@ -993,11 +996,24 @@ export class McpToolsService {
     this.tool(
       server,
       'list_members',
-      'List campaign members (user id, role, linked character).',
+      'List campaign members (user id, role, linked character, and disabled account status). Disabled accounts do ' +
+        'not count as usable DM authority.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         await this.access.requireMember(user, campaignId as number);
         return this.members.listForCampaign(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_membership_integrity',
+      'Server admin only: inspect secret-free campaign authority metadata (usable/disabled DM counts and migration ' +
+        'repair history). This never returns campaign entities or DM-secret content and grants no campaign role.',
+      {},
+      async () => {
+        if (!hasServerAdminPower(user)) throw new ForbiddenException('Requires server admin');
+        return this.users.membershipIntegrity();
       },
     );
 
@@ -2423,6 +2439,20 @@ export class McpToolsService {
         await this.access.requireRole(user, campaignId as number, 'dm');
         await this.members.remove(campaignId as number, memberId as number, user);
         return { ok: true, memberId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'repair_campaign_dm',
+      'Server admin only: recover an orphaned campaign that currently has zero enabled DMs by assigning an existing ' +
+        'enabled account as DM. Returns authority metadata only; it does not expose campaign secrets or grant the ' +
+        'calling admin membership unless that admin is explicitly selected as userId.',
+      { ...CampaignDmRepair.shape },
+      async (fields) => {
+        if (!hasServerAdminPower(user)) throw new ForbiddenException('Requires server admin');
+        return this.users.repairCampaignDm(CampaignDmRepair.parse(fields), user);
       },
     );
 

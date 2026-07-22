@@ -17,6 +17,24 @@
 export const THROTTLE_DEFAULT = 'default';
 export const THROTTLE_AUTH = 'auth';
 export const THROTTLE_SHARE = 'share';
+export const THROTTLE_AI = 'ai';
+
+/**
+ * Strict: AI invocation / generation / probe endpoints across ai-dm, scribe, ai-provider-config.
+ * 10 requests/minute/IP prevents prompt injection loops, runaway client retries, or billing spikes
+ * from exhausting provider quotas.
+ *
+ * Complementary Roles Note:
+ * Rate throttling (@nestjs/throttler) and budget checks serve complementary roles:
+ * - Rate throttling operates at the HTTP/network layer per-IP per-minute window to reject short-term
+ *   burst DoS and API abuse immediately with 429 Too Many Requests before reaching LLM services.
+ * - Budget checks (token budget, seat metering, server caps) operate at the application/domain layer
+ *   per-campaign or server-wide to enforce cumulative financial and token usage limits over longer periods,
+ *   returning 403 Forbidden or 503 Service Unavailable when limits are reached.
+ */
+export const AI_THROTTLE_LIMIT = 10;
+export const AI_THROTTLE_TTL_MS = 60_000;
+
 
 /** Loose default: normal API usage (including MCP tool-call bursts) should never realistically hit this. */
 export const DEFAULT_THROTTLE_LIMIT = 300;

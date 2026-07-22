@@ -53,7 +53,7 @@ over **MCP**. You host it. You own the data. One container, one volume.
 
 -   :material-robot-happy: __Agent-operable over MCP__
 
-    A built-in **134-tool** MCP server exposes your campaign to any AI agent — read,
+    A built-in **137-tool** MCP server exposes your campaign to any AI agent — read,
     write, or fully run it — with a DM-approval proposal queue so nothing touches
     your canon without approval, and every action audit-logged.
 

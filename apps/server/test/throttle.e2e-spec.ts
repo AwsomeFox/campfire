@@ -121,3 +121,102 @@ describe('rate limiting on @Public auth endpoints (e2e, real ThrottlerGuard)', (
     }
   });
 });
+
+/**
+ * AI Rate Limiting & Governance Complementarity:
+ * Rate throttling (@nestjs/throttler) and application budget checks (token budgets / seat limits)
+ * serve complementary roles in the AI architecture:
+ *
+ * 1. Rate Throttling (HTTP Layer / Network Level):
+ *    - Keyed per IP address with a 1-minute TTL.
+ *    - Rejects burst floods (e.g. prompt-injection loops, client retry storms, unauthenticated/spam attempts)
+ *      immediately with HTTP 429 (Too Many Requests).
+ *    - Protects server compute and prevents rapid-fire provider API key depletion within seconds/minutes.
+ *
+ * 2. Budget Checks (Domain Layer / Application Level):
+ *    - Evaluated inside services (AiDmService, ScribeService, CoDmService) against campaign/server token caps.
+ *    - Rejects invocations with HTTP 403 (Forbidden) or HTTP 503 (Service Unavailable) when monthly/cumulative
+ *      token budgets are exhausted.
+ *    - Protects overall financial expenditure and enforces long-term AI resource limits per seat/campaign.
+ */
+describe('rate limiting on AI invocation routes (e2e, AI throttler)', () => {
+  let app: INestApplication;
+  let dataDir: string;
+
+  beforeAll(async () => {
+    const built = await buildThrottledApp();
+    app = built.app;
+    dataDir = built.dataDir;
+  });
+
+  afterAll(async () => {
+    await app.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    process.env.THROTTLE_DISABLED = '1';
+  });
+
+  it('POST /campaigns/1/ai-dm/message: after 10 rapid requests from one IP, the 11th returns 429', async () => {
+    const server = app.getHttpServer();
+    const AI_THROTTLE_LIMIT = 10;
+
+    const statuses: number[] = [];
+    for (let i = 0; i < AI_THROTTLE_LIMIT; i++) {
+      const res = await request(server).post('/api/v1/campaigns/1/ai-dm/message').send({ input: 'hello' });
+      statuses.push(res.status);
+    }
+    // Requests prior to limit hit authorization / seat guards (401), not 429.
+    expect(statuses.every((s) => s !== 429)).toBe(true);
+
+    const overLimitRes = await request(server).post('/api/v1/campaigns/1/ai-dm/message').send({ input: 'hello' });
+    expect(overLimitRes.status).toBe(429);
+  });
+
+  it('POST /campaigns/1/scribe/run: exceeding 10 requests/min returns 429 Too Many Requests', async () => {
+    const server = app.getHttpServer();
+    const AI_THROTTLE_LIMIT = 10;
+
+    const statuses: number[] = [];
+    for (let i = 0; i < AI_THROTTLE_LIMIT + 1; i++) {
+      const res = await request(server).post('/api/v1/campaigns/1/scribe/run').send({});
+      statuses.push(res.status);
+    }
+    expect(statuses[statuses.length - 1]).toBe(429);
+  });
+
+  it('POST /settings/ai-provider/test: exceeding 10 requests/min returns 429 Too Many Requests', async () => {
+    const server = app.getHttpServer();
+    const AI_THROTTLE_LIMIT = 10;
+
+    const statuses: number[] = [];
+    for (let i = 0; i < AI_THROTTLE_LIMIT + 1; i++) {
+      const res = await request(server).post('/api/v1/settings/ai-provider/test').send({});
+      statuses.push(res.status);
+    }
+    expect(statuses[statuses.length - 1]).toBe(429);
+  });
+
+  it('POST /campaigns/1/ai-provider/test: exceeding 10 requests/min returns 429 Too Many Requests', async () => {
+    const server = app.getHttpServer();
+    const AI_THROTTLE_LIMIT = 10;
+
+    const statuses: number[] = [];
+    for (let i = 0; i < AI_THROTTLE_LIMIT + 1; i++) {
+      const res = await request(server).post('/api/v1/campaigns/1/ai-provider/test').send({});
+      statuses.push(res.status);
+    }
+    expect(statuses[statuses.length - 1]).toBe(429);
+  });
+
+  it('POST /campaigns/1/ai-dm/nudge: exceeding 10 requests/min returns 429 Too Many Requests', async () => {
+    const server = app.getHttpServer();
+    const AI_THROTTLE_LIMIT = 10;
+
+    const statuses: number[] = [];
+    for (let i = 0; i < AI_THROTTLE_LIMIT + 1; i++) {
+      const res = await request(server).post('/api/v1/campaigns/1/ai-dm/nudge').send({});
+      statuses.push(res.status);
+    }
+    expect(statuses[statuses.length - 1]).toBe(429);
+  });
+});
+
