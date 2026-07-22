@@ -19,6 +19,7 @@ import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const DANGER_LEVELS: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
 
@@ -113,6 +114,13 @@ export default function CampaignSettingsPage() {
               void refreshCampaigns();
             }}
           />
+          <PublicRecapSharingCard
+            campaign={campaign}
+            onChanged={async () => {
+              await load();
+              await refreshCampaigns();
+            }}
+          />
           <RuleSystemCard
             campaignId={id}
             campaign={campaign}
@@ -137,6 +145,98 @@ export default function CampaignSettingsPage() {
           />
         </>
       ) : null}
+    </div>
+  );
+}
+
+function PublicRecapSharingCard({ campaign, onChanged }: { campaign: Campaign; onChanged: () => Promise<void> }) {
+  const [confirming, setConfirming] = useState<'disable' | 'revoke' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function setPolicy(enabled: boolean) {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api.put<{ revoked: number }>(`${API}/campaigns/${campaign.id}/session-shares/policy`, { enabled });
+      setMessage(
+        enabled
+          ? 'Public recap sharing enabled. Old links remain revoked.'
+          : `Public recap sharing disabled. ${result.revoked} ${result.revoked === 1 ? 'link was' : 'links were'} revoked.`,
+      );
+      setConfirming(null);
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update public recap sharing.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeAll() {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api.delete<{ revoked: number }>(`${API}/campaigns/${campaign.id}/session-shares`);
+      setMessage(`Revoked ${result.revoked} public recap ${result.revoked === 1 ? 'link' : 'links'}.`);
+      setConfirming(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't revoke public recap links.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card elev-sm" data-testid="public-recap-sharing-settings">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="card-kicker" style={{ margin: 0 }}>Public recap sharing</span>
+        <span className={`tag ${campaign.publicRecapSharingEnabled ? 'tag-accent' : 'tag-neutral'}`}>
+          {campaign.publicRecapSharingEnabled ? 'enabled' : 'disabled'}
+        </span>
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Public links reveal only one live recap, but anyone can forward them. Disabling this policy revokes every
+        existing link atomically; turning it back on never restores those URLs.
+      </p>
+      <div className="flex flex-col sm:flex-row gap-2">
+        {campaign.publicRecapSharingEnabled ? (
+          <button className="btn" disabled={busy} aria-busy={busy || undefined} onClick={() => setConfirming('disable')}>Disable and revoke all</button>
+        ) : (
+          <button className="btn btn-primary" disabled={busy || campaign.status !== 'active'} aria-busy={busy || undefined} onClick={() => void setPolicy(true)}>
+            Enable public sharing
+          </button>
+        )}
+        <button className="btn btn-danger" disabled={busy} aria-busy={busy || undefined} onClick={() => setConfirming('revoke')}>Revoke all links</button>
+      </div>
+      {!campaign.publicRecapSharingEnabled && campaign.status !== 'active' && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>Unarchive the campaign before enabling public sharing.</p>
+      )}
+      {message && <p className="text-sm text-emerald-300 m-0" role="status">{message}</p>}
+      {error && <p className="text-sm text-red-400 m-0" role="alert">{error}</p>}
+      {confirming === 'disable' && (
+        <ConfirmDialog
+          title="Disable public recap sharing?"
+          body="Every existing public recap URL in this campaign will stop working immediately. This cannot be undone."
+          confirmLabel="Disable and revoke all"
+          busy={busy}
+          onCancel={() => setConfirming(null)}
+          onConfirm={() => void setPolicy(false)}
+        />
+      )}
+      {confirming === 'revoke' && (
+        <ConfirmDialog
+          title="Revoke every public recap link?"
+          body="All current public recap URLs in this campaign will stop working. Campaign sharing stays enabled for future links."
+          confirmLabel="Revoke all links"
+          busy={busy}
+          onCancel={() => setConfirming(null)}
+          onConfirm={() => void revokeAll()}
+        />
+      )}
     </div>
   );
 }

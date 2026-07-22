@@ -85,6 +85,8 @@ function parseSnapshot(value: string | null): CountSnapshot | null {
 function typeIcon(type: Notification['type']): string {
   switch (type) {
     case 'recap_posted':
+    case 'recap_share_enabled':
+    case 'recap_share_extended':
       return 'open-book';
     case 'note_reply':
       return 'chat-bubble';

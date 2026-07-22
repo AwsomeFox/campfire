@@ -227,6 +227,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     currentLocationId: row.currentLocationId,
     dangerLevel: row.dangerLevel as Campaign['dangerLevel'],
     dmControlsProgression: row.dmControlsProgression,
+    publicRecapSharingEnabled: row.publicRecapSharingEnabled,
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
@@ -410,6 +411,7 @@ export class CampaignsService {
         currentLocationId: input.currentLocationId ?? null,
         dangerLevel: input.dangerLevel ?? 'low',
         dmControlsProgression: input.dmControlsProgression ?? false,
+        publicRecapSharingEnabled: true,
         sessionCount: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
@@ -541,6 +543,7 @@ export class CampaignsService {
           currentLocationId: null, // remapped below (full mode only)
           dangerLevel: source.dangerLevel,
           dmControlsProgression: source.dmControlsProgression,
+          publicRecapSharingEnabled: source.publicRecapSharingEnabled,
           sessionCount: template ? 0 : source.sessionCount,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // attachments (on-disk files) are not cloned
@@ -956,6 +959,10 @@ export class CampaignsService {
           status: 'active', // imported campaigns start editable even if the source was archived
           currentLocationId: null, // remapped below
           dangerLevel: str(campaignSrc.dangerLevel, 'low'),
+          dmControlsProgression: boolOf(campaignSrc.dmControlsProgression),
+          // Older exports predate the policy field and retain the historical
+          // enabled default. Explicitly disabled campaigns stay disabled.
+          publicRecapSharingEnabled: campaignSrc.publicRecapSharingEnabled !== false,
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids

@@ -90,6 +90,9 @@ describe('campaign import (e2e, real cookie sessions)', () => {
       .post(`/api/v1/campaigns/${campaignId}/notes`)
       .send({ body: 'Quest intel for the party', visibility: 'party_shared', entityType: 'quest', entityId: questId });
 
+    // Policy is portable configuration; capability rows/tokens are not.
+    await dmAgent.put(`/api/v1/campaigns/${campaignId}/session-shares/policy`).send({ enabled: false });
+
     // The export document is the import contract.
     const exportRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
     exportDoc = exportRes.body;
@@ -107,6 +110,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(imported.name).toBe('Source Campaign');
     expect(imported.description).toBe('To be exported and re-imported.');
     expect(imported.status).toBe('active');
+    expect(imported.publicRecapSharingEnabled).toBe(false);
     // Attachments aren't recreated from a JSON export.
     expect(imported.mapAttachmentId).toBeNull();
 
@@ -152,6 +156,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     // Sessions + characters copied.
     const sessions = await dmAgent.get(`/api/v1/campaigns/${imported.id}/sessions`);
     expect(sessions.body.length).toBe(1);
+    expect((await dmAgent.get(`/api/v1/sessions/${sessions.body[0].id}/shares`)).body).toEqual([]);
     const chars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
     expect(chars.body.length).toBe(1);
     expect(chars.body[0].name).toBe('Rogue');
@@ -719,4 +724,3 @@ describe('campaign import — atomic staged commit (issue #725)', () => {
     }
   });
 });
-
