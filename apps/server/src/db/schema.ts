@@ -17,6 +17,7 @@ export const campaigns = sqliteTable('campaigns', {
   // When true, only the DM may award XP / level up characters (issue #270). Added in
   // older DBs via migrateCampaignsTableForDmControlsProgression() — see db/db.module.ts.
   dmControlsProgression: integer('dm_controls_progression', { mode: 'boolean' }).notNull().default(false),
+  publicRecapSharingEnabled: integer('public_recap_sharing_enabled', { mode: 'boolean' }).notNull().default(true),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -288,9 +289,14 @@ export const sessionShares = sqliteTable('session_shares', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   sessionId: integer('session_id').notNull(),
   campaignId: integer('campaign_id').notNull(),
+  label: text('label').notNull().default(''),
   createdBy: text('created_by').notNull().default(''),
   tokenHash: text('token_hash').notNull().unique(),
   tokenPrefix: text('token_prefix').notNull(),
+  expiresAt: text('expires_at'),
+  accessCount: integer('access_count').notNull().default(0),
+  firstAccessedAt: text('first_accessed_at'),
+  lastAccessedAt: text('last_accessed_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

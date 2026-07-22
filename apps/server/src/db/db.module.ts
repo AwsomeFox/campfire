@@ -1279,6 +1279,52 @@ function migrateCampaignMembersTableForUserFk(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #788: privacy metadata and policy for public recap capabilities.
+ * Existing links were created without an explicit "never" decision, so the
+ * upgrade gives them a conservative seven-day sunset. A deliberately never-
+ * expiring link created after the migration is represented by NULL and is not
+ * touched again because this named migration runs only once.
+ */
+function migratePublicRecapSharePolicy(sqlite: Database.Database): void {
+  const cutoff = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const migrate = sqlite.transaction(() => {
+    const hasCampaigns = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'").get();
+    if (hasCampaigns) {
+      const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'public_recap_sharing_enabled')) {
+        sqlite.exec('ALTER TABLE campaigns ADD COLUMN public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1');
+      }
+    }
+
+    const hasShares = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_shares'").get();
+    if (!hasShares) return;
+    const columns = sqlite.prepare('PRAGMA table_info(session_shares)').all() as Array<{ name: string }>;
+    const has = (name: string) => columns.some((column) => column.name === name);
+    const legacyNeedsExpiry = !has('expires_at');
+    if (!has('label')) sqlite.exec("ALTER TABLE session_shares ADD COLUMN label TEXT NOT NULL DEFAULT ''");
+    if (legacyNeedsExpiry) sqlite.exec('ALTER TABLE session_shares ADD COLUMN expires_at TEXT');
+    if (!has('access_count')) sqlite.exec('ALTER TABLE session_shares ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0');
+    if (!has('first_accessed_at')) sqlite.exec('ALTER TABLE session_shares ADD COLUMN first_accessed_at TEXT');
+    if (!has('last_accessed_at')) sqlite.exec('ALTER TABLE session_shares ADD COLUMN last_accessed_at TEXT');
+    if (legacyNeedsExpiry) sqlite.prepare('UPDATE session_shares SET expires_at = ? WHERE expires_at IS NULL').run(cutoff);
+
+    // Pre-#788 rows stored a numeric actor id. Recover a useful member-facing
+    // creator label where the corresponding user still exists; audit rows keep
+    // the immutable actor identity either way.
+    sqlite.exec(`
+      UPDATE session_shares
+      SET created_by = COALESCE(
+        (SELECT NULLIF(users.display_name, '') FROM users WHERE CAST(users.id AS TEXT) = session_shares.created_by),
+        (SELECT users.username FROM users WHERE CAST(users.id AS TEXT) = session_shares.created_by),
+        created_by
+      )
+      WHERE created_by <> '' AND created_by NOT GLOB '*[^0-9]*';
+    `);
+  });
+  migrate();
+}
+
+/**
  * Migration for issue #723 (PWA restore safety): the `server_meta` table didn't
  * exist before install/data-generation identity was tracked. The table itself is
  * a single-row singleton (key='singleton') carrying a per-install UUID and a
@@ -1363,6 +1409,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0049_campaigns_ics_token_expires_at', run: migrateCampaignsTableForIcsTokenExpiresAt },
   { name: '0050_rule_entries_licensing', run: migrateRuleEntriesTableForLicensing },
   { name: '0051_server_meta', run: migrateServerMetaTable },
+  { name: '0052_public_recap_share_policy', run: migratePublicRecapSharePolicy },
 ];
 
 /**
