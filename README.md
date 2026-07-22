@@ -176,6 +176,22 @@ have the server write a fresh archive to `BACKUP_DIR` (default `$DATA_DIR/backup
 `BACKUP_INTERVAL_HOURS` (default 24). These are the same archives the download endpoint
 produces — copy them off-box for real disaster recovery.
 
+`BACKUP_INTERVAL_HOURS` is strictly validated: an unset, empty, non-numeric, zero, negative,
+or `NaN`/`Infinity` value falls back to the documented 24h default rather than silently
+becoming 0/Infinity/negative, and the effective cadence is logged at boot so a misconfiguration
+is visible. The value is clamped to a sane range (min one minute, max 30 days). At boot the
+server also checks that `BACKUP_DIR` exists and is writable, and disables scheduling for that
+boot (with a loud error log) if it isn't — so a misconfigured path fails immediately instead of
+silently swallowing every scheduled write.
+
+The scheduler remembers its cadence across restarts (issue #732): the last attempt, last
+success, projected next run, archive size, and sha256 checksum are persisted under the
+`backup.cadence` key in the `settings` table. On boot, if a scheduled run was missed while the
+server was down (or the scheduler was just enabled), a catch-up backup runs immediately so a
+frequently-restarted container can no longer go forever without a backup. Concurrent scheduled
+runs are suppressed by an in-process overlap guard. A failed attempt records its error without
+claiming a success, so an operator reading the `backup.cadence` row sees the real last-good time.
+
 ### Compose example
 
 No secrets are inlined below — `${VAR:?}` fails the compose run with a clear error if
