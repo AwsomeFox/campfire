@@ -231,13 +231,13 @@ figcaption {
 }
 .input {
   width: 100%; min-height: 36px; padding: 6px 10px; font: inherit;
-  font-size: var(--type-control); color: var(--color-text); caret-color: var(--color-accent);
+  font-size: var(--type-control); line-height: 1.2; color: var(--color-text); caret-color: var(--color-accent);
   background: var(--color-surface);
   border: 1px solid var(--color-divider); border-radius: var(--radius-md);
 }
 .input:hover { border-color: color-mix(in srgb, var(--color-text) 45%, transparent); }
 .input:focus-visible { border-color: var(--color-accent); outline-offset: 0; }
-textarea.input { min-height: 90px; resize: vertical; }
+textarea.input { min-height: 90px; line-height: 1.45; resize: vertical; }
 .radio { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: var(--type-control); }
 .radio input, .seg-opt input {
   position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;
@@ -258,7 +258,7 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 .seg-opt {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 12px; font-size: var(--type-control); cursor: pointer;
+  padding: 7px 12px; font-size: var(--type-control); line-height: 1.2; cursor: pointer;
 }
 /* On a narrow rail (e.g. an NPC's Notes panel at ~1280px) a 4-option segmented
    control can't fit on one row; without wrapping the last option ('🤫 Whisper')
