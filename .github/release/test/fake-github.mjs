@@ -199,8 +199,10 @@ export class FakeGitHub {
       const commit = this.commits.get(match[1]);
       return commit ? response(200, clone(commit)) : response(404, { message: 'Not Found' });
     }
-    if (method === 'GET' && path === '/releases/tags/v0.14.2') {
-      const release = this.releases.find((item) => item.tag_name === 'v0.14.2');
+    match = /^\/releases\/tags\/(.+)$/.exec(path);
+    if (method === 'GET' && match) {
+      const tag = decodeURIComponent(match[1]);
+      const release = this.releases.find((item) => item.tag_name === tag);
       return release ? response(200, clone(release)) : response(404, { message: 'Not Found' });
     }
     if (method === 'GET' && path === '/releases') return response(200, clone(this.releases));

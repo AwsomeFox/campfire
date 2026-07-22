@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { executeRelease, selectPreviousValidRelease } from '../publish-release.mjs';
+import {
+  executeRelease,
+  releaseEnvironment,
+  selectPreviousValidRelease,
+  verifyRequiredChecks,
+} from '../publish-release.mjs';
 import { FakeGitHub, SHAS, testConfig } from './fake-github.mjs';
 
 const repositoryUrl = 'https://github.test/acme/campfire';
@@ -149,10 +154,48 @@ test('missing, failed, or non-GitHub required CI fails closed', async () => {
   );
 });
 
+test('a later required check without timestamps supersedes an earlier attempt', () => {
+  const fake = new FakeGitHub();
+  const checks = fake.successfulChecks();
+  const earlier = checks.find((check) => check.name === 'build-test');
+  delete earlier.completed_at;
+  earlier.conclusion = 'failure';
+  checks.push({
+    name: 'build-test',
+    status: 'completed',
+    conclusion: 'success',
+    app: { slug: 'github-actions' },
+  });
+  assert.doesNotThrow(() => verifyRequiredChecks({ check_runs: checks }, testConfig().requiredChecks));
+});
+
 test('inconsistent package, workspace, runtime, UI, or lock metadata fails closed', async () => {
   const fake = new FakeGitHub();
   fake.files.get(SHAS.release)['apps/web/package.json'].version = '0.14.1';
   await assert.rejects(run(fake), (error) => error.code === 'VERSION_MISMATCH' && error.message.includes('web package/UI'));
+});
+
+test('missing version documents are aggregated as version mismatches', async () => {
+  const fake = new FakeGitHub();
+  delete fake.files.get(SHAS.release)['apps/web/package.json'];
+  await assert.rejects(
+    run(fake),
+    (error) => error.code === 'VERSION_MISMATCH'
+      && error.message.includes('web package/UI=<missing>'),
+  );
+});
+
+test('release environment rejects a missing tag name explicitly', () => {
+  assert.throws(
+    () => releaseEnvironment({ GITHUB_REPOSITORY: 'acme/campfire', GITHUB_TOKEN: 'token' }),
+    (error) => error.code === 'INVALID_ENVIRONMENT' && error.message.includes('GITHUB_REF_NAME'),
+  );
+});
+
+test('the fake release endpoint supports arbitrary encoded release tags', async () => {
+  const fake = new FakeGitHub();
+  fake.releases.push({ tag_name: 'v1.2.3', draft: false });
+  assert.equal((await fake.api().getReleaseByTag('v1.2.3')).tag_name, 'v1.2.3');
 });
 
 test('lightweight release tags are rejected', async () => {

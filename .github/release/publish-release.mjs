@@ -33,7 +33,17 @@ async function resolveTag(api, tag, { requireAnnotated = false } = {}) {
 
 async function readVersionDocuments(api, ref, sources) {
   const paths = [...new Set(sources.map((source) => source.path))];
-  return new Map(await Promise.all(paths.map(async (path) => [path, await api.getJsonFile(path, ref)])));
+  return new Map(await Promise.all(paths.map(async (path) => {
+    try {
+      return [path, await api.getJsonFile(path, ref)];
+    } catch (error) {
+      // Missing metadata is a version-consistency failure, not an opaque API
+      // failure. Keep the undefined document so validation can report every
+      // source that depends on the missing file in one actionable error.
+      if (error instanceof ReleaseError && error.status === 404) return [path, undefined];
+      throw error;
+    }
+  })));
 }
 
 async function validateVersionsAtRef(api, ref, tag, sources) {
@@ -76,8 +86,10 @@ export function verifyRequiredChecks(payload, requiredChecks) {
   for (const run of runs) {
     if (run.app?.slug !== 'github-actions') continue;
     const previous = latest.get(run.name);
-    const currentTime = Date.parse(run.completed_at ?? run.started_at ?? run.created_at ?? 0);
-    const previousTime = Date.parse(previous?.completed_at ?? previous?.started_at ?? previous?.created_at ?? 0);
+    const parsedCurrentTime = Date.parse(run.completed_at ?? run.started_at ?? run.created_at ?? '');
+    const parsedPreviousTime = Date.parse(previous?.completed_at ?? previous?.started_at ?? previous?.created_at ?? '');
+    const currentTime = Number.isNaN(parsedCurrentTime) ? 0 : parsedCurrentTime;
+    const previousTime = Number.isNaN(parsedPreviousTime) ? 0 : parsedPreviousTime;
     if (!previous || currentTime >= previousTime) latest.set(run.name, run);
   }
   const failures = [];
@@ -291,6 +303,15 @@ function repositoryParts(value) {
   return parts;
 }
 
+export function releaseEnvironment(env = process.env) {
+  if (!env.GITHUB_REF_NAME) {
+    throw new ReleaseError('INVALID_ENVIRONMENT', 'GITHUB_REF_NAME is required for release publishing.');
+  }
+  const [owner, repo] = repositoryParts(env.GITHUB_REPOSITORY);
+  if (!env.GITHUB_TOKEN) throw new ReleaseError('INVALID_ENVIRONMENT', 'GITHUB_TOKEN is required.');
+  return { tag: env.GITHUB_REF_NAME, owner, repo, token: env.GITHUB_TOKEN };
+}
+
 async function main() {
   if (process.env.GITHUB_ACTIONS === 'true') {
     if (process.env.GITHUB_EVENT_NAME !== 'push' || process.env.GITHUB_REF_TYPE !== 'tag') {
@@ -298,15 +319,13 @@ async function main() {
     }
   }
   const dryRun = process.argv.includes('--dry-run');
-  const tag = process.env.GITHUB_REF_NAME;
-  const [owner, repo] = repositoryParts(process.env.GITHUB_REPOSITORY);
-  if (!process.env.GITHUB_TOKEN) throw new ReleaseError('INVALID_ENVIRONMENT', 'GITHUB_TOKEN is required.');
+  const { tag, owner, repo, token } = releaseEnvironment();
   const configPath = new URL('./config.json', import.meta.url);
   const config = JSON.parse(await readFile(configPath, 'utf8'));
   const api = new GitHubApi({
     owner,
     repo,
-    token: process.env.GITHUB_TOKEN,
+    token,
     apiUrl: process.env.GITHUB_API_URL,
   });
   const result = await executeRelease({
