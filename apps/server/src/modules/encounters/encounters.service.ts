@@ -1086,7 +1086,8 @@ export class EncountersService {
       patch.hpSet !== undefined ||
       patch.hpTemp !== undefined ||
       patch.deathSaveSuccesses !== undefined ||
-      patch.deathSaveFailures !== undefined;
+      patch.deathSaveFailures !== undefined ||
+      patch.deathSaveRoll !== undefined;
     // A recompute is needed if any HP field changed OR hpMax moved (hpCurrent may
     // need re-clamping to a lowered max, and the death state re-derived).
     const recomputeHp = hpFieldsTouched || hpMaxChanged;
@@ -1140,6 +1141,7 @@ export class EncountersService {
           hpTemp: patch.hpTemp,
           deathSaveSuccesses: patch.deathSaveSuccesses,
           deathSaveFailures: patch.deathSaveFailures,
+          deathSaveRoll: patch.deathSaveRoll,
         });
         if (hpMaxChanged) writeSet.hpMax = effectiveHpMax;
         writeSet.hpCurrent = result.hpCurrent;
@@ -1207,6 +1209,27 @@ export class EncountersService {
       await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'died' });
     } else if ((existing.kind === 'monster' || existing.kind === 'npc') && afterHp <= 0 && beforeHp > 0) {
       await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'dropped to 0 HP' });
+    }
+
+    // A rolled death save (issue #619) — record the roll + its 5e outcome so the combat
+    // log shows the provenance of a sudden two-failure nat 1 or a nat-20 revival. The
+    // death event above already fires if the roll killed or the revival shows as HP gain;
+    // this line adds the roll itself.
+    if (patch.deathSaveRoll !== undefined) {
+      const outcome =
+        afterDeath === 'dead'
+          ? 'failed their last death save'
+          : afterDeath === 'stable'
+            ? 'stabilized'
+            : afterHp > 0
+              ? 'revived at 1 HP'
+              : patch.deathSaveRoll === 20
+                ? 'revived at 1 HP'
+                : 'marked a death save';
+      await this.appendEvent(encounterId, round, 'roll', {
+        target: targetName,
+        detail: `death save d20 ${patch.deathSaveRoll} — ${outcome}`,
+      });
     }
 
     // Conditions actually changed (adding an already-present, or removing an absent one,
