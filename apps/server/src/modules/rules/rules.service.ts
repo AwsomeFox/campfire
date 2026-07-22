@@ -294,12 +294,13 @@ export class RulesService {
    * The section vocabulary each `source` accepts (issue #345). A caller-supplied section
    * that isn't in the chosen source's set is rejected 400 synchronously, before a job is
    * enqueued (acceptance criteria) — the widened `RulePackInstallSection` enum lets a name
-   * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e keeps the
-   * historical 5e-shaped set (it ignores the filter at import but still rejects foreign
-   * names); 'other' rides the Open5e path for back-compat.
+   * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e and SF2e
+   * accept both 5e-shaped section names and native PF2e/SF2e section keys (e.g., 'creatures',
+   * 'equipment'); 'other' rides the Open5e path for back-compat.
    */
   private static readonly SECTIONS_BY_SOURCE: Record<RulePackInstallSource, readonly string[]> = {
     open5e: ALL_OPEN5E_SECTIONS,
+    // PF2e / SF2e accept both 5e-shaped section names and native PF2e/SF2e section keys
     pf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
     sf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
     pf1e: ALL_PF1E_SECTIONS,

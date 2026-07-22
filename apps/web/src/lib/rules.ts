@@ -141,6 +141,7 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     license: 'Archives of Nethys · ORC / OGL',
     blurb: 'Starfinder 2e (remaster/playtest) content from the Archives of Nethys open dataset.',
     mechanics: 'Initiative d20 + Perception · proficiency adds your level · level-based DCs · PF2e-style mechanics & conditions · four degrees of success.',
+    // SF2e accepts the 5e-shaped section names (the importer imports its full set regardless).
     sections: FIVE_E_SECTIONS,
     packSlug: SF2E_PACK_SLUG,
     requiresUrl: SOURCES_REQUIRING_URL.has('sf2e'),

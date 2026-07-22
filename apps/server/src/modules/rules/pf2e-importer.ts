@@ -372,7 +372,12 @@ function sleep(ms: number): Promise<void> {
  * retries with 1s/3s backoff — identical policy to the Open5e importer. A 4xx or a
  * network error that isn't a timeout is not retried.
  */
-async function fetchPageWithRetry(url: string, section: Pf2eSection, logger: Pf2eImportLogger): Promise<Response> {
+async function fetchPageWithRetry(
+  url: string,
+  section: Pf2eSection,
+  logger: Pf2eImportLogger,
+  systemLabel: string = 'PF2e',
+): Promise<Response> {
   let lastErr: Error | null = null;
   let lastRes: Response | null = null;
 
@@ -395,7 +400,7 @@ async function fetchPageWithRetry(url: string, section: Pf2eSection, logger: Pf2
       const backoff = PAGE_RETRY_BACKOFFS_MS[attempt];
       const reason = lastErr ? lastErr.message : `HTTP ${lastRes?.status}`;
       logger.warn(
-        `[pf2e-importer] section "${section}": fetch of ${url} failed (${reason}), retrying in ${backoff}ms (attempt ${attempt + 1}/${PAGE_RETRY_BACKOFFS_MS.length})`,
+        `[${systemLabel.toLowerCase()}-importer] section "${section}": fetch of ${url} failed (${reason}), retrying in ${backoff}ms (attempt ${attempt + 1}/${PAGE_RETRY_BACKOFFS_MS.length})`,
       );
       await sleep(backoff);
     }
@@ -446,7 +451,7 @@ export async function fetchPf2eSection(
     const url = `${base}/${index}/_search?q=${encodeURIComponent(`type:${aonType}`)}&size=${PAGE_SIZE}&from=${from}`;
     let res: Response;
     try {
-      res = await fetchPageWithRetry(url, section, logger);
+      res = await fetchPageWithRetry(url, section, logger, systemLabel);
     } catch (err) {
       throw new BadRequestException(`Failed to fetch ${systemLabel} section "${section}" from ${url}: ${(err as Error).message}`);
     }
