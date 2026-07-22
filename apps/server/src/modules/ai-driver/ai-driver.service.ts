@@ -123,6 +123,34 @@ export interface AiDmSessionState {
   vote: AiDmTableVote | null;
   /** The last player who asked for a human takeover (advisory), or null (#314). */
   takeoverRequestedBy: string | null;
+  /**
+   * Active narrowly-scoped approvals letting the seat read ONE secret entity under the DM
+   * principal (issue #557). Keyed `${tool}:${entityId}`; each entry is single-use (consumed
+   * the first time the matching read runs) so a grant for get_npc:42 can't be replayed to
+   * re-leak the same secret across turns. Defaults to {} on a fresh session (omitted from the
+   * literal so existing snapshots deserialize unchanged).
+   */
+  secretReadApprovals?: Record<string, AiDmSecretReadApproval>;
+}
+
+/**
+ * A DM-granted, narrowly-scoped approval for the autonomous seat to read ONE secret entity
+ * under the DM principal during narration (issue #557). Single-use: consumed the first time
+ * the matching `{tool, entityId}` call runs, and audited both at grant and at use.
+ */
+export interface AiDmSecretReadApproval {
+  /** The read tool the approval covers (must be in DRIVER_APPROVABLE_ENTITY_READS). */
+  tool: string;
+  /** The entity id the approval is scoped to (must match the call's entity-id arg). */
+  entityId: number;
+  /** The DM who granted it (audited). */
+  grantedBy: string;
+  /** ISO timestamp of the grant. */
+  grantedAt: string;
+  /** Short DM note recorded with the grant (audited, surfaces in the review UI). */
+  note: string | null;
+  /** Whether the approval has been consumed by a tool call (a consumed approval is inert). */
+  consumed: boolean;
 }
 
 export interface RunTurnOptions {
@@ -214,6 +242,130 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
 const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
 
 /**
+ * DM-only AGGREGATE read tools — never driveable by the autonomous seat (issue #557). These
+ * surface bulk DM-only material (the audit log, the full export with dmSecret, the DM-only
+ * branching arc/beat planner, the AI-scribe job runner, the DM inbox, the DM-only recap
+ * scaffold) where there is no per-entity "reveal one" path a DM could narrowly approve — a
+ * narrating model with this material in context can only repeat it. They are withheld from
+ * the offered schema AND blocked at execution, mirroring the denylist-by-allow-list posture
+ * of DRIVER_LIVE_PLAY_TOOLS. Per-entity secrets (one hidden NPC, one dmSecret field) take the
+ * narrowly-scoped DM-approval gate below instead — bulk DM material has no safe approve path.
+ *
+ * Distinct from the player-safe read allow-list: those tools are role-checked and redacted by
+ * the tool layer itself, so routing them through the player-scoped contextPrincipal (#387) is
+ * enough. This set is DM-ONLY at the tool layer (requireRole:'dm') regardless of caller, so
+ * no principal swap can make them safe — they must be refused outright.
+ */
+const DRIVER_DM_ONLY_AGGREGATE_TOOLS: ReadonlySet<string> = new Set([
+  'export_campaign', // full canon dump WITH dmSecret fields included
+  'read_audit_log', // DM-only: who did what (may include secret-bearing diffs in detail)
+  'list_arcs', // DM-only: the branching plan of FUTURE beats — never visible to players
+  'get_arc', // DM-only: one such arc with its beats + branches
+  'get_beat', // DM-only: one such beat with its branches
+  'draft_session_recap', // DM-only: raw encounter/inbox source material
+  'run_scribe', // DM-only: triggers a paid AI write that returns filed canon drafts
+  'read_inbox', // DM-only: player inbox items (private messages to the DM)
+]);
+
+/**
+ * Read tools that the driver MAY call autonomously because they carry no DM-only material
+ * under a player-scoped principal: hidden entities 404 and dmSecret is stripped by the tool
+ * layer's own secrecy filters, so the model can only see what every member already sees.
+ * Listed explicitly (not derived) so adding a NEW DM-gated read tool in mcp-tools.ts does NOT
+ * silently become driveable — it falls into the default-deny branch until added here. Rule
+ * compendium lookups (lookup_rule / get_rule_entry / list_rule_packs) are public reference
+ * data and intentionally included. Membership/scheduling/inventory reads carry no canon
+ * secrets either.
+ */
+const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
+  // bootstrap
+  'list_campaigns',
+  'get_campaign_summary', // player-scoped: hidden/dmSecret/redacted by the summary builder
+  'get_session_zero', // member-readable safety charter
+  // quests / npcs / locations / characters / factions (per-entity reads; secrecy-aware)
+  'get_quest',
+  'list_quests',
+  'get_npc',
+  'list_npcs',
+  'get_faction',
+  'list_factions',
+  'get_location',
+  'list_locations',
+  'get_character',
+  'get_party',
+  // sessions / recaps (party-visible history)
+  'get_session_recaps',
+  'get_session',
+  // rules compendium (public reference data, no canon secrecy)
+  'lookup_rule',
+  'list_rule_packs',
+  'get_rule_entry',
+  // encounters / combat (fog/HP bands redacted for non-DM by the tool layer, #256/#43/#40)
+  'get_encounter',
+  'get_encounter_difficulty',
+  'generate_encounter',
+  'list_encounters',
+  // membership / scheduling (no canon secrets)
+  'list_members',
+  'list_scheduled_sessions',
+  'get_next_session',
+  'get_calendar_feed',
+  // notes (visibility already filtered to the caller; a player-scoped seat sees only its own)
+  'list_notes',
+  // attachments (metadata only; hidden dropped for non-DM; bytes never served over MCP)
+  'list_attachments',
+  'get_attachment',
+  // inventory / treasury / timeline / comments (secrecy-aware at the tool layer)
+  'list_inventory',
+  'get_inventory_item',
+  'get_treasury',
+  'list_timeline',
+  'get_timeline_event',
+  'get_calendar',
+  'list_comments',
+  'get_comment',
+  // proposals (self-view for non-DM; the seat files proposals it authored)
+  'list_proposals',
+  // AI DM seat config (instructions redacted for non-DM by getSeatForRole, #261)
+  'get_ai_dm_seat',
+]);
+
+/**
+ * Read tools the DM MAY narrowly approve the seat to call under the DM principal for ONE
+ * entity id (issue #557). These are per-entity reads whose DM-only view (a hidden NPC, a
+ * quest's dmSecret, an unexplored location) the DM may want the model to reason about — e.g.
+ * to name a hidden villain while narrating an NPC's whisper. Each approval is bound to a
+ * single tool + entity id (a "narrow scope"), so a grant for `get_npc:42` cannot be reused
+ * to read `get_quest:7`. Bulk DM tools (export/audit/arcs/…) are NOT approvable here — they
+ * have no per-entity scope and are refused outright by DRIVER_DM_ONLY_AGGREGATE_TOOLS.
+ *
+ * The entity id is matched against the tool's primary entity arg, named per tool below.
+ */
+const DRIVER_APPROVABLE_ENTITY_READS: ReadonlyMap<string, string> = new Map<string, string>([
+  ['get_npc', 'npcId'],
+  ['get_quest', 'questId'],
+  ['get_location', 'locationId'],
+  ['get_character', 'characterId'],
+  ['get_faction', 'factionId'],
+  ['get_session', 'sessionId'],
+  ['get_encounter', 'encounterId'],
+  ['get_timeline_event', 'eventId'],
+  ['get_inventory_item', 'itemId'],
+  ['get_attachment', 'attachmentId'],
+  ['get_comment', 'commentId'],
+]);
+
+/** The entity-id arg name for an approvable entity read, or undefined if the tool isn't one. */
+export function driverApprovableEntityArg(toolName: string): string | undefined {
+  return DRIVER_APPROVABLE_ENTITY_READS.get(toolName);
+}
+
+/** Whether a read tool is one the DM can narrowly approve for ONE entity (issue #557). */
+export function isDriverApprovableEntityRead(toolName: string): boolean {
+  return DRIVER_APPROVABLE_ENTITY_READS.has(toolName);
+}
+
+/**
  * Whether the driver seat is permitted to call `tool` (server-side tool-scoping, #317/#378).
  * Default-deny for writes: reads pass; canon writes (proposal-capable) pass and are forced onto the
  * proposal path; every other direct write must be on the live-play allow-list. Deletes are never
@@ -231,6 +383,33 @@ export function isDriverToolAllowed(tool: Pick<DriverTool, 'name' | 'mutating' |
   if (!tool.mutating) return true; // reads are always allowed (permission-checked in the tool)
   if (tool.proposalCapable) return true; // canon writes → the runtime forces propose:true below
   return DRIVER_LIVE_PLAY_TOOLS.has(tool.name); // direct writes: explicit live-play allow-list only
+}
+
+/**
+ * How a driver READ tool call must be dispatched to honor issue #557 (no DM-scoped secrets in
+ * the model context that feeds public narration). The autonomous turn never lets a read run
+ * under the DM seat principal without an explicit, narrowly-scoped DM approval.
+ *
+ *  - 'player_safe' — the tool carries no DM-only material under a player-scoped principal; run
+ *    it through the contextPrincipal (player scope) so hidden entities 404 and dmSecret strips.
+ *  - 'blocked'     — a bulk DM-only aggregate (export/audit/arcs/scribe/inbox) with no narrow
+ *    approve path; refuse at schema + execution.
+ *  - 'secret'      — a per-entity read whose DM-only view the DM may narrowly approve; run
+ *    under the player principal by default, and under the DM principal ONLY when an approval
+ *    matching {tool, entityId} is on file (issue #557 approval gate).
+ */
+export type DriverReadDisposition = 'player_safe' | 'blocked' | 'secret';
+
+/**
+ * Classify a read tool call for the autonomous seat (issue #557). Mutating tools are not
+ * classified here (they take the existing live-play / proposal path); unknown reads default
+ * to 'blocked' so a future DM-gated read tool can never silently become driveable.
+ */
+export function classifyDriverRead(toolName: string): DriverReadDisposition {
+  if (DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(toolName)) return 'blocked';
+  if (DRIVER_APPROVABLE_ENTITY_READS.has(toolName)) return 'secret';
+  if (DRIVER_PLAYER_SAFE_READ_TOOLS.has(toolName)) return 'player_safe';
+  return 'blocked'; // default-deny: an unclassified read is treated as a secret-bearing DM tool
 }
 
 /**
@@ -322,6 +501,7 @@ export class AiDriverService {
       actingDm: null,
       vote: null,
       takeoverRequestedBy: null,
+      secretReadApprovals: {},
     };
   }
 
@@ -450,14 +630,21 @@ export class AiDriverService {
     const { provider, model: execModel } = execution;
 
     const seatPrincipal = this.seatPrincipal(campaignId);
+    const contextPrincipal = this.contextPrincipal(campaignId);
     const actor = `ai-dm-seat:${campaignId}`;
 
-    const toolset = this.mcpTools.buildToolset(seatPrincipal);
-    // Tool-scoping (#317): only OFFER the model the tools this seat may call — destructive/
-    // admin tools are withheld from the schema. This is a hint only; executeToolCalls still
-    // enforces the same allow-list server-side, so a hallucinated forbidden call never runs.
-    const toolSchemas: AiToolSchema[] = toolset.tools
-      .filter((t) => isDriverToolAllowed(t))
+    // Two tool registries (issue #557): the DM seat principal drives writes + live play + any
+    // DM-approved secret read; the player-scoped contextPrincipal drives every OTHER read so
+    // hidden entities 404 and dmSecret strips at the tool layer. executeToolCalls picks the
+    // registry per call from classifyDriverRead + the on-file approvals.
+    const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
+    const contextToolset = this.mcpTools.buildToolset(contextPrincipal);
+    // Tool-scoping (#317 + #557): only OFFER the model tools this seat may call — destructive/
+    // admin tools AND bulk DM-only aggregate reads (export/audit/arcs/…) are withheld from the
+    // schema. This is a hint only; executeToolCalls still enforces the same allow-lists server-
+    // side, so a hallucinated or injection-induced forbidden call never runs.
+    const toolSchemas: AiToolSchema[] = seatToolset.tools
+      .filter((t) => isDriverToolAllowed(t) && !DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(t.name))
       .map((t) => ({
         name: t.name,
         description: t.description,
@@ -530,7 +717,17 @@ export class AiDriverService {
 
         // Feed the assistant's tool-call turn back, then execute each call and append its result.
         messages.push({ role: 'assistant', content: text || undefined, toolCalls });
-        const { toolErrored } = await this.executeToolCalls(campaignId, actor, triggeredBy, toolset, toolCalls, messages, executed);
+        const { toolErrored } = await this.executeToolCalls(
+          campaignId,
+          session,
+          actor,
+          triggeredBy,
+          seatToolset,
+          contextToolset,
+          toolCalls,
+          messages,
+          executed,
+        );
         if (toolErrored) {
           stopReason = 'tool_error';
           break;
@@ -602,22 +799,27 @@ export class AiDriverService {
 
   /**
    * Execute the model's tool calls under the seat's guardrails and append each result
-   * as a `tool` message for the next step. Enforces: (1) a campaignId guard — a call
-   * naming a different campaign is rejected, not executed; (2) forced `propose:true` on
-   * proposal-capable canon tools; (3) per-call audit. Returns whether any call errored.
+   * as a `tool` message for the next step. Enforces: (1) the secrecy policy (#557) — every
+   * read is dispatched under a player-scoped principal UNLESS the DM filed a narrowly-scoped
+   * approval for that exact {tool, entityId}, and DM-only aggregate reads are refused outright;
+   * (2) a campaignId guard — a call naming a different campaign is rejected, not executed;
+   * (3) forced `propose:true` on proposal-capable canon tools; (4) per-call audit of approved
+   * and blocked secret access. Returns whether any call errored.
    */
   private async executeToolCalls(
     campaignId: number,
+    session: AiDmSessionState,
     actor: string,
     triggeredBy: RequestUser,
-    toolset: DriverToolset,
+    seatToolset: DriverToolset,
+    contextToolset: DriverToolset,
     toolCalls: AiToolCall[],
     messages: AiMessage[],
     executed: AiDmExecutedTool[],
   ): Promise<{ toolErrored: boolean }> {
     let toolErrored = false;
     for (const call of toolCalls) {
-      const tool = toolset.get(call.name);
+      const tool = seatToolset.get(call.name) ?? contextToolset.get(call.name);
 
       // (0) Tool-scoping (#317/#378): the seat physically cannot call destructive/admin/economy
       // tools, regardless of what the (untrusted-input-driven) model asked for. Default-deny at
@@ -662,7 +864,56 @@ export class AiDriverService {
         continue;
       }
 
-      // (2) Guardrail (#377): canon writes can NEVER be made directly by the seat — force EVERY
+      // (2) Secrecy policy (#557): pick the principal this read runs under. Writes always run
+      // under the DM seat principal (their write authority is bound to this campaign); reads
+      // run under the player-scoped contextPrincipal by default, so hidden entities 404 and
+      // dmSecret strips at the tool layer. A per-entity read may be elevated to the DM principal
+      // ONLY when a narrowly-scoped, unconsumed approval {tool, entityId} is on file. Bulk DM
+      // aggregate reads (export/audit/arcs/…) have no narrow approve path and are refused.
+      let useSeatPrincipal = !tool || tool.mutating;
+      let approvedSecret: AiDmSecretReadApproval | null = null;
+      if (tool && !tool.mutating) {
+        const disposition = classifyDriverRead(call.name);
+        if (disposition === 'blocked') {
+          // Refused at EXECUTION (not merely by withholding the schema) so a hallucinated or
+          // injection-induced call to a bulk DM read never retrieves secret material.
+          const text = JSON.stringify({
+            error: {
+              status: 403,
+              code: 'forbidden_secret_read',
+              message: `${call.name} exposes DM-only material and is not available to the autonomous AI DM seat.`,
+            },
+          });
+          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+          this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
+          executed.push({ name: call.name, isError: true, proposed: false });
+          this.logger.warn(`Blocked secret-bearing read ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
+          await this.audit.log({
+            actor,
+            actorRole: 'dm',
+            action: 'ai-dm.driver.secret.blocked',
+            entityType: 'ai-dm',
+            campaignId,
+            detail: `blocked secret-bearing read ${call.name} (triggered by ${triggeredBy.id})`,
+          });
+          toolErrored = true;
+          continue;
+        }
+        if (disposition === 'secret') {
+          // A per-entity secret read: only run under the DM principal if the DM filed an
+          // unconsumed approval for THIS entity id. Otherwise run under the player principal
+          // (the entity will 404 if hidden, or return redacted if merely dmSecret-bearing).
+          const argName = driverApprovableEntityArg(call.name);
+          const entityId = argName && typeof args[argName] === 'number' ? (args[argName] as number) : null;
+          const approval = entityId !== null ? this.findApproval(session, call.name, entityId) : null;
+          if (approval) {
+            approvedSecret = approval;
+            useSeatPrincipal = true;
+          }
+        }
+      }
+
+      // (3) Guardrail (#377): canon writes can NEVER be made directly by the seat — force EVERY
       // proposal-capable tool onto the proposal path, ignoring any model-supplied `propose` value.
       // The old `args.propose === undefined` guard let a prompt-injected model emit `propose:false`
       // to overwrite campaign canon with no DM review; coercing unconditionally closes that.
@@ -670,19 +921,49 @@ export class AiDriverService {
       if (canPropose) args.propose = true;
       const proposed = canPropose;
 
+      const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
-      messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: res.text });
+
+      // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,
+      // so a grant for get_npc:42 can't be replayed to re-leak the same secret across turns.
+      if (approvedSecret) {
+        approvedSecret.consumed = true;
+        await this.audit.log({
+          actor,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.secret.approved',
+          entityType: 'ai-dm',
+          campaignId,
+          detail: `approved secret read ${call.name}#${approvedSecret.entityId} granted by ${approvedSecret.grantedBy}${res.isError ? ' [error]' : ''} (triggered by ${triggeredBy.id})`,
+        });
+      }
+
+      // (5) #557 — defense-in-depth redaction of any dmSecret field from a read result before
+      // it re-enters the message history the provider persists. The player-scoped principal is
+      // the real defense (a read routed through it never receives a secret in the first place);
+      // this catches a stray dmSecret that slipped through (e.g. a nested entity in a larger
+      // payload, or a future read tool that fails to honor the role filter). It does NOT apply
+      // to a DM-APPROVED secret read: the approval is the explicit DM consent for the model to
+      // see that one secret so it can reason about it (e.g. to name a hidden villain) — stripping
+      // it would defeat the entire purpose of the approval gate. The narration-side defense for
+      // an approved read is the DM_APPROVED_SECRET_REMINDER tagged onto its result below.
+      const cleanedText = tool && !tool.mutating && !approvedSecret ? redactSecretsFromToolResult(res.text) : res.text;
+      // When a DM-approved secret read returned real DM material, prepend a system reminder so
+      // the model treats it as private reasoning and does not narrate it to the table.
+      const content =
+        approvedSecret && !res.isError ? `${cleanedText}\n\n${DM_APPROVED_SECRET_REMINDER}` : cleanedText;
+      messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content });
       this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: res.isError, proposed });
       executed.push({ name: call.name, isError: res.isError, proposed });
 
-      // (3) Audit every tool call the AI made (actor = the seat, records the triggering user).
+      // (6) Audit every tool call the AI made (actor = the seat, records the triggering user).
       await this.audit.log({
         actor,
         actorRole: 'dm',
         action: 'ai-dm.driver.tool',
         entityType: 'ai-dm',
         campaignId,
-        detail: `${call.name}${proposed ? ' (proposed)' : ''}${res.isError ? ' [error]' : ''} by ${triggeredBy.id}`,
+        detail: `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''} by ${triggeredBy.id}`,
       });
 
       if (res.isError) toolErrored = true;
@@ -756,6 +1037,107 @@ export class AiDriverService {
         // Levers are available in healthy play too (flag a ruling, call a vote, etc.).
         return ['nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
     }
+  }
+
+  // ===================================================================================
+  // Secret-read approval gate (#557): a DM files a narrowly-scoped, single-use approval
+  // letting the autonomous seat read ONE secret entity under the DM principal. Mirrors the
+  // in-memory, per-campaign pattern of the table vote (#382); not a persisted review queue
+  // (a one-shot narrate-time read is not the same lifecycle as a canon proposal).
+  // ===================================================================================
+
+  /** The active (unconsumed) secret-read approvals for a campaign (issue #557). */
+  listSecretReadApprovals(campaignId: number): AiDmSecretReadApproval[] {
+    const session = this.ensureSession(campaignId);
+    const all = Object.values(session.secretReadApprovals ?? {});
+    return all.filter((a) => !a.consumed);
+  }
+
+  /**
+   * Grant a narrowly-scoped approval for the seat to read ONE secret entity under the DM
+   * principal (issue #557). DM only. The approval is single-use: consumed the first time the
+   * matching {tool, entityId} call runs, so a grant for get_npc:42 can't be replayed. Bulk DM
+   * aggregate reads (export/audit/arcs/…) are NOT approvable here.
+   */
+  async grantSecretReadApproval(
+    campaignId: number,
+    granter: RequestUser,
+    tool: string,
+    entityId: number,
+    note?: string,
+    role: Role = 'dm',
+  ): Promise<AiDmSecretReadApproval> {
+    if (!isDriverApprovableEntityRead(tool)) {
+      throw new BadRequestException(
+        `${tool} is not a per-entity read the DM can approve for the AI DM seat. Approvable tools: ${[...DRIVER_APPROVABLE_ENTITY_READS.keys()].join(', ')}.`,
+      );
+    }
+    if (!Number.isInteger(entityId) || entityId <= 0) {
+      throw new BadRequestException('entityId must be a positive integer.');
+    }
+    if (role !== 'dm') {
+      throw new ForbiddenException('Only a DM may grant the AI DM seat narrowly-scoped secret reads.');
+    }
+    const session = this.ensureSession(campaignId);
+    session.secretReadApprovals = session.secretReadApprovals ?? {};
+    const key = approvalKey(tool, entityId);
+    // Replace any prior approval for the same {tool, entityId} (the new one is unconsumed).
+    const approval: AiDmSecretReadApproval = {
+      tool,
+      entityId,
+      grantedBy: granter.id,
+      grantedAt: nowIso(),
+      note: note ?? null,
+      consumed: false,
+    };
+    session.secretReadApprovals[key] = approval;
+    await this.audit.log({
+      actor: auditActor(granter),
+      actorRole: role,
+      action: 'ai-dm.driver.secret.grant',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `granted secret-read ${tool}#${entityId} by ${granter.id}${note ? ` — ${excerpt(note, 160)}` : ''}`,
+    });
+    this.stream.emit({ type: 'secret-approval', campaignId, action: 'granted', tool, entityId });
+    return approval;
+  }
+
+  /** Revoke an unconsumed secret-read approval (issue #557). DM only; idempotent. */
+  async revokeSecretReadApproval(
+    campaignId: number,
+    granter: RequestUser,
+    tool: string,
+    entityId: number,
+    role: Role = 'dm',
+  ): Promise<AiDmSessionState> {
+    if (role !== 'dm') {
+      throw new ForbiddenException('Only a DM may revoke AI DM seat secret-read approvals.');
+    }
+    const session = this.ensureSession(campaignId);
+    const key = approvalKey(tool, entityId);
+    const approvals = session.secretReadApprovals ?? {};
+    if (approvals[key] && !approvals[key].consumed) {
+      delete approvals[key];
+      await this.audit.log({
+        actor: auditActor(granter),
+        actorRole: role,
+        action: 'ai-dm.driver.secret.revoke',
+        entityType: 'ai-dm',
+        campaignId,
+        detail: `revoked secret-read ${tool}#${entityId} by ${granter.id}`,
+      });
+      this.stream.emit({ type: 'secret-approval', campaignId, action: 'revoked', tool, entityId });
+    }
+    return session;
+  }
+
+  /** Look up an unconsumed approval for {tool, entityId}, or null (issue #557). */
+  private findApproval(session: AiDmSessionState, tool: string, entityId: number): AiDmSecretReadApproval | null {
+    const approvals = session.secretReadApprovals ?? {};
+    const key = approvalKey(tool, entityId);
+    const a = approvals[key];
+    return a && !a.consumed ? a : null;
   }
 
   /**
@@ -1140,8 +1522,95 @@ async function safeRead(toolset: DriverToolset, name: string, args: Record<strin
   }
 }
 
+/**
+ * Defense-in-depth redaction of a read tool result before it reaches the external provider
+ * (issue #557). The player-scoped principal is the real defense (a tool call routed through
+ * it never receives a secret in the first place), but the model still receives the result as
+ * a `tool` message in its message history, which the provider persists off-server. Belt-and-
+ * braces: scrub any `dmSecret` field that slipped through (e.g. a future read tool that fails
+ * to honor the role filter, or a nested entity embedded in a larger payload). Operates on the
+ * parsed JSON when the result is a single JSON object/array; otherwise returns the text
+ * untouched (errors and non-JSON tool results are passed through verbatim — they are shaped
+ * by the MCP layer to contain no entity material).
+ *
+ * Returns the (possibly rewritten) tool-result text. Never throws: a malformed payload is
+ * passed through unchanged rather than aborting the turn.
+ */
+export function redactSecretsFromToolResult(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  // An error result is `{"error":{...}}` — never carries entity material — pass through.
+  if (text.startsWith('{"error"')) return text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text; // non-JSON tool result (free-form text) — leave as-is.
+  }
+  const cleaned = scrubDmSecret(parsed);
+  // Only re-serialize if a scrub actually changed something (preserve byte-exact results otherwise).
+  return cleaned === parsed ? text : JSON.stringify(cleaned);
+}
+
+/**
+ * Recursively blank out every `dmSecret` field in `value` (issue #557). Returns the SAME
+ * reference when nothing matched so the caller can skip a no-op re-serialization. The
+ * replacement is `dmSecret:""` (the canonical "stripped" shape the redact helper uses) so a
+ * downstream consumer that reads the field still sees a string, not a missing key.
+ */
+function scrubDmSecret(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((v) => {
+      const s = scrubDmSecret(v);
+      if (s !== v) changed = true;
+      return s;
+    });
+    return changed ? next : value;
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    let changed = false;
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === 'dmSecret') {
+        if (v !== '' && v !== undefined) {
+          next[k] = '';
+          changed = true;
+        } else {
+          next[k] = v;
+        }
+      } else {
+        const s = scrubDmSecret(v);
+        if (s !== v) changed = true;
+        next[k] = s;
+      }
+    }
+    return changed ? next : value;
+  }
+  return value;
+}
+
+/**
+ * The system-reminder text prepended to a tool result that was served under a narrowly-
+ * scoped DM approval (issue #557). It tells the model the material is DM-only and must NOT
+ * enter narration the table sees — the player-scoped principal already keeps unapproved
+ * secrets out of context, but when the DM has explicitly approved ONE secret read the model
+ * is handed real DM material, so the only remaining defense against it surfacing in the
+ * streamed narration is the prompt itself (plus the player-visible redaction below).
+ */
+const DM_APPROVED_SECRET_REMINDER =
+  '[SYSTEM: The tool result above contains DM-ONLY material you were granted narrowly-scoped ' +
+  'permission to read. It is for your private reasoning ONLY. Do NOT quote, paraphrase, name, ' +
+  'or allude to it in the narration you stream to the table. Reveal only what an in-world ' +
+  'character at the table could already observe.]';
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+/** Stable key for a per-entity secret-read approval (issue #557). */
+function approvalKey(tool: string, entityId: number): string {
+  return `${tool}:${entityId}`;
 }
 
 /**
