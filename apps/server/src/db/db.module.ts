@@ -1485,6 +1485,9 @@ function migrateOAuthAccessTokensForAtomicRotation(sqlite: Database.Database): v
     sqlite.exec('CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id)');
   });
   migrate();
+}
+
+/**
  * Issue #877: create the participant-owned access-support table. This is a new
  * table rather than columns on the shared session_zero row so ownership,
  * per-participant deletion, human visibility, and AI consent remain independent.
