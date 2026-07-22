@@ -237,14 +237,18 @@ export default function PlayerDisplayPage() {
   }, []);
 
   useEffect(() => {
-    function handleFullscreenError() {
+    const handleFullscreenError = () => {
       setFullscreenSupported(fullscreenAvailable());
-      setFullscreenNotice({
-        kind: 'error',
-        message:
-          'Fullscreen failed. Keep this tab active, allow fullscreen for this site, and try again. You can also use the browser presentation controls.',
-      });
-    }
+      setFullscreenNotice((prev) =>
+        prev?.kind === 'error'
+          ? prev
+          : {
+              kind: 'error',
+              message:
+                'Fullscreen failed. Keep this tab active, allow fullscreen for this site, and try again. You can also use the browser presentation controls.',
+            },
+      );
+    };
 
     document.addEventListener('fullscreenchange', syncFullscreen);
     document.addEventListener('fullscreenerror', handleFullscreenError);
@@ -396,7 +400,7 @@ export default function PlayerDisplayPage() {
             aria-describedby={displayedFullscreenNotice ? 'cf-screen-fullscreen-notice' : undefined}
             title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
           >
-            ⛶ {isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            <span aria-hidden="true">⛶</span> {isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
           </button>
         </div>
         {displayedFullscreenNotice && (

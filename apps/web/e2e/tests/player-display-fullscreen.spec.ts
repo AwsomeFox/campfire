@@ -96,7 +96,7 @@ test.describe('Player Display fullscreen', () => {
     const fullscreen = await openPlayerDisplay(page, 'unsupported');
 
     await expect(fullscreen).toBeDisabled();
-    await expect(fullscreen).toHaveAccessibleName('⛶ Enter fullscreen');
+    await expect(fullscreen).toHaveAccessibleName('Enter fullscreen');
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'false');
     await expect(fullscreen).toHaveAttribute('aria-busy', 'false');
     await expect(fullscreenNotice(page)).toHaveAttribute('role', 'status');
@@ -126,13 +126,13 @@ test.describe('Player Display fullscreen', () => {
 
     await fullscreen.focus();
     await page.keyboard.press('Enter');
-    await expect(fullscreen).toHaveAccessibleName('⛶ Exit fullscreen');
+    await expect(fullscreen).toHaveAccessibleName('Exit fullscreen');
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
     await expect(fullscreen).toHaveAttribute('aria-busy', 'false');
 
     await fullscreen.focus();
     await page.keyboard.press('Enter');
-    await expect(fullscreen).toHaveAccessibleName('⛶ Enter fullscreen');
+    await expect(fullscreen).toHaveAccessibleName('Enter fullscreen');
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'false');
     await expect(fullscreenNotice(page)).toHaveAttribute('role', 'status');
     await expect(fullscreenNotice(page)).toContainText(/fullscreen ended.*enter fullscreen/i);
@@ -161,7 +161,7 @@ test.describe('Player Display fullscreen', () => {
     await fullscreen.click();
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
     await page.keyboard.press('Escape');
-    await expect(fullscreen).toHaveAccessibleName('⛶ Enter fullscreen');
+    await expect(fullscreen).toHaveAccessibleName('Enter fullscreen');
     await expect(fullscreenNotice(page)).toContainText(/fullscreen ended/i);
 
     await fullscreen.click();
@@ -170,7 +170,7 @@ test.describe('Player Display fullscreen', () => {
       (window as typeof window & { __fullscreenTest: { exitExternally: () => void } }).__fullscreenTest.exitExternally();
     });
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'false');
-    await expect(fullscreen).toHaveAccessibleName('⛶ Enter fullscreen');
+    await expect(fullscreen).toHaveAccessibleName('Enter fullscreen');
   });
 
   test('handles a request API error without lying about state', async ({ page }) => {
@@ -186,7 +186,7 @@ test.describe('Player Display fullscreen', () => {
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
 
     await fullscreen.click();
-    await expect(fullscreen).toHaveAccessibleName('⛶ Exit fullscreen');
+    await expect(fullscreen).toHaveAccessibleName('Exit fullscreen');
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
     await expect(fullscreenNotice(page)).toContainText(/couldn't exit.*press escape.*try the control again/i);
   });
@@ -202,7 +202,7 @@ test.describe('Player Display fullscreen', () => {
     const fullscreen = await openPlayerDisplay(page);
 
     await fullscreen.tap();
-    await expect(fullscreen).toHaveAccessibleName('⛶ Exit fullscreen');
+    await expect(fullscreen).toHaveAccessibleName('Exit fullscreen');
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
     await expect(fullscreen).toBeInViewport();
 
