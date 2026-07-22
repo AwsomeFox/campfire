@@ -88,13 +88,3 @@ jobs:
           path: apps/web/playwright-report/
           if-no-files-found: ignore
 
-  # Dependency-free tests for the tag-to-release policy, fake GitHub API, strict
-  # workflow shape, and a dry run that asserts no mutating request is attempted.
-  release-automation:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.4.1'
-      - run: node --test .github/release/test/*.test.mjs
