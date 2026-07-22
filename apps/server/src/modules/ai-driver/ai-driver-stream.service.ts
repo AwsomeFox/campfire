@@ -41,7 +41,11 @@ export type AiDmStreamEvent =
   | { type: 'recovered'; campaignId: number; state: string; at: string }
   | { type: 'state'; campaignId: number; state: string; at: string }
   | { type: 'vote'; campaignId: number; action: string; kind: string; outcome?: string; at: string }
-  | { type: 'takeover'; campaignId: number; action: string; memberId: string; at: string };
+  | { type: 'takeover'; campaignId: number; action: string; memberId: string; at: string }
+  // #557 — a DM granted or revoked a narrowly-scoped secret-read approval (the seat may now
+  // read ONE secret entity under the DM principal). Thin signal: clients refetch GET
+  // /ai-dm/session for the authoritative approval list.
+  | { type: 'secret-approval'; campaignId: number; action: 'granted' | 'revoked'; tool: string; entityId: number; at: string };
 
 /**
  * In-process pub/sub for the AI DM driver's narration stream (#312), modelled on the
