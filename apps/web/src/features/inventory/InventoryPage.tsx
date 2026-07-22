@@ -265,6 +265,13 @@ function TreasuryCard({
   const [values, setValues] = useState<Record<CoinKey, string>>({ pp: '', gp: '', ep: '', sp: '', cp: '' });
   // The row version the edit form snapshotted from — sent as the CAS token on save.
   const [editBaseUpdatedAt, setEditBaseUpdatedAt] = useState<string | null>(null);
+  // The coin BALANCES the editor snapshotted at open (issue #582 review). The DM's
+  // "changed denominations" must be computed against THIS snapshot — NOT the live
+  // `treasury` prop, which SSE refreshes on every other-player write. Diffing against
+  // the live prop would include coins another player changed (and the DM never
+  // touched), reintroducing the exact overwrite risk this PR closes. After a 409,
+  // editBase is advanced to the server's fresh values so a reapply diffs against THOSE.
+  const [editBase, setEditBase] = useState<Record<CoinKey, number>>({ pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A 409 conflict: the server's current values. While present, the form shows the
@@ -277,6 +284,8 @@ function TreasuryCard({
   const stale = editing && remoteEpoch !== openedAtEpoch && !conflict;
 
   function startEdit() {
+    const base: Record<CoinKey, number> = { pp: treasury.pp, gp: treasury.gp, ep: treasury.ep, sp: treasury.sp, cp: treasury.cp };
+    setEditBase(base);
     setValues({
       pp: String(treasury.pp),
       gp: String(treasury.gp),
@@ -302,10 +311,12 @@ function TreasuryCard({
     return out;
   }
 
-  // Build the CHANGED-only set against the base the DM is diffing from, so we
+  // Build the CHANGED-only set against the snapshot the DM is diffing from, so we
   // don't resubmit untouched denominations (a stale form restoring gp another
-  // player just spent was the original bug). The base is treasury-at-open for a
-  // fresh save, or the server's fresh values after a 409 reapply.
+  // player just spent was the original bug). The base is `editBase` — the balances
+  // the editor opened against (or, after a 409, the server's fresh values) — NEVER
+  // the live `treasury` prop, which SSE refreshes on other-player writes and would
+  // contaminate the changed-coin set with coins the DM never touched.
   function buildSet(base: Record<CoinKey, number>, intended: Record<CoinKey, number>): Partial<Record<CoinKey, number>> {
     const set: Partial<Record<CoinKey, number>> = {};
     for (const { key } of COINS) {
@@ -320,14 +331,12 @@ function TreasuryCard({
     setError(null);
     try {
       const intended = parseIntended();
-      // The values the DM is diffing against. On a fresh save that's the snapshot
-      // the form opened on; on a 409-reapply pass it's the server's fresh values
-      // (so only genuinely-changed denominations are re-sent, pinned to the fresh
-      // row version held in editBaseUpdatedAt).
-      const base: Record<CoinKey, number> = conflict
-        ? { pp: conflict.pp, gp: conflict.gp, ep: conflict.ep, sp: conflict.sp, cp: conflict.cp }
-        : { pp: treasury.pp, gp: treasury.gp, ep: treasury.ep, sp: treasury.sp, cp: treasury.cp };
-      const set = buildSet(base, intended);
+      // Diff against the stable snapshot the DM opened against (editBase) — not the
+      // live treasury prop, which may have moved under them via SSE. Only the coins
+      // the DM ACTUALLY edited go in the { set } patch; on a 409-reapply, editBase
+      // was advanced to the server's fresh values so only genuinely-edited coins are
+      // re-sent, pinned to the fresh row version.
+      const set = buildSet(editBase, intended);
       if (Object.keys(set).length === 0) {
         // Nothing changed — close the editor without a round-trip.
         setConflict(null);
@@ -343,15 +352,19 @@ function TreasuryCard({
       setEditing(false);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        // Stale base: the server's current values come back in the body. Show them
-        // next to the DM's intended change and offer to reapply against fresh values.
-        const fresh = (err as ApiError & { current?: Treasury }).current;
-        if (fresh) {
+        // Stale base: ApiError does NOT carry the server's fresh values (only
+        // status/message/code/fieldErrors), so fetch them, then show the diff and
+        // offer reapply. editBase advances to the fresh values so a reapply diffs
+        // against THOSE (and only the DM's truly-edited coins are re-sent).
+        try {
+          const fresh = await api.get<Treasury>(`${API}/campaigns/${campaignId}/treasury`);
           setConflict(fresh);
-          // Advance the CAS base so a reapply pins the fresh row version.
+          setEditBase({ pp: fresh.pp, gp: fresh.gp, ep: fresh.ep, sp: fresh.sp, cp: fresh.cp });
           setEditBaseUpdatedAt(fresh.updatedAt);
           setOpenedAtEpoch(remoteEpoch); // fresh values are current as of now
           return;
+        } catch {
+          // The follow-up GET itself failed — fall through to the generic error.
         }
       }
       setError(err instanceof ApiError ? err.message : "Couldn't update the treasury.");
@@ -415,12 +428,16 @@ function TreasuryCard({
                 {COINS.map(({ key, label }) => {
                   const fresh = conflict[key];
                   const intent = parseIntended()[key];
-                  const changed = fresh !== intent;
+                  // Only show the reapply arrow for a coin the DM ACTUALLY edited
+                  // (intent differs from the snapshot they opened against). Arrows
+                  // for every fresh !== intent would falsely suggest the DM meant
+                  // to overwrite other players' changes on coins they never touched.
+                  const dmEdited = intent !== editBase[key];
                   return (
                     <div key={key} className="text-center">
                       <p className="text-[10px] text-slate-500 uppercase">{label}</p>
                       <p className="text-white font-bold">{fresh}</p>
-                      {changed && <p className="text-[11px] text-amber-400">→ {intent}</p>}
+                      {dmEdited && intent !== fresh && <p className="text-[11px] text-amber-400">→ {intent}</p>}
                     </div>
                   );
                 })}
