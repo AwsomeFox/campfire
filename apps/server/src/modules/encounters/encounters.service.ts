@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
@@ -353,47 +354,99 @@ export class EncountersService {
     const encounterRow = await this.getRowOrThrow(encounterId);
 
     const set: Partial<typeof encounters.$inferInsert> = {};
-    if (input.name !== undefined) set.name = input.name;
+    const changedPredicates: SQL[] = [];
+    if (input.name !== undefined && input.name !== encounterRow.name) {
+      set.name = input.name;
+      changedPredicates.push(sql`${encounters.name} IS NOT ${input.name}`);
+    }
     if (input.locationId !== undefined) {
       if (input.locationId !== null) await this.assertEntityInCampaign('location', input.locationId, encounterRow.campaignId);
-      set.locationId = input.locationId;
+      if (input.locationId !== encounterRow.locationId) {
+        set.locationId = input.locationId;
+        changedPredicates.push(sql`${encounters.locationId} IS NOT ${input.locationId}`);
+      }
     }
     if (input.questId !== undefined) {
       if (input.questId !== null) await this.assertEntityInCampaign('quest', input.questId, encounterRow.campaignId);
-      set.questId = input.questId;
+      if (input.questId !== encounterRow.questId) {
+        set.questId = input.questId;
+        changedPredicates.push(sql`${encounters.questId} IS NOT ${input.questId}`);
+      }
     }
     if (input.sessionId !== undefined) {
       if (input.sessionId !== null) await this.assertEntityInCampaign('session', input.sessionId, encounterRow.campaignId);
-      set.sessionId = input.sessionId;
+      if (input.sessionId !== encounterRow.sessionId) {
+        set.sessionId = input.sessionId;
+        changedPredicates.push(sql`${encounters.sessionId} IS NOT ${input.sessionId}`);
+      }
     }
     if (input.mapAttachmentId !== undefined) {
       // Do NOT flip the attachment to hidden=false here (issue #259). A battle map must stay
       // hidden as a handout so it isn't exposed raw on the player Handouts card; the fogged
       // canvas still gets it via the file route's encounter-map exception.
       await this.validateAttachmentRef(input.mapAttachmentId, encounterRow.campaignId);
-      set.mapAttachmentId = input.mapAttachmentId;
+      if (input.mapAttachmentId !== encounterRow.mapAttachmentId) {
+        set.mapAttachmentId = input.mapAttachmentId;
+        changedPredicates.push(sql`${encounters.mapAttachmentId} IS NOT ${input.mapAttachmentId}`);
+      }
     }
     // VTT grid config (issue #40, phase 2). Each field is independently settable/clearable.
-    if (input.gridSize !== undefined) set.gridSize = input.gridSize;
-    if (input.gridScale !== undefined) set.gridScale = input.gridScale;
-    if (input.gridUnit !== undefined) set.gridUnit = input.gridUnit;
-    if (input.gridSnap !== undefined) set.gridSnap = input.gridSnap;
-    if (input.gridType !== undefined) set.gridType = input.gridType;
+    if (input.gridSize !== undefined && input.gridSize !== encounterRow.gridSize) {
+      set.gridSize = input.gridSize;
+      changedPredicates.push(sql`${encounters.gridSize} IS NOT ${input.gridSize}`);
+    }
+    if (input.gridScale !== undefined && input.gridScale !== encounterRow.gridScale) {
+      set.gridScale = input.gridScale;
+      changedPredicates.push(sql`${encounters.gridScale} IS NOT ${input.gridScale}`);
+    }
+    if (input.gridUnit !== undefined && input.gridUnit !== encounterRow.gridUnit) {
+      set.gridUnit = input.gridUnit;
+      changedPredicates.push(sql`${encounters.gridUnit} IS NOT ${input.gridUnit}`);
+    }
+    if (input.gridSnap !== undefined && input.gridSnap !== encounterRow.gridSnap) {
+      set.gridSnap = input.gridSnap;
+      changedPredicates.push(sql`${encounters.gridSnap} IS NOT ${input.gridSnap ? 1 : 0}`);
+    }
+    if (input.gridType !== undefined && input.gridType !== (encounterRow.gridType ?? 'square')) {
+      set.gridType = input.gridType;
+      changedPredicates.push(sql`${encounters.gridType} IS NOT ${input.gridType}`);
+    }
     // Fog of war (issue #40, phase 3). Stored as JSON text; null clears it entirely.
-    if (input.fog !== undefined) set.fog = input.fog === null ? null : toJsonText(input.fog);
+    if (input.fog !== undefined && !isDeepStrictEqual(input.fog, parseFog(encounterRow.fog))) {
+      const fog = input.fog === null ? null : toJsonText(input.fog);
+      set.fog = fog;
+      changedPredicates.push(sql`${encounters.fog} IS NOT ${fog}`);
+    }
     // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
-    if (input.aoe !== undefined) set.aoe = toJsonText(input.aoe);
+    if (input.aoe !== undefined && !isDeepStrictEqual(input.aoe, parseAoe(encounterRow.aoe))) {
+      const aoe = toJsonText(input.aoe);
+      set.aoe = aoe;
+      changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
+    }
     // Entity-level secrecy (issue #262) — DM-only (this whole endpoint requires dm). true
     // hides the encounter's roster + difficulty from non-DM reads; the DM reveals by
     // patching hidden back to false.
-    if (input.hidden !== undefined) set.hidden = input.hidden;
+    if (input.hidden !== undefined && input.hidden !== encounterRow.hidden) {
+      set.hidden = input.hidden;
+      changedPredicates.push(sql`${encounters.hidden} IS NOT ${input.hidden ? 1 : 0}`);
+    }
 
-    if (Object.keys(set).length === 0) {
+    if (changedPredicates.length === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
     }
 
     set.updatedAt = nowIso();
-    await this.db.update(encounters).set(set).where(eq(encounters.id, encounterId));
+    // The null-safe predicates make the semantic no-op check atomic. Two clients may both
+    // observe missing defaults, but after the first write the second UPDATE changes zero rows
+    // and therefore produces no duplicate audit entry or SSE invalidation (#865).
+    const result = await this.db
+      .update(encounters)
+      .set(set)
+      .where(and(eq(encounters.id, encounterId), or(...changedPredicates)));
+    const rowsChanged = (result as unknown as { changes?: number }).changes ?? 0;
+    if (rowsChanged === 0) {
+      return this.getWithCombatantsOrThrow(encounterId, role);
+    }
 
     await this.audit.log({
       actor: auditActor(user),
