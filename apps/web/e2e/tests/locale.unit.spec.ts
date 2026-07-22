@@ -49,10 +49,15 @@ test.describe('locale preference resolution', () => {
 
   test('explicit English is persisted and used for both catalog and formatting', () => {
     const storage = new MemoryStorage();
-    const controller = new LocaleController(environment(storage, () => 'de-DE'));
+    let browserReads = 0;
+    const controller = new LocaleController(environment(storage, () => {
+      browserReads += 1;
+      return 'de-DE';
+    }));
 
     expect(controller.setPreference('en')).toBe(true);
     expect(controller.resolved).toEqual({ preference: 'en', catalogLocale: 'en', formatLocale: 'en' });
+    expect(browserReads).toBe(0);
     expect(storage.getItem(LANG_STORAGE_KEY)).toBe(serializeLocalePreference('en'));
 
     const reloaded = new LocaleController(environment(storage, () => 'ar-EG'));
@@ -95,6 +100,19 @@ test.describe('locale preference resolution', () => {
     expect(controller.preference).toBe(SYSTEM_LOCALE);
     expect(controller.resolved.formatLocale).toBe('fr-FR');
     expect(format.formatNumber(1_234.5)).toBe('1\u202f234,5');
+  });
+
+  test('browser locale changes do not notify explicit-language consumers', () => {
+    const storage = new MemoryStorage();
+    const controller = new LocaleController(environment(storage, () => 'fr-FR'));
+    controller.setPreference('en');
+    let notifications = 0;
+    controller.subscribe(() => notifications += 1);
+
+    controller.refreshBrowserLocale();
+
+    expect(notifications).toBe(0);
+    expect(controller.resolved).toEqual({ preference: 'en', catalogLocale: 'en', formatLocale: 'en' });
   });
 
   test('storage read and write failures never prevent in-memory locale changes', () => {

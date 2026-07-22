@@ -169,7 +169,10 @@ export class LocaleController {
   }
 
   get resolved(): ResolvedLocaleState {
-    return resolveLocales(this.preferenceValue, this.currentBrowserLocale());
+    return resolveLocales(
+      this.preferenceValue,
+      this.preferenceValue === SYSTEM_LOCALE ? this.currentBrowserLocale() : undefined,
+    );
   }
 
   setPreference(preference: LocalePreference): boolean {
@@ -187,7 +190,7 @@ export class LocaleController {
 
   /** Notify consumers after the browser's locale changes at runtime. */
   refreshBrowserLocale(): void {
-    this.emitChange();
+    if (this.preferenceValue === SYSTEM_LOCALE) this.emitChange();
   }
 
   subscribe(listener: () => void): () => void {
