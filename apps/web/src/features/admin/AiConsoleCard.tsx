@@ -10,7 +10,7 @@
  *
  * All backed by /settings/ai/* (admin-only). No key or raw prompt is ever shown.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AiConsoleOverview, AiProviderHealthEntry } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
@@ -18,6 +18,48 @@ import { ProviderForm } from '../settings/ProviderForm';
 
 function fmt(n: number): string {
   return n.toLocaleString();
+}
+
+const ALLOWLIST_MAX_MODELS = 200;
+const ALLOWLIST_MAX_MODEL_ID_LENGTH = 120;
+
+type AllowlistDraftValidation = {
+  allowedModels: string[];
+  errors: string[];
+};
+
+function validateAllowlistDraft(text: string): AllowlistDraftValidation {
+  const allowedModels = text
+    .split(/[\n,]/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const errors: string[] = [];
+  const firstEntryByModel = new Map<string, number>();
+
+  allowedModels.forEach((model, index) => {
+    const entryNumber = index + 1;
+    if (model.length > ALLOWLIST_MAX_MODEL_ID_LENGTH) {
+      errors.push(
+        `Entry ${entryNumber} is ${model.length} characters; model IDs can be at most ${ALLOWLIST_MAX_MODEL_ID_LENGTH} characters.`,
+      );
+    }
+    if (/\s/.test(model)) {
+      errors.push(`Entry ${entryNumber} contains whitespace. Separate model IDs with a comma or line break.`);
+    }
+
+    const firstEntry = firstEntryByModel.get(model);
+    if (firstEntry !== undefined) {
+      errors.push(`Entry ${entryNumber} duplicates entry ${firstEntry}: “${model}”.`);
+    } else {
+      firstEntryByModel.set(model, entryNumber);
+    }
+  });
+
+  if (allowedModels.length > ALLOWLIST_MAX_MODELS) {
+    errors.push(`The allowlist has ${allowedModels.length} entries; it can contain at most ${ALLOWLIST_MAX_MODELS}.`);
+  }
+
+  return { allowedModels, errors };
 }
 
 export function AiConsoleCard() {
@@ -238,24 +280,32 @@ function AllowlistEditor({
   onSaved: (o: AiConsoleOverview) => void;
   onError: (msg: string | null) => void;
 }) {
-  const [text, setText] = useState(ov.allowedModels.join('\n'));
+  const savedText = ov.allowedModels.join('\n');
+  const [text, setText] = useState(savedText);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const validation = useMemo(() => validateAllowlistDraft(text), [text]);
+  const hasErrors = validation.errors.length > 0;
+  const inputId = 'ai-allowed-model-ids';
+  const helpId = 'ai-allowed-model-ids-help';
+  const errorId = 'ai-allowed-model-ids-errors';
+  const effectiveStateId = 'ai-allowed-model-ids-effective-state';
 
   useEffect(() => {
-    setText(ov.allowedModels.join('\n'));
-  }, [ov.allowedModels]);
+    setText(savedText);
+  }, [savedText]);
 
   async function save() {
-    const allowedModels = text
-      .split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    if (hasErrors) return;
     setSaving(true);
     onError(null);
     setSaved(false);
     try {
-      onSaved(await api.put<AiConsoleOverview>(`${API}/settings/ai/allowlist`, { allowedModels }));
+      onSaved(
+        await api.put<AiConsoleOverview>(`${API}/settings/ai/allowlist`, {
+          allowedModels: validation.allowedModels,
+        }),
+      );
       setSaved(true);
       setTimeout(() => setSaved(false), 1500);
     } catch (err) {
@@ -266,22 +316,61 @@ function AllowlistEditor({
   }
 
   return (
-    <div className="cf-inset p-3.5 space-y-2">
-      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Model allowlist</p>
-      <p className="text-[11px] text-slate-500">
-        When non-empty, campaign provider overrides may only select a model on this list (one per line). Empty =
-        unrestricted. Requires a configured server-default provider.
+    <div className="cf-inset p-3.5 space-y-2 min-w-0" data-testid="ai-model-allowlist">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Model allowlist</p>
+        <p
+          id={effectiveStateId}
+          role="status"
+          aria-live="polite"
+          aria-label="Effective allowlist state"
+          className="text-[11px] text-slate-400"
+        >
+          <span className="font-semibold text-slate-300">Effective state:</span>{' '}
+          {ov.allowedModels.length === 0
+            ? 'Unrestricted — any model ID is allowed.'
+            : `Restricted to ${ov.allowedModels.length} model ${ov.allowedModels.length === 1 ? 'ID' : 'IDs'}.`}
+        </p>
+      </div>
+      <p className="text-[11px] text-slate-400">
+        When restricted, campaign provider overrides may only select a model on this list. Requires a configured
+        server-default provider.
+      </p>
+      <label htmlFor={inputId} className="block text-[10px] uppercase tracking-widest text-slate-400 font-bold">
+        Allowed model IDs
+      </label>
+      <p id={helpId} className="text-[11px] text-slate-400">
+        Separate model IDs with commas or line breaks. Leave blank to allow any model ID.
       </p>
       <textarea
-        className="cf-input !min-h-0 py-2 text-sm w-full font-mono"
+        id={inputId}
+        className="cf-input !min-h-0 py-2 text-sm w-full max-w-full font-mono"
         rows={3}
         placeholder="gpt-4o-mini&#10;claude-3-5-haiku"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        aria-describedby={`${helpId}${hasErrors ? ` ${errorId}` : ''}`}
+        aria-invalid={hasErrors}
+        aria-errormessage={hasErrors ? errorId : undefined}
+        onChange={(e) => {
+          setText(e.target.value);
+          setSaved(false);
+        }}
       />
-      <div className="flex gap-2 justify-end items-center">
+      {hasErrors && (
+        <div id={errorId} role="alert" className="text-[11px] text-rose-400 min-w-0">
+          <p className="font-semibold">Fix the following before saving:</p>
+          <ul className="list-disc pl-5 space-y-0.5">
+            {validation.errors.map((validationError) => (
+              <li key={validationError} className="break-words">
+                {validationError}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="flex gap-2 justify-end items-center flex-wrap">
         {saved && <span className="text-xs text-emerald-400 mr-auto">Saved.</span>}
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving || hasErrors}>
           {saving ? 'Saving…' : 'Save allowlist'}
         </Btn>
       </div>
