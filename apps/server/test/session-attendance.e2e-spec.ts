@@ -137,6 +137,52 @@ describe('session attendance (e2e) — issue #121', () => {
     ]);
   });
 
+  it('does not resolve a legacy attendee against a same-id character from another campaign', async () => {
+    const server = ctx.app.getHttpServer();
+    const session = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 660, title: 'Legacy Collision' });
+    const original = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Stored Hero' });
+    const set = await request(server)
+      .put(`/api/v1/sessions/${session.body.id}/attendance`)
+      .set(dm)
+      .send({ characterIds: [original.body.id] });
+    expect(set.status).toBe(200);
+
+    const otherCampaign = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Private Other Table' });
+    const outsider = await request(server)
+      .post(`/api/v1/campaigns/${otherCampaign.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Secret Outsider Name' });
+
+    // Reproduce a pre-#69/corrupted database where the attendance FK points to
+    // an id that has since been reused by a character in a different campaign.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.run(sql`PRAGMA foreign_keys = OFF`);
+    try {
+      await db.delete(characters).where(eq(characters.id, original.body.id));
+      await db
+        .update(characters)
+        .set({ id: original.body.id })
+        .where(eq(characters.id, outsider.body.id));
+    } finally {
+      await db.run(sql`PRAGMA foreign_keys = ON`);
+    }
+
+    const attendance = await request(server).get(`/api/v1/sessions/${session.body.id}/attendance`).set(dm);
+    expect(attendance.status).toBe(200);
+    expect(attendance.body).toEqual([
+      expect.objectContaining({ characterId: original.body.id, characterName: 'Stored Hero' }),
+    ]);
+  });
+
   it('setting attendance again replaces the set (not additive)', async () => {
     const server = ctx.app.getHttpServer();
 

@@ -449,12 +449,15 @@ export class SessionsService {
    * immediately without a read causing synchronization writes.
    */
   async getAttendance(sessionId: number): Promise<SessionAttendee[]> {
-    await this.getRowOrThrow(sessionId); // 404 for an unknown session
+    const session = await this.getRowOrThrow(sessionId); // 404 for an unknown session
     const displayName = sql<string>`coalesce(${characters.name}, ${sessionAttendees.characterName})`;
     const rows = await this.db
       .select({ attendee: sessionAttendees, currentCharacterName: characters.name })
       .from(sessionAttendees)
-      .leftJoin(characters, eq(sessionAttendees.characterId, characters.id))
+      .leftJoin(
+        characters,
+        and(eq(sessionAttendees.characterId, characters.id), eq(characters.campaignId, session.campaignId)),
+      )
       .where(eq(sessionAttendees.sessionId, sessionId))
       .orderBy(asc(displayName), asc(sessionAttendees.id));
     return rows.map(({ attendee, currentCharacterName }) =>
