@@ -3159,7 +3159,9 @@ export class McpToolsService {
       user,
       'post_comment',
       'Any member: post a discussion comment anchored to an entity (entityType/entityId). Optional parentId for a ' +
-        'threaded reply (must reference a comment on the same entity), and inCharacter for a play-by-post scene. ' +
+        'threaded reply (must reference a comment on the same entity). For a play-by-post scene set inCharacter=true ' +
+        'and characterId to a live character owned by the authenticated account; the response retains immutable ' +
+        'character name/avatar snapshots plus account provenance. ' +
         'Requires visibility of the anchored entity — posting on a hidden/secret entity 404s for non-DM (issue #230).',
       { campaignId: CampaignIdArg, ...CommentCreate.shape },
       async ({ campaignId, ...fields }) => {
@@ -3173,7 +3175,7 @@ export class McpToolsService {
       server,
       user,
       'update_comment',
-      'Edit a discussion comment\'s body and/or inCharacter flag. Author or DM only.',
+      'Edit a discussion comment body. Author or DM only. Character attribution is immutable after posting; changing inCharacter is rejected.',
       { commentId: Id.describe('Comment id — from list_comments'), ...CommentUpdate.shape },
       async ({ commentId, ...fields }) => {
         const row = await this.comments.getRowOrThrow(commentId as number);

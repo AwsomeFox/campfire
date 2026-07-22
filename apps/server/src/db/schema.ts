@@ -411,6 +411,12 @@ export const comments = sqliteTable('comments', {
   authorName: text('author_name').notNull().default(''),
   body: text('body').notNull(),
   inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
+  // Immutable creation-time character attribution (issue #787). character_id is
+  // deliberately a soft reference: deleting/trashed characters must not erase or
+  // rewrite historical dialogue. The copied name/avatar remain display-authoritative.
+  characterId: integer('character_id'),
+  characterName: text('character_name'),
+  characterAvatarUrl: text('character_avatar_url'),
   // Soft delete / tombstone (issue #503). NULL = live; an ISO timestamp means the
   // comment is tombstoned (body redacted in API responses, replies preserved).
   // Nullable/absent in older DBs pre-migration; see db/db.module.ts migrateCommentsTableForSoftDelete().

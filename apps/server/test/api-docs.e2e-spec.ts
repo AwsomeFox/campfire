@@ -105,6 +105,33 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
     });
   });
 
+  it('documents in-character comment input and immutable attribution output (issue #787)', async () => {
+    const res = await request(app.getHttpServer()).get('/api/openapi.json');
+    const operation = res.body.paths?.['/api/v1/campaigns/{campaignId}/comments']?.post;
+    expect(operation?.description).toContain('characterId');
+
+    const requestRef = operation?.requestBody?.content?.['application/json']?.schema?.$ref as string | undefined;
+    const requestName = requestRef?.split('/').pop();
+    expect(requestName).toBeTruthy();
+    const requestProperties = res.body.components?.schemas?.[requestName!]?.properties;
+    expect(requestProperties).toHaveProperty('characterId');
+    expect(requestProperties).not.toHaveProperty('characterName');
+    expect(requestProperties).not.toHaveProperty('characterAvatarUrl');
+
+    const responseRef = operation?.responses?.['201']?.content?.['application/json']?.schema?.$ref as string | undefined;
+    const responseName = responseRef?.split('/').pop();
+    expect(responseName).toBeTruthy();
+    expect(res.body.components?.schemas?.[responseName!]?.properties).toEqual(
+      expect.objectContaining({
+        authorUserId: expect.any(Object),
+        authorName: expect.any(Object),
+        characterId: expect.any(Object),
+        characterName: expect.any(Object),
+        characterAvatarUrl: expect.any(Object),
+      }),
+    );
+  });
+
   it('documents membership integrity diagnostics and recovery (#849)', async () => {
     const res = await request(app.getHttpServer()).get('/api/openapi.json');
     const diagnostics = res.body.paths?.['/api/v1/admin/membership-integrity']?.get;

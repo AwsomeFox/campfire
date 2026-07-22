@@ -6,7 +6,7 @@
  * top-level comments, with replies nested one deep.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { Comment, EntityType } from '@campfire/schema';
+import type { Character, Comment, EntityType } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Btn, TextArea, ErrorNote } from '../../components/ui';
@@ -41,6 +41,7 @@ export function CommentsThread({
   const isDm = roleIn(campaignId) === 'dm';
 
   const [comments, setComments] = useState<Comment[]>([]);
+  const [ownedCharacters, setOwnedCharacters] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<number | null>(null);
@@ -49,16 +50,20 @@ export function CommentsThread({
   const load = useCallback(async () => {
     setError(null);
     try {
-      const list = await api.get<Comment[]>(
-        `${API}/campaigns/${campaignId}/comments?entityType=${entityType}&entityId=${entityId}`,
-      );
+      const [list, characterList] = await Promise.all([
+        api.get<Comment[]>(`${API}/campaigns/${campaignId}/comments?entityType=${entityType}&entityId=${entityId}`),
+        api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`),
+      ]);
       setComments(list);
+      setOwnedCharacters(
+        myUserId == null ? [] : characterList.filter((character) => character.ownerUserId === myUserId),
+      );
     } catch {
       setError("Couldn't load the discussion.");
     } finally {
       setLoading(false);
     }
-  }, [campaignId, entityType, entityId]);
+  }, [campaignId, entityType, entityId, myUserId]);
 
   useEffect(() => {
     setLoading(true);
@@ -94,8 +99,8 @@ export function CommentsThread({
   }
 
   return (
-    <div className="space-y-3">
-      <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wide flex items-center gap-2">
+    <section className="space-y-3" aria-labelledby={`discussion-${entityType}-${entityId}`}>
+      <h3 id={`discussion-${entityType}-${entityId}`} className="text-sm font-bold text-slate-400 uppercase tracking-wide flex items-center gap-2">
         Discussion
         {comments.length > 0 && <span className="tag">{comments.length}</span>}
       </h3>
@@ -138,6 +143,7 @@ export function CommentsThread({
                     entityId={entityId}
                     parentId={root.id}
                     placeholder="Write a reply…"
+                    ownedCharacters={ownedCharacters}
                     onPosted={() => {
                       setReplyTo(null);
                       void load();
@@ -157,6 +163,7 @@ export function CommentsThread({
         entityId={entityId}
         parentId={null}
         placeholder="Add to the discussion…"
+        ownedCharacters={ownedCharacters}
         onPosted={load}
       />
 
@@ -169,7 +176,7 @@ export function CommentsThread({
           onCancel={() => setConfirmingDelete(null)}
         />
       )}
-    </div>
+    </section>
   );
 }
 
@@ -190,6 +197,8 @@ function CommentCard({
   const [draft, setDraft] = useState(comment.body);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const accountLabel = comment.authorName || comment.authorUserId;
+  const characterLabel = comment.inCharacter ? comment.characterName?.trim() : null;
 
   async function save() {
     setSaving(true);
@@ -207,18 +216,28 @@ function CommentCard({
 
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-2" {...entityTargetProps('comment', comment.id)}>
-      <div className="flex items-center gap-2 flex-wrap text-xs">
-        <span className="font-bold text-slate-300">{comment.authorName || comment.authorUserId}</span>
-        {comment.inCharacter && <span className="tag tag-accent">In character</span>}
-        <span className="text-slate-600">{timeAgo(comment.createdAt)}</span>
-        {comment.updatedAt !== comment.createdAt && (
-          // Issue #783: when a NON-author edited the comment (editedBy set), say so
-          // honestly instead of a bare "edited" — the author of record never wrote
-          // the current body. A self-edit has no editedBy, so it stays a plain badge.
-          <span className="text-slate-600 italic">
-            {comment.editedBy ? `edited by ${comment.editedBy}` : 'edited'}
-          </span>
+      <div className="flex items-start gap-2 min-w-0">
+        {characterLabel && (
+          <CharacterAvatar name={characterLabel} avatarUrl={comment.characterAvatarUrl} />
         )}
+        <div className="flex items-center gap-2 flex-wrap text-xs min-w-0">
+          <span className="font-bold text-slate-300 break-words">{characterLabel || accountLabel}</span>
+          {comment.inCharacter && <span className="tag tag-accent">In character</span>}
+          {characterLabel && (
+            <span className="text-slate-500" aria-label={`Posted by account ${accountLabel}`}>
+              Posted by {accountLabel}
+            </span>
+          )}
+          <span className="text-slate-600">{timeAgo(comment.createdAt)}</span>
+          {comment.updatedAt !== comment.createdAt && (
+            // Issue #783: when a NON-author edited the comment (editedBy set), say so
+            // honestly instead of a bare "edited" — the author of record never wrote
+            // the current body. A self-edit has no editedBy, so it stays a plain badge.
+            <span className="text-slate-600 italic">
+              {comment.editedBy ? `edited by ${comment.editedBy}` : 'edited'}
+            </span>
+          )}
+        </div>
       </div>
       {error && <ErrorNote message={error} />}
       {editing ? (
@@ -261,12 +280,43 @@ function CommentCard({
   );
 }
 
+function CharacterAvatar({ name, avatarUrl }: { name: string; avatarUrl: string | null }) {
+  const [failed, setFailed] = useState(false);
+  const initials = name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join('') || '?';
+
+  if (avatarUrl && !failed) {
+    return (
+      <img
+        src={avatarUrl}
+        alt=""
+        loading="lazy"
+        onError={() => setFailed(true)}
+        className="h-9 w-9 shrink-0 rounded-full object-cover border border-slate-700"
+      />
+    );
+  }
+  return (
+    <span
+      aria-hidden="true"
+      className="h-9 w-9 shrink-0 rounded-full border border-slate-700 bg-slate-800 grid place-items-center text-[11px] font-bold text-slate-300"
+    >
+      {initials}
+    </span>
+  );
+}
+
 function ComposeBox({
   campaignId,
   entityType,
   entityId,
   parentId,
   placeholder,
+  ownedCharacters,
   onPosted,
   onCancel,
 }: {
@@ -275,11 +325,13 @@ function ComposeBox({
   entityId: number;
   parentId: number | null;
   placeholder: string;
+  ownedCharacters: Character[];
   onPosted: () => void;
   onCancel?: () => void;
 }) {
   const [body, setBody] = useState('');
   const [inCharacter, setInCharacter] = useState(false);
+  const [characterId, setCharacterId] = useState<number | null>(null);
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -294,9 +346,11 @@ function ComposeBox({
         parentId: parentId ?? undefined,
         body,
         inCharacter,
+        characterId: inCharacter ? characterId : undefined,
       });
       setBody('');
       setInCharacter(false);
+      setCharacterId(null);
       onPosted();
     } catch {
       setError("Couldn't post the comment.");
@@ -314,17 +368,48 @@ function ComposeBox({
         onChange={(e) => setBody(e.target.value)}
         placeholder={placeholder}
       />
-      <div className="flex items-center gap-3 justify-end">
-        <label className="flex items-center gap-1.5 text-xs text-slate-500 mr-auto cursor-pointer">
-          <input type="checkbox" checked={inCharacter} onChange={(e) => setInCharacter(e.target.checked)} />
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 sm:justify-end">
+        <label
+          className={`flex items-center gap-1.5 text-xs mr-auto ${ownedCharacters.length ? 'text-slate-500 cursor-pointer' : 'text-slate-600 cursor-not-allowed'}`}
+          title={ownedCharacters.length ? undefined : 'Create or claim a character before posting in character.'}
+        >
+          <input
+            type="checkbox"
+            checked={inCharacter}
+            disabled={ownedCharacters.length === 0}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setInCharacter(checked);
+              setCharacterId(checked ? (characterId ?? ownedCharacters[0]?.id ?? null) : null);
+            }}
+          />
           In character
         </label>
+        {inCharacter && (
+          <label className="flex items-center gap-2 text-xs text-slate-400 min-w-0 sm:max-w-[18rem]">
+            <span className="whitespace-nowrap">Speaking as</span>
+            <select
+              className="cf-select !min-h-0 !py-1.5 text-xs flex-1 min-w-0"
+              value={characterId ?? ''}
+              onChange={(e) => setCharacterId(Number(e.target.value))}
+              aria-label="Speaking character"
+            >
+              {ownedCharacters.map((character) => (
+                <option key={character.id} value={character.id}>{character.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
         {onCancel && (
           <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={onCancel}>
             Cancel
           </Btn>
         )}
-        <Btn className="!min-h-0 !py-1 text-xs" onClick={post} disabled={posting || !body.trim()}>
+        <Btn
+          className="!min-h-0 !py-1 text-xs self-end sm:self-auto"
+          onClick={post}
+          disabled={posting || !body.trim() || (inCharacter && characterId == null)}
+        >
           {posting ? 'Posting…' : 'Post'}
         </Btn>
       </div>
