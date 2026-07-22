@@ -14,7 +14,11 @@ import { api, ApiError, API } from '../lib/api';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
-import { NotificationsBell } from '../features/notifications/NotificationsBell';
+import {
+  NotificationsBell,
+  NotificationsPanel,
+  NotificationsProvider,
+} from '../features/notifications/NotificationsBell';
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
@@ -227,6 +231,14 @@ function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: bo
 }
 
 export function Layout() {
+  return (
+    <NotificationsProvider>
+      <LayoutContent />
+    </NotificationsProvider>
+  );
+}
+
+function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, refresh: refreshAuth, logout } = useAuth();
   const params = useParams<{ campaignId: string }>();
@@ -241,11 +253,26 @@ export function Layout() {
   const [lostAccess, setLostAccess] = useState(false);
   const [inboxCount, setInboxCount] = useState(0);
   const [pendingProposals, setPendingProposals] = useState(0);
+  const [desktopLayout, setDesktopLayout] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches,
+  );
   const menuRef = useRef<HTMLDivElement>(null);
   // Track WHICH campaign we've stale-checked, not a bare boolean — so navigating
   // to a different campaign re-checks (and clears a prior lock screen) instead of
   // trusting a once-per-session flag.
   const staleCheckedIdRef = useRef<number | undefined>(undefined);
+
+  // CSS still owns the responsive chrome, but only the active breakpoint gets
+  // a bell renderer. Notification state/polling/panel remain in the provider
+  // above this component, so crossing the breakpoint cannot duplicate traffic
+  // or discard an open panel (issue #802).
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 768px)');
+    const onChange = (event: MediaQueryListEvent) => setDesktopLayout(event.matches);
+    setDesktopLayout(media.matches);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
 
   // Single app-wide AI-DM stream subscription (#344, building on #338's shared
   // useAiDmStream + toolActivity map). Mounted here — the campaign chrome every
@@ -488,7 +515,7 @@ export function Layout() {
                 <span className="block text-[11px] text-muted">Switch campaign</span>
               </span>
             </Link>
-            <NotificationsBell />
+            {desktopLayout && <NotificationsBell />}
           </div>
 
           {campaignId !== undefined && <SidebarSearch campaignId={campaignId} />}
@@ -582,7 +609,7 @@ export function Layout() {
             </div>
           </div>
           <div className="flex-1" />
-          <NotificationsBell />
+          {!desktopLayout && <NotificationsBell />}
           {campaignId !== undefined && roleLabel && (
             <button
               className="tag tag-outline cursor-pointer"
@@ -640,7 +667,7 @@ export function Layout() {
             </Link>
             <span className="tag tag-outline" style={{ fontSize: 10 }}>{t('nav.selfHosted')}</span>
             <div className="flex-1" />
-            <NotificationsBell />
+            {desktopLayout && <NotificationsBell />}
             {isAdmin && (
               <Link to="/admin" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
                 {t('nav.admin')}
@@ -719,6 +746,7 @@ export function Layout() {
       )}
 
       {showPasswordModal && <ChangePasswordModal onClose={() => setShowPasswordModal(false)} />}
+      <NotificationsPanel />
     </div>
     </AiDmLiveActivityProvider>
   );
