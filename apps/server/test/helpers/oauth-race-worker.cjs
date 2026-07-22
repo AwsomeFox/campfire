@@ -3,8 +3,31 @@
 require('reflect-metadata');
 const fs = require('node:fs');
 const path = require('node:path');
-const { openDatabase } = require('../../dist/db/db.module.js');
-const { OAuthService } = require('../../dist/modules/oauth/oauth.service.js');
+
+const input = JSON.parse(process.env.OAUTH_RACE_INPUT || '{}');
+
+function loadServerModules() {
+  const distDb = path.resolve(__dirname, '../../dist/db/db.module.js');
+  const distOAuth = path.resolve(__dirname, '../../dist/modules/oauth/oauth.service.js');
+  if (!input.forceSource && fs.existsSync(distDb) && fs.existsSync(distOAuth)) {
+    return {
+      openDatabase: require(distDb).openDatabase,
+      OAuthService: require(distOAuth).OAuthService,
+    };
+  }
+
+  // `test` builds before Jest, while `test:watch` intentionally does not. Keep
+  // this cross-process harness usable in both workflows without requiring stale
+  // dist output. The schema workspace is already a prerequisite of server tests.
+  process.env.TS_NODE_PROJECT ||= path.resolve(__dirname, '../../tsconfig.json');
+  require('ts-node/register/transpile-only');
+  return {
+    openDatabase: require('../../src/db/db.module.ts').openDatabase,
+    OAuthService: require('../../src/modules/oauth/oauth.service.ts').OAuthService,
+  };
+}
+
+const { openDatabase, OAuthService } = loadServerModules();
 
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 
@@ -20,7 +43,6 @@ function waitForAllReaders(barrierDir, participantCount, participantId) {
 }
 
 async function main() {
-  const input = JSON.parse(process.env.OAUTH_RACE_INPUT || '{}');
   const opened = openDatabase(input.dataDir);
   const service = new OAuthService(opened.orm);
 
