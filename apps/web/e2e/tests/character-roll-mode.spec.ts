@@ -73,7 +73,7 @@ test.describe('Character sheet roll-mode chooser (issue #713)', () => {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const chooser = page.getByRole('radiogroup', { name: 'Saving throw roll mode' });
+    const chooser = page.locator("section", { hasText: "Saving throws" }).first().getByRole("radiogroup", { name: "Saving throw roll mode" });
     await expect(chooser).toBeVisible();
 
     // Default is Flat; the live status (role=status) announces it before any roll.
@@ -82,10 +82,14 @@ test.describe('Character sheet roll-mode chooser (issue #713)', () => {
     await expect(savesCard.getByRole('status')).toContainText(/flat roll/i);
 
     // Select Advantage via the visible chooser (a tap, not a modifier key).
-    await chooser.getByRole('radio', { name: /advantage/i }).click();
+    // The radio accessible names are the full descriptions ("Advantage — roll
+    // two d20 and keep the higher" / "Disadvantage — …"), so the name regex
+    // MUST be anchored — an unanchored /advantage/i matches "Disadvantage" too
+    // and Playwright strict mode then sees two elements.
+    await chooser.getByRole('radio', { name: /^advantage/i }).click();
     await expect(savesCard.getByRole('status')).toContainText(/rolling with advantage/i);
     // The selected option reports its state accessibly.
-    await expect(chooser.getByRole('radio', { name: /advantage/i })).toHaveAttribute('aria-checked', 'true');
+    await expect(chooser.getByRole('radio', { name: /^advantage/i })).toHaveAttribute('aria-checked', 'true');
 
     // The STR save button now advertises the advantage mode in its accessible name.
     const strSave = savesCard.getByRole('button', { name: /Roll STR save.*advantage/i });
@@ -110,7 +114,7 @@ test.describe('Character sheet roll-mode chooser (issue #713)', () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const chooser = page.getByRole('radiogroup', { name: 'Saving throw roll mode' });
+    const chooser = page.locator("section", { hasText: "Saving throws" }).first().getByRole("radiogroup", { name: "Saving throw roll mode" });
     const savesCard = page.locator('section', { hasText: 'Saving throws' }).first();
 
     // Leave the chooser on Flat (the default).
@@ -136,16 +140,18 @@ test.describe('Character sheet roll-mode chooser (issue #713)', () => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/characters/${characterId}`);
 
-    const chooser = page.getByRole('radiogroup', { name: 'Saving throw roll mode' });
+    const chooser = page.locator("section", { hasText: "Saving throws" }).first().getByRole("radiogroup", { name: "Saving throw roll mode" });
     // Enter the group on the (tabindex 0) selected Flat option.
     await chooser.getByRole('radio', { name: /^flat/i }).focus();
     // ArrowRight moves to Advantage AND selects it (radiogroup semantics).
+    // Anchored name regexes (see note above): /advantage/i would also match
+    // "Disadvantage" because that description contains the substring.
     await page.keyboard.press('ArrowRight');
-    await expect(chooser.getByRole('radio', { name: /advantage/i })).toHaveAttribute('aria-checked', 'true');
-    await expect(chooser.getByRole('radio', { name: /advantage/i })).toBeFocused();
+    await expect(chooser.getByRole('radio', { name: /^advantage/i })).toHaveAttribute('aria-checked', 'true');
+    await expect(chooser.getByRole('radio', { name: /^advantage/i })).toBeFocused();
     // ArrowRight again lands on Disadvantage.
     await page.keyboard.press('ArrowRight');
-    await expect(chooser.getByRole('radio', { name: /disadvantage/i })).toHaveAttribute('aria-checked', 'true');
+    await expect(chooser.getByRole('radio', { name: /^disadvantage/i })).toHaveAttribute('aria-checked', 'true');
 
     // No axe violations scoped to the chooser (names, roles, keyboard).
     const results = await new AxeBuilder({ page })

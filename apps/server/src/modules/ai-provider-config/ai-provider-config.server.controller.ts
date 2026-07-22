@@ -7,8 +7,6 @@ import type { RequestUser } from '../../common/user.types';
 import { AiProviderConfigService } from './ai-provider-config.service';
 import {
   AiProviderConfigUpdateDto,
-  AiProviderRemovalConfirmDto,
-  AiProviderRemovalImpactDto,
   AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA,
   AiProviderTestRequestDto,
   AiProviderTestResultDto,
@@ -63,32 +61,12 @@ export class AiProviderServerConfigController {
     return this.configs.clearServerKey(user);
   }
 
-  @Get('removal-impact')
-  @ApiOperation({
-    summary: 'Preview removal of the server-default AI provider',
-    description:
-      'Server-admin only. Authoritatively computes every affected campaign, its exact fallback/disabled outcome, ' +
-      'AI-seat budget/runtime implications, and an opaque revision required to confirm deletion. Never returns key material.',
-  })
-  @ApiResponse({ status: 200, description: 'Credential-free authoritative removal preview.', type: AiProviderRemovalImpactDto })
-  @ApiResponse({ status: 404, description: 'No server-default provider config exists.' })
-  removalImpact() {
-    return this.configs.previewServerRemoval();
-  }
-
   @Delete()
   @HttpCode(204)
-  @ApiOperation({
-    summary: 'Confirm removal of the server-default AI provider config',
-    description:
-      'Server-admin only. Requires the exact impact revision from GET removal-impact. Recomputes impact and atomically ' +
-      'deletes plus audits; stale revisions return 409 and leave the active config unchanged.',
-  })
-  @ApiBody({ type: AiProviderRemovalConfirmDto })
-  @ApiResponse({ status: 204, description: 'Deletion and secret-free audit committed.' })
-  @ApiResponse({ status: 409, description: 'Impact changed after preview; nothing was deleted.' })
-  async remove(@Body() body: AiProviderRemovalConfirmDto, @CurrentUser() user: RequestUser) {
-    this.configs.deleteServer(body.impactRevision, user);
+  @ApiOperation({ summary: 'Delete the server-default AI provider config', description: 'Server-admin only.' })
+  @ApiResponse({ status: 204, description: 'Deleted (or already absent).' })
+  async remove(@CurrentUser() user: RequestUser) {
+    await this.configs.deleteServer(user);
   }
 
   @Post('test')

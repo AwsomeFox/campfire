@@ -387,9 +387,12 @@ export function HomePage() {
     navigate(`/c/${c.id}`);
   }
 
+  if (wizardOpen) {
+    return <NewCampaignWizard onClose={closeWizard} onCreated={onCampaignCreated} />;
+  }
+
   return (
-    <>
-      <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5">
+    <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5">
       <div>
         <h3 style={{ margin: 0 }}>Your campaigns</h3>
         <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
@@ -467,8 +470,6 @@ export function HomePage() {
           <TrashSection onChanged={async () => { await Promise.allSettled([refresh(), refreshAuth()]); }} />
         </>
       )}
-      </div>
-      {wizardOpen && <NewCampaignWizard onClose={closeWizard} onCreated={onCampaignCreated} />}
-    </>
+    </div>
   );
 }

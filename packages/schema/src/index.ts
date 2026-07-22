@@ -3074,63 +3074,6 @@ export const AiProviderEffectiveView = z.object({
 });
 export type AiProviderEffectiveView = z.infer<typeof AiProviderEffectiveView>;
 
-// Safe provider removal is a preview-then-confirm workflow (issue #755). The
-// server computes every effective before/after state; clients never try to
-// reproduce provider fallback, credential, or runtime policy locally.
-export const AiProviderRemovalEffectiveState = z.object({
-  configured: z.boolean(),
-  providerType: AiProviderConfigType.nullable(),
-  model: z.string().nullable(),
-  source: z.enum(['server', 'campaign']).nullable(),
-  credentialSource: AiProviderCredentialSource,
-  ready: z.boolean(),
-});
-export type AiProviderRemovalEffectiveState = z.infer<typeof AiProviderRemovalEffectiveState>;
-
-export const AiProviderRemovalRuntimeImpact = z.object({
-  mode: AiDmMode,
-  enabled: z.boolean(),
-  tokenBudget: z.number().int().nonnegative(),
-  tokensUsed: z.number().int().nonnegative(),
-  budgetRemaining: z.number().int().nonnegative(),
-  budgetsUnchanged: z.literal(true),
-  implication: z.enum(['continues-with-fallback', 'enabled-seat-will-stop', 'provider-disabled']),
-});
-export type AiProviderRemovalRuntimeImpact = z.infer<typeof AiProviderRemovalRuntimeImpact>;
-
-export const AiProviderRemovalCampaignImpact = z.object({
-  campaignId: Id,
-  campaignName: z.string(),
-  campaignStatus: z.string(),
-  trashed: z.boolean(),
-  current: AiProviderRemovalEffectiveState,
-  after: AiProviderRemovalEffectiveState,
-  result: z.enum(['fallback', 'disabled']),
-  runtime: AiProviderRemovalRuntimeImpact,
-});
-export type AiProviderRemovalCampaignImpact = z.infer<typeof AiProviderRemovalCampaignImpact>;
-
-export const AiProviderRemovalImpact = z.object({
-  scope: z.enum(['server', 'campaign']),
-  campaignId: Id.nullable(),
-  providerType: AiProviderConfigType,
-  model: z.string(),
-  credentialSource: AiProviderCredentialSource,
-  storedKeyWillBeLost: z.boolean(),
-  impactRevision: z.string().regex(/^[a-f0-9]{64}$/),
-  previewedAt: IsoDate,
-  affectedCampaignCount: z.number().int().nonnegative(),
-  affectedCampaigns: z.array(AiProviderRemovalCampaignImpact),
-});
-export type AiProviderRemovalImpact = z.infer<typeof AiProviderRemovalImpact>;
-
-// Required DELETE payload. A preview revision is deliberately mandatory: an
-// older or hand-built client cannot bypass the authoritative impact review.
-export const AiProviderRemovalConfirm = z
-  .object({ impactRevision: z.string().regex(/^[a-f0-9]{64}$/) })
-  .strict();
-export type AiProviderRemovalConfirm = z.infer<typeof AiProviderRemovalConfirm>;
-
 // ── Admin AI console (issue #315): opt-in, budgets & caps, usage, kill switch ──
 // A server-admin-only cockpit over the AI program: the global kill switch
 // (ServerSettings.experimentalAiDm), server-wide + per-campaign token caps, a usage

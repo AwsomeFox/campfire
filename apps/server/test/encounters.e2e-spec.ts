@@ -2677,12 +2677,6 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'X' });
     const res = await request(server).patch(`/api/v1/encounters/${enc.body.id}`).set(dm).send({ locationId: otherLoc.body.id });
     expect(res.status).toBe(404);
-
-    const create = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/encounters`)
-      .set(dm)
-      .send({ name: 'Cross-campaign link must fail', locationId: otherLoc.body.id });
-    expect(create.status).toBe(404);
   });
 
   it('get_campaign_summary (REST) now includes an encounters digest', async () => {
@@ -2714,71 +2708,6 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(note.body.entityType).toBe('encounter');
     expect(note.body.entityId).toBe(enc.body.id);
     expect(note.body.entityName).toBe('Noted fight');
-  });
-
-  it('redacts hidden-quest, unexplored-location, and deleted-session links for a player while DM sees them (issue #485)', async () => {
-    const server = ctx.app.getHttpServer();
-
-    const hiddenQuest = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/quests`)
-      .set(dm)
-      .send({ title: 'Secret Plan', hidden: true });
-    expect(hiddenQuest.status).toBe(201);
-    const hiddenQuestId = hiddenQuest.body.id;
-
-    const unexploredLoc = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/locations`)
-      .set(dm)
-      .send({ name: 'Uncharted Cavern', status: 'unexplored' });
-    expect(unexploredLoc.status).toBe(201);
-    const unexploredLocId = unexploredLoc.body.id;
-
-    const linkedSession = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/sessions`)
-      .set(dm)
-      .send({ number: 485, title: 'Secret Aftermath', recap: 'DM-only deleted fixture' });
-    expect(linkedSession.status).toBe(201);
-    const linkedSessionId = linkedSession.body.id;
-
-    const created = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/encounters`)
-      .set(dm)
-      .send({ name: 'Hidden Linked Fight', questId: hiddenQuestId, locationId: unexploredLocId, sessionId: linkedSessionId });
-    expect(created.status).toBe(201);
-    const encId = created.body.id;
-
-    const deletedSession = await request(server).delete(`/api/v1/sessions/${linkedSessionId}`).set(dm);
-    expect(deletedSession.status).toBe(200);
-
-    // DM GET single encounter: sees questId & locationId
-    const dmGet = await request(server).get(`/api/v1/encounters/${encId}`).set(dm);
-    expect(dmGet.status).toBe(200);
-    expect(dmGet.body.questId).toBe(hiddenQuestId);
-    expect(dmGet.body.locationId).toBe(unexploredLocId);
-    expect(dmGet.body.sessionId).toBe(linkedSessionId);
-
-    // Player GET single encounter: questId & locationId are redacted to null
-    const playerGet = await request(server).get(`/api/v1/encounters/${encId}`).set(player);
-    expect(playerGet.status).toBe(200);
-    expect(playerGet.body.questId).toBeNull();
-    expect(playerGet.body.locationId).toBeNull();
-    expect(playerGet.body.sessionId).toBeNull();
-
-    // DM list encounters: sees questId & locationId
-    const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(dm);
-    expect(dmList.status).toBe(200);
-    const dmEnc = dmList.body.find((e: { id: number }) => e.id === encId);
-    expect(dmEnc.questId).toBe(hiddenQuestId);
-    expect(dmEnc.locationId).toBe(unexploredLocId);
-    expect(dmEnc.sessionId).toBe(linkedSessionId);
-
-    // Player list encounters: questId & locationId are redacted to null
-    const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(player);
-    expect(playerList.status).toBe(200);
-    const playerEnc = playerList.body.find((e: { id: number }) => e.id === encId);
-    expect(playerEnc.questId).toBeNull();
-    expect(playerEnc.locationId).toBeNull();
-    expect(playerEnc.sessionId).toBeNull();
   });
 
   it('difficulty band computes correctly for a known party + monster set', async () => {

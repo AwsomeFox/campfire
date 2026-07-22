@@ -639,14 +639,6 @@ decrypted **in-process only** by `AiProviderConfigService.resolveEffectiveConfig
 `allowedModels` on the server default to restrict which models a campaign override
 may select.
 
-Removal uses a preview-confirm contract. `GET /settings/ai-provider/removal-impact`
-or `GET /campaigns/:id/ai-provider/removal-impact` returns the server-computed
-campaign impact, exact fallback/disabled outcomes, and an opaque `impactRevision`.
-The matching `DELETE` accepts that revision in its JSON body and returns `409` if
-provider, campaign, credential, seat, or budget state changed after the preview.
-The confirmed delete and its secret-free audit record commit atomically; stored
-key material is permanently unrecoverable after success.
-
 ### Encryption key env var
 
 | Env var | Required | Default | Notes |
