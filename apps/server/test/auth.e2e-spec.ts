@@ -2,8 +2,8 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { DB, type DrizzleDb } from '../src/db/db.module';
-import { users } from '../src/db/schema';
+import { DB, DB_HOLDER, DbHolder, type DrizzleDb } from '../src/db/db.module';
+import { users, userSessions } from '../src/db/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 describe('auth setup/login/logout (e2e, real cookie sessions, DEV_AUTH unset)', () => {
@@ -54,6 +54,117 @@ describe('auth setup/login/logout (e2e, real cookie sessions, DEV_AUTH unset)', 
     const server = ctx.app.getHttpServer();
     const res = await request(server).get('/api/v1/me');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('first-run setup atomic claim (e2e, real SQLite concurrency)', () => {
+  let ctx: TestAppContext;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    // A listening socket keeps all requests genuinely in flight together; an
+    // unlistened supertest handler can serialise enough work to hide the race.
+    await ctx.app.listen(0);
+    baseUrl = await ctx.app.getUrl();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('lets exactly one of N simultaneous requests create the sole admin and session', async () => {
+    const N = 12;
+    const results = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        request(baseUrl)
+          .post('/api/v1/auth/setup')
+          .send({
+            username: `racing-admin-${i}`,
+            password: `racing-password-${i}`,
+            displayName: `Racing Admin ${i}`,
+          }),
+      ),
+    );
+
+    const winners = results.filter((result) => result.status === 201);
+    const losers = results.filter((result) => result.status === 409);
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(N - 1);
+    expect(losers.every((result) => result.body.message === 'Setup already completed')).toBe(true);
+    expect(losers.every((result) => result.headers['set-cookie'] === undefined)).toBe(true);
+
+    const winner = winners[0];
+    expect(winner.body.user.serverRole).toBe('admin');
+    const setCookies = winner.headers['set-cookie'] as unknown as string[];
+    expect(setCookies).toHaveLength(1);
+    const winnerCookie = setCookies[0].split(';')[0];
+    const winnerMe = await request(baseUrl).get('/api/v1/me').set('Cookie', winnerCookie);
+    expect(winnerMe.status).toBe(200);
+    expect(winnerMe.body.user.id).toBe(winner.body.user.id);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const persistedUsers = await db.select().from(users);
+    const persistedSessions = await db.select().from(userSessions);
+    expect(persistedUsers).toHaveLength(1);
+    expect(persistedUsers[0]).toMatchObject({
+      id: winner.body.user.id,
+      username: winner.body.user.username,
+      serverRole: 'admin',
+      disabled: false,
+    });
+    expect(persistedSessions).toHaveLength(1);
+    expect(persistedSessions[0].userId).toBe(winner.body.user.id);
+
+    const status = await request(baseUrl).get('/api/v1/auth/status');
+    expect(status.status).toBe(200);
+    expect(status.body.setupRequired).toBe(false);
+  });
+});
+
+describe('first-run setup atomic rollback (e2e, real SQLite failure injection)', () => {
+  let ctx: TestAppContext;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('rolls back the initial admin when session creation fails and remains retryable', async () => {
+    const holder = ctx.app.get<DbHolder>(DB_HOLDER);
+    holder.raw.exec(`
+      CREATE TRIGGER fail_initial_session
+      BEFORE INSERT ON user_sessions
+      BEGIN
+        SELECT RAISE(ABORT, 'injected initial session failure');
+      END;
+    `);
+
+    const failed = await request(ctx.app.getHttpServer())
+      .post('/api/v1/auth/setup')
+      .send({ username: 'rollback-admin', password: 'rollback-password-1' });
+    expect(failed.status).toBe(500);
+    expect(failed.headers['set-cookie']).toBeUndefined();
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    expect(await db.select().from(users)).toHaveLength(0);
+    expect(await db.select().from(userSessions)).toHaveLength(0);
+
+    const status = await request(ctx.app.getHttpServer()).get('/api/v1/auth/status');
+    expect(status.status).toBe(200);
+    expect(status.body.setupRequired).toBe(true);
+
+    holder.raw.exec('DROP TRIGGER fail_initial_session');
+    const retry = await request(ctx.app.getHttpServer())
+      .post('/api/v1/auth/setup')
+      .send({ username: 'rollback-admin', password: 'rollback-password-1' });
+    expect(retry.status).toBe(201);
+    expect(retry.headers['set-cookie']).toBeDefined();
+    expect(await db.select().from(users)).toHaveLength(1);
+    expect(await db.select().from(userSessions)).toHaveLength(1);
   });
 });
 
