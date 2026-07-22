@@ -946,6 +946,47 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(viewerOgre.hpBand).toBeTruthy();
   });
 
+  it('get_encounter and list_encounters redact hidden-quest and unexplored-location links for a viewer PAT (issue #485)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const quest = parseResult(
+      await dmC.callTool({ name: 'add_quest', arguments: { campaignId, title: 'Secret MCP Quest', hidden: true } }),
+    ) as { id: number };
+
+    const loc = parseResult(
+      await dmC.callTool({ name: 'add_location', arguments: { campaignId, name: 'Secret Cave', status: 'unexplored' } }),
+    ) as { id: number };
+
+    const enc = parseResult(
+      await dmC.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId, name: 'MCP Link Fight', questId: quest.id, locationId: loc.id },
+      }),
+    ) as { id: number };
+
+    // DM PAT sees linked questId & locationId
+    const dmView = parseResult(
+      await dmC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { questId: number | null; locationId: number | null };
+    expect(dmView.questId).toBe(quest.id);
+    expect(dmView.locationId).toBe(loc.id);
+
+    // Viewer PAT gets questId & locationId redacted to null
+    const viewerC = await mcpClient(viewerToken);
+    const viewerView = parseResult(
+      await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { questId: number | null; locationId: number | null };
+    expect(viewerView.questId).toBeNull();
+    expect(viewerView.locationId).toBeNull();
+
+    const viewerList = parseResult(
+      await viewerC.callTool({ name: 'list_encounters', arguments: { campaignId } }),
+    ) as Array<{ id: number; questId: number | null; locationId: number | null }>;
+    const item = viewerList.find((e) => e.id === enc.id);
+    expect(item).toBeDefined();
+    expect(item?.questId).toBeNull();
+    expect(item?.locationId).toBeNull();
+  });
+
   it('draft_session_recap assembles the template scaffold + seeds encounters and resolved inbox threads (issue #62)', async () => {
     const client = await mcpClient(dmToken);
 
