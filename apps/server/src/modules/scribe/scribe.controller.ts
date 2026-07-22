@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -47,6 +48,7 @@ export class ScribeController {
   }
 
   @Post('run')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'Run the AI scribe now (on-demand)',
     description:

@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Put } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -51,6 +52,7 @@ export class AiDmController {
   }
 
   @Post('turn')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'AI Dungeon Master takes a turn',
     description:
