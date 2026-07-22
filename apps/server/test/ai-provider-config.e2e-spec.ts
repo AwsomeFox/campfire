@@ -490,16 +490,47 @@ describe('ai-provider-config visible draft connection tests (issue #852, e2e)', 
     expect(fake.calls[0].authorization).toBe(`Bearer ${storedCampaignKey}`);
 
     const echoedCandidate = 'sk-provider-echo-must-redact-8527';
-    fake.failNext(401, JSON.stringify({ error: `bad credential ${echoedCandidate}` }));
+    fake.failNext(401, JSON.stringify({ error: `bad credential ${echoedCandidate}`, internalSecret: 'super-secret-internal-538' }));
     const failed = await request(server)
       .post('/api/v1/settings/ai-provider/test')
       .set(dm)
       .send({ providerType: 'openai', model: 'failing-draft', baseUrl: fake.baseUrl, apiKey: echoedCandidate });
     expect(failed.status).toBe(201);
     expect(failed.body.ok).toBe(false);
-    expect(failed.body.error).toContain('[REDACTED]');
+    expect(failed.body.error).toBe('AI provider returned HTTP 401 unauthorized');
     expect(JSON.stringify(failed.body)).not.toContain(echoedCandidate);
+    expect(JSON.stringify(failed.body)).not.toContain('super-secret-internal-538');
     expect(JSON.stringify(failed.body)).not.toContain(storedCampaignKey);
+  });
+
+  it('sanitizes provider 401 and 500 HTTP error responses without leaking raw body (issue #538)', async () => {
+    const sensitiveToken = 'raw-body-token-secret-9988';
+    const sensitiveDbHost = 'postgres://db-admin:secretpass@internal-cluster.local:5432/main';
+
+    // 401 Unauthorized leak check
+    fake.failNext(401, JSON.stringify({ error: 'unauthorized', rawToken: sensitiveToken, debugInfo: 'internal auth failure' }));
+    const res401 = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'test-401-sanitized', baseUrl: fake.baseUrl, apiKey: 'sk-candidate-key' });
+    expect(res401.status).toBe(201);
+    expect(res401.body.ok).toBe(false);
+    expect(res401.body.error).toBe('AI provider returned HTTP 401 unauthorized');
+    expect(JSON.stringify(res401.body)).not.toContain(sensitiveToken);
+    expect(JSON.stringify(res401.body)).not.toContain('rawToken');
+    expect(JSON.stringify(res401.body)).not.toContain('debugInfo');
+
+    // 500 Internal Server Error leak check (pass count=5 so retries also encounter 500)
+    fake.failNext(500, JSON.stringify({ error: 'Internal Server Error', connectionString: sensitiveDbHost }), 5);
+    const res500 = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'test-500-sanitized', baseUrl: fake.baseUrl, apiKey: 'sk-candidate-key' });
+    expect(res500.status).toBe(201);
+    expect(res500.body.ok).toBe(false);
+    expect(res500.body.error).toBe('AI provider returned HTTP 500 internal server error');
+    expect(JSON.stringify(res500.body)).not.toContain(sensitiveDbHost);
+    expect(JSON.stringify(res500.body)).not.toContain('connectionString');
   });
 });
 

@@ -2,7 +2,7 @@ import { createAiProvider } from '../../src/modules/ai-dm/providers/factory';
 import { OpenAiProvider } from '../../src/modules/ai-dm/providers/openai-provider';
 import { AnthropicProvider } from '../../src/modules/ai-dm/providers/anthropic-provider';
 import { MockAiProvider } from '../../src/modules/ai-dm/providers/mock-provider';
-import { AiProviderError, classifyHttpStatus, parseRetryAfterMs } from '../../src/modules/ai-dm/providers/errors';
+import { AiProviderError, classifyHttpStatus, getHttpStatusText, parseRetryAfterMs } from '../../src/modules/ai-dm/providers/errors';
 import { parseSse, backoffDelayMs, DEFAULT_RETRY } from '../../src/modules/ai-dm/providers/http';
 import {
   mcpToolsToAiSchemas,
@@ -62,8 +62,18 @@ describe('error taxonomy', () => {
     expect(classifyHttpStatus(400, 'prompt is too long')).toBe('context_length');
   });
 
-  it('defaults retryable from the kind', () => {
-    expect(new AiProviderError('rate_limit', 'x').retryable).toBe(true);
+  it('maps HTTP status codes to standard human-readable descriptions', () => {
+    expect(getHttpStatusText(401)).toBe('unauthorized');
+    expect(getHttpStatusText(500)).toBe('internal server error');
+    expect(getHttpStatusText(403)).toBe('forbidden');
+    expect(getHttpStatusText(429)).toBe('too many requests');
+    expect(getHttpStatusText(400)).toBe('bad request');
+  });
+
+  it('defaults retryable from the kind and supports rawBody', () => {
+    const err = new AiProviderError('rate_limit', 'x', { rawBody: 'raw error' });
+    expect(err.retryable).toBe(true);
+    expect(err.rawBody).toBe('raw error');
     expect(new AiProviderError('server', 'x').retryable).toBe(true);
     expect(new AiProviderError('auth', 'x').retryable).toBe(false);
     expect(new AiProviderError('context_length', 'x').retryable).toBe(false);
