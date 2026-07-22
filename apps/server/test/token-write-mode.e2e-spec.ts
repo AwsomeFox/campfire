@@ -199,8 +199,75 @@ describe('Issue #158: server-enforced token write-mode (e2e)', () => {
       expect(res.status).toBe(201);
     });
 
-    it('a token minted with no writeScope defaults to direct (back-compat)', async () => {
+    it('a token minted with no writeScope defaults to propose (safe, issue #575)', async () => {
+      // Issue #575: newly-issued tokens default to 'propose' so AI/agent writes
+      // land in the DM approval queue rather than touching canon directly. An
+      // admin who wants direct writes must opt in explicitly at mint time.
       const mint = await dmAgent.post('/api/v1/tokens').send({ name: 'wm-default', scope: 'dm' });
+      expect(mint.body.apiToken.writeScope).toBe('propose');
+    });
+  });
+
+  // Issue #575 regression: EVERY mint path defaults omitted writeScope to
+  // 'propose', and the safe default really routes a canon write into the DM
+  // proposal queue (not direct to canon). If the default flips back to 'direct',
+  // every assertion in this block fails — that is the regression guard.
+  describe('Issue #575: newly-issued tokens default to propose across every mint path', () => {
+    it('self-service POST /tokens defaults writeScope to propose', async () => {
+      const mint = await dmAgent.post('/api/v1/tokens').send({ name: 'wm575-self', scope: 'dm' });
+      expect(mint.status).toBe(201);
+      expect(mint.body.apiToken.writeScope).toBe('propose');
+    });
+
+    it('admin POST /users/:id/tokens defaults writeScope to propose', async () => {
+      // wm-dm (the setup user) is the server admin; mint on behalf of themself.
+      const dmMe = await dmAgent.get('/api/v1/me');
+      const dmId = dmMe.body.user.id;
+      const mint = await dmAgent
+        .post(`/api/v1/users/${dmId}/tokens`)
+        .send({ tokenName: 'wm575-admin-provisioned', scope: 'dm' });
+      expect(mint.status).toBe(201);
+      expect(mint.body.apiToken.writeScope).toBe('propose');
+    });
+
+    it('headless POST /auth/token defaults writeScope to propose', async () => {
+      const mint = await request(ctx.app.getHttpServer())
+        .post('/api/v1/auth/token')
+        .send({ username: 'wm-dm', password: 'dm-password-1', tokenName: 'wm575-headless', scope: 'dm' });
+      expect(mint.status).toBe(201);
+      expect(mint.body.apiToken.writeScope).toBe('propose');
+    });
+
+    it('a propose-default token routes a canon write into the DM queue (202), never direct (201)', async () => {
+      // The point of the safe default: an AI minting a token with no writeScope
+      // and immediately writing must NOT touch canon — its mutation lands as a
+      // pending proposal. This is the user-visible safety guarantee of #575.
+      const mint = await dmAgent.post('/api/v1/tokens').send({ name: 'wm575-canary', scope: 'dm' });
+      expect(mint.body.apiToken.writeScope).toBe('propose');
+      const rawToken = mint.body.token;
+
+      const before = await dmAgent.get(`/api/v1/campaigns/${campaignId}/npcs`);
+      const beforeCount = before.body.length;
+
+      const write = await request(ctx.app.getHttpServer())
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set('Authorization', `Bearer ${rawToken}`)
+        .send({ name: 'wm575 should be proposed, not written' });
+      expect(write.status).toBe(202); // proposed, NOT 201 direct
+      expect(write.body.proposal.status).toBe('pending');
+      expect(write.body.proposal.action).toBe('create');
+
+      // Canon is untouched — the NPC does not exist until a DM approves.
+      const after = await dmAgent.get(`/api/v1/campaigns/${campaignId}/npcs`);
+      expect(after.body.length).toBe(beforeCount);
+      expect(after.body.some((n: { name: string }) => n.name === 'wm575 should be proposed, not written')).toBe(false);
+    });
+
+    it('opting into writeScope: direct still works (the default is safe, not mandatory)', async () => {
+      // The flip is in the DEFAULT — an admin who explicitly asks for direct
+      // still gets it. This proves the change is "safe default", not "direct
+      // removed".
+      const mint = await dmAgent.post('/api/v1/tokens').send({ name: 'wm575-explicit-direct', scope: 'dm', writeScope: 'direct' });
       expect(mint.body.apiToken.writeScope).toBe('direct');
     });
   });

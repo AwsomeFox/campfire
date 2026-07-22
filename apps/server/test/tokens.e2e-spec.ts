@@ -33,7 +33,10 @@ describe('api tokens (e2e, real cookie sessions)', () => {
   it('create -> raw token works as Bearer on /me and campaign routes', async () => {
     const server = ctx.app.getHttpServer();
 
-    const createRes = await dmAgent.post('/api/v1/tokens').send({ name: 'my-dm-token', scope: 'dm' });
+    // writeScope: 'direct' is explicit because the safe default changed to
+    // 'propose' in issue #575 — this test asserts a DIRECT write (201 + title),
+    // so we opt in rather than rely on the (now-safe) default.
+    const createRes = await dmAgent.post('/api/v1/tokens').send({ name: 'my-dm-token', scope: 'dm', writeScope: 'direct' });
     expect(createRes.status).toBe(201);
     expect(createRes.body.token).toMatch(/^cf_pat_[0-9a-f]{48}$/);
     expect(createRes.body.apiToken.tokenPrefix).toBe(createRes.body.token.slice(0, 11));
@@ -64,7 +67,11 @@ describe('api tokens (e2e, real cookie sessions)', () => {
   it('scope viewer token cannot create quest (403) even for dm owner', async () => {
     const server = ctx.app.getHttpServer();
 
-    const createRes = await dmAgent.post('/api/v1/tokens').send({ name: 'viewer-scoped', scope: 'viewer' });
+    // writeScope: 'direct' is explicit (issue #575 default is 'propose') — this
+    // test asserts viewer scope BLOCKS a direct canon write (403). Under the
+    // 'propose' default the same call would route into the DM queue (202), which
+    // is a different (also-valid) behavior; we pin the direct path here.
+    const createRes = await dmAgent.post('/api/v1/tokens').send({ name: 'viewer-scoped', scope: 'viewer', writeScope: 'direct' });
     expect(createRes.status).toBe(201);
     const rawToken = createRes.body.token;
 
@@ -184,7 +191,7 @@ describe('api tokens (e2e, real cookie sessions)', () => {
         tokenId: createRes.body.apiToken.id,
         name: 'me-viewer-scoped',
         scope: 'viewer',
-        writeScope: 'direct', // default write authority (issue #158) — unaffected by read scope
+        writeScope: 'propose', // safe default for new tokens (issue #575) — unaffected by read scope
         campaignId: null,
         adminEnabled: false,
         serverAdmin: false, // owner IS a server admin, but the token was not minted adminEnabled

@@ -2440,9 +2440,11 @@ export const ApiToken = z.object({
   name: z.string().min(1).max(80),
   scope: TokenScope,
   // Server-enforced write authority, independent of `scope` — see WriteScope.
-  // Defaults 'direct' (back-compat: existing tokens write exactly as before).
-  // Existing DBs get the column added defaulting to 'direct' via
-  // migrateApiTokensTableForWriteScope() (db.module.ts).
+  // DB ROW default 'direct' (back-compat: pre-existing rows write exactly as
+  // before). This is NOT the minting default — newly MINTED tokens omitting
+  // writeScope are defaulted to 'propose' server-side (issue #575, see
+  // TokensService). Existing DBs get the column added defaulting to 'direct'
+  // via migrateApiTokensTableForWriteScope() (db.module.ts).
   writeScope: WriteScope.default('direct'),
   campaignId: Id.nullable().default(null), // null = all campaigns the owner can access
   // Whether this token may exercise SERVER-admin powers (ServerRolesGuard-gated routes,
@@ -2465,10 +2467,12 @@ export const ApiTokenCreate = z.object({
   // token can only mint tokens bound to that same campaign — a scoped-down token can
   // never mint a broader sibling.
   scope: TokenScope,
-  // Server-enforced write authority (default 'direct'). When the caller is itself
+  // Server-enforced write authority (omitted → server defaults to 'propose',
+  // issue #575: newly-issued tokens funnel mutations through the DM proposal
+  // queue rather than writing canon directly). When the caller is itself
   // authenticated via a PAT, this is additionally capped to the calling token's
-  // writeScope (min in the direct>propose>none order) — a propose-only token can
-  // never mint a direct-write sibling. See WriteScope / TokensService.create.
+  // writeScope (min in the direct>propose>none order) — a propose-only token
+  // can never mint a direct-write sibling. See WriteScope / TokensService.create.
   writeScope: WriteScope.optional(),
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // requires the caller to currently hold real server-admin power; silently forced false otherwise
@@ -2483,7 +2487,7 @@ export const AuthTokenRequest = z.object({
   password: z.string().min(1).max(200), // same cap as LoginRequest.password — scrypt DoS guard on an unauthenticated path
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer' (least privilege) — see TokensService.mintFor
-  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
+  writeScope: WriteScope.optional(), // omitted → server defaults to 'propose' (issue #575); see WriteScope
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // caller (the just-authenticated user) must currently be a server admin — see TokensService.create
 });
@@ -2495,7 +2499,7 @@ export type AuthTokenRequest = z.infer<typeof AuthTokenRequest>;
 export const AdminTokenCreate = z.object({
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer'
-  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
+  writeScope: WriteScope.optional(), // omitted → server defaults to 'propose' (issue #575); see WriteScope
   campaignId: Id.nullable().optional(),
   // May only be set true when the TARGET user (owner of the minted token) is themself
   // a server admin, AND the calling admin currently holds real (non-token-capped)
