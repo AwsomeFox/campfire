@@ -68,6 +68,11 @@ test.describe('shared notification controller', () => {
     await expect(dialog).toHaveAttribute('id', controlledId!);
     await expect.poll(() => bell.evaluate((element) => element.closest('[inert]') !== null)).toBe(true);
 
+    // Focus cycle now includes the always-present close button (issue #664):
+    // Mark all read -> Close -> first item -> last item -> (wrap) Mark all read.
+    const closeButton = dialog.getByRole('button', { name: 'Close notifications' });
+    await page.keyboard.press('Tab');
+    await expect(closeButton).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(firstItem).toBeFocused();
     await page.keyboard.press('Tab');
@@ -101,22 +106,26 @@ test.describe('shared notification controller', () => {
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
     await expect(dialog).toBeVisible();
-    await expect(dialog).toBeFocused();
     await expect(dialog).toHaveAccessibleDescription('0 items.');
     await expect(dialog.getByRole('status')).toHaveText('0 items.');
     await expect(dialog.getByText('Nothing yet')).toBeVisible();
 
+    // Issue #664: the panel is a bottom sheet on narrow viewports, so it hugs
+    // the bottom edge and spans the viewport width (matching the MoreSheet).
+    const closeButton = dialog.getByRole('button', { name: 'Close notifications' });
+    await expect(closeButton).toBeVisible();
+    await expect(closeButton).toBeFocused();
     const box = await dialog.boundingBox();
     expect(box).not.toBeNull();
-    expect(box!.x).toBeGreaterThanOrEqual(12);
-    expect(box!.x + box!.width).toBeLessThanOrEqual(363);
-    expect(box!.y).toBeGreaterThanOrEqual(12);
-    expect(box!.y + box!.height).toBeLessThanOrEqual(655);
+    expect(box!.x).toBe(0);
+    expect(box!.width).toBe(375);
+    expect(box!.y + box!.height).toBe(667);
 
+    // With only the close button focusable, Tab wraps back to it.
     await page.keyboard.press('Tab');
-    await expect(dialog).toBeFocused();
+    await expect(closeButton).toBeFocused();
     await page.keyboard.press('Shift+Tab');
-    await expect(dialog).toBeFocused();
+    await expect(closeButton).toBeFocused();
 
     const accessibilityScan = await new AxeBuilder({ page }).include('[role="dialog"]').analyze();
     expect(accessibilityScan.violations).toEqual([]);
@@ -127,7 +136,8 @@ test.describe('shared notification controller', () => {
 
     await bell.click();
     await expect(dialog).toBeVisible();
-    await page.mouse.click(2, 2);
+    // The visible close button is itself a dismiss affordance on mobile.
+    await closeButton.click();
     await expect(dialog).toHaveCount(0);
     await expect(bell).toBeFocused();
   });
