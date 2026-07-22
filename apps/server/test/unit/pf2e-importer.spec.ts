@@ -84,7 +84,8 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(entryTypeForSection('creatures')).toBe('monster');
     expect(entryTypeForSection('ancestries')).toBe('race');
     expect(entryTypeForSection('backgrounds')).toBe('feat');
-    expect(ALL_PF2E_SECTIONS).toHaveLength(8);
+    expect(entryTypeForSection('vehicles')).toBe('item');
+    expect(ALL_PF2E_SECTIONS).toHaveLength(9);
   });
 });
 

@@ -54,7 +54,7 @@ const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 // Campfire's importer "sections" map 1:1 onto an AoN document `type` and a Campfire
 // rule-entry type. Ancestries -> race, backgrounds -> feat (per issue #2's class/race/feat
 // vocabulary; a background is a feat-like package of proficiencies), classes -> class.
-export type Pf2eSection = 'creatures' | 'spells' | 'equipment' | 'feats' | 'ancestries' | 'classes' | 'backgrounds' | 'conditions';
+export type Pf2eSection = 'creatures' | 'spells' | 'equipment' | 'feats' | 'ancestries' | 'classes' | 'backgrounds' | 'conditions' | 'vehicles';
 
 /** AoN `_source.type` value queried for each section. */
 const SECTION_TO_AON_TYPE: Record<Pf2eSection, string> = {
@@ -69,6 +69,7 @@ const SECTION_TO_AON_TYPE: Record<Pf2eSection, string> = {
   classes: 'class',
   backgrounds: 'background',
   conditions: 'condition',
+  vehicles: 'vehicle',
 };
 
 const SECTION_TO_ENTRY_TYPE: Record<Pf2eSection, RuleEntryType> = {
@@ -80,6 +81,7 @@ const SECTION_TO_ENTRY_TYPE: Record<Pf2eSection, RuleEntryType> = {
   classes: 'class',
   backgrounds: 'feat',
   conditions: 'condition',
+  vehicles: 'item',
 };
 
 export const ALL_PF2E_SECTIONS: Pf2eSection[] = [
@@ -91,6 +93,7 @@ export const ALL_PF2E_SECTIONS: Pf2eSection[] = [
   'classes',
   'backgrounds',
   'conditions',
+  'vehicles',
 ];
 
 export interface ImportedEntry {
@@ -342,6 +345,25 @@ function mapCondition(src: Record<string, unknown>): ImportedEntry {
   };
 }
 
+function mapVehicle(src: Record<string, unknown>): ImportedEntry {
+  const name = asString(src.name);
+  const body = bodyOf(src);
+  const level = num(src.level);
+  const ac = num(src.ac);
+  const hp = num(src.hp);
+
+  return {
+    slug: slugify(name),
+    name,
+    type: 'item',
+    summary: truncate(body, 300) || 'Vehicle',
+    body,
+    dataJson: JSON.stringify({ category: 'vehicle', level, ac, hp }),
+    license: licenseOf(src),
+    source: sourceOf(src),
+  };
+}
+
 const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>) => ImportedEntry> = {
   creatures: mapCreature,
   spells: mapSpell,
@@ -351,6 +373,7 @@ const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>) => Impo
   classes: mapClass,
   backgrounds: mapBackground,
   conditions: mapCondition,
+  vehicles: mapVehicle,
 };
 
 async function fetchWithTimeout(url: string): Promise<Response> {
