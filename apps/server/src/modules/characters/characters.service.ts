@@ -1,7 +1,7 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats, ruleSystemAdapter, ddbImportSupported } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog, campaigns, characters, combatants, encounters } from '../../db/schema';
@@ -184,6 +184,16 @@ export class CharactersService {
    * audit all apply uniformly. Private/not-found sheets surface as clean 400/404 errors from
    * fetchDdbCharacter.
    *
+   * System compatibility (issue #714): a DDB sheet is a D&D-5e character (5e abilities, AC/HP
+   * math, conditions, skills/saves), so importing it into a campaign running a different
+   * system (Pathfinder, OSR, 13th Age, Open Legend) or a homebrew campaign with no explicit
+   * pack would silently produce a character whose numbers belong to another game. The import
+   * is therefore gated on `ddbImportSupported(ruleSystem)` — only an explicitly-5e campaign
+   * is accepted. This runs BEFORE the DDB fetch so an incompatible campaign never reaches the
+   * network, and it rejects a direct-API request that bypasses the (hiding) UI affordance.
+   * When a non-5e system is supported in the future it will go through a field-by-field
+   * conversion preview first (the issue calls that out explicitly); until then, reject.
+   *
    * The character-service base URL is read from `DDB_CHARACTER_SERVICE_BASE_URL` when set
    * (an e2e test points this at an in-process fake server, mirroring the Open5e `url`
    * override); otherwise the live service is used. `fetchImpl` is injectable for the same
@@ -196,6 +206,18 @@ export class CharactersService {
     role: Role,
     fetchImpl?: DdbFetch,
   ): Promise<Character> {
+    // System gate before any network/parse work — incompatible campaigns never reach DDB.
+    const [campaign] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    if (!ddbImportSupported(campaign?.ruleSystem)) {
+      throw new BadRequestException(
+        "D&D Beyond import is only available for D&D 5e campaigns. " +
+          'Switch the campaign’s rule system to the D&D 5e SRD, or create the character manually.',
+      );
+    }
     const ddbId = parseDdbId(input.ddbId?.trim() || input.url?.trim() || '');
     const baseUrl = process.env.DDB_CHARACTER_SERVICE_BASE_URL || undefined;
     const data = await fetchDdbCharacter(ddbId, baseUrl, fetchImpl);

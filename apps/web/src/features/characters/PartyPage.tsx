@@ -8,10 +8,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import type { Character, CampaignMember } from '@campfire/schema';
-import { levelForXp } from '@campfire/schema';
+import { levelForXp, ddbImportSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
+import { useCampaign } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { avatarTone, initials } from './avatar';
@@ -25,6 +26,12 @@ export default function PartyPage() {
   const { me, roleIn } = useAuth();
   const role = roleIn(id);
   const isDm = role === 'dm';
+  // The campaign record drives the D&D Beyond import affordance (issue #714): the importer
+  // produces a 5e-shaped character, so it is only offered for an explicitly-D&D-5e campaign.
+  // A homebrew campaign (no pack selected) resolves to 5e for combat math but is NOT treated
+  // as explicitly 5e here, matching the server's compatibility gate.
+  const campaign = useCampaign(id);
+  const ddbAllowed = ddbImportSupported(campaign?.ruleSystem);
 
   const [characters, setCharacters] = useState<Character[]>([]);
   const [members, setMembers] = useState<CampaignMember[]>([]);
@@ -175,7 +182,7 @@ export default function PartyPage() {
       )}
 
       {canCreate && (creating || characters.length === 0) && (
-        <NewCharacterForm campaignId={id} onCancel={characters.length > 0 ? () => setCreating(false) : undefined} onCreated={load} />
+        <NewCharacterForm campaignId={id} ddbAllowed={ddbAllowed} onCancel={characters.length > 0 ? () => setCreating(false) : undefined} onCreated={load} />
       )}
 
       {pendingUndo && (
@@ -517,10 +524,17 @@ function AwardXpForm({
 
 function NewCharacterForm({
   campaignId,
+  ddbAllowed,
   onCancel,
   onCreated,
 }: {
   campaignId: number;
+  /**
+   * Whether the campaign's rule system is field-compatible with the D&D Beyond importer
+   * (issue #714). False hides the import affordance entirely; the server re-checks this on
+   * the request, so a stale/hidden UI can't sneak an incompatible import through.
+   */
+  ddbAllowed: boolean;
   onCancel?: () => void;
   onCreated: () => void;
 }) {
@@ -585,29 +599,37 @@ function NewCharacterForm({
       <h2 className="font-bold text-white text-sm">New character</h2>
       {error && <p className="text-sm text-rose-400">{error}</p>}
 
-      {/* Import from D&D Beyond (issue #18) — read-only, public sheets only. */}
-      <div className="space-y-2 rounded-md border border-slate-700/60 p-3">
-        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Import from D&amp;D Beyond</span>
-        <div className="flex gap-2">
-          <TextInput
-            aria-label="D&D Beyond character id or URL"
-            placeholder="D&D Beyond id or character URL"
-            value={ddbRef}
-            onChange={(e) => setDdbRef(e.target.value)}
-            maxLength={500}
-          />
-          <Btn type="button" onClick={importFromDdb} disabled={importing || !ddbRef.trim()}>
-            {importing ? 'Importing…' : 'Import'}
-          </Btn>
+      {/* Import from D&D Beyond (issue #18) — read-only, public sheets only.
+          Offered only for explicitly-D&D-5e campaigns (issue #714): a DDB sheet is a 5e
+          character, so importing into another system would silently produce a character
+          whose numbers belong to a different game. The server re-checks compatibility, so
+          a stale UI can't bypass it. */}
+      {ddbAllowed && (
+        <div className="space-y-2 rounded-md border border-slate-700/60 p-3">
+          <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Import from D&amp;D Beyond</span>
+          <div className="flex gap-2">
+            <TextInput
+              aria-label="D&D Beyond character id or URL"
+              placeholder="D&D Beyond id or character URL"
+              value={ddbRef}
+              onChange={(e) => setDdbRef(e.target.value)}
+              maxLength={500}
+            />
+            <Btn type="button" onClick={importFromDdb} disabled={importing || !ddbRef.trim()}>
+              {importing ? 'Importing…' : 'Import'}
+            </Btn>
+          </div>
+          <p className="text-xs text-slate-500">The sheet must be set to Public on D&amp;D Beyond.</p>
         </div>
-        <p className="text-xs text-slate-500">The sheet must be set to Public on D&amp;D Beyond.</p>
-      </div>
+      )}
 
-      <div className="flex items-center gap-2 text-xs text-slate-600">
-        <span className="h-px flex-1 bg-slate-700/60" />
-        or create manually
-        <span className="h-px flex-1 bg-slate-700/60" />
-      </div>
+      {ddbAllowed && (
+        <div className="flex items-center gap-2 text-xs text-slate-600">
+          <span className="h-px flex-1 bg-slate-700/60" />
+          or create manually
+          <span className="h-px flex-1 bg-slate-700/60" />
+        </div>
+      )}
 
       <form onSubmit={submit} className="space-y-3">
         <TextInput aria-label="Character name" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} autoFocus />
