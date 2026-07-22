@@ -1326,19 +1326,35 @@ function migrateCombatantsUniqueIdentity(sqlite: Database.Database): void {
     );
   if (hasCurrentPointer) {
     const remapForIdentity = (identityCol: 'character_id' | 'npc_id') => {
-      // Pairs of (encounter_id, surviving_min_id, all_duplicate_ids_csv) for the
-      // identity column. Build the remap per encounter from the duplicate set.
+      // For each (encounter, identity) group that has duplicates, repoint the
+      // encounter's current_combatant_id to the surviving MIN(id) ONLY when the
+      // pointer currently references one of the duplicate (to-be-deleted) rows
+      // for THAT identity — i.e. a row whose id differs from keep_id but shares
+      // keep_id's identity value. A pointer at an unrelated combatant (a monster,
+      // or a different identity) is left untouched, so the turn pointer is never
+      // collateral-damaged by an unrelated group's dedupe.
       const survivors = sqlite
         .prepare(
-          `SELECT encounter_id, MIN(id) AS keep_id FROM combatants WHERE ${identityCol} IS NOT NULL GROUP BY encounter_id, ${identityCol}`,
+          `SELECT encounter_id, ${identityCol} AS identity_value, MIN(id) AS keep_id
+           FROM combatants WHERE ${identityCol} IS NOT NULL
+           GROUP BY encounter_id, ${identityCol}
+           HAVING COUNT(*) > 1`,
         )
-        .all() as Array<{ encounter_id: number; keep_id: number }>;
-      for (const { encounter_id, keep_id } of survivors) {
+        .all() as Array<{ encounter_id: number; identity_value: number; keep_id: number }>;
+      for (const { encounter_id, identity_value, keep_id } of survivors) {
         sqlite
           .prepare(
-            `UPDATE encounters SET current_combatant_id = ? WHERE id = ? AND current_combatant_id IS NOT NULL AND current_combatant_id != ? AND current_combatant_id IN (SELECT id FROM combatants WHERE encounter_id = ? AND ${identityCol} IS NOT NULL)`,
+            `UPDATE encounters
+               SET current_combatant_id = ?
+             WHERE id = ?
+               AND current_combatant_id IS NOT NULL
+               AND current_combatant_id != ?
+               AND current_combatant_id IN (
+                 SELECT id FROM combatants
+                 WHERE encounter_id = ? AND ${identityCol} = ?
+               )`,
           )
-          .run(keep_id, encounter_id, keep_id, encounter_id);
+          .run(keep_id, encounter_id, keep_id, encounter_id, identity_value);
       }
     };
     remapForIdentity('character_id');
