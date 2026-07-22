@@ -7,7 +7,7 @@ Campfire is the party's shared memory: quests with objectives and subquests, NPC
 Design goals:
 
 - **Single Docker image, single volume** — SQLite, no external services
-- **Login via any OIDC provider** (built for [Authentik](https://goauthentik.io); roles map from groups: `dm` / `player` / `viewer`)
+- **Login via any OIDC provider** (built for [Authentik](https://goauthentik.io)); IdP groups can gate sign-in or grant server-admin access, while campaign roles are assigned in Campfire
 - **AI-operable from day 1** — the same service layer is exposed as a REST API (OpenAPI) and an MCP server (130+ tools), so an AI assistant can maintain — or run — the campaign; AI writes can be routed through a DM-approved proposal queue
 - **An AI in the DM seat (optional, experimental)** — a per-campaign AI-DM seat runs as a **co-DM** (proposes only; every change lands in the DM's approval queue) or a full **driver** (holds the seat and runs the session), with token budgets, a kill switch, and player recovery levers
 - **Server-enforced secrecy** — DM-only fields, hidden entities and private notes are stripped in the API layer, never hidden client-side
@@ -140,6 +140,7 @@ running on 8080 — maps to the container's internal 8080).
 | `OIDC_CLIENT_ID` | *(unset)* | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | *(unset)* | OIDC client secret |
 | `OIDC_REDIRECT_URI` | *(unset)* | OIDC callback URL, e.g. `https://campfire.example.com/api/v1/auth/oidc/callback` |
+| `OIDC_PROVIDER_NAME` | *(unset)* | Optional identity-provider display name for the login button, e.g. `Keycloak`; unset uses neutral “Sign in with SSO” branding |
 | `OIDC_SCOPE` | `openid profile email` | OIDC scopes requested |
 | `OIDC_GROUPS_CLAIM` | `groups` | Claim in the ID token holding the user's group memberships |
 | `OIDC_ADMIN_GROUP` | *(unset)* | Group name that grants the Campfire **server admin** role (campaign roles dm/player/viewer are per-campaign memberships managed in-app) |
@@ -192,6 +193,7 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
       OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:?}
+      OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-}
       OIDC_ADMIN_GROUP: ${OIDC_ADMIN_GROUP:?}
       TZ: ${TZ:-UTC}
     # No `ports:` published here — reverse-proxied, see below. For a standalone
@@ -209,8 +211,9 @@ The common self-hosted pattern: **Traefik** terminates TLS and routes
 `campfire.example.com` to the container on its internal port 8080 (via Docker labels
 or a dynamic config file), while **Authentik** is the OIDC provider — create an
 OAuth2/OIDC provider + application in Authentik, point `OIDC_ISSUER` at it, and map
-an Authentik group (e.g. `campfire-dm`) to `OIDC_ADMIN_GROUP` so its members land in
-Campfire with the `dm` role. Campfire itself never needs a public port in this setup
+an Authentik group (e.g. `campfire-admins`) to `OIDC_ADMIN_GROUP` so its members become
+Campfire server admins. Campaign access and `dm` / `player` / `viewer` roles are still
+assigned inside Campfire. Campfire itself never needs a public port in this setup
 — only Traefik does; Campfire and Traefik talk over the Docker network.
 
 ## AI Dungeon Master (experimental)
