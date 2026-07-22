@@ -11,20 +11,18 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { useAnnounce } from '../../components/Announcer';
 import { ENTITY_ICON } from '../../lib/uiIcons';
 import { proposalTargetHref } from '../../lib/entityLinks';
+import {
+  deriveProposalSelectionScope,
+  isAiProposal,
+  retainPendingSelection,
+  summarizeProposalBatch,
+} from './proposalSelection';
 
 type EntityType = Proposal['entityType'];
-
-/**
- * An AI-drafted proposal (issue #341): the co-DM draft endpoint (#313) attributes these
- * to `ai-dm:<campaignId>` (see CoDmService.draft's `attribution.proposerUserId`), never a
- * human user id, so this prefix check is a reliable, cheap way to tell "drafted by AI" from
- * a human/collaborator proposal without a schema change.
- */
-function isAiProposal(p: Proposal): boolean {
-  return p.proposerUserId.startsWith('ai-dm:');
-}
 
 const entityIcon: Record<EntityType, string> = {
   quest: ENTITY_ICON.quest,
@@ -56,6 +54,7 @@ export default function ProposalsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { roleIn } = useAuth();
+  const announce = useAnnounce();
   const role = roleIn(cid);
   const isDm = role === 'dm';
 
@@ -67,6 +66,10 @@ export default function ProposalsPage() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
+  const [batchConfirmation, setBatchConfirmation] = useState<{
+    action: 'approve' | 'reject';
+    proposals: Proposal[];
+  } | null>(null);
   // "AI drafts" filter (issue #341): narrow the pending queue down to co-DM-drafted
   // proposals so a DM can triage what the AI wrote separately from human/collab edits.
   const [aiOnly, setAiOnly] = useState(false);
@@ -82,6 +85,9 @@ export default function ProposalsPage() {
         api.get<Proposal[]>(`${API}/campaigns/${cid}/proposals?status=rejected`),
       ]);
       setPending(pendingList);
+      // A proposal may be resolved by another DM or agent while this page is open.
+      // Never retain an invisible, no-longer-pending id after the refresh.
+      setSelected((current) => retainPendingSelection(pendingList, current));
       const merged = [...approved, ...rejected].sort(
         (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
       );
@@ -126,8 +132,10 @@ export default function ProposalsPage() {
     }
   }
 
-  async function resolveSelected(action: 'approve' | 'reject') {
-    const ids = [...selected];
+  async function resolveSelected(action: 'approve' | 'reject', proposals: Proposal[]) {
+    // `proposals` is the frozen visible selection shown in the confirmation. Its
+    // order and ids are used unchanged for the request.
+    const ids = proposals.map((proposal) => proposal.id);
     if (ids.length === 0) return;
     setBatchBusy(true);
     setError(null);
@@ -136,14 +144,20 @@ export default function ProposalsPage() {
         `${API}/proposals/batch/${action}`,
         { ids },
       );
-      const failed = results.filter((r) => !r.ok);
-      if (failed.length > 0) {
-        setError(`${failed.length} of ${results.length} couldn't be ${action === 'approve' ? 'approved' : 'rejected'}: ${failed[0].error ?? 'unknown error'}`);
-      }
-      setSelected(new Set());
+      const succeededIds = new Set(results.filter((result) => result.ok).map((result) => result.id));
+      // Treat a missing result as a failure too. The server currently returns one
+      // result per id, but preserving an unacknowledged id is the safer fallback.
+      const failedIds = ids.filter((id) => !succeededIds.has(id));
+      const firstFailure = results.find((result) => !result.ok);
+      setSelected(new Set(failedIds));
       await load();
+      if (failedIds.length > 0) {
+        setError(`${failedIds.length} of ${ids.length} couldn't be ${action === 'approve' ? 'approved' : 'rejected'}: ${firstFailure?.error ?? 'unknown error'}`);
+      }
+      setBatchConfirmation(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Couldn't ${action} the selected proposals.`);
+      setBatchConfirmation(null);
     } finally {
       setBatchBusy(false);
     }
@@ -156,6 +170,20 @@ export default function ProposalsPage() {
       else next.add(id);
       return next;
     });
+  }
+
+  function setAiFilter(nextAiOnly: boolean) {
+    const nextScope = deriveProposalSelectionScope(pending ?? [], selected, nextAiOnly);
+    setSelected(new Set(nextScope.selectedIds));
+    setAiOnly(nextAiOnly);
+    if (nextScope.hiddenSelectedIds.length > 0) {
+      const cleared = nextScope.hiddenSelectedIds.length;
+      const remaining = nextScope.selectedCount;
+      announce(
+        `AI drafts filter cleared ${cleared} hidden ${cleared === 1 ? 'selection' : 'selections'}. ` +
+          `${remaining} visible ${remaining === 1 ? 'proposal remains' : 'proposals remain'} selected.`,
+      );
+    }
   }
 
   if (!Number.isFinite(cid)) {
@@ -193,7 +221,8 @@ export default function ProposalsPage() {
   }
 
   const aiPendingCount = (pending ?? []).filter(isAiProposal).length;
-  const visiblePending = aiOnly ? (pending ?? []).filter(isAiProposal) : (pending ?? []);
+  const selectionScope = deriveProposalSelectionScope(pending ?? [], selected, aiOnly);
+  const visiblePending = selectionScope.visible;
 
   return (
     <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
@@ -212,34 +241,31 @@ export default function ProposalsPage() {
         <EmptyState icon="crystal-ball" title="No pending proposals" hint="Approved & rejected proposals show up below." />
       ) : (
         <div className="space-y-3">
-          {aiPendingCount > 0 && (
-            <button
-              type="button"
-              onClick={() => setAiOnly((v) => !v)}
-              className="inline-flex items-center gap-1.5 text-[11px] px-1"
+          {(aiPendingCount > 0 || aiOnly) && (
+            <label
+              className="inline-flex items-center gap-1.5 text-[11px] px-1 cursor-pointer"
               style={{ color: aiOnly ? 'var(--color-accent-300)' : 'var(--color-neutral-500)' }}
             >
-              <span
-                aria-hidden
-                className="inline-block w-3.5 h-3.5 rounded-sm border"
-                style={{
-                  borderColor: aiOnly ? 'var(--color-accent-300)' : 'var(--color-neutral-600)',
-                  background: aiOnly ? 'var(--color-accent-300)' : 'transparent',
-                }}
+              <input
+                type="checkbox"
+                checked={aiOnly}
+                onChange={(event) => setAiFilter(event.target.checked)}
+                disabled={batchBusy}
               />
               <GameIcon slug="robot-golem" size={13} className="inline align-text-bottom mr-1" /> AI drafts only ({aiPendingCount})
-            </button>
+            </label>
           )}
           <BatchBar
-            total={visiblePending.length}
-            selectedCount={selected.size}
-            allSelected={visiblePending.length > 0 && selected.size === visiblePending.length}
+            total={selectionScope.total}
+            selectedCount={selectionScope.selectedCount}
+            allSelected={selectionScope.allSelected}
+            indeterminate={selectionScope.indeterminate}
             busy={batchBusy}
             onToggleAll={(all) =>
               setSelected(all ? new Set(visiblePending.map((p) => p.id)) : new Set())
             }
-            onApprove={() => resolveSelected('approve')}
-            onReject={() => resolveSelected('reject')}
+            onApprove={() => setBatchConfirmation({ action: 'approve', proposals: selectionScope.selected })}
+            onReject={() => setBatchConfirmation({ action: 'reject', proposals: selectionScope.selected })}
           />
           {visiblePending.length === 0 ? (
             <EmptyState icon="robot-golem" title="No AI drafts pending" hint="Turn off the filter to see the rest of the queue." />
@@ -259,6 +285,16 @@ export default function ProposalsPage() {
             ))
           )}
         </div>
+      )}
+
+      {batchConfirmation && (
+        <BatchConfirmationDialog
+          action={batchConfirmation.action}
+          proposals={batchConfirmation.proposals}
+          busy={batchBusy}
+          onConfirm={() => void resolveSelected(batchConfirmation.action, batchConfirmation.proposals)}
+          onCancel={() => setBatchConfirmation(null)}
+        />
       )}
 
       {history.length > 0 && (
@@ -297,6 +333,7 @@ function BatchBar({
   total,
   selectedCount,
   allSelected,
+  indeterminate,
   busy,
   onToggleAll,
   onApprove,
@@ -305,6 +342,7 @@ function BatchBar({
   total: number;
   selectedCount: number;
   allSelected: boolean;
+  indeterminate: boolean;
   busy: boolean;
   onToggleAll: (all: boolean) => void;
   onApprove: () => void;
@@ -316,8 +354,9 @@ function BatchBar({
         <input
           type="checkbox"
           checked={allSelected}
+          disabled={busy || total === 0}
           ref={(el) => {
-            if (el) el.indeterminate = selectedCount > 0 && !allSelected;
+            if (el) el.indeterminate = indeterminate;
           }}
           onChange={(e) => onToggleAll(e.target.checked)}
         />
@@ -334,6 +373,59 @@ function BatchBar({
         </div>
       )}
     </div>
+  );
+}
+
+function BatchConfirmationDialog({
+  action,
+  proposals,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  action: 'approve' | 'reject';
+  proposals: Proposal[];
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const summary = summarizeProposalBatch(proposals);
+  const verb = action === 'approve' ? 'Approve' : 'Reject';
+  const pastVerb = action === 'approve' ? 'approved' : 'rejected';
+
+  return (
+    <ConfirmDialog
+      title={`${verb} ${summary.total} selected ${summary.total === 1 ? 'proposal' : 'proposals'}?`}
+      confirmLabel={`${verb} ${summary.total} ${summary.total === 1 ? 'proposal' : 'proposals'}`}
+      danger={action === 'reject' || summary.destructiveCount > 0}
+      busy={busy}
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+      body={(
+        <div className="space-y-2">
+          <p>
+            Only these {summary.total} visible selected {summary.total === 1 ? 'proposal' : 'proposals'} will be {pastVerb}.
+          </p>
+          <ul className="list-disc pl-5 space-y-1" aria-label="Selected proposal types">
+            {summary.actions.map((item) => (
+              <li key={item.action}>
+                <strong className="capitalize">{item.action}</strong>: {item.count}{' '}
+                {item.count === 1 ? 'proposal' : 'proposals'} ({item.entityCounts.map(({ entityType, count }) =>
+                  `${count} ${entityType}`,
+                ).join(', ')})
+              </li>
+            ))}
+          </ul>
+          {summary.destructiveCount > 0 && (
+            <p className="text-rose-400">
+              {action === 'approve'
+                ? `${summary.destructiveCount} delete ${summary.destructiveCount === 1 ? 'proposal is' : 'proposals are'} destructive and will permanently remove the target.`
+                : `${summary.destructiveCount} delete ${summary.destructiveCount === 1 ? 'proposal is' : 'proposals are'} included; rejecting keeps the target unchanged.`}
+            </p>
+          )}
+        </div>
+      )}
+    />
   );
 }
 

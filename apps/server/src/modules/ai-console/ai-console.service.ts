@@ -229,7 +229,15 @@ export class AiConsoleService {
     const serverView = await this.providers.getServerView();
     if (serverView) {
       const r = await this.providers.testConnection(null);
-      out.push({ scope: 'server', campaignId: null, campaignName: null, ...r });
+      out.push({
+        scope: 'server',
+        campaignId: null,
+        campaignName: null,
+        ok: r.ok,
+        providerType: r.providerType,
+        model: r.model,
+        error: r.error,
+      });
     }
 
     // Every campaign that has its own provider override, joined to its name.
@@ -246,7 +254,10 @@ export class AiConsoleService {
         scope: 'campaign',
         campaignId: o.campaignId,
         campaignName: o.campaignName ?? `#${o.campaignId}`,
-        ...r,
+        ok: r.ok,
+        providerType: r.providerType,
+        model: r.model,
+        error: r.error,
       });
     }
 
