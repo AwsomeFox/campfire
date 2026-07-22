@@ -295,6 +295,94 @@ export class EncountersService {
   }
 
   /**
+   * Redact `questId`, `locationId`, and `sessionId` to `null` on encounter domain objects
+   * (or digests) when viewed by a non-DM and the linked entity is hidden, unexplored, or deleted.
+   */
+  private async redactHiddenLinkedEntities<T extends { questId: number | null; locationId: number | null; sessionId: number | null }>(
+    items: T[],
+    campaignId: number,
+    viewerRole?: Role,
+  ): Promise<T[]> {
+    if (viewerRole === undefined || viewerRole === 'dm' || items.length === 0) {
+      return items;
+    }
+
+    const questIds = Array.from(new Set(items.map((i) => i.questId).filter((id): id is number => id !== null)));
+    const locationIds = Array.from(new Set(items.map((i) => i.locationId).filter((id): id is number => id !== null)));
+    const sessionIds = Array.from(new Set(items.map((i) => i.sessionId).filter((id): id is number => id !== null)));
+
+    const hiddenQuestIds = new Set<number>();
+    if (questIds.length > 0) {
+      const questRows = await this.db
+        .select({ id: quests.id, hidden: quests.hidden, deletedAt: quests.deletedAt })
+        .from(quests)
+        .where(and(inArray(quests.id, questIds), eq(quests.campaignId, campaignId)));
+      const foundIds = new Set(questRows.map((q) => q.id));
+      for (const id of questIds) {
+        if (!foundIds.has(id)) hiddenQuestIds.add(id);
+      }
+      for (const q of questRows) {
+        if (q.hidden || q.deletedAt !== null) {
+          hiddenQuestIds.add(q.id);
+        }
+      }
+    }
+
+    const hiddenLocationIds = new Set<number>();
+    if (locationIds.length > 0) {
+      const locRows = await this.db
+        .select({ id: locations.id, status: locations.status, deletedAt: locations.deletedAt })
+        .from(locations)
+        .where(and(inArray(locations.id, locationIds), eq(locations.campaignId, campaignId)));
+      const foundIds = new Set(locRows.map((l) => l.id));
+      for (const id of locationIds) {
+        if (!foundIds.has(id)) hiddenLocationIds.add(id);
+      }
+      for (const l of locRows) {
+        if (l.status === 'unexplored' || l.deletedAt !== null) {
+          hiddenLocationIds.add(l.id);
+        }
+      }
+    }
+
+    const hiddenSessionIds = new Set<number>();
+    if (sessionIds.length > 0) {
+      const sessRows = await this.db
+        .select({ id: sessions.id, deletedAt: sessions.deletedAt })
+        .from(sessions)
+        .where(and(inArray(sessions.id, sessionIds), eq(sessions.campaignId, campaignId)));
+      const foundIds = new Set(sessRows.map((s) => s.id));
+      for (const id of sessionIds) {
+        if (!foundIds.has(id)) hiddenSessionIds.add(id);
+      }
+      for (const s of sessRows) {
+        if (s.deletedAt !== null) {
+          hiddenSessionIds.add(s.id);
+        }
+      }
+    }
+
+    if (hiddenQuestIds.size === 0 && hiddenLocationIds.size === 0 && hiddenSessionIds.size === 0) {
+      return items;
+    }
+
+    return items.map((item) => {
+      const qId = item.questId !== null && hiddenQuestIds.has(item.questId) ? null : item.questId;
+      const lId = item.locationId !== null && hiddenLocationIds.has(item.locationId) ? null : item.locationId;
+      const sId = item.sessionId !== null && hiddenSessionIds.has(item.sessionId) ? null : item.sessionId;
+      if (qId === item.questId && lId === item.locationId && sId === item.sessionId) {
+        return item;
+      }
+      return {
+        ...item,
+        questId: qId,
+        locationId: lId,
+        sessionId: sId,
+      };
+    });
+  }
+
+  /**
    * `viewerRole` drives entity-level secrecy (issue #262): a hidden encounter is a DM's
    * prepared, not-yet-sprung fight and is dropped WHOLESALE for a non-DM viewer — mirroring
    * how QuestsService/NpcsService filter hidden rows. Omit `viewerRole` (or pass `dm`) only
@@ -311,7 +399,8 @@ export class EncountersService {
     const list = rows.map(encounterToDomain);
     // Drop hidden encounters wholesale for a non-DM viewer (issue #262). undefined role
     // (DM-facing callers) is never filtered.
-    return viewerRole === undefined ? list : filterHidden(list, viewerRole);
+    const visible = viewerRole === undefined ? list : filterHidden(list, viewerRole);
+    return this.redactHiddenLinkedEntities(visible, campaignId, viewerRole);
   }
 
   /**
@@ -355,7 +444,9 @@ export class EncountersService {
       const fog = parseFog(row.fog);
       if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
     }
-    return { ...encounterToDomain(row), combatants: list };
+    const domain = encounterToDomain(row);
+    const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
+    return { ...redactedDomain, combatants: list };
   }
 
   async getCombatantRowOrThrow(encounterId: number, combatantId: number) {
@@ -552,6 +643,9 @@ export class EncountersService {
 
   /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
   async create(campaignId: number, input: EncounterCreateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    if (input.locationId != null) await this.assertEntityInCampaign('location', input.locationId, campaignId);
+    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, campaignId);
+    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, campaignId);
     const ts = nowIso();
     const [encounterRow] = await this.db
       .insert(encounters)
@@ -861,7 +955,7 @@ export class EncountersService {
       .groupBy(combatants.encounterId);
     const tallyById = new Map(tally.map((t) => [t.encounterId, { total: Number(t.total), down: Number(t.down) }]));
 
-    return rows.map((r) => {
+    const digests: EncounterDigest[] = rows.map((r) => {
       const t = tallyById.get(r.id) ?? { total: 0, down: 0 };
       return {
         id: r.id,
@@ -876,6 +970,7 @@ export class EncountersService {
         downCount: t.down,
       };
     });
+    return this.redactHiddenLinkedEntities(digests, campaignId, viewerRole);
   }
 
   /**
