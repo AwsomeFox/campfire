@@ -64,8 +64,30 @@ export default defineConfig({
             // The `campfire-api` bucket is global across sign-ins, so it is
             // purged at every auth-identity change (see lib/swCache.ts) to keep
             // one account's data from ever bleeding into another's.
-            urlPattern: ({ url, request }) =>
-              url.pathname.startsWith("/api/") && request.method === "GET",
+            //
+            // PROVEN-LIVE EXCLUSION (issue #579): `/me` and `/auth/*` are the
+            // identity channel and MUST NOT be served from this cache. The
+            // browser's `navigator.onLine` only reflects the network interface,
+            // not whether a response actually reached the server — so when the
+            // router is up but Campfire is down, NetworkFirst would silently
+            // fall back to a cached `/me` and AuthProvider would mistake that
+            // stale identity for a live one, wiping the offline cache. By keeping
+            // `/me` out of the SW cache entirely, a successful `/me` is
+            // guaranteed to be proven-live (and a failure is a real failure).
+            // The last-known identity is persisted separately by lib/swCache.ts
+            // so an offline reload can still render the authed UI, clearly marked
+            // as stale, without ever confusing a cached body with a live one.
+            urlPattern: ({ url, request }) => {
+              if (request.method !== "GET") return false;
+              if (!url.pathname.startsWith("/api/")) return false;
+              if (
+                url.pathname === "/api/v1/me"
+                || url.pathname.startsWith("/api/v1/auth/")
+              ) {
+                return false;
+              }
+              return true;
+            },
             handler: "NetworkFirst",
             options: {
               cacheName: "campfire-api",

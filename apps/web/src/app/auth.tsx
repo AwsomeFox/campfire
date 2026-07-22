@@ -14,6 +14,22 @@ export interface AuthState {
    * server" instead of spinning on the splash screen forever.
    */
   connectionError: boolean;
+  /**
+   * True when `me` was restored from the persisted last-known snapshot rather than
+   * confirmed live on this load (issue #579). Happens when `/me` could not reach
+   * the server (offline, or origin reachable but Campfire down). AuthProvider never
+   * infers this from `navigator.onLine` — only a real `/me` failure sets it. The
+   * UI should show an "offline — showing last-known" banner and avoid mutations,
+   * since cached campaign data may be stale.
+   */
+  staleIdentity: boolean;
+  /**
+   * Wall-clock ms (Date.now()) at which `me` was last confirmed live by a real
+   * `/me` round-trip. Null while loading or when never confirmed (e.g. logged out).
+   * Used to label the offline banner "last synced …". When `staleIdentity` is true
+   * this is the time the snapshot was persisted, NOT the current render time.
+   */
+  lastSyncedAt: number | null;
   isAdmin: boolean;
   /** Effective role in a campaign: admin → dm; else membership role; null = no access. */
   roleIn(campaignId: number): Role | null;
@@ -25,6 +41,8 @@ export const AuthContext = createContext<AuthState>({
   me: null,
   ready: false,
   connectionError: false,
+  staleIdentity: false,
+  lastSyncedAt: null,
   isAdmin: false,
   roleIn: () => null,
   refresh: async () => {},
