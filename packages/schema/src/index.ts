@@ -3936,6 +3936,18 @@ export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
 // "1d20+1d4+3", "2d6-1d4-2". The regex only fixes SHAPE — count/sides/modifier bounds
 // are enforced in apps/server/src/common/dice.ts (parseCompoundDiceExpr), so a shape
 // match is never sufficient on its own.
+//
+// Unicode digit normalization (issue #633): the wire contract is INTENTIONALLY
+// ASCII-only — this regex matches ASCII `0-9` and the server's parser reads ASCII
+// digits. Non-ASCII decimal digits (Arabic-Indic ٠-٩, Extended Arabic-Indic ۰-۹,
+// Devanagari ०-९) typed or pasted by international rollers are normalized to ASCII at
+// the INPUT boundary, in apps/web/src/lib/i18nNumbers.ts (canonicalizeDiceExpr), before
+// the expression is sent here. So an Arabic user typing `٢d٢٠+٣` is canonicalized to
+// `2d20+3` on the client and validates cleanly. Keeping the regex ASCII means the
+// stored/persisted form is always canonical, while the input surface is permissive of
+// the scripts a multilingual table types. The web client calls canonicalizeDiceExpr in
+// SharedDiceLog.submitExpr; any future client that posts raw dice expressions MUST do
+// the same normalization before relying on this pattern.
 export const DiceExprPattern =
   /^\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))(?:\s*[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))*\s*$/i;
 export const RollRequest = z.object({
