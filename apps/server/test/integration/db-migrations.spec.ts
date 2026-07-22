@@ -33,7 +33,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
 
       expect(columnNames(sqlite, 'campaigns')).toEqual(
-        expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token']),
+        expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at']),
       );
       expect(columnNames(sqlite, 'characters')).toEqual(
         expect.arrayContaining(['xp', 'save_proficiencies', 'skills', 'actions', 'spell_slots', 'dm_secret']),
@@ -104,6 +104,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       const campaign = sqlite.prepare('SELECT * FROM campaigns WHERE id = 1').get() as Record<string, unknown>;
       expect(campaign).toMatchObject({ name: 'Legacy Campaign', rule_system: '' });
       expect(campaign.ics_token).toBeNull();
+      // 0049 (issue #554): the ICS token expiry column is added by migration on
+      // old-shaped DBs, null on the legacy row (no expiry until the DM rotates).
+      expect(campaign.ics_token_expires_at).toBeNull();
 
       const character = sqlite.prepare('SELECT * FROM characters WHERE id = 1').get() as Record<string, unknown>;
       expect(character).toMatchObject({ name: 'Legacy Hero', hp_current: 17, hp_max: 24, xp: 0, dm_secret: '' });

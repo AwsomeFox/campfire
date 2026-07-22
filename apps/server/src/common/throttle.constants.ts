@@ -67,6 +67,33 @@ export const ICS_THROTTLE_LIMIT = 30;
 export const ICS_THROTTLE_TTL_MS = 60_000;
 
 /**
+ * Issue #554 — feed-token lifetime. Every ICS feed token minted by
+ * SchedulingService.rotateFeed gets an `ics_token_expires_at` set to
+ * now + this window; once it passes, buildFeedByToken rejects the token with
+ * 404 so a leaked feed URL self-destructs instead of leaking schedule data
+ * forever. The DM can rotate any time before or after to mint a fresh token
+ * (and a fresh expiry). 90 days is the default — long enough that active
+ * tables never hit it organically, short enough that a stale URL from a
+ * former player / leaked screen-share / forwarded email goes cold. Overridable
+ * via ICS_FEED_TOKEN_TTL_DAYS (parsed at module load by ics-feed-token.ts).
+ */
+export const DEFAULT_ICS_FEED_TOKEN_TTL_DAYS = 90;
+
+/**
+ * Resolve the feed-token TTL window from the env override at boot. Accepts any
+ * positive integer number of days; falls back to the 90-day default on missing,
+ * non-numeric, or out-of-range values (so a typo in ICS_FEED_TOKEN_TTL_DAYS
+ * can never accidentally disable expiry by setting 0/negative).
+ */
+export function resolveIcsFeedTokenTtlDays(): number {
+  const raw = process.env.ICS_FEED_TOKEN_TTL_DAYS?.trim();
+  if (!raw) return DEFAULT_ICS_FEED_TOKEN_TTL_DAYS;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return DEFAULT_ICS_FEED_TOKEN_TTL_DAYS;
+  return n;
+}
+
+/**
  * Test-env escape hatch: e2e suites legitimately fire many rapid auth calls
  * across a single jest file (e.g. auth.e2e-spec.ts's ~28 login/setup calls in
  * one run) — real per-test-file throttling would make those suites flaky
