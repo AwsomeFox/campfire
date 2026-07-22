@@ -80,6 +80,7 @@ function buildService(entities: {
     { listArcsWithBeats: noop as any } as any, // storylines
     { listEvents: noop as any, getCalendar: async () => null } as any, // timeline
     { get: async () => null } as any, // sessionZero
+    { getOwn: async () => null } as any, // supportPreferences
     { listForCampaign: noop as any, getTreasury: async () => null } as any, // inventory
   );
 }

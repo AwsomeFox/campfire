@@ -15,6 +15,7 @@ import type {
 } from '../ai-dm/providers/ai-provider';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -465,6 +466,7 @@ export class AiDriverService {
     private readonly audit: AuditService,
     private readonly stream: AiDmStreamService,
     private readonly notifications: NotificationsService,
+    private readonly supportPreferences: SupportPreferencesService,
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
   ) {}
 
@@ -1513,9 +1515,9 @@ export class AiDriverService {
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for
     // every turn, so revocation cannot linger in a cached prompt.
-    const supports = await safeRead(contextToolset, 'get_ai_support_preferences', { campaignId });
-    if (supports && supports !== '[]') {
-      parts.push(`## Participant-authorized practical supports\n${supports}`);
+    const supports = await this.supportPreferences.listForAi(campaignId);
+    if (supports.length > 0) {
+      parts.push(`## Participant-authorized practical supports\n${JSON.stringify(supports)}`);
     }
 
     return parts.join('\n\n');
