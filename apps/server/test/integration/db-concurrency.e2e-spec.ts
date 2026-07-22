@@ -1,7 +1,5 @@
 import request from 'supertest';
 import { DB_HOLDER, type DbHolder } from '../../src/db/db.module';
-import type { RequestUser } from '../../src/common/user.types';
-import { LocationsService } from '../../src/modules/locations/locations.service';
 import { createTestApp, closeTestApp, type TestAppContext } from '../test-app';
 import { dm, player } from './fixtures';
 import { CharactersService } from '../../src/modules/characters/characters.service';
@@ -37,8 +35,6 @@ function synchronizeCharacterLookupPairs(service: CharactersService, characterId
     return row;
   });
 }
-
-const concurrentDm: RequestUser = { id: 'dev:ci-dm', name: 'ci-dm', serverRole: 'user', devRole: 'dm' };
 
 /**
  * Integration coverage for the atomic write paths under real concurrency (issue
@@ -186,12 +182,15 @@ describe('concurrency (real SQLite, atomic writes)', () => {
         .send({ name: 'South Gate' }),
     ]);
 
-    const locationsService = ctx.app.get(LocationsService);
-    await Promise.all(
+    const results = await Promise.all(
       [locationA.body.id, locationB.body.id].map((locationId) =>
-        locationsService.discover(locationId, 'current', concurrentDm, 'dm'),
+        request(baseUrl)
+          .post(`/api/v1/locations/${locationId}/discover`)
+          .set(dm)
+          .send({ status: 'current' }),
       ),
     );
+    expect(results.every((result) => result.status === 201)).toBe(true);
 
     const [locations, persistedCampaign] = await Promise.all([
       request(baseUrl).get(`/api/v1/campaigns/${campaignId}/locations`).set(dm),

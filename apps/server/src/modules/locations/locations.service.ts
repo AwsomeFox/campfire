@@ -255,8 +255,8 @@ export class LocationsService {
   /**
    * Set a location's status. When set to 'current', demote any previous
    * 'current' location in the same campaign to 'explored' and set
-  * campaign.currentLocationId to this location.
-  */
+   * campaign.currentLocationId to this location.
+   */
   async discover(id: number, status: Location['status'], user: RequestUser, role: Role): Promise<Location> {
     const ts = nowIso();
     let row!: typeof locations.$inferSelect;
