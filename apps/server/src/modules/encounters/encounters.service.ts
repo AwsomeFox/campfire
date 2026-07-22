@@ -422,6 +422,8 @@ export class EncountersService {
    */
   async searchForCampaign(campaignId: number, role: Role, needle: string, limit: number): Promise<EncounterSearchEntry[]> {
     const boundedLimit = Math.max(1, Math.min(limit, 50));
+    needle = needle.trim().toLowerCase();
+    if (!needle) return [];
     const questLabel = role === 'dm'
       ? sql<string>`coalesce(${quests.title}, '')`
       : sql<string>`case when ${quests.hidden} = 0 then coalesce(${quests.title}, '') else '' end`;

@@ -117,11 +117,12 @@ export class SchedulingService {
    */
   async searchForCampaign(campaignId: number, needle: string, limit: number): Promise<ScheduledSession[]> {
     const boundedLimit = Math.max(1, Math.min(limit, 50));
+    needle = needle.trim().toLowerCase();
+    if (!needle) return [];
     const rows = await this.db
       .select()
       .from(scheduledSessions)
       .where(and(
-        eq(scheduledSessions.campaignId, campaignId),
         or(
           sql`instr(lower(${scheduledSessions.title}), ${needle}) > 0`,
           sql`instr(lower(${scheduledSessions.scheduledAt}), ${needle}) > 0`,
