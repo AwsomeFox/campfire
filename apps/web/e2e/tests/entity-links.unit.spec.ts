@@ -198,4 +198,12 @@ test.describe('same-name disambiguation (issue #739)', () => {
     expect(resolveUniqueByName(list, 'vex')).toEqual({ type: 'npc', id: 5, name: ' Vex ' });
     expect(resolveUniqueByName(list, ' VEX ')).toEqual({ type: 'npc', id: 5, name: ' Vex ' });
   });
+
+  test('canonically equivalent Unicode names remain ambiguous', () => {
+    const list = [
+      { type: 'npc' as const, id: 5, name: 'Amélie' },
+      { type: 'character' as const, id: 6, name: 'AME\u0301LIE' },
+    ];
+    expect(resolveUniqueByName(list, 'ame\u0301lie')).toBeNull();
+  });
 });

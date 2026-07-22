@@ -11,11 +11,7 @@ import {
   resolveUniqueByName,
   type NavigableEntityType,
 } from '../lib/entityLinks';
-
-/** Escape a string for safe inclusion in a RegExp. */
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+import { buildMentionCandidates, findMentionMatches } from '../lib/mentionMatching';
 
 /**
  * Resolve `/.cf/<type>/<id>` mention anchors authored inside markdown links.
@@ -101,19 +97,8 @@ function useAutoLink(
     const root = ref.current;
     if (!root || campaignId === undefined || targets.length === 0) return;
 
-    // Longest names first so "Vex the Innkeeper" wins over "Vex".
-    const sorted = [...targets].filter((t) => t.name.trim().length >= 2).sort((a, b) => b.name.length - a.name.length);
-    if (sorted.length === 0) return;
-    const byName = new Map<string, MentionTarget>();
-    for (const t of sorted) {
-      const key = t.name.toLowerCase();
-      // Collisions drop the name entirely (the author must insert a cf: link).
-      if (resolveUniqueByName(targets, t.name)) {
-        if (!byName.has(key)) byName.set(key, t);
-      }
-    }
-    if (byName.size === 0) return;
-    const pattern = new RegExp(`\\b(${[...byName.keys()].map(escapeRegExp).join('|')})\\b`, 'gi');
+    const candidates = buildMentionCandidates(targets);
+    if (candidates.length === 0) return;
 
     const SKIP = new Set(['A', 'CODE', 'PRE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -123,7 +108,7 @@ function useAutoLink(
           if (SKIP.has(el.tagName)) return NodeFilter.FILTER_REJECT;
           el = el.parentElement;
         }
-        return pattern.test(node.nodeValue ?? '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        return node.nodeValue?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       },
     });
 
@@ -132,28 +117,22 @@ function useAutoLink(
 
     for (const textNode of textNodes) {
       const text = textNode.nodeValue ?? '';
-      pattern.lastIndex = 0;
+      const matches = findMentionMatches(text, candidates);
+      if (matches.length === 0) continue;
       const frag = document.createDocumentFragment();
       let last = 0;
-      let m: RegExpExecArray | null;
-      let linked = false;
-      while ((m = pattern.exec(text))) {
-        const target = byName.get(m[0].toLowerCase());
-        if (!target) continue;
-        if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      for (const match of matches) {
+        if (match.start > last) frag.appendChild(document.createTextNode(text.slice(last, match.start)));
         const a = document.createElement('a');
-        a.setAttribute('href', mentionTargetHref(campaignId, target));
-        a.setAttribute('data-mention', `${target.type}:${target.id}`);
+        a.setAttribute('href', mentionTargetHref(campaignId, match.target));
+        a.setAttribute('data-mention', `${match.target.type}:${match.target.id}`);
         a.className = 'cf-mention';
-        a.textContent = m[0];
+        a.textContent = text.slice(match.start, match.end);
         frag.appendChild(a);
-        last = m.index + m[0].length;
-        linked = true;
+        last = match.end;
       }
-      if (linked) {
-        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
-        textNode.parentNode?.replaceChild(frag, textNode);
-      }
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      textNode.parentNode?.replaceChild(frag, textNode);
     }
   }, [ref, html, campaignId, targets]);
 }
