@@ -1053,17 +1053,12 @@ export class EncountersService {
       }
     }
 
-    // Non-HP field writes computed up front (conditions/initiative/identity). The
-    // HP + death-save fields are computed INSIDE the transaction below off a fresh
-    // read, so concurrent damage still composes atomically (issue #86).
+    // Non-HP field writes computed up front (initiative/identity). The HP +
+    // death-save fields AND the condition add/remove deltas are computed INSIDE
+    // the transaction below off a fresh read, so concurrent damage and concurrent
+    // condition changes both compose atomically (issues #86, #747).
     const staticUpdate: Partial<typeof combatants.$inferInsert> = {};
 
-    if (patch.addConditions !== undefined || patch.removeConditions !== undefined) {
-      const current = new Set(fromJsonText<string[]>(existing.conditions, []));
-      for (const c of patch.removeConditions ?? []) current.delete(c);
-      for (const c of patch.addConditions ?? []) current.add(c);
-      staticUpdate.conditions = toJsonText([...current]);
-    }
     if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
@@ -1091,8 +1086,13 @@ export class EncountersService {
     // A recompute is needed if any HP field changed OR hpMax moved (hpCurrent may
     // need re-clamping to a lowered max, and the death state re-derived).
     const recomputeHp = hpFieldsTouched || hpMaxChanged;
+    // Condition add/remove deltas — applied INSIDE the transaction below off the
+    // fresh row, so two concurrent condition changes (one adds while another
+    // removes a different condition) compose instead of the loser's whole-array
+    // write silently clobbering the winner's (issue #747, same class as #86/#657).
+    const conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
 
-    if (Object.keys(staticUpdate).length === 0 && !recomputeHp) {
+    if (Object.keys(staticUpdate).length === 0 && !recomputeHp && !conditionsTouched) {
       return combatantToDomain(existing);
     }
 
@@ -1118,12 +1118,35 @@ export class EncountersService {
     let afterHp = 0;
     let afterTemp = 0;
     let afterDeath = 'none';
+    // Condition snapshots captured inside the tx (off the fresh row + the write
+    // result) so combat-log events derive from the actual committed before/after
+    // state, not a stale pre-await read (issue #747, mirroring the HP snapshots).
+    let beforeConditions: Set<string> = new Set();
+    let afterConditions: Set<string> = new Set();
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
       beforeHp = fresh.hpCurrent;
       beforeTemp = fresh.hpTemp;
       beforeDeath = fresh.deathState;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+      if (conditionsTouched) {
+        // Rebase the add/remove deltas against the FRESH row's conditions (issue
+        // #747). A stale whole-array write — derived outside the tx from the
+        // pre-await read — let two concurrent callers clobber each other: caller A
+        // adds 'poisoned' while caller B removes 'prone', and whichever wrote
+        // second replaced the array entirely, dropping the other's change. By
+        // reading `fresh.conditions` inside the serialized transaction and applying
+        // both deltas as set union/difference, concurrent changes compose — the
+        // same read-from-fresh pattern the HP path uses. Retries (re-adding an
+        // already-present or re-removing an absent condition) are idempotent: the
+        // set ops are no-ops and `afterConditions` equals `beforeConditions`.
+        const current = new Set(fromJsonText<string[]>(fresh.conditions, []));
+        beforeConditions = new Set(current);
+        for (const c of patch.removeConditions ?? []) current.delete(c);
+        for (const c of patch.addConditions ?? []) current.add(c);
+        afterConditions = new Set(current);
+        writeSet.conditions = toJsonText([...current]);
+      }
       if (recomputeHp) {
         const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
         const state: CombatantHpState = {
@@ -1155,6 +1178,12 @@ export class EncountersService {
       afterHp = updated.hpCurrent;
       afterTemp = updated.hpTemp;
       afterDeath = updated.deathState;
+      // Re-derive afterConditions from the committed row so combat-log events
+      // reflect the actual persisted state even if a future trigger rewrites the
+      // column (defense-in-depth; today the write above is the only mutator).
+      if (conditionsTouched) {
+        afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
+      }
       if (mirrorHp) {
         tx.update(characters).set({ hpCurrent: updated.hpCurrent, updatedAt: nowIso() }).where(eq(characters.id, existing.characterId!)).run();
       }
@@ -1167,7 +1196,7 @@ export class EncountersService {
     // identity edits (rename / hpMax / initMod, issue #114) — which are rare and
     // worth a trail. An update that ONLY touched HP/death-save fields is skipped.
     const changedNonHp =
-      staticUpdate.conditions !== undefined ||
+      conditionsTouched ||
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
@@ -1233,13 +1262,20 @@ export class EncountersService {
     }
 
     // Conditions actually changed (adding an already-present, or removing an absent one,
-    // is a no-op and not logged).
-    const conditionsBefore = new Set(fromJsonText<string[]>(existing.conditions, []));
-    for (const c of patch.addConditions ?? []) {
-      if (!conditionsBefore.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `gained ${c}` });
-    }
-    for (const c of patch.removeConditions ?? []) {
-      if (conditionsBefore.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `cleared ${c}` });
+    // is a no-op and not logged). Derived from the committed before/after snapshots
+    // captured inside the transaction (issue #747) — NOT the pre-await `existing`
+    // read — so a condition that a concurrent writer added/removed between the stale
+    // read and the tx is attributed correctly (or recognized as a no-op by this
+    // caller). Logging the symmetric difference of the two committed sets means a
+    // retry that landed nothing new logs nothing, while a real concurrent change
+    // still logs exactly the conditions this caller's delta flipped.
+    if (conditionsTouched) {
+      for (const c of afterConditions) {
+        if (!beforeConditions.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `gained ${c}` });
+      }
+      for (const c of beforeConditions) {
+        if (!afterConditions.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `cleared ${c}` });
+      }
     }
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
