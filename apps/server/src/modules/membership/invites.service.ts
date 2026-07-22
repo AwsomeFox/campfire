@@ -1,5 +1,5 @@
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InviteCreate } from '@campfire/schema';
 import type { CampaignInvite, InvitePreview, InviteRole, Me } from '@campfire/schema';
@@ -69,7 +69,11 @@ export class InvitesService {
    * Campaign exports intentionally omit invite codes altogether.
    */
   async listForCampaign(campaignId: number): Promise<CampaignInvite[]> {
-    const rows = await this.db.select().from(campaignInvites).where(eq(campaignInvites.campaignId, campaignId));
+    const rows = await this.db
+      .select()
+      .from(campaignInvites)
+      .where(eq(campaignInvites.campaignId, campaignId))
+      .orderBy(asc(campaignInvites.id));
     return rows.filter((row) => !this.isSpent(row)).map((row) => this.toDomain(row));
   }
 
