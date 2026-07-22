@@ -127,8 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
-    void clearApiCache();
-    queryClient.clear();
+    void clearApiCache().finally(() => queryClient.clear());
   }, []);
 
   useAuthStorageListener(handleMultiTabSignOut);
@@ -172,6 +171,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // — a later /me reporting a different generation (a restore happened) wipes
       // the cache on this tab even without a reload.
       lastInstanceRef.current = decision.me?.instance ?? lastInstanceRef.current;
+    } else if (outcome.kind === 'loggedOut') {
+      lastUserIdRef.current = null;
+      lastInstanceRef.current = null;
     }
 
     setMe(decision.me);

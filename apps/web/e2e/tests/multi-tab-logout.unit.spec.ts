@@ -30,9 +30,7 @@ test.describe('Auth Storage Utilities', () => {
 
     try {
       setAuthStorage({ id: 42, username: 'testuser' });
-      expect(store['cf.user']).toBe(JSON.stringify({ id: 42, username: 'testuser' }));
-      expect(store['cf.auth']).toBe('true');
-      expect(store['cf.authToken']).toBe('42');
+      expect(store['cf.authUserId']).toBe('42');
 
       clearAuthStorage();
       for (const key of AUTH_STORAGE_KEYS) {
@@ -47,9 +45,7 @@ test.describe('Auth Storage Utilities', () => {
   test('setAuthStorage(null) clears auth keys from localStorage', () => {
     const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
     const store: Record<string, string> = {
-      'cf.user': '{"id":1}',
-      'cf.auth': 'true',
-      'cf.authToken': '1',
+      'cf.authUserId': '1',
     };
 
     Object.defineProperty(globalThis, 'localStorage', {

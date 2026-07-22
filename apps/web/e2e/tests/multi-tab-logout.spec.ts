@@ -19,7 +19,7 @@ test.describe('Multi-Tab Sign-Out', () => {
 
     // Clear auth state in Tab A
     await pageA.evaluate(() => {
-      localStorage.removeItem('cf.user');
+      localStorage.removeItem('cf.authUserId');
     });
 
     // Tab B automatically detects sign-out via 'storage' listener and redirects to /login
@@ -68,11 +68,9 @@ test.describe('Multi-Tab Sign-Out', () => {
     await expect(pageA.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
     await expect(pageB.getByText('Cinderhaven', { exact: false }).first()).toBeVisible();
 
-    // Trigger logout in Tab A via localStorage clear + API call or evaluate
-    await pageA.evaluate(async () => {
-      await fetch('/api/v1/auth/logout', { method: 'POST' });
-      localStorage.removeItem('cf.user');
-    });
+    // Drive the real application contract: logout invalidates the cookie and
+    // clears the sentinel that peer tabs observe.
+    await pageA.getByRole('button', { name: 'Sign out' }).click();
 
     // Tab B automatically updates auth state and redirects to /login
     await expect(pageB).toHaveURL(/\/login/);
