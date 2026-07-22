@@ -258,6 +258,7 @@ export class EncountersService {
    */
   private async redactHiddenLinkedEntities<T extends { questId: number | null; locationId: number | null; sessionId: number | null }>(
     items: T[],
+    campaignId: number,
     viewerRole?: Role,
   ): Promise<T[]> {
     if (viewerRole === undefined || viewerRole === 'dm' || items.length === 0) {
@@ -273,7 +274,7 @@ export class EncountersService {
       const questRows = await this.db
         .select({ id: quests.id, hidden: quests.hidden, deletedAt: quests.deletedAt })
         .from(quests)
-        .where(inArray(quests.id, questIds));
+        .where(and(inArray(quests.id, questIds), eq(quests.campaignId, campaignId)));
       const foundIds = new Set(questRows.map((q) => q.id));
       for (const id of questIds) {
         if (!foundIds.has(id)) hiddenQuestIds.add(id);
@@ -290,7 +291,7 @@ export class EncountersService {
       const locRows = await this.db
         .select({ id: locations.id, status: locations.status, deletedAt: locations.deletedAt })
         .from(locations)
-        .where(inArray(locations.id, locationIds));
+        .where(and(inArray(locations.id, locationIds), eq(locations.campaignId, campaignId)));
       const foundIds = new Set(locRows.map((l) => l.id));
       for (const id of locationIds) {
         if (!foundIds.has(id)) hiddenLocationIds.add(id);
@@ -307,7 +308,7 @@ export class EncountersService {
       const sessRows = await this.db
         .select({ id: sessions.id, deletedAt: sessions.deletedAt })
         .from(sessions)
-        .where(inArray(sessions.id, sessionIds));
+        .where(and(inArray(sessions.id, sessionIds), eq(sessions.campaignId, campaignId)));
       const foundIds = new Set(sessRows.map((s) => s.id));
       for (const id of sessionIds) {
         if (!foundIds.has(id)) hiddenSessionIds.add(id);
@@ -357,7 +358,7 @@ export class EncountersService {
     // Drop hidden encounters wholesale for a non-DM viewer (issue #262). undefined role
     // (DM-facing callers) is never filtered.
     const visible = viewerRole === undefined ? list : filterHidden(list, viewerRole);
-    return this.redactHiddenLinkedEntities(visible, viewerRole);
+    return this.redactHiddenLinkedEntities(visible, campaignId, viewerRole);
   }
 
   /**
@@ -402,7 +403,7 @@ export class EncountersService {
       if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
     }
     const domain = encounterToDomain(row);
-    const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], viewerRole);
+    const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
     return { ...redactedDomain, combatants: list };
   }
 
@@ -600,6 +601,9 @@ export class EncountersService {
 
   /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
   async create(campaignId: number, input: EncounterCreateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    if (input.locationId != null) await this.assertEntityInCampaign('location', input.locationId, campaignId);
+    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, campaignId);
+    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, campaignId);
     const ts = nowIso();
     const [encounterRow] = await this.db
       .insert(encounters)
@@ -924,7 +928,7 @@ export class EncountersService {
         downCount: t.down,
       };
     });
-    return this.redactHiddenLinkedEntities(digests, viewerRole);
+    return this.redactHiddenLinkedEntities(digests, campaignId, viewerRole);
   }
 
   /**

@@ -2669,6 +2669,12 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'X' });
     const res = await request(server).patch(`/api/v1/encounters/${enc.body.id}`).set(dm).send({ locationId: otherLoc.body.id });
     expect(res.status).toBe(404);
+
+    const create = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Cross-campaign link must fail', locationId: otherLoc.body.id });
+    expect(create.status).toBe(404);
   });
 
   it('get_campaign_summary (REST) now includes an encounters digest', async () => {
