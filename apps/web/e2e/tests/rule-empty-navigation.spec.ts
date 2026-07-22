@@ -2,6 +2,14 @@ import { test, expect } from '@playwright/test';
 import { stateFor } from './seed';
 
 async function openRuleSystemStep(page: import('@playwright/test').Page) {
+  // The shared E2E server deliberately carries a synthetic statblock pack for
+  // compendium/encounter coverage. This spec owns the empty-list boundary, so
+  // isolate only the pack-list read instead of uninstalling shared fixtures and
+  // making later tests order-dependent.
+  await page.route('**/api/v1/rules/packs', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+  });
   await page.goto('/?newCampaign=1');
   await expect(page.getByRole('heading', { name: 'New campaign' })).toBeVisible();
   await page.getByLabel('Name').fill('Rules navigation test');
