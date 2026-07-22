@@ -1,5 +1,7 @@
 import request from 'supertest';
+import { sql } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const owner = { 'x-dev-role': 'player', 'x-dev-user': 'owner-1' };
@@ -11,6 +13,7 @@ describe('xp & levelling (e2e)', () => {
   let campaignId: number;
   let characterId: number; // owned by owner-1
   let secondCharacterId: number; // DM-managed
+  const legacyIds = {} as Record<'dead' | 'retired' | 'inactive', number>;
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -31,6 +34,15 @@ describe('xp & levelling (e2e)', () => {
       .send({ name: 'Sidekick', hpMax: 8, hpCurrent: 8 });
     expect(char2Res.status).toBe(201);
     secondCharacterId = char2Res.body.id;
+
+    for (const [status, xp] of [['dead', 100], ['retired', 200], ['inactive', 300]] as const) {
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: `${status[0].toUpperCase()}${status.slice(1)} Hero`, status, xp });
+      expect(res.status).toBe(201);
+      legacyIds[status] = res.body.id;
+    }
   });
 
   afterAll(async () => {
@@ -80,7 +92,7 @@ describe('xp & levelling (e2e)', () => {
 
   // ---------- party award ----------
 
-  it('dm awards party-wide xp to every character', async () => {
+  it('dm party award defaults to active characters and leaves mixed legacy roster untouched', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).post(`/api/v1/campaigns/${campaignId}/characters/xp`).set(dm).send({ amount: 300 });
     expect(res.status).toBe(201);
@@ -88,6 +100,11 @@ describe('xp & levelling (e2e)', () => {
     const byId = new Map<number, { xp: number }>(res.body.map((c: { id: number; xp: number }) => [c.id, c]));
     expect(byId.get(characterId)!.xp).toBe(300); // was clamped to 0 above
     expect(byId.get(secondCharacterId)!.xp).toBe(300);
+
+    for (const [status, xp] of [['dead', 100], ['retired', 200], ['inactive', 300]] as const) {
+      const legacy = await request(server).get(`/api/v1/characters/${legacyIds[status]}`).set(dm);
+      expect(legacy.body).toMatchObject({ status, xp });
+    }
   });
 
   it('dm awards xp to a characterIds subset only', async () => {
@@ -111,12 +128,79 @@ describe('xp & levelling (e2e)', () => {
     expect(res.status).toBe(403);
   });
 
+  it('rejects a selected non-active recipient without opt-in and rolls the whole mixed selection back', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters/xp`)
+      .set(dm)
+      .send({ amount: 50, characterIds: [characterId, legacyIds.retired] });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('includeNonActive');
+
+    const [active, retired] = await Promise.all([
+      request(server).get(`/api/v1/characters/${characterId}`).set(dm),
+      request(server).get(`/api/v1/characters/${legacyIds.retired}`).set(dm),
+    ]);
+    expect(active.body.xp).toBe(900);
+    expect(retired.body.xp).toBe(200);
+  });
+
+  it('rejects a broad non-active opt-in without explicit recipient IDs', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters/xp`)
+      .set(dm)
+      .send({ amount: 50, includeNonActive: true });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('explicit characterIds');
+  });
+
+  it('preserves a deliberate retired-character correction with explicit selection and opt-in, and audits status-at-award', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters/xp`)
+      .set(dm)
+      .send({ amount: 75, characterIds: [legacyIds.retired], includeNonActive: true });
+    expect(res.status).toBe(201);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({ id: legacyIds.retired, status: 'retired', xp: 275 });
+
+    const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+    const entry = audit.body.find((row: { action: string; detail: string }) => {
+      if (row.action !== 'character.xp_award') return false;
+      const detail = JSON.parse(row.detail) as { recipients?: Array<{ characterId: number }> };
+      return detail.recipients?.some((recipient) => recipient.characterId === legacyIds.retired);
+    });
+    expect(entry).toBeDefined();
+    expect(JSON.parse(entry.detail)).toEqual({
+      amount: 75,
+      recipients: [{
+        characterId: legacyIds.retired,
+        name: 'Retired Hero',
+        status: 'retired',
+        xpBefore: 200,
+        xpAfter: 275,
+      }],
+    });
+  });
+
   it('party award with a foreign characterId -> 400', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters/xp`)
       .set(dm)
-      .send({ amount: 100, characterIds: [999999] });
+      .send({ amount: 100, characterIds: [characterId, 999999] });
+    expect(res.status).toBe(400);
+    const unchanged = await request(server).get(`/api/v1/characters/${characterId}`).set(dm);
+    expect(unchanged.body.xp).toBe(900);
+  });
+
+  it('party award rejects duplicate recipient IDs at the schema boundary', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters/xp`)
+      .set(dm)
+      .send({ amount: 100, characterIds: [characterId, characterId] });
     expect(res.status).toBe(400);
   });
 
@@ -124,6 +208,24 @@ describe('xp & levelling (e2e)', () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).post(`/api/v1/campaigns/${campaignId}/characters/xp`).set(dm).send({ amount: 0 });
     expect(res.status).toBe(400);
+  });
+
+  it('composes concurrent exact-recipient awards without losing either increment', async () => {
+    const server = ctx.app.getHttpServer();
+    const [first, second] = await Promise.all([
+      request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters/xp`)
+        .set(dm)
+        .send({ amount: 11, characterIds: [secondCharacterId] }),
+      request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters/xp`)
+        .set(dm)
+        .send({ amount: 13, characterIds: [secondCharacterId] }),
+    ]);
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    const current = await request(server).get(`/api/v1/characters/${secondCharacterId}`).set(dm);
+    expect(current.body.xp).toBe(324); // 300 + 11 + 13
   });
 
   // ---------- guided level-up ----------
@@ -181,5 +283,40 @@ describe('xp & levelling (e2e)', () => {
     const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(dm).send({ xp: 1234 });
     expect(res.status).toBe(200);
     expect(res.body.xp).toBe(1234);
+  });
+});
+
+describe('party XP transaction atomicity against the real SQLite database (issue #814)', () => {
+  let ctx: TestAppContext;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('rolls XP back when the audit write fails', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Atomic XP' });
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${campaign.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Transaction Tester', xp: 40 });
+
+    // Force the final statement in CharactersService.awardXp's transaction to fail.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.run(sql`DROP TABLE audit_log`);
+
+    const award = await request(server)
+      .post(`/api/v1/campaigns/${campaign.body.id}/characters/xp`)
+      .set(dm)
+      .send({ amount: 10, characterIds: [character.body.id] });
+    expect(award.status).toBe(500);
+
+    const unchanged = await request(server).get(`/api/v1/characters/${character.body.id}`).set(dm);
+    expect(unchanged.status).toBe(200);
+    expect(unchanged.body.xp).toBe(40);
   });
 });
