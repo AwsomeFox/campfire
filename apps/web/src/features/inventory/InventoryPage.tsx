@@ -376,6 +376,10 @@ function TreasuryCard({
   // Quick add/spend: a pure { delta } patch. Never conflicts. Disabled to 0 floor
   // on spend (a spend past 0 is a server 400 and would just bounce), unlimited add.
   async function quickDelta(coin: CoinKey, by: number) {
+    // Clear any prior error (e.g. a 400 "cannot go negative" from a previous failed
+    // spend) so a stale message doesn't linger after a successful +/- click. A new
+    // failure below re-sets it.
+    setError(null);
     try {
       const updated = await api.patch<Treasury>(`${API}/campaigns/${campaignId}/treasury`, { delta: { [coin]: by } });
       onChanged(updated);

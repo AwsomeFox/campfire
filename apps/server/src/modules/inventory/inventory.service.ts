@@ -251,6 +251,15 @@ export class InventoryService {
     if (assignments.length === 0) {
       throw new BadRequestException('Treasury patch must change at least one denomination');
     }
+    // Issue #582: an absolute { set } is inherently racy against concurrent deltas, so
+    // it MUST carry expectedUpdatedAt (CAS) — without it, a stale form can still clobber
+    // another player's concurrent spend, which is exactly the data-loss this PR closes.
+    // Deltas are atomic (col = col + ?) and never require CAS. The web editor always
+    // sends expectedUpdatedAt on the set path; a 400 here means an un-upgraded caller
+    // that should switch to { delta } for add/spend or supply the CAS token to reconcile.
+    if (!isDelta && patch.expectedUpdatedAt === undefined) {
+      throw new BadRequestException('An absolute { set } requires expectedUpdatedAt (CAS); use { delta } for add/spend');
+    }
 
     const ts = nowIso();
     const expected = !isDelta ? patch.expectedUpdatedAt : undefined;

@@ -332,10 +332,11 @@ describe('inventory & treasury (e2e)', () => {
 
     it('set is absolute and only touches the given denominations', async () => {
       const server = ctx.app.getHttpServer();
+      const base = (await request(server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm)).body;
       const res = await request(server)
         .patch(`/api/v1/campaigns/${campaignId}/treasury`)
         .set(dm)
-        .send({ set: { pp: 5, gp: 42 } });
+        .send({ set: { pp: 5, gp: 42 }, expectedUpdatedAt: base.updatedAt });
       expect(res.status).toBe(200);
       expect(res.body.pp).toBe(5);
       expect(res.body.gp).toBe(42);
@@ -345,8 +346,23 @@ describe('inventory & treasury (e2e)', () => {
       const negRes = await request(server)
         .patch(`/api/v1/campaigns/${campaignId}/treasury`)
         .set(dm)
-        .send({ set: { gp: -1 } });
+        .send({ set: { gp: -1 }, expectedUpdatedAt: res.body.updatedAt });
       expect(negRes.status).toBe(400);
+    });
+
+    it('an absolute { set } without expectedUpdatedAt is rejected (issue #582 — CAS required)', async () => {
+      // A stale form sending an absolute set without the CAS token could still
+      // clobber a concurrent spend — the exact data-loss this PR closes. The
+      // server now enforces the acceptance criterion "require expectedUpdatedAt
+      // for absolute reconciliation". Use { delta } for add/spend (atomic, no
+      // CAS needed) or supply expectedUpdatedAt to reconcile.
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}/treasury`)
+        .set(dm)
+        .send({ set: { gp: 1 } });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/expectedUpdatedAt/i);
     });
 
     it('viewer may read but not write the treasury', async () => {
@@ -423,10 +439,11 @@ describe('inventory & treasury (e2e)', () => {
 
     it('CAS: a set without expectedUpdatedAt still applies (back-compat for pre-CAS callers)', async () => {
       const server = ctx.app.getHttpServer();
+      const base = (await request(server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm)).body;
       const res = await request(server)
         .patch(`/api/v1/campaigns/${campaignId}/treasury`)
         .set(dm)
-        .send({ set: { sp: 9 } });
+        .send({ set: { sp: 9 }, expectedUpdatedAt: base.updatedAt });
       expect(res.status).toBe(200);
       expect(res.body.sp).toBe(9);
     });
@@ -443,9 +460,10 @@ describe('inventory & treasury (e2e)', () => {
       const server = ctx.app.getHttpServer();
       const camp = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Audit Camp' })).body.id;
 
-      // gp 0 -> 50 (delta), then gp 50 -> 50/pp 0 -> 1 (set), then gp 50 -> 40 (spend).
+      // gp 0 -> 50 (delta), then gp 50 -> 50/pp 0 -> 1 (set with CAS), then gp 50 -> 40 (spend).
       await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(player).send({ delta: { gp: 50 } });
-      await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(dm).send({ set: { pp: 1 } });
+      const beforeSet = (await request(server).get(`/api/v1/campaigns/${camp}/treasury`).set(dm)).body;
+      await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(dm).send({ set: { pp: 1 }, expectedUpdatedAt: beforeSet.updatedAt });
       await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(player).send({ delta: { gp: -10, sp: 5 } });
 
       const auditRes = await request(server).get(`/api/v1/campaigns/${camp}/audit`).set(dm);
