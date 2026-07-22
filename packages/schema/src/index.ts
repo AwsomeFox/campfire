@@ -195,6 +195,23 @@ export const SkillRank = z.enum(['proficient', 'expertise']);
 export type SkillRank = z.infer<typeof SkillRank>;
 
 /**
+ * 5e death-save lifecycle (issue #57 / #711). Lives on every Combatant AND, since
+ * #711, on the persistent Character row as the post-encounter reconciliation echo.
+ * - `none`: alive (hp > 0), or a monster (monsters don't roll death saves — 0 HP
+ *   is simply "down"); death-save counters are held at 0.
+ * - `dying`: a character at 0 HP, rolling death saves (successes/failures 0–2).
+ * - `stable`: a character at 0 HP that reached 3 successes (or was stabilized) —
+ *   unconscious but no longer rolling. Any further damage flips back to `dying`.
+ * - `dead`: 3 death-save failures, OR instant death from massive damage
+ *   (a single hit whose overflow past 0 HP is >= hpMax).
+ *
+ * Declared up here (ahead of Character) so Character can reference it for its
+ * persistent echo; the Combatant below reuses the same enum.
+ */
+export const DeathState = z.enum(['none', 'dying', 'stable', 'dead']);
+export type DeathState = z.infer<typeof DeathState>;
+
+/**
  * Character lifecycle (issue #115). Only `active` PCs are auto-conscripted into a
  * new encounter's combatant list; dead/retired/inactive characters stay on the
  * roster (viewable, full sheet + history intact) but are skipped by the auto-add
@@ -245,6 +262,16 @@ export const Character = z.object({
   ac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(1).default(10),
+  // Issue #711: persistent echo of the per-combatant death/temp-HP subsystem
+  // (originally issue #57). The encounter tracker is the source of truth during
+  // a fight; on /end these four fields are reconciled back onto the sheet so a
+  // dead PC stays dead (and stays off the next encounter's auto-add), a stable
+  // PC keeps its unconscious state, and a leftover temp-HP pool carries forward.
+  // Defaults mirror Combatant's so a pre-#711 sheet reads as alive + temp-less.
+  hpTemp: z.number().int().min(0).default(0),
+  deathState: DeathState.default('none'),
+  deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
+  deathSaveFailures: z.number().int().min(0).max(3).default(0),
   conditions: z.array(z.string().max(40)).default([]),
   saveProficiencies: z.array(AbilityKey).default([]), // abilities with saving-throw proficiency
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
@@ -3778,18 +3805,8 @@ export type CombatantKind = z.infer<typeof CombatantKind>;
 export const HpBand = z.enum(['healthy', 'bloodied', 'critical', 'down']);
 export type HpBand = z.infer<typeof HpBand>;
 
-/**
- * 5e death-save lifecycle for a combatant at 0 HP (issue #57).
- * - `none`: alive (hp > 0), or a monster (monsters don't roll death saves — 0 HP
- *   is simply "down"); death-save counters are held at 0.
- * - `dying`: a character at 0 HP, rolling death saves (successes/failures 0–2).
- * - `stable`: a character at 0 HP that reached 3 successes (or was stabilized) —
- *   unconscious but no longer rolling. Any further damage flips back to `dying`.
- * - `dead`: 3 death-save failures, OR instant death from massive damage
- *   (a single hit whose overflow past 0 HP is >= hpMax).
- */
-export const DeathState = z.enum(['none', 'dying', 'stable', 'dead']);
-export type DeathState = z.infer<typeof DeathState>;
+// DeathState is declared near the top of the file (ahead of Character) so the
+// persistent Character echo can reference it; see its full docblock there.
 
 export const Combatant = z.object({
   id: Id,

@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS characters (
   ac INTEGER,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
+  -- Issue #711: persistent echo of the combat death/temp-HP subsystem. The
+  -- encounter tracker has tracked these since issue #57, but the per-fight
+  -- write-back only persisted hpCurrent, so a dead PC was resurrected on
+  -- sheet read and re-conscripted into the next fight. These columns carry
+  -- the post-encounter reconciliation forward.
+  hp_temp INTEGER NOT NULL DEFAULT 0,
+  death_state TEXT NOT NULL DEFAULT 'none',
+  death_save_successes INTEGER NOT NULL DEFAULT 0,
+  death_save_failures INTEGER NOT NULL DEFAULT 0,
   conditions TEXT NOT NULL DEFAULT '[]',
   save_proficiencies TEXT NOT NULL DEFAULT '[]',
   skills TEXT NOT NULL DEFAULT '{}',

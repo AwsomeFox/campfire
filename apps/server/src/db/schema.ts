@@ -67,6 +67,14 @@ export const characters = sqliteTable('characters', {
   ac: integer('ac'),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
+  // Issue #711: the combat death/temp-HP subsystem (issue #57) mirrored back
+  // from the encounter at /end. `hpTemp` is the carried-over temp-HP pool; the
+  // three death-save fields echo the combatant lifecycle so a dead PC stays
+  // visibly dead on the sheet and is skipped by the next encounter's auto-add.
+  hpTemp: integer('hp_temp').notNull().default(0),
+  deathState: text('death_state').notNull().default('none'),
+  deathSaveSuccesses: integer('death_save_successes').notNull().default(0),
+  deathSaveFailures: integer('death_save_failures').notNull().default(0),
   conditions: text('conditions').notNull().default('[]'),
   saveProficiencies: text('save_proficiencies').notNull().default('[]'),
   skills: text('skills').notNull().default('{}'),
