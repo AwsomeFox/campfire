@@ -5,7 +5,6 @@
  * signed-out users continue to /login.
  */
 import { useState, type FormEvent } from 'react';
-import { useTranslation } from 'react-i18next';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
