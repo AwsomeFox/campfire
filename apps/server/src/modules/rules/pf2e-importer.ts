@@ -55,7 +55,10 @@ export type Pf2eSection = 'creatures' | 'spells' | 'equipment' | 'feats' | 'ance
 const SECTION_TO_AON_TYPE: Record<Pf2eSection, string> = {
   creatures: 'creature',
   spells: 'spell',
-  equipment: 'equipment',
+  // AoN has no 'equipment' type — gear lives under type 'Item' (verified live:
+  // q=type:equipment → 0 hits, q=type:item → 10k+). 'equipment' silently imported
+  // nothing since #326.
+  equipment: 'item',
   feats: 'feat',
   ancestries: 'ancestry',
   classes: 'class',
@@ -463,7 +466,10 @@ export async function fetchPf2eSection(
         // Compare the SOURCE row's declared type against the section's AoN type — the
         // mapped entry.type is a per-section constant, so comparing it to the
         // section's own entry type (also derived from the section) never fires.
-        if (asString((src as Record<string, unknown>).type) !== aonType) {
+        // CASE-INSENSITIVE: live AoN `_source.type` is capitalized ('Spell', 'Item', …)
+        // while the q=type:x match works on the lowercased analyzed token — a
+        // case-sensitive compare here skipped EVERY row (0-entry imports).
+        if (asString((src as Record<string, unknown>).type).toLowerCase() !== aonType.toLowerCase()) {
           skippedCount += 1;
           continue;
         }

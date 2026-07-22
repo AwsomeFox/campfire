@@ -23,7 +23,7 @@ const CREATURES = [
   {
     id: 'goblin-warrior',
     name: 'Goblin Warrior',
-    type: 'creature',
+    type: 'Creature',
     level: -1,
     ac: 16,
     hp: 6,
@@ -49,7 +49,7 @@ const CREATURES = [
   {
     id: 'dragon-adult-red',
     name: 'Adult Red Dragon',
-    type: 'creature',
+    type: 'Creature',
     level: 14,
     ac: 37,
     hp: 300,
@@ -77,7 +77,7 @@ const SPELLS = [
   {
     id: 'fireball',
     name: 'Fireball',
-    type: 'spell',
+    type: 'Spell',
     level: 3,
     tradition: ['arcane', 'primal'],
     cast: 2,
@@ -94,7 +94,7 @@ const EQUIPMENT = [
   {
     id: 'longsword',
     name: 'Longsword',
-    type: 'equipment',
+    type: 'Item',
     level: 0,
     price: '1 gp',
     bulk: 1,
@@ -111,7 +111,7 @@ const FEATS = [
   {
     id: 'power-attack',
     name: 'Power Attack',
-    type: 'feat',
+    type: 'Feat',
     level: 1,
     prerequisite: '',
     trait: ['Fighter', 'Flourish'],
@@ -125,7 +125,7 @@ const ANCESTRIES = [
   {
     id: 'dwarf',
     name: 'Dwarf',
-    type: 'ancestry',
+    type: 'Ancestry',
     hp: 10,
     size: 'Medium',
     speed: { walk: 20 },
@@ -140,7 +140,7 @@ const CLASSES = [
   {
     id: 'fighter',
     name: 'Fighter',
-    type: 'class',
+    type: 'Class',
     hp: 10,
     attribute: ['strength', 'dexterity'],
     trait: ['Class'],
@@ -154,7 +154,7 @@ const BACKGROUNDS = [
   {
     id: 'acolyte',
     name: 'Acolyte',
-    type: 'background',
+    type: 'Background',
     trait: [],
     text: 'You spent your early days in a religious monastery or cloister.',
     source: 'Pathfinder Player Core',
@@ -166,7 +166,7 @@ const CONDITIONS = [
   {
     id: 'frightened',
     name: 'Frightened',
-    type: 'condition',
+    type: 'Condition',
     text: "You're gripped by fear and struggle to control your nerves. You take a status penalty equal to this value to all your checks.",
     source: 'Pathfinder Player Core',
     license: 'ORC',
@@ -174,7 +174,7 @@ const CONDITIONS = [
   {
     id: 'off-guard',
     name: 'Off-Guard',
-    type: 'condition',
+    type: 'Condition',
     text: "You're distracted or otherwise unable to focus your full attention on defense, taking a -2 circumstance penalty to AC.",
     source: 'Pathfinder Player Core',
     license: 'ORC',
@@ -184,7 +184,9 @@ const CONDITIONS = [
 const BY_TYPE: Record<string, Array<Record<string, unknown>>> = {
   creature: CREATURES,
   spell: SPELLS,
-  equipment: EQUIPMENT,
+  // Live AoN keeps gear under type 'Item' (there is no 'equipment' type) — the
+  // importer's equipment section queries `type:item`.
+  item: EQUIPMENT,
   feat: FEATS,
   ancestry: ANCESTRIES,
   class: CLASSES,
@@ -255,9 +257,9 @@ export async function startFakePf2eMixed(): Promise<FakePf2e> {
       hits: {
         total: { value: 2 },
         hits: [
-          { _id: 'acolyte', _source: { id: 'acolyte', name: 'Acolyte', type: 'background', text: 'A religious upbringing.', source: 'Pathfinder Player Core', license: 'ORC' } },
+          { _id: 'acolyte', _source: { id: 'acolyte', name: 'Acolyte', type: 'Background', text: 'A religious upbringing.', source: 'Pathfinder Player Core', license: 'ORC' } },
           // Stray mixed row: source type is `feat`, NOT `background`. Must be skipped.
-          { _id: 'power-attack', _source: { id: 'power-attack', name: 'Power Attack', type: 'feat', text: 'A stray feat leaked into the background query.', source: 'Pathfinder Player Core', license: 'ORC' } },
+          { _id: 'power-attack', _source: { id: 'power-attack', name: 'Power Attack', type: 'Feat', text: 'A stray feat leaked into the background query.', source: 'Pathfinder Player Core', license: 'ORC' } },
         ],
       },
     });
@@ -299,10 +301,10 @@ export async function startFakePf2eDuplicates(): Promise<FakePf2e> {
       hits: {
         total: { value: 3 },
         hits: [
-          { _id: 'goblin-mc', _source: { id: 'goblin-mc', name: 'Goblin Warrior', type: 'creature', level: -1, hp: 6, source: 'Pathfinder Monster Core', license: 'ORC' } },
+          { _id: 'goblin-mc', _source: { id: 'goblin-mc', name: 'Goblin Warrior', type: 'Creature', level: -1, hp: 6, source: 'Pathfinder Monster Core', license: 'ORC' } },
           // Malformed: no _source — must be skipped.
           { _id: 'broken' },
-          { _id: 'goblin-legacy', _source: { id: 'goblin-legacy', name: 'Goblin Warrior', type: 'creature', level: -1, hp: 6, source: 'Legacy Bestiary', license: 'OGL' } },
+          { _id: 'goblin-legacy', _source: { id: 'goblin-legacy', name: 'Goblin Warrior', type: 'Creature', level: -1, hp: 6, source: 'Legacy Bestiary', license: 'OGL' } },
         ],
       },
     });
@@ -343,7 +345,7 @@ export async function startFakePf2eCrossSection(): Promise<FakePf2e> {
           total: { value: 1 },
           // Same `id` as the background below -> same slug ('cleave'); both map to entry
           // type `feat`, so the two rows share the (type, slug) key across sections.
-          hits: [{ _id: 'cleave-feat', _source: { id: 'cleave', name: 'Cleave', type: 'feat', level: 1, text: 'A sweeping strike.', source: 'Pathfinder Player Core', license: 'ORC' } }],
+          hits: [{ _id: 'cleave-feat', _source: { id: 'cleave', name: 'Cleave', type: 'Feat', level: 1, text: 'A sweeping strike.', source: 'Pathfinder Player Core', license: 'ORC' } }],
         },
       });
       return;
@@ -352,7 +354,7 @@ export async function startFakePf2eCrossSection(): Promise<FakePf2e> {
       res.json({
         hits: {
           total: { value: 1 },
-          hits: [{ _id: 'cleave-bg', _source: { id: 'cleave', name: 'Cleave', type: 'background', text: 'You grew up splitting logs.', source: 'Pathfinder Player Core', license: 'ORC' } }],
+          hits: [{ _id: 'cleave-bg', _source: { id: 'cleave', name: 'Cleave', type: 'Background', text: 'You grew up splitting logs.', source: 'Pathfinder Player Core', license: 'ORC' } }],
         },
       });
       return;
