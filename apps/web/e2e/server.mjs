@@ -47,6 +47,9 @@ const child = spawn(process.execPath, [serverEntry], {
     THROTTLE_DISABLED: '1',
     // No dev-auth bypass: real sessions only (see header note).
     DEV_AUTH: '',
+    // Issue #445 fixture: proves the admin can clear an encrypted key and see the
+    // matching operator environment credential become ready without exposing it.
+    OPENAI_API_KEY: 'e2e-openai-environment-key-never-render',
   },
 });
 

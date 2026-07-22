@@ -25,7 +25,8 @@ export class AiProviderCampaignConfigController {
   @Get()
   @ApiOperation({
     summary: 'Get the per-campaign AI provider override',
-    description: 'DM only. Redacted: the API key is never returned — only `configured` + `keyLast4`.',
+    description:
+      'DM only. Redacted: the API key is never returned — only `configured`, `keyLast4`, and non-secret credential source/readiness.',
   })
   @ApiResponse({ status: 200, description: 'The redacted campaign override, or null when unset.' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
@@ -38,7 +39,7 @@ export class AiProviderCampaignConfigController {
     summary: 'Get the non-secret effective AI provider indicator for a campaign',
     description:
       'DM only. Returns which provider is in effect and whether it comes from the server default or a campaign ' +
-      'override (`{ configured, providerType, model, source }`). Carries NO key material — this lets a DM (who ' +
+      'override, plus non-secret credential source/readiness. Carries NO key material — this lets a DM (who ' +
       'cannot read the admin-only server config) render the effective-provider status line.',
   })
   @ApiResponse({ status: 200, description: 'The non-secret effective-provider view.' })
@@ -59,6 +60,20 @@ export class AiProviderCampaignConfigController {
   async put(@Param('id', ParseIntPipe) id: number, @Body() body: AiProviderConfigUpdateDto, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
     return this.configs.putCampaign(id, body, user);
+  }
+
+  @Delete('key')
+  @ApiOperation({
+    summary: 'Clear the stored campaign API key',
+    description:
+      'DM only. Clears only this override\'s encrypted key and masked last-four indicator. Provider, model, base URL, ' +
+      'and parameters are retained; the override may fall back to the server credential. Audited without key material.',
+  })
+  @ApiResponse({ status: 200, description: 'The retained override with updated non-secret credential source/readiness.' })
+  @ApiResponse({ status: 404, description: 'No campaign provider override exists.' })
+  async clearKey(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.configs.clearCampaignKey(id, user);
   }
 
   @Delete()

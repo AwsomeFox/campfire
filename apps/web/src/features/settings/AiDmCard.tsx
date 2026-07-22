@@ -230,11 +230,18 @@ function EffectiveProviderSection({
               {effective.providerType} / {effective.model || '—'}
             </span>
             <span className={`tag ${sourceTag}`} style={{ fontSize: 10 }}>{sourceLabel}</span>
+            <span className={`tag ${effective.ready ? 'tag-accent' : 'tag-neutral'}`} style={{ fontSize: 10 }}>
+              {effective.ready ? 'credential ready' : 'credential missing'}
+            </span>
           </div>
           <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-            {effective.source === 'campaign'
-              ? 'This campaign overrides the server default below. No API key is needed here to use AI.'
-              : 'Inherited from the server default set by your server admin. No API key is needed here to use AI.'}
+            {effective.ready
+              ? `Credential source: ${effective.credentialSource.replace('-', ' ')}. ${
+                  effective.source === 'campaign'
+                    ? 'This campaign overrides the server default below.'
+                    : 'Inherited from the server default set by your server admin.'
+                }`
+              : 'The provider settings exist, but no usable credential is available. Ask the server admin to set a key or environment credential.'}
           </p>
         </div>
       ) : (
