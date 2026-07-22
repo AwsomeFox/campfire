@@ -233,6 +233,63 @@ describe('ai-provider-config (e2e)', () => {
 });
 
 /**
+ * Effective-provider indicator (issue #399): a DM-safe, NON-secret read that tells the
+ * campaign AI settings which provider is in effect and whether it's the server default or
+ * a campaign override. It must never carry key material, and must be DM-gated.
+ */
+describe('ai-provider-config effective indicator (issue #399, e2e)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Effective Indicator Campaign' });
+    campaignId = campRes.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('reports configured:false when neither scope is set', async () => {
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/effective`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ configured: false, providerType: null, model: null, source: null });
+  });
+
+  it('reports the SERVER default as the source when only the server default is set', async () => {
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'gpt-4o-mini', apiKey: SERVER_KEY });
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/effective`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ configured: true, providerType: 'openai', model: 'gpt-4o-mini', source: 'server' });
+    // NEVER any key material.
+    expect(JSON.stringify(res.body)).not.toContain(SERVER_KEY);
+    expect(res.body).not.toHaveProperty('keyLast4');
+    expect(res.body).not.toHaveProperty('apiKey');
+  });
+
+  it('reports a CAMPAIGN override as the source once one exists (no key needed)', async () => {
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'anthropic', model: 'claude-3-5-sonnet' });
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/effective`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ configured: true, providerType: 'anthropic', model: 'claude-3-5-sonnet', source: 'campaign' });
+  });
+
+  it('is DM-gated — a campaign player (non-DM) is 403', async () => {
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/effective`).set(player);
+    expect(res.status).toBe(403);
+  });
+});
+
+/**
  * Regression: the server default's API key must NEVER be shipped to a campaign-controlled
  * destination (issue #373). A DM who creates a campaign can set a per-campaign override with
  * a foreign `baseUrl`/`providerType` and NO key of its own; the resolver must not pair the

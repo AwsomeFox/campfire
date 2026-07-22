@@ -149,6 +149,31 @@ export class AiProviderConfigService {
     return row ? this.toView(row) : null;
   }
 
+  /**
+   * Non-secret "which provider is in effect" indicator for a campaign (issue #399).
+   *
+   * A campaign DM cannot read the admin-only server-default config, but the campaign
+   * AI settings still need to show which provider is actually resolved and whether it
+   * comes from the SERVER default or a CAMPAIGN override. This returns ONLY the type +
+   * model + source scope — NEVER any key material (no `configured`/`keyLast4` about the
+   * key itself, only whether *any* provider is resolvable). It mirrors the
+   * `resolveEffectiveConfig` precedence (`campaign ?? server`) without decrypting.
+   */
+  async getEffectiveView(
+    campaignId: number,
+  ): Promise<{ configured: boolean; providerType: AiProviderType | null; model: string | null; source: 'server' | 'campaign' | null }> {
+    const server = await this.serverRow();
+    const camp = await this.campaignRow(campaignId);
+    const primary = camp ?? server;
+    if (!primary) return { configured: false, providerType: null, model: null, source: null };
+    return {
+      configured: true,
+      providerType: primary.providerType as AiProviderType,
+      model: primary.model,
+      source: camp ? 'campaign' : 'server',
+    };
+  }
+
   // ── writes ───────────────────────────────────────────────────────────────────
 
   /** Upsert the server-default config (admin-gated at the controller). */

@@ -2655,6 +2655,20 @@ export const AiProviderTestResult = z.object({
 });
 export type AiProviderTestResult = z.infer<typeof AiProviderTestResult>;
 
+// Non-secret effective-provider indicator (GET /campaigns/:id/ai-provider/effective).
+// A campaign DM cannot read the admin-only server-default config (/settings/ai-provider),
+// so this minimal, role-gated (dm) read tells the campaign AI settings which provider is
+// actually in effect and whether it comes from the SERVER default or a CAMPAIGN override.
+// It carries NO key material — only the resolved type/model and the source scope.
+// `configured` is false (and the other fields null) when neither scope has a provider.
+export const AiProviderEffectiveView = z.object({
+  configured: z.boolean(),
+  providerType: AiProviderConfigType.nullable(),
+  model: z.string().nullable(),
+  source: z.enum(['server', 'campaign']).nullable(),
+});
+export type AiProviderEffectiveView = z.infer<typeof AiProviderEffectiveView>;
+
 // ── Admin AI console (issue #315): opt-in, budgets & caps, usage, kill switch ──
 // A server-admin-only cockpit over the AI program: the global kill switch
 // (ServerSettings.experimentalAiDm), server-wide + per-campaign token caps, a usage
