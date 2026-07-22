@@ -35,11 +35,11 @@ function FlameMark({ size = 44 }: { size?: number }) {
 }
 
 /** The value-prop highlights shown on the landing hero. Icons degrade gracefully. */
-const FEATURES: { icon: string; title: string; body: string }[] = [
+export const FEATURES: { icon: string; title: string; body: string }[] = [
   {
     icon: 'rolling-dices',
     title: 'An AI Dungeon Master',
-    body: 'Sit it in the DM seat as a full driver, or a co-DM that only proposes — it narrates, tracks combat, and never touches canon without approval.',
+    body: 'Two modes, plainly different. As a co-DM it only proposes — every change waits in a queue for a human DM to approve before anything is applied. In Driver mode it holds the DM seat and acts directly — narrating, rolling dice, moving HP and conditions, and running the table within the limits you set.',
   },
   {
     icon: 'treasure-map',

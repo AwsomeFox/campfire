@@ -70,9 +70,9 @@
     "systemInfo": "State: {{state}}",
 
     "offTitle": "The AI DM is off",
-    "offHint": "No AI is running this table. The DM can switch on Driver mode in settings.",
+    "offHint": "No AI is running this table. The DM can switch on Driver mode (the AI acts directly as the DM) or Co-DM mode (the AI only proposes) in settings.",
     "coDmTitle": "The AI is co-DMing",
-    "coDmHint": "In co-DM mode the AI only proposes changes for the DM to approve — there's no live table to play at. Switch to Driver mode to seat the AI as the DM.",
+    "coDmHint": "In Co-DM mode the AI only proposes — every draft waits for a human DM to approve, and nothing changes until then. There's no live table to play at. Switch to Driver mode to let the AI hold the DM seat and act directly.",
     "gatedTitle": "AI DM unavailable",
     "openSettings": "Open AI DM settings"
   }
