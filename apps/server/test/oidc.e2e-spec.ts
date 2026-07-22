@@ -197,6 +197,14 @@ class CookieAgent {
     return [...this.jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
   }
 
+  getCookie(name: string): string | undefined {
+    return this.jar.get(name);
+  }
+
+  setCookie(name: string, value: string): void {
+    this.jar.set(name, value);
+  }
+
   /** GET with redirects NOT followed (manual) — mirrors supertest's `.redirects(0)` used by the old suite. */
   async getNoRedirect(pathname: string): Promise<Response> {
     const cookie = this.cookieHeader();
@@ -251,11 +259,15 @@ async function fetchNoRedirect(url: string): Promise<Response> {
   return fetch(url, { redirect: 'manual' });
 }
 
-/** Drives the full /oidc/login -> fake IdP /authorize -> /oidc/callback round trip for a given cookie agent, returning the callback response (which sets the session cookie and redirects to '/'). */
-async function performOidcLogin(agent: CookieAgent): Promise<Response> {
+async function startOidcLogin(agent: CookieAgent): Promise<URL> {
   const loginRes = await agent.getNoRedirect('/api/v1/auth/oidc/login');
   expect(loginRes.status).toBe(302);
-  const authorizeUrl = new URL(loginRes.headers.get('location')!);
+  return new URL(loginRes.headers.get('location')!);
+}
+
+/** Drives the full /oidc/login -> fake IdP /authorize -> /oidc/callback round trip for a given cookie agent, returning the callback response (which sets the session cookie and redirects to '/'). */
+async function performOidcLogin(agent: CookieAgent): Promise<Response> {
+  const authorizeUrl = await startOidcLogin(agent);
 
   // Simulate the browser following the redirect to the fake IdP, which immediately
   // redirects back to our callback URL (no real login form in the fake IdP).
@@ -265,6 +277,38 @@ async function performOidcLogin(agent: CookieAgent): Promise<Response> {
 
   const callbackRes = await agent.getNoRedirect(callbackUrl.pathname + callbackUrl.search);
   return callbackRes;
+}
+
+const RECOVERY_CATEGORIES = [
+  'cancelled',
+  'flow_expired',
+  'state_pkce_mismatch',
+  'provider_unavailable',
+  'client_token_failure',
+  'missing_claims',
+  'group_denied',
+  'account_disabled',
+] as const;
+type RecoveryCategory = (typeof RECOVERY_CATEGORIES)[number];
+
+function expectRecoveryRedirect(res: Response, category: RecoveryCategory): string {
+  expect(res.status).toBe(302);
+  const rawLocation = res.headers.get('location');
+  expect(rawLocation).toBeTruthy();
+  expect(rawLocation).toMatch(/^\/login\/sso-error\?/);
+  const location = new URL(rawLocation!, 'http://campfire.invalid');
+  expect(location.origin).toBe('http://campfire.invalid');
+  expect(location.pathname).toBe('/login/sso-error');
+  expect([...location.searchParams.keys()].sort()).toEqual(['category', 'ref']);
+  expect(location.searchParams.get('category')).toBe(category);
+  expect(RECOVERY_CATEGORIES).toContain(category);
+  const reference = location.searchParams.get('ref');
+  expect(reference).toMatch(/^[A-F0-9]{16}$/);
+  expect(rawLocation).not.toContain('PROVIDER_PRIVATE');
+  expect(rawLocation).not.toContain('test-secret');
+  expect(rawLocation).not.toContain('sensitive-code');
+  expect(rawLocation).not.toContain('sensitive-state');
+  return reference!;
 }
 
 /**
@@ -388,16 +432,138 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
   });
 
   describe('/auth/oidc/login and /auth/oidc/callback disabled state', () => {
-    it('login returns 503 (not a crash) when OIDC is not configured', async () => {
+    it('login redirects to safe recovery when OIDC is not configured', async () => {
       const app = await bootApp({
         OIDC_ISSUER: undefined,
         OIDC_CLIENT_ID: undefined,
         OIDC_CLIENT_SECRET: undefined,
         OIDC_REDIRECT_URI: undefined,
       });
-      const res = await fetch(`${app.baseUrl}/api/v1/auth/oidc/login`);
-      expect(res.status).toBe(503);
+      const res = await fetch(`${app.baseUrl}/api/v1/auth/oidc/login`, { redirect: 'manual' });
+      expectRecoveryRedirect(res, 'provider_unavailable');
     });
+  });
+
+  describe('safe browser recovery redirects', () => {
+    let app: AppProcess;
+
+    beforeAll(async () => {
+      app = await spawnApp(oidcEnvFor(idp, {
+        OIDC_ALLOWED_GROUP: 'campfire-users',
+        OIDC_ADMIN_GROUP: 'campfire-admins',
+      }));
+    });
+
+    afterAll(async () => {
+      await app.kill();
+    });
+
+    it('maps provider cancellation, logs only a redacted reference, and starts a fresh retry flow', async () => {
+      idp.setNextMode('cancel');
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent);
+      const reference = expectRecoveryRedirect(callbackRes, 'cancelled');
+
+      expect(app.output()).toContain(`OIDC_RECOVERY reference=${reference} stage=callback category=cancelled`);
+      expect(app.output()).not.toContain('PROVIDER_PRIVATE_CANCELLATION_DETAIL');
+      expect(app.output()).not.toContain('test-secret');
+
+      const firstRetry = await startOidcLogin(agent);
+      const firstFlow = agent.getCookie('campfire_oidc_flow');
+      const secondRetry = await startOidcLogin(agent);
+      const secondFlow = agent.getCookie('campfire_oidc_flow');
+      expect(firstRetry.pathname).toBe('/authorize');
+      expect(secondRetry.pathname).toBe('/authorize');
+      expect(firstFlow).toBeTruthy();
+      expect(secondFlow).toBeTruthy();
+      expect(secondFlow).not.toBe(firstFlow);
+    });
+
+    it('maps an expired or missing flow before using callback payloads', async () => {
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await agent.getNoRedirect(
+        '/api/v1/auth/oidc/callback?code=sensitive-code&state=sensitive-state',
+      );
+      expectRecoveryRedirect(callbackRes, 'flow_expired');
+    });
+
+    it('maps a state mismatch without contacting the token endpoint', async () => {
+      const agent = new CookieAgent(app.baseUrl);
+      await startOidcLogin(agent);
+      const callbackRes = await agent.getNoRedirect(
+        '/api/v1/auth/oidc/callback?code=sensitive-code&state=sensitive-state',
+      );
+      expectRecoveryRedirect(callbackRes, 'state_pkce_mismatch');
+    });
+
+    it('maps a PKCE verifier mismatch returned as invalid_grant', async () => {
+      const agent = new CookieAgent(app.baseUrl);
+      const authorizeUrl = await startOidcLogin(agent);
+      const idpRes = await fetchNoRedirect(authorizeUrl.toString());
+      const callbackUrl = new URL(idpRes.headers.get('location')!);
+      const flow = agent.getCookie('campfire_oidc_flow');
+      expect(flow).toBeTruthy();
+      const [state] = decodeURIComponent(flow!).split(':');
+      agent.setCookie(
+        'campfire_oidc_flow',
+        encodeURIComponent(`${state}:tampered-pkce-verifier`),
+      );
+
+      const callbackRes = await agent.getNoRedirect(callbackUrl.pathname + callbackUrl.search);
+      expectRecoveryRedirect(callbackRes, 'state_pkce_mismatch');
+      expect(app.output()).not.toContain('PROVIDER_PRIVATE_PKCE_DETAIL');
+    });
+
+    it('maps client/token endpoint rejection without exposing the provider response', async () => {
+      idp.setNextMode('token_error');
+      const callbackRes = await performOidcLogin(new CookieAgent(app.baseUrl));
+      expectRecoveryRedirect(callbackRes, 'client_token_failure');
+      expect(app.output()).not.toContain('PROVIDER_PRIVATE_TOKEN_DETAIL');
+    });
+
+    it('maps a successful token response with no ID-token claims', async () => {
+      idp.setNextMode('missing_claims');
+      const callbackRes = await performOidcLogin(new CookieAgent(app.baseUrl));
+      expectRecoveryRedirect(callbackRes, 'missing_claims');
+    });
+
+    it('maps allowed-group denial and does not create a session', async () => {
+      idp.setNextUser({
+        sub: 'sub-recovery-outsider',
+        preferred_username: 'recovery-outsider',
+        groups: ['another-app'],
+      });
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent);
+      expectRecoveryRedirect(callbackRes, 'group_denied');
+      expect((await agent.get('/api/v1/me')).status).toBe(401);
+    });
+
+    it('preserves the successful callback contract and session semantics', async () => {
+      idp.setNextUser({
+        sub: 'sub-recovery-success',
+        preferred_username: 'recovery-success',
+        groups: ['campfire-users'],
+      });
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent);
+      expect(callbackRes.status).toBe(302);
+      expect(callbackRes.headers.get('location')).toBe('/');
+      expect((await agent.get('/api/v1/me')).status).toBe(200);
+    });
+  });
+
+  it('maps an unreachable discovery endpoint to provider unavailable recovery', async () => {
+    const unreachablePort = await getFreePort();
+    const app = await bootApp((port) => ({
+      OIDC_ISSUER: `http://127.0.0.1:${unreachablePort}`,
+      OIDC_CLIENT_ID: 'test-client',
+      OIDC_CLIENT_SECRET: 'test-secret',
+      OIDC_REDIRECT_URI: `http://127.0.0.1:${port}/api/v1/auth/oidc/callback`,
+      OIDC_ALLOW_INSECURE: '1',
+    }));
+    const res = await fetch(`${app.baseUrl}/api/v1/auth/oidc/login`, { redirect: 'manual' });
+    expectRecoveryRedirect(res, 'provider_unavailable');
   });
 
   describe('full login round trip', () => {
@@ -526,7 +692,7 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       await app.kill();
     });
 
-    it('disabled OIDC user gets 403 with a clear message on callback, and no session cookie is set', async () => {
+    it('disabled OIDC user reaches safe account-disabled recovery and gets no session cookie', async () => {
       // First login as an admin (via the admin-group claim) so we have someone who can disable users.
       idp.setNextUser({ sub: 'sub-disable-admin', preferred_username: 'disableadmin', email: 'disableadmin@example.com', name: 'Disable Admin', groups: ['campfire-admins'] });
       const adminAgent = new CookieAgent(app.baseUrl);
@@ -555,9 +721,7 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       idp.setNextUser({ sub: 'sub-to-disable', preferred_username: 'todisable', email: 'todisable@example.com', name: 'To Disable' });
       const retryAgent = new CookieAgent(app.baseUrl);
       const callbackRes = await performOidcLogin(retryAgent);
-      expect(callbackRes.status).toBe(403);
-      const callbackBody = await callbackRes.json();
-      expect(callbackBody.message).toMatch(/disabled/i);
+      expectRecoveryRedirect(callbackRes, 'account_disabled');
 
       // No session cookie (campfire_session) was issued to the disabled user — only the
       // OIDC flow cookie gets cleared (expected on every callback, success or failure).
@@ -586,14 +750,12 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       await app.kill();
     });
 
-    it('denies a user without the allowed group: 403, no session cookie, no account provisioned', async () => {
+    it('denies a user without the allowed group: safe recovery, no session cookie, no account provisioned', async () => {
       idp.setNextUser({ sub: 'sub-outsider', preferred_username: 'outsider', email: 'outsider@example.com', name: 'Out Sider', groups: ['some-other-app'] });
 
       const agent = new CookieAgent(app.baseUrl);
       const callbackRes = await performOidcLogin(agent);
-      expect(callbackRes.status).toBe(403);
-      const callbackBody = await callbackRes.json();
-      expect(callbackBody.message).toMatch(/not allowed to sign in/i);
+      expectRecoveryRedirect(callbackRes, 'group_denied');
 
       // No session cookie was minted — only the OIDC flow cookie gets cleared.
       const headers = callbackRes.headers as Headers & { getSetCookie?: () => string[] };
@@ -657,9 +819,7 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
 
       const agent = new CookieAgent(app.baseUrl);
       const callbackRes = await performOidcLogin(agent);
-      expect(callbackRes.status).toBe(403);
-      const callbackBody = await callbackRes.json();
-      expect(callbackBody.message).toMatch(/not allowed to sign in/i);
+      expectRecoveryRedirect(callbackRes, 'group_denied');
 
       const meRes = await agent.get('/api/v1/me');
       expect(meRes.status).toBe(401);
@@ -865,10 +1025,10 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
         allowedGroup: 'campfire-users',
       });
 
-      // No allowed-group membership -> denied at the callback with a 403, no session.
+      // No allowed-group membership -> safe recovery redirect, no session.
       idp.setNextUser({ sub: 'sub-nogroup', preferred_username: 'nogroup', email: 'n@example.com', name: 'No Group', groups: [] });
       const denied = await performOidcLogin(new CookieAgent(app.baseUrl));
-      expect(denied.status).toBe(403);
+      expectRecoveryRedirect(denied, 'group_denied');
 
       // Member of the allowed group -> provisioned normally.
       idp.setNextUser({ sub: 'sub-ingroup', preferred_username: 'ingroup', email: 'i@example.com', name: 'In Group', groups: ['campfire-users'] });
