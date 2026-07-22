@@ -1854,7 +1854,7 @@ export const SF2E_ADAPTER_ID = 'sf2e';
 /** Pack slug the SF2e importer installs under. */
 export const SF2E_PACK_SLUG = 'sf2e-srd';
 
-export interface Sf2eRuleSystemAdapter extends Pf2eRuleSystemAdapter {}
+export type Sf2eRuleSystemAdapter = Pf2eRuleSystemAdapter;
 
 export const Sf2eAdapter: Sf2eRuleSystemAdapter = {
   ...Pf2eAdapter,

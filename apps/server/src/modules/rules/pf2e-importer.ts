@@ -170,9 +170,9 @@ function bodyOf(src: Record<string, unknown>): string {
   return asString(src.text) || asString(src.markdown) || asString(src.description) || asString(src.desc);
 }
 
-/** Reported license (OGL legacy / ORC remaster). Falls back to the pack default. */
-function licenseOf(src: Record<string, unknown>): string {
-  return asString(src.license) || PF2E_DEFAULT_LICENSE;
+/** Reported license (OGL legacy / ORC remaster). Falls back to the pack default license. */
+function licenseOf(src: Record<string, unknown>, defaultLicense: string = PF2E_DEFAULT_LICENSE): string {
+  return asString(src.license) || defaultLicense;
 }
 
 /** Source-book label for attribution (AoN `source`; array-valued on some rows). */
@@ -199,7 +199,7 @@ function num(v: unknown): number | null {
   return typeof v === 'number' ? v : null;
 }
 
-function mapCreature(src: Record<string, unknown>): ImportedEntry {
+function mapCreature(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const traits = traitsOf(src);
   const level = num(src.level);
@@ -222,12 +222,12 @@ function mapCreature(src: Record<string, unknown>): ImportedEntry {
       rarity: rarity || null,
       traits,
     }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapSpell(src: Record<string, unknown>): ImportedEntry {
+function mapSpell(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const rank = num(src.level) ?? num(src.rank); // PF2e remaster: spell "rank"; legacy field is `level`
   const traditions = asStringArray(src.tradition);
@@ -245,12 +245,12 @@ function mapSpell(src: Record<string, unknown>): ImportedEntry {
       duration: asString(src.duration) || null,
       traits: traitsOf(src),
     }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapEquipment(src: Record<string, unknown>): ImportedEntry {
+function mapEquipment(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const price = asString(src.price);
   return {
@@ -267,12 +267,12 @@ function mapEquipment(src: Record<string, unknown>): ImportedEntry {
       rarity: asString(src.rarity) || null,
       traits: traitsOf(src),
     }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapFeat(src: Record<string, unknown>): ImportedEntry {
+function mapFeat(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const level = num(src.level);
   const prereq = asString(src.prerequisite);
@@ -283,12 +283,12 @@ function mapFeat(src: Record<string, unknown>): ImportedEntry {
     summary: truncate([level !== null ? `Feat ${level}` : null, prereq ? `Prereq: ${prereq}` : null].filter(Boolean).join(' · ') || bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: JSON.stringify({ level, prerequisite: prereq || null, traits: traitsOf(src) }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapAncestry(src: Record<string, unknown>): ImportedEntry {
+function mapAncestry(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   return {
     slug: slugOf(src, name),
@@ -297,12 +297,12 @@ function mapAncestry(src: Record<string, unknown>): ImportedEntry {
     summary: truncate([src.hp !== undefined ? `HP ${num(src.hp)}` : null, asString(src.size), traitsOf(src).slice(0, 3).join(', ')].filter(Boolean).join(' · ') || bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: JSON.stringify({ hp: num(src.hp), size: asString(src.size) || null, speed: src.speed ?? null, traits: traitsOf(src) }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapClass(src: Record<string, unknown>): ImportedEntry {
+function mapClass(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const keyAbility = asStringArray(src.attribute ?? src.key_ability);
   return {
@@ -312,12 +312,12 @@ function mapClass(src: Record<string, unknown>): ImportedEntry {
     summary: truncate([src.hp !== undefined ? `HP ${num(src.hp)}/level` : null, keyAbility.length ? `key ${keyAbility.join('/')}` : null].filter(Boolean).join(' · ') || bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: JSON.stringify({ hpPerLevel: num(src.hp), keyAbility, traits: traitsOf(src) }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapBackground(src: Record<string, unknown>): ImportedEntry {
+function mapBackground(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   return {
     slug: slugOf(src, name),
@@ -326,12 +326,12 @@ function mapBackground(src: Record<string, unknown>): ImportedEntry {
     summary: truncate(bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: JSON.stringify({ kind: 'background', traits: traitsOf(src) }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapCondition(src: Record<string, unknown>): ImportedEntry {
+function mapCondition(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   return {
     slug: slugOf(src, name),
@@ -340,12 +340,12 @@ function mapCondition(src: Record<string, unknown>): ImportedEntry {
     summary: truncate(bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: null,
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapVehicle(src: Record<string, unknown>): ImportedEntry {
+function mapVehicle(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const body = bodyOf(src);
   const level = num(src.level);
@@ -359,12 +359,12 @@ function mapVehicle(src: Record<string, unknown>): ImportedEntry {
     summary: truncate(body, 300) || 'Vehicle',
     body,
     dataJson: JSON.stringify({ category: 'vehicle', level, ac, hp }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>) => ImportedEntry> = {
+const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>, defaultLicense?: string) => ImportedEntry> = {
   creatures: mapCreature,
   spells: mapSpell,
   equipment: mapEquipment,

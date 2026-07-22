@@ -34,10 +34,14 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(data.traits).toEqual(['Goblin', 'Humanoid']);
   });
 
-  it('fetches sf2e section using fetchSf2eSection', async () => {
-    const { entries } = await fetchSf2eSection(fake.baseUrl, 'creatures', silentLogger);
+  it('fetches sf2e section using fetchSf2eSection and maps vehicles -> item', async () => {
+    const { entries } = await fetchSf2eSection(fake.baseUrl, 'vehicles', silentLogger);
     expect(entries.length).toBeGreaterThan(0);
-    expect(entries[0].name).toBe('Goblin Warrior');
+    expect(entries[0].name).toBe('Hover Skimmer');
+    expect(entries[0].type).toBe('item');
+    const data = JSON.parse(entries[0].dataJson!);
+    expect(data.category).toBe('vehicle');
+    expect(data.level).toBe(2);
   });
 
   it('strips art (image fields never make it into dataJson or body)', async () => {
