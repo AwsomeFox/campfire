@@ -94,10 +94,19 @@ How players get accounts is the server admin's choice:
 ## Under the hood
 
 - Campaign membership lives in a `campaign_members` table (`campaignId`, `userId`,
-  `role`, optional linked `characterId`).
+  `role`, optional linked `characterId`). `userId` is foreign-keyed to a real
+  account; missing users are cleaned safely during upgrade and rejected by REST,
+  MCP, and SQLite thereafter.
 - The effective role for a request is resolved per campaign; DM secrets and
   private notes are filtered **server-side**, so the separation is enforced by the
   API, not the UI.
-- The **last DM** of a campaign and the **last enabled admin** of the server are
-  both protected — you can't remove or demote your way into an unadministerable
-  campaign or a locked-out server.
+- The **last enabled DM** of a campaign and the **last enabled admin** of the server
+  are both protected — disabled/missing accounts do not count, and account
+  disable/delete is guarded alongside membership demotion/removal. These checks
+  are transactional under concurrent REST, MCP, and admin requests.
+- The **audit log** keeps the two scopes distinct too: a server-scoped admin
+  action (accounts, settings, rule packs, AI provider config) is attributed
+  `actorRole: admin`, while a campaign-scoped action carries the actor's campaign
+  role (`dm`/`player`/`viewer`). An admin acting inside a campaign they're a
+  member of is recorded by their campaign role there — server power is not story
+  access. See [Audit](server.md#audit-admin-audit).

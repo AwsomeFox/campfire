@@ -4,6 +4,8 @@
  */
 import { forwardRef, useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { GameIcon } from './GameIcon';
+import { chipClass, type ChipVariant } from './chipVariants';
+export type { ChipVariant } from './chipVariants';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <section className={`cf-card p-5 ${className}`}>{children}</section>;
@@ -12,25 +14,6 @@ export function Card({ children, className = '' }: { children: ReactNode; classN
 export function Inset({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <div className={`cf-inset p-3 ${className}`}>{children}</div>;
 }
-
-export type ChipVariant =
-  | 'active' | 'available' | 'completed' | 'failed'
-  | 'private' | 'dm' | 'party' | 'proposal' | 'whisper' | 'ai';
-
-const chipClass: Record<ChipVariant, string> = {
-  active: 'cf-chip-active',
-  available: 'cf-chip-available',
-  completed: 'cf-chip-completed',
-  failed: 'cf-chip-failed',
-  private: 'cf-chip-private',
-  dm: 'cf-chip-dm',
-  party: 'cf-chip-party',
-  proposal: 'cf-chip-proposal',
-  whisper: 'cf-chip-whisper',
-  // AI-drafted proposal attribution (issue #341): distinct teal so an AI-authored
-  // proposal reads as its own thing next to the proposer/delete/status chips.
-  ai: 'cf-chip-ai',
-};
 
 export function Chip({ variant, children, className = '' }: { variant: ChipVariant; children: ReactNode; className?: string }) {
   return <span className={`cf-chip ${chipClass[variant]} ${className}`}>{children}</span>;

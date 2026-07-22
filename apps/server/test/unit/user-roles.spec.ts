@@ -4,6 +4,7 @@ import {
   roleAtLeast,
   minRole,
   auditActor,
+  auditActorRole,
   hasServerAdminPower,
   type RequestUser,
   type TokenContext,
@@ -112,5 +113,34 @@ describe('roles — hasServerAdminPower (privilege-escalation guard)', () => {
     expect(
       hasServerAdminPower(user({ serverRole: 'user', tokenContext: tokenCtx({ scope: 'dm', adminEnabled: true }) })),
     ).toBe(false);
+  });
+});
+
+/**
+ * Issue #526: auditActorRole maps a RequestUser to the audit-log actor role for
+ * a SERVER-scoped admin action — 'admin' when the actor holds real server-admin
+ * power (mirroring hasServerAdminPower), otherwise 'dm' (the honest attribution
+ * for a caller that reached an admin route via a DM-equivalent path, e.g. a DM
+ * installing a rule pack). A scope-capped PAT owned by an admin does NOT count.
+ */
+describe('roles — auditActorRole (issue #526 admin attribution)', () => {
+  it('an admin on a cookie session attributes "admin"', () => {
+    expect(auditActorRole(user({ serverRole: 'admin' }))).toBe('admin');
+  });
+
+  it('a non-admin attributes "dm" (campaign-DM equivalent on admin routes)', () => {
+    expect(auditActorRole(user({ serverRole: 'user' }))).toBe('dm');
+  });
+
+  it('an admin acting through a NON-admin-enabled token attributes "dm" (power is capped)', () => {
+    expect(
+      auditActorRole(user({ serverRole: 'admin', tokenContext: tokenCtx({ adminEnabled: false }) })),
+    ).toBe('dm');
+  });
+
+  it('an admin acting through an adminEnabled token attributes "admin"', () => {
+    expect(
+      auditActorRole(user({ serverRole: 'admin', tokenContext: tokenCtx({ adminEnabled: true }) })),
+    ).toBe('admin');
   });
 });

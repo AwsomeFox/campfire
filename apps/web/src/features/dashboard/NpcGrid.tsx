@@ -1,17 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { Npc } from '@campfire/schema';
 import { EmptyState } from '../../components/ui';
-
-const DISPOSITION_COLOR: Record<string, string> = {
-  friendly: 'text-emerald-400',
-  hostile: 'text-rose-400',
-  wary: 'text-purple-400',
-  neutral: 'text-slate-200',
-};
-
-function nameColor(disposition: string): string {
-  return DISPOSITION_COLOR[disposition.toLowerCase()] ?? 'text-slate-200';
-}
+import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
 
 export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] }) {
   return (
@@ -42,16 +32,14 @@ export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] 
             }}
           >
             <span style={{ flex: 1, minWidth: 0 }}>
-              <span className={nameColor(npc.disposition)} style={{ fontSize: 13.5 }}>
+              <span style={{ fontSize: 13.5 }}>
                 {npc.name}
               </span>
               <span className="text-muted" style={{ display: 'block', fontSize: 11 }}>
                 {npc.role}
               </span>
             </span>
-            <span className="tag tag-neutral" style={{ fontSize: 10, flex: 'none' }}>
-              {npc.disposition}
-            </span>
+            <NpcDispositionBadge disposition={npc.disposition} className="flex-none" />
           </Link>
         ))
       )}

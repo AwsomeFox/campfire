@@ -369,7 +369,8 @@ export function levelForXp(xp: number): number {
 }
 
 // ---------- quest ----------
-export const QuestStatus = z.enum(['available', 'active', 'completed', 'failed']);
+export const QUEST_STATUSES = ['available', 'active', 'completed', 'failed'] as const;
+export const QuestStatus = z.enum(QUEST_STATUSES);
 
 export const QuestObjective = z.object({
   id: Id,
@@ -504,6 +505,12 @@ export const StoryArcWithBeats = StoryArc.extend({ beats: z.array(StoryBeatWithB
 export type StoryArcWithBeats = z.infer<typeof StoryArcWithBeats>;
 
 // ---------- npc ----------
+// NPC disposition remains open text so campaigns can use setting-specific values.
+// These are the canonical values the shipped UI gives semantic treatment; every
+// other value is deliberately presented as neutral.
+export const CANONICAL_NPC_DISPOSITIONS = ['friendly', 'neutral', 'hostile'] as const;
+export const CanonicalNpcDisposition = z.enum(CANONICAL_NPC_DISPOSITIONS);
+
 export const Npc = z.object({
   id: Id,
   campaignId: Id,
@@ -2275,11 +2282,55 @@ export const CampaignMember = z.object({
   characterId: Id.nullable().default(null),
   username: z.string().default(''), // denormalized for display
   displayName: z.string().default(''),
+  disabled: z.boolean().default(false), // unusable accounts never count as DM authority (#849)
   ...timestamps,
 });
 export type CampaignMember = z.infer<typeof CampaignMember>;
 export const MemberCreate = z.object({ userId: Id, role: Role, characterId: Id.nullable().optional() });
 export const MemberUpdate = z.object({ role: Role.optional(), characterId: Id.nullable().optional() });
+
+// Server-admin-only membership integrity diagnostics/recovery (#849). These
+// shapes expose operational metadata only: campaign identity/name, account ids,
+// roles and migration actions — never campaign entities or DM-secret content.
+export const MembershipIntegrityRepairReason = z.enum([
+  'missing_user',
+  'missing_campaign',
+  'missing_character',
+]);
+export const MembershipIntegrityRepairAction = z.enum(['removed_membership', 'cleared_character']);
+export const MembershipIntegrityRepair = z.object({
+  id: Id,
+  campaignId: Id,
+  campaignName: z.string().nullable(),
+  memberId: Id,
+  userId: Id,
+  role: Role,
+  reason: MembershipIntegrityRepairReason,
+  action: MembershipIntegrityRepairAction,
+  invalidReferenceId: Id.nullable(),
+  createdAt: IsoDate,
+});
+export type MembershipIntegrityRepair = z.infer<typeof MembershipIntegrityRepair>;
+
+export const MembershipIntegrityCampaign = z.object({
+  campaignId: Id,
+  campaignName: z.string(),
+  usableDmCount: z.number().int().nonnegative(),
+  disabledDmUserIds: z.array(Id),
+  removedGhostMembershipCount: z.number().int().nonnegative(),
+  repairRequired: z.boolean(),
+});
+export type MembershipIntegrityCampaign = z.infer<typeof MembershipIntegrityCampaign>;
+
+export const MembershipIntegrityReport = z.object({
+  generatedAt: IsoDate,
+  campaigns: z.array(MembershipIntegrityCampaign),
+  repairs: z.array(MembershipIntegrityRepair),
+});
+export type MembershipIntegrityReport = z.infer<typeof MembershipIntegrityReport>;
+
+export const CampaignDmRepair = z.object({ campaignId: Id, userId: Id });
+export type CampaignDmRepair = z.infer<typeof CampaignDmRepair>;
 
 // ---------- campaign invites (DM invite links / join codes) ----------
 // A DM-generated, shareable link that onboards a player without a server admin:
@@ -3728,6 +3779,7 @@ export type DiceRoll = z.infer<typeof DiceRoll>;
 export type DangerLevel = z.infer<typeof DangerLevel>;
 export type CampaignCloneMode = z.infer<typeof CampaignCloneMode>;
 export type QuestStatus = z.infer<typeof QuestStatus>;
+export type CanonicalNpcDisposition = z.infer<typeof CanonicalNpcDisposition>;
 export type LocationStatus = z.infer<typeof LocationStatus>;
 export type NoteVisibility = z.infer<typeof NoteVisibility>;
 export type NoteKind = z.infer<typeof NoteKind>;
@@ -3738,11 +3790,27 @@ export type ProposalStatus = z.infer<typeof ProposalStatus>;
 export type ApiTokenCreated = z.infer<typeof ApiTokenCreated>;
 export type AttachmentKind = z.infer<typeof AttachmentKind>;
 
+// The role attributed to an audit-log actor. The audit table's `actor_role`
+// column is a free-form TEXT column (NOT a DB enum — see the server's
+// db/schema.ts), so its value space is wider than the campaign `Role` enum.
+//
+// `dm`/`player`/`viewer` are the campaign-scoped roles (who did what *inside* a
+// campaign — the actor's effective membership role at the time). `admin` is the
+// server-scoped sentinel (issue #526): it marks an action taken by a server
+// admin exercising server-wide power (user/rule-pack/ai-provider/settings
+// writes), so an incident reviewer can distinguish a privileged operator action
+// from an ordinary campaign-DM one. Server-scoped admin rows carry
+// `campaignId: null`; a campaign-scoped row is never attributed `admin`
+// (an admin who also happens to be a DM in a campaign is recorded by their
+// campaign role there).
+export const AuditActorRole = z.enum(['dm', 'player', 'viewer', 'admin']);
+export type AuditActorRole = z.infer<typeof AuditActorRole>;
+
 export const AuditEntry = z.object({
   id: Id,
   campaignId: Id.nullable(),
   actor: z.string().max(200), // user id or token name
-  actorRole: Role,
+  actorRole: AuditActorRole,
   action: z.string().max(80), // e.g. quest.update
   entityType: z.string().max(40).nullable(),
   entityId: Id.nullable(),

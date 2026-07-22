@@ -103,4 +103,74 @@ test.describe('admin user creation accessibility', () => {
     await expect(page.getByRole('cell', { name: uniqueUsername })).toBeVisible();
     await expect(page.getByRole('cell', { name: 'Keyboard User' })).toBeVisible();
   });
+
+  test('repairs an orphaned campaign without exposing campaign content', async ({ page }) => {
+    let repaired = false;
+    let repairBody: { campaignId?: number; userId?: number } | null = null;
+    await page.route('**/api/v1/admin/membership-integrity**', async (route) => {
+      const request = route.request();
+      if (request.method() === 'POST') {
+        repairBody = request.postDataJSON() as { campaignId?: number; userId?: number };
+        repaired = true;
+        await route.fulfill({
+          status: 201,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            campaignId: 777,
+            campaignName: 'Recovery-only campaign',
+            usableDmCount: 1,
+            disabledDmUserIds: [],
+            removedGhostMembershipCount: 0,
+            repairRequired: false,
+          }),
+        });
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          generatedAt: '2026-07-22T00:00:00.000Z',
+          campaigns: repaired
+            ? []
+            : [
+                {
+                  campaignId: 777,
+                  campaignName: 'Recovery-only campaign',
+                  usableDmCount: 0,
+                  disabledDmUserIds: [999],
+                  removedGhostMembershipCount: 1,
+                  repairRequired: true,
+                },
+              ],
+          repairs: [],
+        }),
+      });
+    });
+
+    await page.goto('/admin/users');
+
+    const card = page.getByTestId('membership-integrity');
+    await expect(card).toContainText('Operational metadata only');
+    await expect(card).toContainText('Recovery-only campaign');
+    await expect(card).toContainText('0 enabled DMs');
+    await expect(card).toContainText('1 disabled DM seat');
+    await expect(card).toContainText('1 ghost row repaired');
+    await expect(card).not.toContainText(/description|secret/i);
+
+    const target = card.getByRole('combobox', { name: 'Recovery DM for Recovery-only campaign' });
+    const enabledUserId = await target.locator('option').nth(1).getAttribute('value');
+    expect(enabledUserId).toBeTruthy();
+    await target.selectOption(enabledUserId!);
+    const repair = card.getByRole('button', { name: 'Assign recovery DM' });
+    await repair.focus();
+    await page.keyboard.press('Enter');
+
+    await expect(card.getByText('All campaigns have usable DM authority')).toBeVisible();
+    expect(repairBody).toEqual({ campaignId: 777, userId: Number(enabledUserId) });
+
+    const accessibilityScan = await new AxeBuilder({ page }).include('[data-testid="membership-integrity"]').analyze();
+    expect(accessibilityScan.violations).toEqual([]);
+  });
 });

@@ -612,6 +612,9 @@ describe('dmControlsProgression flag gates XP/level-up (issue #270)', () => {
     expect(lvlDenied.status).toBe(403);
     const patchDenied = await request(server).patch(`/api/v1/characters/${characterId}`).set(owner).send({ xp: 5000 });
     expect(patchDenied.status).toBe(403);
+    const afterDenied = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(afterDenied.body.xp).toBe(900);
+    expect(afterDenied.body.level).toBe(2);
 
     // Non-progression edits by the owner still work (HP), proving the gate is scoped.
     const hpOk = await request(server).post(`/api/v1/characters/${characterId}/hp`).set(owner).send({ set: 15 });

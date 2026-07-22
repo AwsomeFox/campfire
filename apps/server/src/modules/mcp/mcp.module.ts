@@ -24,6 +24,7 @@ import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { TimelineModule } from '../timeline/timeline.module';
 import { CommentsModule } from '../comments/comments.module';
+import { UsersModule } from '../users/users.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -55,6 +56,7 @@ import { McpController } from './mcp.controller';
     InventoryModule,
     TimelineModule,
     CommentsModule,
+    UsersModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],

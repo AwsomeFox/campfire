@@ -90,7 +90,7 @@ export function HandoutsCard({
                 style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 8, borderRadius: 10 }}
               >
                 <img
-                  src={`${attachmentFileUrl(a.id)}?size=thumb`}
+                  src={attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt }, { size: 'thumb' })}
                   alt=""
                   style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
                 />

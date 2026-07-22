@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry } from '@campfire/schema';
+import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
@@ -273,6 +273,7 @@ function ReadOnlyMemberTable({ members }: { members: CampaignMember[] }) {
             <tr key={m.id}>
               <td className="py-2.5 pr-4">
                 <span className="font-semibold text-white">{m.displayName || m.username}</span>
+                {m.disabled && <span className="ml-2 text-[10px] text-rose-400">disabled</span>}
               </td>
               <td className="pr-4">
                 <span className={`cf-chip ${ROLE_CHIP[m.role]}`}>{ROLE_LABEL[m.role]}</span>
@@ -502,6 +503,7 @@ function MemberRow({
       <div className="min-w-0">
         <p className="text-[13.5px] m-0 flex items-center gap-1.5">
           {member.displayName || member.username}
+          {member.disabled && <span className="text-[10px] text-rose-400">disabled</span>}
         </p>
         <p className="text-muted text-[11px] m-0">{character?.name || 'no character linked'}</p>
       </div>
@@ -513,7 +515,7 @@ function MemberRow({
         disabled={savingRole}
         onChange={(e) => changeRole(e.target.value as Role)}
       >
-        <option value="dm">dm</option>
+        <option value="dm" disabled={member.disabled}>dm</option>
         <option value="player">player</option>
         <option value="viewer">viewer</option>
       </select>
@@ -690,7 +692,12 @@ function timeAgo(iso: string): string {
   return `${days}d`;
 }
 
-const ACTOR_ICON: Record<Role, string> = { dm: 'top-hat', player: 'person', viewer: 'person' };
+// Issue #526: actorRole is now AuditActorRole (dm/player/viewer + the 'admin'
+// sentinel). This per-campaign audit list only ever sees campaign-scoped rows,
+// so 'admin' won't legitimately appear here (admin actions are server-scoped
+// and live on /admin/audit) — but key the full widened type and give 'admin' a
+// distinct icon so a stray value renders gracefully instead of `undefined`.
+const ACTOR_ICON: Record<AuditActorRole, string> = { dm: 'top-hat', player: 'person', viewer: 'person', admin: 'crown' };
 
 /**
  * Resolve an AuditEntry.actor (see auditActor() in apps/server/src/common/user.types.ts)

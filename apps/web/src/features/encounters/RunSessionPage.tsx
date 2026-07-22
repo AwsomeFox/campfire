@@ -65,6 +65,35 @@ const STATUS_TAG_CLASS: Record<string, string> = {
   ended: 'tag tag-outline',
 };
 
+type EncounterGridPatch = Partial<
+  Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>
+>;
+
+/** Stable serialization for suppressing an equivalent encounter PATCH while it is in flight. */
+function encounterPatchKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(encounterPatchKey).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${encounterPatchKey(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+/** Defaults shown by the grid panel must become real encounter state once the grid is enabled. */
+function missingGridDefaults(encounter: EncounterWithCombatants): EncounterGridPatch | null {
+  if (encounter.gridSize == null || encounter.gridSize <= 0) return null;
+  const patch: EncounterGridPatch = {};
+  if (encounter.gridScale == null) patch.gridScale = 5;
+  if (encounter.gridUnit == null) patch.gridUnit = 'ft';
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function gridDefaultAttemptKey(encounterId: number, patch: EncounterGridPatch): string {
+  return `${encounterId}:${Object.keys(patch).sort().join(',')}`;
+}
+
 // 5e difficulty band badge (issue #58) — party XP thresholds vs adjusted monster XP.
 const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {
   trivial: 'Trivial',
@@ -690,19 +719,77 @@ export default function RunSessionPage() {
   // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
   // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
   // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
+  const pendingEncounterPatchKeys = useRef(new Set<string>());
+  const gridDefaultAttempts = useRef(new Set<string>());
   const setMap = useMutation({
-    mutationFn: (patch: Record<string, unknown>) => api.patch(`${API}/encounters/${eid}`, patch),
+    mutationFn: ({ patch }: { patch: Record<string, unknown>; pendingKey: string; defaultAttemptKey?: string }) =>
+      api.patch(`${API}/encounters/${eid}`, patch),
     onMutate: () => setActionError(null),
-    onError: reportError,
-    onSettled: () => invalidateEncounter(queryClient, eid),
+    onError: (error, variables) => {
+      if (variables.defaultAttemptKey) gridDefaultAttempts.current.delete(variables.defaultAttemptKey);
+      reportError(error);
+    },
+    onSettled: (_data, error, variables) => {
+      pendingEncounterPatchKeys.current.delete(variables.pendingKey);
+      // A failed default write keeps its optimistic intent until a poll/SSE refresh supplies
+      // server truth. That fresh missing-field snapshot is what permits the next retry, rather
+      // than mutation-render churn immediately creating an unbounded failure loop.
+      if (!variables.defaultAttemptKey || !error) invalidateEncounter(queryClient, eid);
+    },
   });
-  const setEncounterMap = (attachmentId: number | null) => setMap.mutate({ mapAttachmentId: attachmentId });
+  const mutateMapRef = useRef(setMap.mutate);
+  mutateMapRef.current = setMap.mutate;
+
+  const queueEncounterPatch = useCallback(
+    (patch: Record<string, unknown>, defaultAttemptKey?: string): boolean => {
+      const pendingKey = `${eid}:${encounterPatchKey(patch)}`;
+      if (pendingEncounterPatchKeys.current.has(pendingKey)) return false;
+      pendingEncounterPatchKeys.current.add(pendingKey);
+      if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
+
+      // Record the default intent before dispatch. Strict Mode's second effect pass, mutation
+      // renders, and stale polling/SSE responses therefore all see committed-looking defaults;
+      // the pending-key guard remains the final backstop if a stale response overwrites them.
+      if (defaultAttemptKey) {
+        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+          current ? { ...current, ...patch } : current,
+        );
+      }
+
+      mutateMapRef.current({ patch, pendingKey, defaultAttemptKey });
+      return true;
+    },
+    [eid, queryClient],
+  );
+
+  const setEncounterMap = useCallback(
+    (attachmentId: number | null) => queueEncounterPatch({ mapAttachmentId: attachmentId }),
+    [queueEncounterPatch],
+  );
   // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
-  const setEncounterGrid = (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>>) => setMap.mutate(patch);
+  const setEncounterGrid = useCallback((patch: EncounterGridPatch) => queueEncounterPatch(patch), [queueEncounterPatch]);
   // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
-  const setEncounterFog = (fog: FogState | null) => setMap.mutate({ fog });
+  const setEncounterFog = useCallback((fog: FogState | null) => queueEncounterPatch({ fog }), [queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
-  const setEncounterAoe = (aoe: AoeTemplate[]) => setMap.mutate({ aoe });
+  const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
+
+  // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
+  // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
+  useEffect(() => {
+    if (!isDm || !encounter) return;
+    const patch = missingGridDefaults(encounter);
+    const encounterPrefix = `${encounter.id}:`;
+    if (!patch) {
+      for (const key of gridDefaultAttempts.current) {
+        if (key.startsWith(encounterPrefix)) gridDefaultAttempts.current.delete(key);
+      }
+      return;
+    }
+
+    const attemptKey = gridDefaultAttemptKey(encounter.id, patch);
+    if (gridDefaultAttempts.current.has(attemptKey)) return;
+    queueEncounterPatch(patch, attemptKey);
+  }, [encounter, isDm, queueEncounterPatch]);
 
   // Transient battle-map ping (issue #238). Fire-and-forget POST; the server broadcasts an
   // `encounter.ping` SSE signal that every client — including this one — renders and fades, so
@@ -1197,7 +1284,7 @@ function BattleMap({
   onSetMap: (attachmentId: number | null) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
   onUnplaceToken: (combatantId: number) => void;
-  onSetGrid: (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>>) => void;
+  onSetGrid: (patch: EncounterGridPatch) => void;
   onSetFog: (fog: FogState | null) => void;
   onSetAoe: (aoe: AoeTemplate[]) => void;
   onPing: (x: number, y: number) => void;
@@ -1323,19 +1410,6 @@ function BattleMap({
     const height = imgNatural.h * scale;
     return { left: (surfaceW - width) / 2, top: (surfaceH - height) / 2, width, height };
   }, [surfaceW, surfaceH, imgNatural]);
-
-  // Heal grid config that shows placeholder defaults but stores null (issue #273a): the panel
-  // *displays* scale 5 / unit ft even when `gridScale`/`gridUnit` are null, which leaves Measure
-  // disabled ("Set a grid scale first"). Once the grid is on, commit those shown defaults so the
-  // values are real, persist, and enable Measure. DM-only — players can't PATCH the encounter.
-  useEffect(() => {
-    if (!isDm || !gridOn) return;
-    if (encounter.gridScale != null && encounter.gridUnit != null) return;
-    const patch: Partial<Pick<EncounterWithCombatants, 'gridScale' | 'gridUnit'>> = {};
-    if (encounter.gridScale == null) patch.gridScale = 5;
-    if (encounter.gridUnit == null) patch.gridUnit = 'ft';
-    onSetGrid(patch);
-  }, [isDm, gridOn, encounter.gridScale, encounter.gridUnit, onSetGrid]);
 
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
