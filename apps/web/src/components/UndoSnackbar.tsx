@@ -12,13 +12,18 @@
  *   - On failure the bar stays open in an error state with Retry / Dismiss
  *     instead of disappearing with the restore still broken.
  *   - Spamming Undo while a restore is pending is a no-op (duplicate guard).
- *   - Pending / success / failure are announced via an aria-live region.
+ *   - Pending / failure are announced via the snackbar's own aria-live region;
+ *     success is announced via the app-root Announcer (`successMessage`),
+ *     which survives the parent unmounting this bar during `onUndo`.
+ *   - The auto-dismiss timer is cancelled synchronously inside `undo()`, so a
+ *     timeout firing at the click boundary can't race the pending-state clear.
  *
  * The lifecycle lives in `undoSnackbarState.ts` (pure, tested without a
  * browser); this component owns the side-effectful bits — the real timeout, the
  * restore promise, and the render.
  */
 import { useEffect, useRef, useState } from 'react';
+import { useAnnounce } from './Announcer';
 import {
   initialUndoState,
   isOpen,
@@ -33,6 +38,7 @@ export function UndoSnackbar({
   onUndo,
   onExpire,
   timeoutMs = 7000,
+  successMessage = 'Restored.',
 }: {
   message: string;
   /** Restore the entity. Return a promise so the bar can show a "Restoring…" state. */
@@ -40,8 +46,17 @@ export function UndoSnackbar({
   /** Fired when the window closes without an undo (auto-dismiss or explicit dismiss). */
   onExpire: () => void;
   timeoutMs?: number;
+  /**
+   * Message spoken to assistive tech after a successful restore. Announced via
+   * the app-root live region (Announcer) so it is still heard when the parent
+   * unmounts this snackbar during `onUndo` (every current caller does).
+   */
+  successMessage?: string;
 }) {
   const [snapshot, setSnapshot] = useState<UndoSnapshot>(initialUndoState);
+  // App-root live region (mounted once in AnnounceProvider, see Announcer.tsx).
+  // Durable: survives this snackbar being unmounted by its parent mid-`undo`.
+  const announce = useAnnounce();
 
   // Unmount guard: the restore promise in `undo()` resolves asynchronously, so
   // the bar's parent may have unmounted it (e.g. cleared `pendingUndo`) while
@@ -94,19 +109,20 @@ export function UndoSnackbar({
     };
   }, []);
 
-  // On success, announce + close. Done in an effect (not inline in `undo`) so
-  // the snapshot remains the single source of truth and the render reflects the
-  // `done` state for a frame before the parent unmounts the bar.
-  useEffect(() => {
-    if (snapshot.status === 'done') {
-      onExpireRef.current();
-    }
-  }, [snapshot.status]);
-
   async function undo() {
     // Duplicate-restore guard: a restore is already in flight — ignore the
     // extra click. (`failed` is NOT busy, so Retry still works.)
     if (isBusy(snapshot)) return;
+    // Cancel the auto-dismiss timer SYNCHRONOUSLY, before awaiting the restore.
+    // Relying on the timer effect below to clear it after the `pending` state
+    // commits is racy at the timeout boundary: the pending timeout could fire
+    // (calling onExpire → parent unmount) between the click and the effect
+    // cleanup. Clearing the ref here guarantees the in-flight timeout is gone
+    // the moment the user commits to a restore.
+    if (timerRef.current != null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     // The UI labels the action "Retry" in the failed state; dispatch the
     // matching `'retry'` event so the intent is explicit and the reducer's
     // `'retry'` branch isn't dead code. From `idle` this is a first attempt,
@@ -116,6 +132,13 @@ export function UndoSnackbar({
     setSnapshot((cur) => reduceUndo(cur, startEvent));
     try {
       await onUndoRef.current();
+      // Announce success via the app-root live region BEFORE the parent unmounts
+      // this snackbar. Every current caller (QuestPage, NpcPage, LocationPage,
+      // SessionsPage, MyNotesPage) clears its pending-undo state inside `onUndo`
+      // once the restore POST resolves, so this component unmounts before a
+      // screen reader would read its own role="status". The Announcer's polite
+      // region lives at the app root and survives that unmount.
+      announce(successMessage);
       if (mountedRef.current) {
         setSnapshot((cur) => reduceUndo(cur, { type: 'succeeded' }));
       }
