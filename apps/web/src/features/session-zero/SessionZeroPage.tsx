@@ -246,9 +246,12 @@ export default function SessionZeroPage() {
       )}
 
       {!loading && (
-        <>
+        <section
+          aria-labelledby="access-support-heading"
+          style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
+        >
           <div style={{ marginTop: 10 }}>
-            <h3 style={{ margin: 0 }}>Access support</h3>
+            <h3 id="access-support-heading" style={{ margin: 0 }}>Access support</h3>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13, lineHeight: 1.5 }}>
               Optional practical preferences that help participation. No diagnosis or explanation is needed, and sharing
               is never required. You own your submission and can change or delete it at any time.
@@ -338,7 +341,7 @@ export default function SessionZeroPage() {
               </div>
             </div>
           </Section>
-        </>
+        </section>
       )}
     </div>
   );

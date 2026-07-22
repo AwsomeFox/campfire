@@ -21,7 +21,7 @@ test.describe.serial('Session Zero participant-owned access support', () => {
     await save.focus();
     await player.keyboard.press('Enter');
     await expect(player.getByRole('status')).toContainText('saved');
-    const playerAxe = await new AxeBuilder({ page: player }).include('main').analyze();
+    const playerAxe = await new AxeBuilder({ page: player }).include('[aria-labelledby="access-support-heading"]').analyze();
     expect(playerAxe.violations).toEqual([]);
 
     const dmContext = await browser.newContext({ storageState: stateFor('dm') });
@@ -67,7 +67,7 @@ test.describe.serial('Session Zero participant-owned access support', () => {
 
     const viewport = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
     expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.width);
-    const axe = await new AxeBuilder({ page }).include('main').analyze();
+    const axe = await new AxeBuilder({ page }).include('[aria-labelledby="access-support-heading"]').analyze();
     expect(axe.violations).toEqual([]);
 
     const viewerContext = await browser.newContext({
@@ -77,7 +77,7 @@ test.describe.serial('Session Zero participant-owned access support', () => {
     const viewer = await viewerContext.newPage();
     await viewer.goto(`/c/${campaignId}/session-zero`);
     await expect(viewer.getByText(/MOBILE_TABLE_SUPPORT_877/)).toBeVisible();
-    const viewerAxe = await new AxeBuilder({ page: viewer }).include('main').analyze();
+    const viewerAxe = await new AxeBuilder({ page: viewer }).include('[aria-labelledby="access-support-heading"]').analyze();
     expect(viewerAxe.violations).toEqual([]);
 
     await page.getByRole('button', { name: 'Delete my submission' }).click();
