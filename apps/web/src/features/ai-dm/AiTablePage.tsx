@@ -24,7 +24,7 @@
  * page leaves clearly-marked seams for them (see the `session.stuck` / `session.state`
  * region below) and renders only a minimal fallback for the gated/off states.
  */
-import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -499,8 +499,9 @@ function AiTableComposer({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const mountedRef = useRef(true);
   const formRef = useRef<HTMLFormElement>(null);
-  const reasonId = useRef(`ai-table-send-reason-${Math.random().toString(36).slice(2)}`).current;
-  const storageWarningId = useRef(`ai-table-storage-warning-${Math.random().toString(36).slice(2)}`).current;
+  const idPrefix = useId();
+  const reasonId = `${idPrefix}-send-reason`;
+  const storageWarningId = `${idPrefix}-storage-warning`;
 
   useEffect(() => {
     mountedRef.current = true;

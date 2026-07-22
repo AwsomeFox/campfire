@@ -281,6 +281,9 @@ export function useAiDmStream(
     })();
 
     return () => {
+      // Surface the terminal lifecycle state before marking this effect disposed.
+      // This matters when enabled/campaign changes without unmounting the consumer.
+      handlersRef.current.onConnectionStateChange?.('closed');
       disposed = true;
       controller.abort();
     };
