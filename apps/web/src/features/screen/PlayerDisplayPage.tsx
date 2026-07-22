@@ -339,7 +339,7 @@ export default function PlayerDisplayPage() {
       window.removeEventListener('focusout', ping);
       clearHideTimer();
     };
-  }, [cid, navigate, syncFullscreen]);
+  }, [cid, navigate]);
 
   const toggleFullscreen = useCallback(async () => {
     if (!fullscreenAvailable()) {
