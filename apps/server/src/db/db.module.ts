@@ -1462,6 +1462,7 @@ function migrateServerMetaTable(sqlite: Database.Database): void {
 }
 
 /**
+
  * Issue #679: retain consumed refresh-token generations as replay sentinels and
  * link rotations into a revocable family. Existing live rows each become the
  * root of their own family, preserving every issued token while allowing the
@@ -1484,6 +1485,35 @@ function migrateOAuthAccessTokensForAtomicRotation(sqlite: Database.Database): v
     sqlite.exec('CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id)');
   });
   migrate();
+}
+
+/**
+ * Issue #877: create the participant-owned access-support table. This is a new
+ * table rather than columns on the shared session_zero row so ownership,
+ * per-participant deletion, human visibility, and AI consent remain independent.
+ * Existing installs start with no submissions; no private content is inferred or
+ * copied during upgrade. The conservative defaults are facilitator-only and no AI.
+ */
+function migrateParticipantSupportPreferences(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS participant_support_preferences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      owner_user_id TEXT NOT NULL,
+      owner_name TEXT NOT NULL DEFAULT '',
+      support_text TEXT NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'facilitator' CHECK (visibility IN ('table', 'facilitator')),
+      ai_use_consent INTEGER NOT NULL DEFAULT 0 CHECK (ai_use_consent IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(campaign_id, owner_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_participant_support_campaign
+      ON participant_support_preferences(campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_participant_support_ai_consent
+      ON participant_support_preferences(campaign_id, ai_use_consent);
+  `);
+
 }
 
 /**
@@ -1550,9 +1580,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0049_campaigns_ics_token_expires_at', run: migrateCampaignsTableForIcsTokenExpiresAt },
   { name: '0050_rule_entries_licensing', run: migrateRuleEntriesTableForLicensing },
   { name: '0051_server_meta', run: migrateServerMetaTable },
+
   { name: '0052_public_recap_share_policy', run: migratePublicRecapSharePolicy },
   { name: '0053_oauth_atomic_rotation', run: migrateOAuthAccessTokensForAtomicRotation },
   { name: '0054_combatants_unique_identity', run: migrateCombatantsUniqueIdentity },
+  { name: '0055_participant_support_preferences', run: migrateParticipantSupportPreferences },
+
 ];
 
 /**

@@ -17,6 +17,7 @@ import { FactionsService } from '../factions/factions.service';
 import { StorylinesService } from '../storylines/storylines.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
+import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { InventoryService } from '../inventory/inventory.service';
 import type { RequestUser } from '../../common/user.types';
 
@@ -112,6 +113,7 @@ export class ExportService {
     private readonly storylines: StorylinesService,
     private readonly timeline: TimelineService,
     private readonly sessionZero: SessionZeroService,
+    private readonly supportPreferences: SupportPreferencesService,
     private readonly inventory: InventoryService,
   ) {}
 
@@ -252,6 +254,10 @@ export class ExportService {
         'the raw image bytes are NOT embedded here. Export with format=mdzip to obtain a zip whose ' +
         'uploads/ folder holds the actual files at attachments[].file. Entries with present=false ' +
         'have no file on disk (dangling reference); their bytes are omitted from every export format.',
+      participantSupportNote:
+        'Participant-owned access-support preferences are intentionally excluded from campaign exports, imports, ' +
+        'and clones. Each participant can export their own submission with GET /campaigns/:id/export/me; full-server ' +
+        'backup/restore preserves the database rows and ownership.',
     };
   }
 
@@ -271,11 +277,12 @@ export class ExportService {
    * a dm calling their own member export sees the same owner-scoped slice.
    */
   async buildMemberExport(campaignId: number, user: RequestUser, role: 'dm' | 'player' | 'viewer') {
-    const [campaign, characterList, noteList, proposalList] = await Promise.all([
+    const [campaign, characterList, noteList, proposalList, supportPreference] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.characters.listForCampaign(campaignId, role),
       this.notes.listForCampaign(campaignId, user, role, { mine: true }),
       this.proposals.listForCampaign(campaignId, undefined),
+      this.supportPreferences.getOwn(campaignId, user.id),
     ]);
 
     const ownCharacters = characterList.filter((c) => c.ownerUserId === user.id);
@@ -287,9 +294,10 @@ export class ExportService {
       characters: ownCharacters,
       notes: noteList,
       proposals: ownProposals,
+      supportPreference,
       note:
-        'This is a MEMBER-scoped export — only the characters you own, the notes you authored, and the ' +
-        'proposals you submitted in this campaign. It intentionally excludes DM secrets, other members’ ' +
+        'This is a MEMBER-scoped export — only the characters and support preference you own, the notes you authored, ' +
+        'and the proposals you submitted in this campaign. It intentionally excludes DM secrets, other members’ ' +
         'private data, and the campaign-wide bundle (that export is DM-only).',
     };
   }

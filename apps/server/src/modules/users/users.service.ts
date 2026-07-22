@@ -13,6 +13,7 @@ import {
   passwordResetRequests,
   characters,
   membershipIntegrityRepairs,
+  participantSupportPreferences,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
@@ -273,6 +274,9 @@ export class UsersService {
       tx.delete(userSessions).where(eq(userSessions.userId, id)).run();
       tx.delete(apiTokens).where(eq(apiTokens.userId, id)).run();
       tx.delete(passwordResetRequests).where(eq(passwordResetRequests.userId, id)).run();
+      tx.delete(participantSupportPreferences)
+        .where(eq(participantSupportPreferences.ownerUserId, String(id)))
+        .run();
       tx.delete(campaignMembers).where(eq(campaignMembers.userId, id)).run();
       tx.update(characters)
         .set({ ownerUserId: null, updatedAt: nowIso() })

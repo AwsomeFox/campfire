@@ -9,6 +9,7 @@ import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config
 import { AiDmModule } from '../ai-dm/ai-dm.module';
 import { ScribeService } from './scribe.service';
 import { ScribeController } from './scribe.controller';
+import { SessionZeroModule } from '../session-zero/session-zero.module';
 
 /**
  * Automatic / scheduled AI scribe (issue #316) — isolated module.
@@ -29,6 +30,7 @@ import { ScribeController } from './scribe.controller';
     ProposalRecordsModule,
     AiProviderConfigModule,
     AiDmModule,
+    SessionZeroModule,
   ],
   controllers: [ScribeController],
   providers: [ScribeService],
