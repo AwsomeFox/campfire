@@ -197,9 +197,10 @@ free-text string, not a FK).
 ### Auth endpoints
 
 - `GET /auth/status` (public) — `{setupRequired, localLoginEnabled,
-  oidcEnabled, version}`. `oidcEnabled` is true only when `OIDC_ISSUER`,
+  signupEnabled, oidcEnabled, oidcProviderName, version}`. `oidcEnabled` is true only when `OIDC_ISSUER`,
   `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are all set (see "OIDC / SSO
-  login" below).
+  login" below). `oidcProviderName` is the optional public display name only;
+  issuer, client, group, and secret configuration details are never included.
 - `POST /auth/setup` (public, only while zero users exist, else 409) —
   creates the first user as `serverRole: 'admin'`, starts a session.
 - `POST /auth/login` (public) — 401 generic on bad credentials, 403 if
@@ -254,8 +255,8 @@ free-text string, not a FK).
 ### OIDC / SSO login
 
 Generic OIDC (tested against [Authentik](https://goauthentik.io/), works with
-any standards-compliant provider), gated entirely by env vars — nothing to
-configure in the DB or admin UI. Implemented with `openid-client` v6
+any standards-compliant provider), configurable from the admin UI or env vars
+(env values win per field). Implemented with `openid-client` v6
 (`modules/auth/oidc.service.ts`, `oidc.controller.ts`, `oidc.config.ts`).
 
 **Env vars:**
@@ -266,6 +267,7 @@ configure in the DB or admin UI. Implemented with `openid-client` v6
 | `OIDC_CLIENT_ID` | yes* | — | |
 | `OIDC_CLIENT_SECRET` | yes* | — | |
 | `OIDC_REDIRECT_URI` | no | `${APP_URL or http://localhost:8080}/api/v1/auth/oidc/callback` | Must exactly match the redirect URI registered on the provider. |
+| `OIDC_PROVIDER_NAME` | no | — (`Sign in with SSO`) | Optional public identity-provider display name for the login button, e.g. `Keycloak` (80 characters max). |
 | `OIDC_SCOPE` | no | `openid profile email` | Add `groups` (or your provider's scope name) here too if group membership isn't included by default. |
 | `OIDC_GROUPS_CLAIM` | no | `groups` | Name of the ID-token claim holding the user's group list. |
 | `OIDC_ADMIN_GROUP` | no | — (admin sync disabled) | Group name that grants `serverRole: 'admin'`. Applied on **every** login, both directions — added to the group -> promoted, removed -> demoted — except the last enabled admin is never demoted (a warn is logged and the role left as-is). |
@@ -293,8 +295,8 @@ the `/auth/oidc/*` routes 503).
    the relevant users, and set `OIDC_ADMIN_GROUP=campfire-admins`. Removing
    a user from that group demotes them on their next login.
 5. Restart Campfire with the env vars set — `GET /auth/status` should now
-   report `oidcEnabled: true`, and a "Sign in with SSO" affordance (web-side)
-   can point at `GET /auth/oidc/login`.
+   report `oidcEnabled: true`. The web app shows “Sign in with SSO” unless
+   `OIDC_PROVIDER_NAME` supplies a display name.
 
 **How it works server-side:**
 

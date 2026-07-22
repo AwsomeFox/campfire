@@ -17,6 +17,7 @@
 
 /** The stored, admin-editable OIDC config (persisted in the settings store). All strings; '' means unset. Includes the secret (server-side only — never serialized to clients). */
 export interface StoredOidcConfig {
+  providerName: string;
   issuer: string;
   clientId: string;
   clientSecret: string;
@@ -29,6 +30,7 @@ export interface StoredOidcConfig {
 
 /** The fully-resolved config actually used at runtime (env merged over stored, defaults applied). */
 export interface OidcResolvedConfig {
+  providerName: string | null;
   issuer: string;
   clientId: string;
   clientSecret: string;
@@ -40,6 +42,7 @@ export interface OidcResolvedConfig {
 }
 
 export const EMPTY_STORED_OIDC: StoredOidcConfig = {
+  providerName: '',
   issuer: '',
   clientId: '',
   clientSecret: '',
@@ -52,6 +55,7 @@ export const EMPTY_STORED_OIDC: StoredOidcConfig = {
 
 /** Env var backing each stored field. */
 const ENV_KEYS: Record<keyof StoredOidcConfig, string> = {
+  providerName: 'OIDC_PROVIDER_NAME',
   issuer: 'OIDC_ISSUER',
   clientId: 'OIDC_CLIENT_ID',
   clientSecret: 'OIDC_CLIENT_SECRET',
@@ -110,10 +114,13 @@ export function resolveOidcConfig(stored: StoredOidcConfig): OidcResolvedConfig 
   if (!issuer || !clientId || !clientSecret) return null;
 
   const redirectUri = pick('redirectUri', stored) || `${appUrl()}/api/v1/auth/oidc/callback`;
+  // Admin updates are schema-capped at 80 chars. Apply the same cap to env
+  // input before it reaches the unauthenticated auth-status response.
+  const providerName = pick('providerName', stored).slice(0, 80) || null;
   const adminGroup = pick('adminGroup', stored) || null;
   const allowedGroup = pick('allowedGroup', stored) || null;
   const groupsClaim = pick('groupsClaim', stored) || 'groups';
   const scope = pick('scope', stored) || 'openid profile email';
 
-  return { issuer, clientId, clientSecret, redirectUri, adminGroup, allowedGroup, groupsClaim, scope };
+  return { providerName, issuer, clientId, clientSecret, redirectUri, adminGroup, allowedGroup, groupsClaim, scope };
 }

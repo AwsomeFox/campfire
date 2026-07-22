@@ -2168,7 +2168,10 @@ export const AuthStatus = z.object({
   setupRequired: z.boolean(), // true until the first (admin) user exists
   localLoginEnabled: z.boolean(), // for non-admin users (admins can always log in locally)
   signupEnabled: z.boolean(), // effective: allowSignup && allowLocalLogin && !setupRequired
-  oidcEnabled: z.boolean(), // future
+  oidcEnabled: z.boolean(),
+  // Optional operator-authored branding for the public login button. Null means
+  // the UI must use neutral "SSO" copy; no issuer/client/group details belong here.
+  oidcProviderName: z.string().max(80).nullable(),
   version: z.string(),
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
@@ -2198,9 +2201,11 @@ export const SettingsUpdate = ServerSettings.partial();
 // the stored value for that field (see server oidc.config.ts). The client
 // secret is WRITE-ONLY — it is accepted on update but never returned.
 const OidcField = z.string().trim().max(2048);
+const OidcProviderNameField = z.string().trim().max(80);
 
 /** OIDC settings as returned to admins (GET). Never includes the client secret. */
 export const OidcSettings = z.object({
+  providerName: z.string(),
   issuer: z.string(),
   clientId: z.string(),
   redirectUri: z.string(),
@@ -2218,6 +2223,7 @@ export type OidcSettings = z.infer<typeof OidcSettings>;
 
 /** Admin update payload. All fields optional. clientSecret is write-only: omit to keep the current secret, pass '' to clear it. */
 export const OidcSettingsUpdate = z.object({
+  providerName: OidcProviderNameField.optional(),
   issuer: OidcField.optional(),
   clientId: OidcField.optional(),
   clientSecret: z.string().max(2048).optional(),

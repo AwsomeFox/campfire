@@ -45,6 +45,9 @@ test('first admin reaches the campaign hub without reload or stale auth routes',
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByRole('heading', { name: 'Your campaigns' })).toBeVisible();
   await expect(page.getByText('No campaigns yet — light the first fire.')).toBeVisible();
+  await expect(
+    page.getByText(/Follow a campaign invite, or ask a DM or server admin to add your account/),
+  ).toBeVisible();
   expect(postSetupAuthReads).toEqual(new Set(['/api/v1/me', '/api/v1/auth/status']));
 
   await page.goBack();
@@ -88,6 +91,62 @@ test('first admin reaches the campaign hub without reload or stale auth routes',
   await expect(signedOutPage).toHaveURL(/\/login$/);
   await expect(signedOutPage.getByRole('button', { name: 'Sign in' })).toBeVisible();
   await signedOut.close();
+});
+
+test('OIDC login uses neutral SSO branding and truthful account-versus-campaign copy', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, serviceWorkers: 'block' });
+  const page = await context.newPage();
+  await page.route('**/api/v1/auth/status', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        setupRequired: false,
+        localLoginEnabled: true,
+        signupEnabled: false,
+        oidcEnabled: true,
+        oidcProviderName: null,
+        version: 'test',
+      }),
+    });
+  });
+  await page.route('**/api/v1/me', async (route) => {
+    await route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ message: 'Unauthorized' }) });
+  });
+
+  await page.goto('/login');
+  await expect(page.getByRole('link', { name: 'Sign in with SSO' })).toBeVisible();
+  await expect(page.getByText('SSO creates your Campfire account.')).toBeVisible();
+  await expect(page.getByText('Campaign access and DM, player, or viewer roles are assigned inside Campfire.')).toBeVisible();
+  await expect(page.getByText(/Authentik|Roles come from your campaign groups/)).toHaveCount(0);
+  await context.close();
+});
+
+test('OIDC login uses the configured provider display name', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, serviceWorkers: 'block' });
+  const page = await context.newPage();
+  await page.route('**/api/v1/auth/status', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        setupRequired: false,
+        localLoginEnabled: true,
+        signupEnabled: false,
+        oidcEnabled: true,
+        oidcProviderName: 'Keycloak',
+        version: 'test',
+      }),
+    });
+  });
+  await page.route('**/api/v1/me', async (route) => {
+    await route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ message: 'Unauthorized' }) });
+  });
+
+  await page.goto('/login');
+  await expect(page.getByRole('link', { name: 'Sign in with Keycloak' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Sign in with SSO' })).toHaveCount(0);
+  await context.close();
 });
 
 test('successful setup exits safely when the auth-status cache refresh fails', async ({ browser, baseURL }) => {

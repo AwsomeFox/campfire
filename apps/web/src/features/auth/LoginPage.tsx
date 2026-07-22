@@ -258,6 +258,7 @@ export function LoginPage() {
   }
 
   const oidcEnabled = Boolean(status?.oidcEnabled);
+  const oidcProviderName = status?.oidcProviderName?.trim() || 'SSO';
   // Forward the intended target through SSO. The OIDC flow is a full-page server
   // round-trip (callback currently always redirects to `/`), so honoring this
   // needs matching backend support; the local form already returns to it.
@@ -284,12 +285,12 @@ export function LoginPage() {
         {oidcEnabled ? (
           <>
             <a href={oidcLoginHref} className="btn btn-primary btn-block" style={{ minHeight: 44 }}>
-              Sign in with Authentik
+              Sign in with {oidcProviderName}
             </a>
             <p className="text-muted" style={{ margin: '2px 0 0', fontSize: 11 }}>
-              One account for players, DM and viewers.
+              SSO creates your Campfire account.
               <br />
-              Roles come from your campaign groups.
+              Campaign access and DM, player, or viewer roles are assigned inside Campfire.
             </p>
             {showLocalForm ? (
               <div className="w-full flex flex-col gap-3" style={{ marginTop: 6 }}>
