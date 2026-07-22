@@ -48,6 +48,8 @@ import {
 } from '../../lib/characterStats';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { RollResultBanner } from '../../components/RollResultBanner';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { CharacterTrashMenu } from './CharacterTrashMenu';
 
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
@@ -68,6 +70,11 @@ export default function CharacterPage() {
   const [notFound, setNotFound] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [editingSheet, setEditingSheet] = useState(false);
+  // Move-to-Trash (issue #716): soft-delete is reversible, so the sheet offers the
+  // action for owners + the DM, shows an immediate Undo snackbar, and only redirects
+  // to the roster once that snackbar expires (or is dismissed).
+  const [trashing, setTrashing] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState(false);
   // Shared dice-log roller for click-to-roll saves/skills/attacks (issue #258).
   const roller = useRoller(cid, setActionError);
 
@@ -171,6 +178,28 @@ export default function CharacterPage() {
     }
   }
 
+  // Soft-delete (issue #716/#116) — reversible. The sheet stays mounted so the Undo
+  // snackbar can restore in place; the redirect to the roster happens when the
+  // snackbar expires or is dismissed (onExpire), not on delete itself.
+  async function trash() {
+    setTrashing(true);
+    setActionError(null);
+    try {
+      await api.delete(`${API}/characters/${id}`);
+      setPendingUndo(true);
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Couldn't move this character to the Trash.");
+    } finally {
+      setTrashing(false);
+    }
+  }
+
+  async function undoTrash() {
+    await api.post(`${API}/characters/${id}/restore`);
+    setPendingUndo(false);
+    await load();
+  }
+
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
       <div>
@@ -198,11 +227,16 @@ export default function CharacterPage() {
           </p>
         </div>
         {isOwner && <Chip variant="dm">You can edit</Chip>}
-        {canEdit && !editingSheet && (
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs ml-auto" onClick={() => setEditingSheet(true)}>
-            ✎ Edit sheet
-          </Btn>
-        )}
+        <div className="flex items-center gap-1 ml-auto">
+          {canEdit && !editingSheet && (
+            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>
+              ✎ Edit sheet
+            </Btn>
+          )}
+          {canEdit && (
+            <CharacterTrashMenu characterName={character.name} busy={trashing} onTrash={trash} />
+          )}
+        </div>
       </div>
 
       {editingSheet && (
@@ -341,6 +375,14 @@ export default function CharacterPage() {
       </div>
 
       {isOwner && <NotesRail campaignId={cid} entityType="character" entityId={character.id} />}
+
+      {pendingUndo && (
+        <UndoSnackbar
+          message={`${character.name} moved to the Trash.`}
+          onUndo={undoTrash}
+          onExpire={() => navigate(`/c/${cid}/party`)}
+        />
+      )}
     </div>
   );
 }

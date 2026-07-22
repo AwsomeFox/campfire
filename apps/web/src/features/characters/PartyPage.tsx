@@ -13,7 +13,9 @@ import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { avatarTone, initials } from './avatar';
+import { CharacterTrashMenu } from './CharacterTrashMenu';
 import { STATUS_LABEL, StatusTag } from './status';
 
 export default function PartyPage() {
@@ -29,6 +31,10 @@ export default function PartyPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // Move-to-Trash from the roster (issue #716): a trashed card is removed from the
+  // list immediately and an Undo snackbar offers a same-page restore. Delayed restore
+  // remains available from the campaign Trash. Only one undo is outstanding at a time.
+  const [pendingUndo, setPendingUndo] = useState<Character | null>(null);
   const awardXpRequested = searchParams.get('action') === 'award-xp';
   // Keep the URL authoritative so Back/Forward closes and reopens the deep-linked
   // form instead of leaving local state out of sync with browser history.
@@ -69,7 +75,25 @@ export default function PartyPage() {
   }, [id, load]);
 
   // Keep party HP live at the table (issue #113): poll ~5s while the tab is visible.
-  usePollWhileVisible(() => void load(), 5000, Number.isFinite(id));
+  // Paused while an undo is pending so a restore in flight isn't clobbered by a
+  // fresh list fetch that hasn't yet observed the restored row.
+  usePollWhileVisible(() => void load(), 5000, Number.isFinite(id) && !pendingUndo);
+
+  // Roster trash (issue #716) — soft-delete the character, drop the card locally, and
+  // surface an Undo. The card's own menu runs the DELETE; this handler is the page-level
+  // seam that updates the list and owns the snackbar.
+  function onCharacterTrashed(character: Character) {
+    setCharacters((prev) => prev.filter((c) => c.id !== character.id));
+    setPendingUndo(character);
+  }
+
+  async function undoTrash() {
+    const trashed = pendingUndo;
+    if (!trashed) return;
+    await api.post(`${API}/characters/${trashed.id}/restore`);
+    setPendingUndo(null);
+    await load();
+  }
 
   function ownerLabel(ownerUserId: string | null): string | null {
     if (!ownerUserId) return null;
@@ -139,6 +163,11 @@ export default function PartyPage() {
               // Quick HP is offered on a card the viewer can edit: the DM (any card)
               // or a player on their own character (issue #68).
               canEditHp={isDm || (c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
+              // Move-to-Trash (issue #716): owner or DM only — the menu is not rendered
+              // for an unrelated player, matching PATCH /characters/:id role gating.
+              canTrash={isDm || (c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
+              onTrashed={onCharacterTrashed}
+              onError={setError}
               onChange={load}
             />
           ))}
@@ -147,6 +176,14 @@ export default function PartyPage() {
 
       {canCreate && (creating || characters.length === 0) && (
         <NewCharacterForm campaignId={id} onCancel={characters.length > 0 ? () => setCreating(false) : undefined} onCreated={load} />
+      )}
+
+      {pendingUndo && (
+        <UndoSnackbar
+          message={`${pendingUndo.name} moved to the Trash.`}
+          onUndo={undoTrash}
+          onExpire={() => setPendingUndo(null)}
+        />
       )}
     </div>
   );
@@ -158,6 +195,9 @@ function CharacterCard({
   index,
   ownerLabel,
   canEditHp,
+  canTrash,
+  onTrashed,
+  onError,
   onChange,
 }: {
   campaignId: number;
@@ -165,6 +205,9 @@ function CharacterCard({
   index: number;
   ownerLabel: string | null;
   canEditHp: boolean;
+  canTrash: boolean;
+  onTrashed: (character: Character) => void;
+  onError: (message: string | null) => void;
   onChange: () => void;
 }) {
   const tone = avatarTone(index);
@@ -172,34 +215,53 @@ function CharacterCard({
   // Dead/retired/inactive PCs (issue #115) are muted so a fallen or shelved character
   // is visually distinct from the live party, while staying fully viewable.
   const isActive = character.status === 'active';
+  // Move-to-Trash (issue #716): the card owns its DELETE so the kebab can show a
+  // busy state; on success it hands the trashed character up for the page-level
+  // Undo snackbar + list removal.
+  const [trashing, setTrashing] = useState(false);
+
+  async function trash() {
+    setTrashing(true);
+    try {
+      await api.delete(`${API}/characters/${character.id}`);
+      onTrashed(character);
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't move this character to the Trash.");
+    } finally {
+      setTrashing(false);
+    }
+  }
+
   // The card stays a single click target to the sheet, but the quick-HP steppers
-  // are siblings of the Link (not nested inside it) — nesting <button> inside an
-  // <a> is invalid and would hijack the navigation click (issue #68).
+  // and the kebab menu are siblings of the Link (not nested inside it) — nesting
+  // <button> inside an <a> is invalid and would hijack the navigation click (#68).
   return (
     <div className={`cf-card p-3.5 space-y-2.5 hover:border-amber-500/50 transition-colors ${isActive ? '' : 'opacity-60'}`}>
-      <Link to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
-        <div className="flex items-center gap-2.5">
-          <div
-            className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}
-          >
-            {initials(character.name)}
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
-              {!isActive && <StatusTag status={character.status} className="shrink-0" />}
+      <div className="relative">
+        <Link to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
+          <div className="flex items-center gap-2.5">
+            <div
+              className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}
+            >
+              {initials(character.name)}
             </div>
-            <p className="text-[11.5px] text-slate-500 truncate">
-              {character.className || 'Unknown class'} · Lv {character.level}
-              {ownerLabel && ` · ${ownerLabel}`}
-            </p>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5">
+                <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
+                {!isActive && <StatusTag status={character.status} className="shrink-0" />}
+              </div>
+              <p className="text-[11.5px] text-slate-500 truncate">
+                {character.className || 'Unknown class'} · Lv {character.level}
+                {ownerLabel && ` · ${ownerLabel}`}
+              </p>
+            </div>
+            {levelForXp(character.xp) > character.level && (
+              <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${levelForXp(character.xp)}`}>
+                ⬆ Level up
+              </span>
+            )}
           </div>
-          {levelForXp(character.xp) > character.level && (
-            <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${levelForXp(character.xp)}`}>
-              ⬆ Level up
-            </span>
-          )}
-        </div>
         <div className="flex justify-between text-[11.5px] text-slate-500">
           <span>HP</span>
           <span>
@@ -216,7 +278,18 @@ function CharacterCard({
             </span>
           </div>
         )}
-      </Link>
+        </Link>
+        {canTrash && (
+          <div className="absolute top-0 right-0">
+            <CharacterTrashMenu
+              characterName={character.name}
+              busy={trashing}
+              onTrash={trash}
+              triggerLabel="roster card"
+            />
+          </div>
+        )}
+      </div>
       {canEditHp && <QuickHp character={character} onChange={onChange} />}
     </div>
   );
