@@ -453,9 +453,10 @@ export class AiProviderConfigService {
 
   /**
    * Read and evaluate the complete state that can change a removal outcome. The
-   * returned revision hashes ciphertext and row metadata server-side (never
-   * serializing either), campaign lifecycle, seat/budget state, and only the
-   * presence—not values—of environment credentials.
+   * returned revision hashes a server-side serialization of ciphertext and row
+   * metadata without returning or exposing either, plus campaign lifecycle,
+   * seat/budget state, and only the presence—not values—of environment
+   * credentials.
    */
   private buildRemovalImpact(
     scope: Scope,
