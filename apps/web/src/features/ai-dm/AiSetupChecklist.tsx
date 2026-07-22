@@ -21,7 +21,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import type { AiConsoleOverview, AiProviderConfigView } from '@campfire/schema';
+import type { AiConsoleOverview, AiProviderEffectiveView } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
@@ -60,11 +60,11 @@ export function AiSetupChecklist({
   const seatQuery = useAiDmSeat(campaignId);
   const seat = seatQuery.data;
 
-  // Real state source ②: the campaign provider config (GET /campaigns/:id/ai-provider) —
-  // `configured` = an encrypted API key is stored for this campaign.
+  // Real state source ②: the effective provider indicator. `ready` accounts for
+  // campaign/server stored keys, environment fallback, and keyless mock providers.
   const providerQuery = useQuery({
-    queryKey: ['campaign', campaignId, 'ai-provider'],
-    queryFn: () => api.get<AiProviderConfigView | null>(`${API}/campaigns/${campaignId}/ai-provider`),
+    queryKey: ['campaign', campaignId, 'ai-provider', 'effective'],
+    queryFn: () => api.get<AiProviderEffectiveView>(`${API}/campaigns/${campaignId}/ai-provider/effective`),
   });
   const provider = providerQuery.data ?? null;
 
@@ -102,12 +102,12 @@ export function AiSetupChecklist({
     {
       key: 'provider',
       title: t('aiOnboarding.checklist.steps.provider.title'),
-      body: provider?.configured
+      body: provider?.ready
         ? t('aiOnboarding.checklist.steps.provider.done', { model: provider.model || provider.providerType })
         : t('aiOnboarding.checklist.steps.provider.todo'),
-      done: !!provider?.configured,
+      done: !!provider?.ready,
       actor: 'dm',
-      fix: provider?.configured
+      fix: provider?.ready
         ? undefined
         : { label: t('aiOnboarding.checklist.fixProvider'), to: `/c/${campaignId}/settings#ai-dm-provider` },
     },

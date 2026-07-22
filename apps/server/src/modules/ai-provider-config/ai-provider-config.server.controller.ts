@@ -22,7 +22,8 @@ export class AiProviderServerConfigController {
   @Get()
   @ApiOperation({
     summary: 'Get the server-default AI provider config',
-    description: 'Server-admin only. Redacted: the API key is never returned — only `configured` + `keyLast4`.',
+    description:
+      'Server-admin only. Redacted: the API key is never returned — only `configured`, `keyLast4`, and non-secret credential source/readiness.',
   })
   @ApiResponse({ status: 200, description: 'The redacted server-default config, or null when unset.' })
   get() {
@@ -39,6 +40,19 @@ export class AiProviderServerConfigController {
   @ApiResponse({ status: 200, description: 'The updated (redacted) config.' })
   put(@Body() body: AiProviderConfigUpdateDto, @CurrentUser() user: RequestUser) {
     return this.configs.putServer(body, user);
+  }
+
+  @Delete('key')
+  @ApiOperation({
+    summary: 'Clear the stored server-default API key',
+    description:
+      'Server-admin only. Clears only the encrypted key and masked last-four indicator. Provider, model, base URL, ' +
+      'parameters, and model allowlist are retained. A matching environment credential may become effective. Audited without key material.',
+  })
+  @ApiResponse({ status: 200, description: 'The retained config with updated non-secret credential source/readiness.' })
+  @ApiResponse({ status: 404, description: 'No server-default provider config exists.' })
+  clearKey(@CurrentUser() user: RequestUser) {
+    return this.configs.clearServerKey(user);
   }
 
   @Delete()

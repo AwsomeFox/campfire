@@ -19,6 +19,20 @@ const player = { 'x-dev-role': 'player', 'x-dev-user': 'aipc-player' };
 const SERVER_KEY = 'sk-server-SUPERSECRET-0001';
 const CAMPAIGN_KEY = 'sk-campaign-SUPERSECRET-9999';
 
+const ORIGINAL_OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ORIGINAL_ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+beforeAll(() => {
+  // The ordinary provider tests must not depend on the machine running Jest.
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+});
+
+afterAll(() => {
+  restoreEnv('OPENAI_API_KEY', ORIGINAL_OPENAI_API_KEY);
+  restoreEnv('ANTHROPIC_API_KEY', ORIGINAL_ANTHROPIC_API_KEY);
+});
+
 describe('ai-provider-config (e2e)', () => {
   let ctx: TestAppContext;
   let server: ReturnType<TestAppContext['app']['getHttpServer']>;
@@ -229,6 +243,10 @@ describe('ai-provider-config (e2e)', () => {
       .set(player)
       .send({ providerType: 'openai', model: 'gpt-4o' });
     expect(write.status).toBe(403);
+    const clear = await request(server)
+      .delete(`/api/v1/campaigns/${campaignId}/ai-provider/key`)
+      .set(player);
+    expect(clear.status).toBe(403);
   });
 });
 
@@ -256,7 +274,14 @@ describe('ai-provider-config effective indicator (issue #399, e2e)', () => {
   it('reports configured:false when neither scope is set', async () => {
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/effective`).set(dm);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ configured: false, providerType: null, model: null, source: null });
+    expect(res.body).toEqual({
+      configured: false,
+      providerType: null,
+      model: null,
+      source: null,
+      credentialSource: 'none',
+      ready: false,
+    });
   });
 
   it('reports the SERVER default as the source when only the server default is set', async () => {
@@ -266,7 +291,14 @@ describe('ai-provider-config effective indicator (issue #399, e2e)', () => {
       .send({ providerType: 'openai', model: 'gpt-4o-mini', apiKey: SERVER_KEY });
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/effective`).set(dm);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ configured: true, providerType: 'openai', model: 'gpt-4o-mini', source: 'server' });
+    expect(res.body).toEqual({
+      configured: true,
+      providerType: 'openai',
+      model: 'gpt-4o-mini',
+      source: 'server',
+      credentialSource: 'stored',
+      ready: true,
+    });
     // NEVER any key material.
     expect(JSON.stringify(res.body)).not.toContain(SERVER_KEY);
     expect(res.body).not.toHaveProperty('keyLast4');
@@ -280,12 +312,203 @@ describe('ai-provider-config effective indicator (issue #399, e2e)', () => {
       .send({ providerType: 'anthropic', model: 'claude-3-5-sonnet' });
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/effective`).set(dm);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ configured: true, providerType: 'anthropic', model: 'claude-3-5-sonnet', source: 'campaign' });
+    expect(res.body).toEqual({
+      configured: true,
+      // The keyless campaign override borrows the credential-owning server
+      // provider + endpoint (issue #373), while retaining its model choice.
+      providerType: 'openai',
+      model: 'claude-3-5-sonnet',
+      source: 'campaign',
+      credentialSource: 'server',
+      ready: true,
+    });
   });
 
   it('is DM-gated — a campaign player (non-DM) is 403', async () => {
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/effective`).set(player);
     expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * Issue #445: key revocation is a dedicated operation, not a replay of the full
+ * provider form. It must preserve every non-secret setting, produce a secret-free
+ * audit entry, and immediately expose standard vendor environment fallback.
+ */
+describe('ai-provider-config explicit stored-key clear (issue #445, e2e)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Credential Fallback Campaign' });
+    campaignId = camp.body.id;
+  });
+
+  afterAll(async () => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    await closeTestApp(ctx);
+  });
+
+  it('stores then clears an OpenAI-compatible key, retaining config and falling back to OPENAI_API_KEY', async () => {
+    const storedKey = 'sk-openai-stored-never-return-4451';
+    const environmentKey = 'sk-openai-environment-never-return-4452';
+    process.env.OPENAI_API_KEY = environmentKey;
+
+    const put = await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'gpt-4.1-mini',
+        baseUrl: 'https://openai-compatible.example/v1',
+        params: { temperature: 0.35, maxTokens: 4321 },
+        allowedModels: ['gpt-4.1-mini'],
+        apiKey: storedKey,
+      });
+    expect(put.status).toBe(200);
+    expect(put.body.credentialSource).toBe('stored');
+    expect(put.body.ready).toBe(true);
+
+    const cleared = await request(server).delete('/api/v1/settings/ai-provider/key').set(dm);
+    expect(cleared.status).toBe(200);
+    expect(cleared.body).toMatchObject({
+      providerType: 'openai',
+      model: 'gpt-4.1-mini',
+      baseUrl: 'https://openai-compatible.example/v1',
+      params: { temperature: 0.35, maxTokens: 4321 },
+      allowedModels: ['gpt-4.1-mini'],
+      configured: false,
+      keyLast4: null,
+      credentialSource: 'environment',
+      ready: true,
+    });
+    expect(JSON.stringify(cleared.body)).not.toContain(storedKey);
+    expect(JSON.stringify(cleared.body)).not.toContain(environmentKey);
+
+    const sqlite = new Database(dbFilePath(ctx.dataDir), { readonly: true });
+    const row = sqlite.prepare("SELECT * FROM ai_provider_configs WHERE scope = 'server'").get() as Record<string, unknown>;
+    sqlite.close();
+    expect(row.encrypted_api_key).toBeNull();
+    expect(row.key_last4).toBeNull();
+    expect(row.model).toBe('gpt-4.1-mini');
+    expect(row.base_url).toBe('https://openai-compatible.example/v1');
+    expect(row.params).toBe(JSON.stringify({ temperature: 0.35, maxTokens: 4321 }));
+
+    const effective = await ctx.app.get(AiProviderConfigService).resolveEffectiveConfig(campaignId);
+    expect(effective).toMatchObject({
+      providerType: 'openai',
+      model: 'gpt-4.1-mini',
+      apiKey: environmentKey,
+      baseUrl: 'https://openai-compatible.example/v1',
+      params: { temperature: 0.35, maxTokens: 4321 },
+    });
+
+    const audit = await request(server).get('/api/v1/admin/audit').set(dm);
+    const clearEntry = audit.body.find((entry: { action: string }) => entry.action === 'ai-provider.key-clear');
+    expect(clearEntry).toMatchObject({ entityType: 'ai-provider', detail: 'server' });
+    expect(JSON.stringify(clearEntry)).not.toContain(storedKey);
+    expect(JSON.stringify(clearEntry)).not.toContain('4451');
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it('stores then clears an Anthropic key and falls back to ANTHROPIC_API_KEY', async () => {
+    const storedKey = 'sk-ant-stored-never-return-4453';
+    const environmentKey = 'sk-ant-environment-never-return-4454';
+    process.env.ANTHROPIC_API_KEY = environmentKey;
+
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({
+        providerType: 'anthropic',
+        model: 'claude-sonnet-4-5',
+        baseUrl: 'https://anthropic-compatible.example',
+        params: { temperature: 0.2, maxTokens: 2048 },
+        apiKey: storedKey,
+      });
+    const cleared = await request(server).delete('/api/v1/settings/ai-provider/key').set(dm);
+
+    expect(cleared.status).toBe(200);
+    expect(cleared.body).toMatchObject({
+      providerType: 'anthropic',
+      model: 'claude-sonnet-4-5',
+      baseUrl: 'https://anthropic-compatible.example',
+      params: { temperature: 0.2, maxTokens: 2048 },
+      configured: false,
+      keyLast4: null,
+      credentialSource: 'environment',
+      ready: true,
+    });
+    const effective = await ctx.app.get(AiProviderConfigService).resolveEffectiveConfig(campaignId);
+    expect(effective?.apiKey).toBe(environmentKey);
+    expect(effective?.providerType).toBe('anthropic');
+    expect(JSON.stringify(cleared.body)).not.toContain(storedKey);
+    expect(JSON.stringify(cleared.body)).not.toContain(environmentKey);
+    delete process.env.ANTHROPIC_API_KEY;
+
+    const unavailable = await request(server).get('/api/v1/settings/ai-provider').set(dm);
+    expect(unavailable.body).toMatchObject({
+      configured: false,
+      credentialSource: 'none',
+      ready: false,
+    });
+  });
+
+  it('clears a campaign key without changing the override and inherits the environment-backed server credential', async () => {
+    process.env.OPENAI_API_KEY = 'sk-server-env-campaign-fallback-4455';
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'gpt-4.1-mini',
+        baseUrl: 'https://server.example/v1',
+        apiKey: '',
+        allowedModels: [],
+      });
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({
+        providerType: 'anthropic',
+        model: 'campaign-model',
+        baseUrl: 'https://campaign.example',
+        params: { temperature: 0.7, maxTokens: 3000 },
+        apiKey: 'sk-campaign-stored-4456',
+      });
+
+    const cleared = await request(server)
+      .delete(`/api/v1/campaigns/${campaignId}/ai-provider/key`)
+      .set(dm);
+    expect(cleared.status).toBe(200);
+    expect(cleared.body).toMatchObject({
+      providerType: 'anthropic',
+      model: 'campaign-model',
+      baseUrl: 'https://campaign.example',
+      params: { temperature: 0.7, maxTokens: 3000 },
+      configured: false,
+      credentialSource: 'environment',
+      ready: true,
+    });
+
+    const effective = await ctx.app.get(AiProviderConfigService).resolveEffectiveConfig(campaignId);
+    expect(effective).toMatchObject({
+      providerType: 'openai',
+      model: 'campaign-model',
+      apiKey: 'sk-server-env-campaign-fallback-4455',
+      baseUrl: 'https://server.example/v1',
+      params: { temperature: 0.7, maxTokens: 3000 },
+    });
+    const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+    expect(audit.body.some((entry: { action: string; detail: string }) =>
+      entry.action === 'ai-provider.key-clear' && entry.detail === 'campaign')).toBe(true);
+    expect(JSON.stringify(audit.body)).not.toContain('sk-campaign-stored-4456');
+    expect(JSON.stringify(audit.body)).not.toContain('4456');
+    delete process.env.OPENAI_API_KEY;
   });
 });
 
@@ -423,8 +646,16 @@ describe('ai-provider-config server default is admin-gated (e2e, no dev auth)', 
     const deniedGet = await userAgent.get('/api/v1/settings/ai-provider');
     expect(deniedGet.status).toBe(403);
 
+    const deniedClear = await userAgent.delete('/api/v1/settings/ai-provider/key');
+    expect(deniedClear.status).toBe(403);
+
     // Sanity: the endpoint is actually mounted for the admin.
     const adminGet = await request(server).get('/api/v1/settings/ai-provider').set({});
     expect([401, 403]).toContain(adminGet.status); // unauthenticated is rejected too
   });
 });
+
+function restoreEnv(name: 'OPENAI_API_KEY' | 'ANTHROPIC_API_KEY', value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}

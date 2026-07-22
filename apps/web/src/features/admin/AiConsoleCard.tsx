@@ -213,9 +213,9 @@ function ProviderDefaultSection({ ov, onChanged }: { ov: AiConsoleOverview; onCh
     <div className="cf-inset p-3.5 space-y-2">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Default AI provider</p>
-        <span className={`cf-chip ${ov.serverProviderConfigured ? 'cf-chip-completed' : 'cf-chip-private'}`}>
+        <span className={`cf-chip ${ov.serverProviderReady ? 'cf-chip-completed' : 'cf-chip-private'}`}>
           {ov.serverProviderConfigured
-            ? `Configured${ov.serverProviderType ? ` · ${ov.serverProviderType}` : ''}`
+            ? `${ov.serverProviderReady ? 'Ready' : 'Credential missing'}${ov.serverProviderType ? ` · ${ov.serverProviderType}` : ''}`
             : 'Not set'}
         </span>
       </div>
