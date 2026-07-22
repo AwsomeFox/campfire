@@ -94,6 +94,8 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(dialog).toHaveAttribute('aria-modal', 'true');
     await expect(dialog).toHaveAccessibleDescription(/Saved .* by Morgan Vale/);
     await expect(dialog.getByText('FULL-SNAPSHOT-END')).toBeVisible();
+    expect(await page.locator('[inert]').count()).toBeGreaterThan(0);
+    expect(await dialog.evaluate((element) => element.closest('[inert]'))).toBeNull();
 
     const bodyDiff = dialog.getByRole('region', { name: 'Quest description' });
     await expect(bodyDiff.getByText('Changed', { exact: true })).toBeVisible();

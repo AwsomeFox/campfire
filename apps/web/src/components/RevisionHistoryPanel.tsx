@@ -90,7 +90,12 @@ function RevisionDialog({
   const descriptionId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
   const cancelRestoreRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useDialog<HTMLDivElement>({ onClose, disabled: restoring, autoFocus: false });
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose,
+    disabled: restoring,
+    autoFocus: false,
+    inertBackground: true,
+  });
   const fields = useMemo(
     () => snapshotFields(revision.snapshot, currentSnapshot),
     [revision.snapshot, currentSnapshot],
