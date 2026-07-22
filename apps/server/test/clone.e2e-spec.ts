@@ -17,6 +17,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
   let locationId: number;
   let npcId: number;
   let questId: number;
+  let sessionId: number;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -53,7 +54,11 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     await dmAgent.post(`/api/v1/quests/${questId}/status`).send({ status: 'active' });
 
     // Play state: session, character, encounter+combatant, notes.
-    await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The party arrived.' });
+    const session = await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The party arrived.' });
+    sessionId = session.body.id;
+    await dmAgent
+      .post(`/api/v1/sessions/${sessionId}/shares`)
+      .send({ label: 'Original-only capability', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Hero', className: 'Fighter' });
     const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Goblin Ambush' });
     await dmAgent.post(`/api/v1/encounters/${encRes.body.id}/combatants`).send({ kind: 'monster', name: 'Goblin', hpMax: 7 });
@@ -79,6 +84,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(clone.description).toBe('The one true prep.');
     expect(clone.sessionCount).toBe(1);
     expect(clone.mapAttachmentId).toBeNull();
+    expect(clone.publicRecapSharingEnabled).toBe(true);
 
     // Locations copied (status preserved), currentLocationId remapped to the cloned row.
     const locs = await dmAgent.get(`/api/v1/campaigns/${clone.id}/locations`);
@@ -114,6 +120,9 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     // body — for this short recap the excerpt is the whole thing.
     expect(sessions.body[0].recapExcerpt).toBe('The party arrived.');
     expect(sessions.body[0].recap).toBeUndefined();
+    // Capability secrets/audit state are never cloned, even for a full clone.
+    const clonedShares = await dmAgent.get(`/api/v1/sessions/${sessions.body[0].id}/shares`);
+    expect(clonedShares.body).toEqual([]);
     const chars = await dmAgent.get(`/api/v1/campaigns/${clone.id}/characters`);
     expect(chars.body.length).toBe(1);
     expect(chars.body[0].name).toBe('Hero');

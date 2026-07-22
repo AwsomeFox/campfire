@@ -17,7 +17,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
+import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -29,6 +29,7 @@ import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { entityTargetProps } from '../../lib/entityLinks';
+import { useCampaign } from '../../app/CampaignContext';
 
 export default function SessionsPage() {
   useFormattingLocale();
@@ -373,7 +374,6 @@ function SessionDetail({
   onDeleted: (id: number, number: number) => void | Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
-  const [sharing, setSharing] = useState(false);
   const [titleDraft, setTitleDraft] = useState(session.title);
   const [dateDraft, setDateDraft] = useState(toDateInputValue(session.playedAt));
   // The list omits the full recap body (issue #71) — fetch it for the opened session.
@@ -394,7 +394,6 @@ function SessionDetail({
 
   useEffect(() => {
     setEditing(false);
-    setSharing(false);
     setTitleDraft(session.title);
     setDateDraft(toDateInputValue(session.playedAt));
     setRecapLoading(true);
@@ -554,16 +553,13 @@ function SessionDetail({
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
           </Btn>
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setSharing((v) => !v)}>
-            {sharing ? 'Hide sharing' : 'Share'}
-          </Btn>
           <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} disabled={deleting}>
             {deleting ? 'Deleting…' : 'Delete'}
           </Btn>
         </div>
       )}
 
-      {isDm && !editing && sharing && <SharePanel sessionId={session.id} />}
+      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} isDm={isDm} />}
 
       {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
           regretted edit can be recovered. Refetches whenever a save/restore happens. */}
@@ -747,19 +743,21 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
   );
 }
 
-/**
- * DM-only share-link management for one recap. The raw link is shown ONCE at
- * creation (the server stores only a hash) — after that the list shows the
- * display prefix, and the DM can revoke or mint a fresh link at any time.
- */
-function SharePanel({ sessionId }: { sessionId: number }) {
+type ShareLifetime = '1' | '7' | '30' | 'never';
+
+/** Member-visible status plus DM-only capability controls for one recap. */
+function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+  const campaign = useCampaign(campaignId);
   const [shares, setShares] = useState<SessionShare[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
-  const [revokingId, setRevokingId] = useState<number | null>(null);
-  const [newLink, setNewLink] = useState<string | null>(null);
+  const [label, setLabel] = useState('');
+  const [lifetime, setLifetime] = useState<ShareLifetime>('7');
+  const [acknowledgedNever, setAcknowledgedNever] = useState(false);
+  const [newLink, setNewLink] = useState<{ shareId: number; url: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const policyEnabled = campaign?.publicRecapSharingEnabled !== false;
 
   const load = useCallback(async () => {
     setError(null);
@@ -780,12 +778,19 @@ function SharePanel({ sessionId }: { sessionId: number }) {
   }, [load]);
 
   async function create() {
+    if (lifetime === 'never' && !acknowledgedNever) return;
     setCreating(true);
     setError(null);
     setCopied(false);
     try {
-      const res = await api.post<SessionShareCreated>(`${API}/sessions/${sessionId}/shares`);
-      setNewLink(`${window.location.origin}/share/${res.token}`);
+      const expiresAt = lifetime === 'never'
+        ? null
+        : new Date(Date.now() + Number(lifetime) * 24 * 60 * 60 * 1000).toISOString();
+      const res = await api.post<SessionShareCreated>(`${API}/sessions/${sessionId}/shares`, { label, expiresAt });
+      setNewLink({ shareId: res.share.id, url: `${window.location.origin}/share/${res.token}` });
+      setLabel('');
+      setLifetime('7');
+      setAcknowledgedNever(false);
       await load();
     } catch {
       setError("Couldn't create a share link.");
@@ -794,24 +799,10 @@ function SharePanel({ sessionId }: { sessionId: number }) {
     }
   }
 
-  async function revoke(id: number) {
-    setRevokingId(id);
-    setError(null);
-    try {
-      await api.delete(`${API}/sessions/${sessionId}/shares/${id}`);
-      setNewLink(null);
-      await load();
-    } catch {
-      setError("Couldn't revoke that link.");
-    } finally {
-      setRevokingId(null);
-    }
-  }
-
   async function copy() {
     if (!newLink) return;
     try {
-      await navigator.clipboard.writeText(newLink);
+      await navigator.clipboard.writeText(newLink.url);
       setCopied(true);
     } catch {
       /* clipboard unavailable — the link is selectable below */
@@ -819,24 +810,75 @@ function SharePanel({ sessionId }: { sessionId: number }) {
   }
 
   return (
-    <Card className="space-y-3">
-      <div className="flex items-center gap-2">
-        <h3 className="font-bold text-white text-sm m-0">Read-only share links</h3>
-        <div className="flex-1" />
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={create} disabled={creating}>
-          {creating ? 'Creating…' : '+ New link'}
-        </Btn>
+    <Card className="space-y-3" data-testid="recap-share-panel">
+      <div className="flex items-center gap-2 flex-wrap">
+        <h3 className="font-bold text-white text-sm m-0">Public recap sharing</h3>
+        {!loading && shares.length > 0 && <span className="tag tag-accent">{shares.length} active</span>}
       </div>
-      <p className="text-[11.5px] text-slate-500 m-0">
-        Anyone with a link can read this recap — no account needed. The full link is shown only once, so copy it now;
-        revoke it here any time.
+      <p className="text-[11.5px] text-slate-300 m-0">
+        Anyone who receives an active link can forward it and read the current recap without an account. All campaign
+        members can see who enabled sharing, when it expires, and how often it has been opened.
       </p>
+      {!policyEnabled && (
+        <p className="text-xs text-amber-300 m-0" role="status">
+          Public recap sharing is disabled in Campaign settings. Existing links were revoked.
+        </p>
+      )}
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      {isDm && policyEnabled && (
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_150px_auto] items-end">
+          <div className="field !mb-0">
+            <label htmlFor={`share-label-${sessionId}`}>Label</label>
+            <TextInput
+              id={`share-label-${sessionId}`}
+              value={label}
+              maxLength={120}
+              onChange={(event) => setLabel(event.target.value)}
+              placeholder="e.g. Absent players"
+            />
+          </div>
+          <div className="field !mb-0">
+            <label htmlFor={`share-expiry-${sessionId}`}>Expires</label>
+            <select
+              id={`share-expiry-${sessionId}`}
+              className="input"
+              value={lifetime}
+              onChange={(event) => {
+                setLifetime(event.target.value as ShareLifetime);
+                setAcknowledgedNever(false);
+              }}
+            >
+              <option value="1">In 24 hours</option>
+              <option value="7">In 7 days</option>
+              <option value="30">In 30 days</option>
+              <option value="never">Never</option>
+            </select>
+          </div>
+          <Btn
+            className="!min-h-0 !py-2 text-xs !bg-violet-700 !border-violet-700 !text-white"
+            onClick={create}
+            disabled={creating || (lifetime === 'never' && !acknowledgedNever)}
+          >
+            {creating ? 'Creating…' : 'Create link'}
+          </Btn>
+          {lifetime === 'never' && (
+            <label className="sm:col-span-3 flex items-start gap-2 text-xs text-amber-200">
+              <input
+                type="checkbox"
+                checked={acknowledgedNever}
+                onChange={(event) => setAcknowledgedNever(event.target.checked)}
+              />
+              <span>I understand this link remains public until a DM revokes it.</span>
+            </label>
+          )}
+        </div>
+      )}
+
       {newLink && (
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap" aria-live="polite">
           <code className="text-xs break-all flex-1 min-w-0" style={{ color: 'var(--color-accent)' }}>
-            {newLink}
+            {newLink.url}
           </code>
           <Btn ghost className="!min-h-0 !py-1.5 text-xs shrink-0" onClick={copy}>
             {copied ? 'Copied ✓' : 'Copy link'}
@@ -849,20 +891,102 @@ function SharePanel({ sessionId }: { sessionId: number }) {
       ) : shares.length === 0 ? (
         <p className="text-sm text-slate-600 m-0">No active links.</p>
       ) : (
-        <ul className="m-0 p-0 space-y-1.5" style={{ listStyle: 'none' }}>
+        <ul className="m-0 p-0 space-y-2" style={{ listStyle: 'none' }}>
           {shares.map((s) => (
-            <li key={s.id} className="flex items-center gap-2.5 text-xs">
-              <code className="text-slate-400">{s.tokenPrefix}…</code>
-              <span className="text-muted">created {formatDate(s.createdAt)}</span>
-              <div className="flex-1" />
-              <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={() => revoke(s.id)} disabled={revokingId === s.id}>
-                {revokingId === s.id ? 'Revoking…' : 'Revoke'}
-              </Btn>
-            </li>
+            <ShareRow
+              key={s.id}
+              share={s}
+              sessionId={sessionId}
+              isDm={isDm}
+              onChanged={load}
+              onRevoked={(shareId) => setNewLink((current) => current?.shareId === shareId ? null : current)}
+            />
           ))}
         </ul>
       )}
     </Card>
+  );
+}
+
+function ShareRow({
+  share,
+  sessionId,
+  isDm,
+  onChanged,
+  onRevoked,
+}: {
+  share: SessionShare;
+  sessionId: number;
+  isDm: boolean;
+  onChanged: () => Promise<void>;
+  onRevoked: (shareId: number) => void;
+}) {
+  const [draftLabel, setDraftLabel] = useState(share.label);
+  const [busy, setBusy] = useState<'label' | 'extend' | 'revoke' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function mutate(kind: 'label' | 'extend' | 'revoke') {
+    setBusy(kind);
+    setError(null);
+    try {
+      if (kind === 'revoke') {
+        await api.delete(`${API}/sessions/${sessionId}/shares/${share.id}`);
+        onRevoked(share.id);
+      } else {
+        const currentExpiry = share.expiresAt ? Date.parse(share.expiresAt) : Date.now();
+        const body = kind === 'label'
+          ? { label: draftLabel }
+          : { expiresAt: new Date(Math.max(Date.now(), currentExpiry) + 7 * 24 * 60 * 60 * 1000).toISOString() };
+        await api.patch(`${API}/sessions/${sessionId}/shares/${share.id}`, body);
+      }
+      await onChanged();
+    } catch {
+      setError(`Couldn't ${kind === 'revoke' ? 'revoke' : kind === 'extend' ? 'extend' : 'rename'} this link.`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <li className="rounded-md border border-slate-700/70 p-2.5 text-xs space-y-2">
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="min-w-0 flex-1 space-y-1">
+          <p className="m-0 text-slate-200 font-semibold break-words">{share.label || 'Unlabelled link'}</p>
+          <p className="m-0 text-muted">
+            Created by {share.createdBy || 'Unknown member'} · {share.expiresAt ? `expires ${formatDateTime(share.expiresAt)}` : 'never expires'}
+          </p>
+          <p className="m-0 text-muted">
+            Opened {share.accessCount} {share.accessCount === 1 ? 'time' : 'times'}
+            {share.lastAccessedAt ? ` · last ${formatDateTime(share.lastAccessedAt)}` : ' · not opened yet'}
+          </p>
+        </div>
+        <code className="text-slate-300 shrink-0" aria-label="Share token display prefix">{share.tokenPrefix}…</code>
+      </div>
+      {isDm && (
+        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+          <label className="sr-only" htmlFor={`share-row-label-${share.id}`}>Edit share label</label>
+          <TextInput
+            id={`share-row-label-${share.id}`}
+            className="!min-h-0 !py-1.5 text-xs flex-1"
+            maxLength={120}
+            value={draftLabel}
+            onChange={(event) => setDraftLabel(event.target.value)}
+          />
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy !== null || draftLabel === share.label} onClick={() => void mutate('label')}>
+            {busy === 'label' ? 'Saving…' : 'Save label'}
+          </Btn>
+          {share.expiresAt && (
+            <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy !== null} onClick={() => void mutate('extend')}>
+              {busy === 'extend' ? 'Extending…' : 'Extend 7 days'}
+            </Btn>
+          )}
+          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy !== null} onClick={() => void mutate('revoke')}>
+            {busy === 'revoke' ? 'Revoking…' : 'Revoke'}
+          </Btn>
+        </div>
+      )}
+      {error && <p className="m-0 text-red-400" role="alert">{error}</p>}
+    </li>
   );
 }
 

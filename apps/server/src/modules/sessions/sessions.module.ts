@@ -8,7 +8,7 @@ import { SessionsService } from './sessions.service';
 import { SessionSharesService } from './session-shares.service';
 import { SchedulingService } from './scheduling.service';
 import { CampaignSessionsController, SessionsController } from './sessions.controller';
-import { SessionSharesController, SharedRecapController } from './session-shares.controller';
+import { CampaignSessionSharesController, SessionSharesController, SharedRecapController } from './session-shares.controller';
 import {
   CampaignScheduleController,
   ScheduleController,
@@ -22,6 +22,7 @@ import {
     CampaignSessionsController,
     SessionsController,
     SessionSharesController,
+    CampaignSessionSharesController,
     SharedRecapController,
     CampaignScheduleController,
     ScheduleController,
@@ -29,6 +30,6 @@ import {
     CalendarFeedController,
   ],
   providers: [SessionsService, SessionSharesService, SchedulingService],
-  exports: [SessionsService, SchedulingService],
+  exports: [SessionsService, SessionSharesService, SchedulingService],
 })
 export class SessionsModule {}

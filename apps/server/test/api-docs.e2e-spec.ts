@@ -127,6 +127,27 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
       expect(responseProperties).not.toHaveProperty('apiKey');
     }
   });
+
+  it('documents public recap expiry, member disclosure, update, policy, and revoke-all contracts (#788)', async () => {
+    const res = await request(app.getHttpServer()).get('/api/openapi.json');
+    const paths = res.body.paths;
+    const list = paths?.['/api/v1/sessions/{sessionId}/shares']?.get;
+    const create = paths?.['/api/v1/sessions/{sessionId}/shares']?.post;
+    const update = paths?.['/api/v1/sessions/{sessionId}/shares/{shareId}']?.patch;
+    const policy = paths?.['/api/v1/campaigns/{campaignId}/session-shares/policy']?.put;
+    const revokeAll = paths?.['/api/v1/campaigns/{campaignId}/session-shares']?.delete;
+
+    expect(list?.description).toContain('Any campaign member');
+    expect(update).toBeTruthy();
+    expect(policy?.description).toContain('atomically revokes');
+    expect(revokeAll).toBeTruthy();
+
+    const requestSchema = create?.requestBody?.content?.['application/json']?.schema as { $ref?: string } | undefined;
+    const schemaName = requestSchema?.$ref?.split('/').pop();
+    const schema = res.body.components?.schemas?.[schemaName!];
+    expect(schema?.required).toContain('expiresAt');
+    expect(schema?.properties?.expiresAt).toEqual(expect.objectContaining({ nullable: true }));
+  });
 });
 
 describe('api docs exposure: API_DOCS=0 disables the docs (e2e)', () => {

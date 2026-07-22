@@ -13,6 +13,7 @@ const player = { 'x-dev-role': 'player', 'x-dev-user': 'player-1' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'viewer-1' };
 
 const SHARE_TOKEN_RE = /^cf_share_[0-9a-f]{48}$/;
+const futureExpiry = (days = 7) => new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
 /**
  * Issue #12 — read-only recap share links.
@@ -48,7 +49,10 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
   it('DM creates a share link: 201, unguessable token shown once, hash never leaked', async () => {
     const server = ctx.app.getHttpServer();
 
-    const res = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm);
+    const res = await request(server)
+      .post(`/api/v1/sessions/${sessionId}/shares`)
+      .set(dm)
+      .send({ label: 'Absent players', expiresAt: futureExpiry() });
     expect(res.status).toBe(201);
     expect(res.body.token).toMatch(SHARE_TOKEN_RE);
     expect(res.body.share.sessionId).toBe(sessionId);
@@ -80,15 +84,16 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
     expect(delRes.status).toBe(200);
   });
 
-  it('players and viewers cannot mint, list, or revoke share links (403)', async () => {
+  it('all members can inspect active metadata, while only DMs can mint or revoke', async () => {
     const server = ctx.app.getHttpServer();
 
-    expect((await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(player)).status).toBe(403);
-    expect((await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(viewer)).status).toBe(403);
-    expect((await request(server).get(`/api/v1/sessions/${sessionId}/shares`).set(player)).status).toBe(403);
+    expect((await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(player).send({ expiresAt: futureExpiry() })).status).toBe(403);
+    expect((await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(viewer).send({ expiresAt: futureExpiry() })).status).toBe(403);
 
-    const created = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm);
+    const created = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
     expect(created.status).toBe(201);
+    expect((await request(server).get(`/api/v1/sessions/${sessionId}/shares`).set(player)).status).toBe(200);
+    expect((await request(server).get(`/api/v1/sessions/${sessionId}/shares`).set(viewer)).status).toBe(200);
     expect((await request(server).delete(`/api/v1/sessions/${sessionId}/shares/${created.body.share.id}`).set(player)).status).toBe(403);
 
     // still revocable by the DM
@@ -107,7 +112,7 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
     expect((await request(server).get('/api/v1/shared/recaps/cf_share_tooshort')).status).toBe(404);
 
     // Revoked: works before, 404 after.
-    const created = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm);
+    const created = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
     expect((await request(server).get(`/api/v1/shared/recaps/${created.body.token}`)).status).toBe(200);
 
     const delRes = await request(server).delete(`/api/v1/sessions/${sessionId}/shares/${created.body.share.id}`).set(dm);
@@ -122,7 +127,7 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
     const server = ctx.app.getHttpServer();
 
     const otherSess = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 2 });
-    const created = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm);
+    const created = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
 
     const crossRes = await request(server).delete(`/api/v1/sessions/${otherSess.body.id}/shares/${created.body.share.id}`).set(dm);
     expect(crossRes.status).toBe(404);
@@ -137,7 +142,7 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
     const server = ctx.app.getHttpServer();
 
     const sessRes = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 3, recap: 'Short-lived.' });
-    const created = await request(server).post(`/api/v1/sessions/${sessRes.body.id}/shares`).set(dm);
+    const created = await request(server).post(`/api/v1/sessions/${sessRes.body.id}/shares`).set(dm).send({ expiresAt: futureExpiry() });
     expect((await request(server).get(`/api/v1/shared/recaps/${created.body.token}`)).status).toBe(200);
 
     expect((await request(server).delete(`/api/v1/sessions/${sessRes.body.id}`).set(dm)).status).toBe(200);
@@ -147,8 +152,8 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
   it('each mint produces a distinct token; multiple links stay independently revocable', async () => {
     const server = ctx.app.getHttpServer();
 
-    const a = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm);
-    const b = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm);
+    const a = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
+    const b = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
     expect(a.body.token).not.toBe(b.body.token);
 
     const listRes = await request(server).get(`/api/v1/sessions/${sessionId}/shares`).set(dm);
@@ -161,26 +166,151 @@ describe('session share links (e2e) — mint/list/revoke + public resolution', (
 
     expect((await request(server).delete(`/api/v1/sessions/${sessionId}/shares/${b.body.share.id}`).set(dm)).status).toBe(200);
   });
+
+  it('requires an explicit future expiry, with null as the deliberate never option', async () => {
+    const server = ctx.app.getHttpServer();
+    expect((await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({})).status).toBe(400);
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/sessions/${sessionId}/shares`)
+          .set(dm)
+          .send({ expiresAt: new Date(Date.now() - 60_000).toISOString() })
+      ).status,
+    ).toBe(400);
+
+    const never = await request(server)
+      .post(`/api/v1/sessions/${sessionId}/shares`)
+      .set(dm)
+      .send({ label: 'Deliberate permanent handout', expiresAt: null });
+    expect(never.status).toBe(201);
+    expect(never.body.share.expiresAt).toBeNull();
+    await request(server).delete(`/api/v1/sessions/${sessionId}/shares/${never.body.share.id}`).set(dm);
+  });
+
+  it('expires links, supports forwarding, and records first/last access plus count', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/sessions/${sessionId}/shares`)
+      .set(dm)
+      .send({ label: 'Convention guests', expiresAt: new Date(Date.now() + 1_000).toISOString() });
+
+    expect((await request(server).get(`/api/v1/shared/recaps/${created.body.token}`).set('x-forwarded-for', '192.0.2.10')).status).toBe(200);
+    expect((await request(server).get(`/api/v1/shared/recaps/${created.body.token}`).set('x-forwarded-for', '192.0.2.11')).status).toBe(200);
+    const visible = await request(server).get(`/api/v1/sessions/${sessionId}/shares`).set(player);
+    expect(visible.body[0]).toEqual(
+      expect.objectContaining({
+        label: 'Convention guests',
+        createdBy: 'dm-1',
+        accessCount: 2,
+        firstAccessedAt: expect.any(String),
+        lastAccessedAt: expect.any(String),
+      }),
+    );
+    expect(visible.body[0].token).toBeUndefined();
+    expect(visible.body[0].tokenHash).toBeUndefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 1_050));
+    const expired = await request(server).get(`/api/v1/shared/recaps/${created.body.token}`);
+    expect(expired.status).toBe(404);
+    expect(expired.body.message).toBe('Share link not found or revoked');
+    expect((await request(server).get(`/api/v1/sessions/${sessionId}/shares`).set(viewer)).body).toEqual([]);
+    // Expiry is terminal for the capability: a stale share id cannot resurrect
+    // the forwarded URL by extending it after the deadline.
+    expect(
+      (
+        await request(server)
+          .patch(`/api/v1/sessions/${sessionId}/shares/${created.body.share.id}`)
+          .set(dm)
+          .send({ expiresAt: futureExpiry(7) })
+      ).status,
+    ).toBe(404);
+  });
+
+  it('serves the current recap after edits and allows expiry/label updates', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/sessions/${sessionId}/shares`)
+      .set(dm)
+      .send({ label: 'Initial', expiresAt: futureExpiry(1) });
+    const extended = await request(server)
+      .patch(`/api/v1/sessions/${sessionId}/shares/${created.body.share.id}`)
+      .set(dm)
+      .send({ label: 'Press copy', expiresAt: futureExpiry(30) });
+    expect(extended.status).toBe(200);
+    expect(extended.body).toEqual(expect.objectContaining({ label: 'Press copy', expiresAt: expect.any(String) }));
+
+    const edited = 'The recap changed after the URL was sent.';
+    expect((await request(server).patch(`/api/v1/sessions/${sessionId}`).set(dm).send({ recap: edited })).status).toBe(200);
+    expect((await request(server).get(`/api/v1/shared/recaps/${created.body.token}`)).body.recap).toBe(edited);
+
+    await request(server).patch(`/api/v1/sessions/${sessionId}`).set(dm).send({ recap: '# What happened\n\nThe party met **Gundren** in Phandalin.' });
+    await request(server).delete(`/api/v1/sessions/${sessionId}/shares/${created.body.share.id}`).set(dm);
+  });
+
+  it('revokes all, disables campaign sharing without resurrection, and blocks archived campaigns uniformly', async () => {
+    const server = ctx.app.getHttpServer();
+    const a = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
+    const b = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
+    const revoked = await request(server).delete(`/api/v1/campaigns/${campaignId}/session-shares`).set(dm);
+    // Revoke-all deliberately also purges expired audit rows left by the expiry
+    // test above, so the count may exceed the two currently active fixtures.
+    expect(revoked.body.revoked).toBeGreaterThanOrEqual(2);
+    expect((await request(server).get(`/api/v1/shared/recaps/${a.body.token}`)).status).toBe(404);
+    expect((await request(server).get(`/api/v1/shared/recaps/${b.body.token}`)).status).toBe(404);
+
+    const beforeDisable = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
+    const disabled = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/session-shares/policy`)
+      .set(dm)
+      .send({ enabled: false });
+    expect(disabled.body).toEqual({ revoked: 1 });
+    expect((await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm)).body.publicRecapSharingEnabled).toBe(false);
+    expect((await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() })).status).toBe(403);
+
+    await request(server).put(`/api/v1/campaigns/${campaignId}/session-shares/policy`).set(dm).send({ enabled: true });
+    expect((await request(server).get(`/api/v1/shared/recaps/${beforeDisable.body.token}`)).status).toBe(404);
+    const archived = await request(server).post(`/api/v1/sessions/${sessionId}/shares`).set(dm).send({ expiresAt: futureExpiry() });
+    await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' });
+    const archiveResponse = await request(server).get(`/api/v1/shared/recaps/${archived.body.token}`);
+    expect(archiveResponse.status).toBe(404);
+    expect(archiveResponse.body.message).toBe('Share link not found or revoked');
+    await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' });
+    await request(server).delete(`/api/v1/sessions/${sessionId}/shares/${archived.body.share.id}`).set(dm);
+  });
 });
 
 describe('session share links (e2e) — truly public, DEV_AUTH unset', () => {
   let ctx: TestAppContext;
   let token: string;
+  let shareId: number;
+  let sessionId: number;
+  let adminAgent: ReturnType<typeof request.agent>;
+  let playerAgent: ReturnType<typeof request.agent>;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
     const server = ctx.app.getHttpServer();
 
     // Real cookie-session admin (admins are dm everywhere) mints the link.
-    const agent = request.agent(server);
-    const setupRes = await agent.post('/api/v1/auth/setup').send({ username: 'admin', password: 'correct-horse-battery' });
+    adminAgent = request.agent(server);
+    const setupRes = await adminAgent.post('/api/v1/auth/setup').send({ username: 'admin', password: 'correct-horse-battery' });
     expect(setupRes.status).toBe(201);
 
-    const campRes = await agent.post('/api/v1/campaigns').send({ name: 'Public Share Campaign' });
-    const sessRes = await agent.post(`/api/v1/campaigns/${campRes.body.id}/sessions`).send({ number: 1, recap: 'Catch-up recap.' });
-    const shareRes = await agent.post(`/api/v1/sessions/${sessRes.body.id}/shares`);
+    const player = await adminAgent.post('/api/v1/users').send({ username: 'share-player', password: 'player-password-1', serverRole: 'user' });
+    playerAgent = request.agent(server);
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'share-player', password: 'player-password-1' });
+
+    const campRes = await adminAgent.post('/api/v1/campaigns').send({ name: 'Public Share Campaign' });
+    await adminAgent.post(`/api/v1/campaigns/${campRes.body.id}/members`).send({ userId: player.body.id, role: 'player' });
+    const sessRes = await adminAgent.post(`/api/v1/campaigns/${campRes.body.id}/sessions`).send({ number: 1, recap: 'Catch-up recap.' });
+    sessionId = sessRes.body.id;
+    const shareRes = await adminAgent
+      .post(`/api/v1/sessions/${sessionId}/shares`)
+      .send({ label: 'Player catch-up', expiresAt: futureExpiry() });
     expect(shareRes.status).toBe(201);
     token = shareRes.body.token;
+    shareId = shareRes.body.share.id;
   });
 
   afterAll(async () => {
@@ -205,6 +335,27 @@ describe('session share links (e2e) — truly public, DEV_AUTH unset', () => {
     expect((await request(server).post('/api/v1/sessions/1/shares')).status).toBe(401);
     expect((await request(server).get('/api/v1/sessions/1/shares')).status).toBe(401);
     expect((await request(server).delete('/api/v1/sessions/1/shares/1')).status).toBe(401);
+  });
+
+  it('notifies affected real members when sharing is enabled and extended', async () => {
+    const initial = await playerAgent.get('/api/v1/notifications');
+    expect(initial.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'recap_share_enabled',
+          title: 'Public sharing enabled for Session 1',
+          entityType: 'session',
+          entityId: sessionId,
+        }),
+      ]),
+    );
+
+    const extended = await adminAgent
+      .patch(`/api/v1/sessions/${sessionId}/shares/${shareId}`)
+      .send({ expiresAt: futureExpiry(30) });
+    expect(extended.status).toBe(200);
+    const after = await playerAgent.get('/api/v1/notifications');
+    expect(after.body).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'recap_share_extended', entityId: sessionId })]));
   });
 });
 

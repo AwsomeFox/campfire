@@ -68,6 +68,11 @@ export const Campaign = z.object({
   // When true, only the DM may award XP / level up characters (issue #270); when false
   // (default) any character owner may self-progress, preserving the original behavior.
   dmControlsProgression: z.boolean().default(false),
+  // Campaign-level privacy kill switch for unauthenticated recap links. This is
+  // mutated through the dedicated session-share policy endpoint so disabling it
+  // can atomically revoke every active capability rather than leaving old URLs
+  // ready to spring back to life when the setting is re-enabled.
+  publicRecapSharingEnabled: z.boolean().default(true),
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
@@ -83,7 +88,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // Clone/template input — POST /campaigns/:id/clone.
@@ -674,13 +679,37 @@ export const SessionShare = z.object({
   id: Id,
   sessionId: Id,
   campaignId: Id,
-  createdBy: z.string().max(200).default(''), // user id or token name, display/audit only
+  label: z.string().max(120).default(''),
+  createdBy: z.string().max(200).default(''), // member-visible display name; durable actor id lives in audit
   tokenPrefix: z.string().max(16), // display only, e.g. cf_share_9f2a
+  // NULL means a deliberately selected "never" expiry. New share requests must
+  // always send this field so omission can never accidentally create a forever URL.
+  expiresAt: z.string().datetime({ offset: true }).nullable(),
+  accessCount: z.number().int().nonnegative().default(0),
+  firstAccessedAt: z.string().datetime({ offset: true }).nullable().default(null),
+  lastAccessedAt: z.string().datetime({ offset: true }).nullable().default(null),
   ...timestamps,
 });
 export type SessionShare = z.infer<typeof SessionShare>;
+export const SessionShareCreate = z.object({
+  label: z.string().trim().max(120).default(''),
+  expiresAt: z.string().datetime({ offset: true }).nullable(),
+});
+export type SessionShareCreate = z.infer<typeof SessionShareCreate>;
+export const SessionShareUpdate = z
+  .object({
+    label: z.string().trim().max(120).optional(),
+    expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  })
+  .strict()
+  .refine((value) => value.label !== undefined || value.expiresAt !== undefined, 'at least one field is required');
+export type SessionShareUpdate = z.infer<typeof SessionShareUpdate>;
 export const SessionShareCreated = z.object({ token: z.string(), share: SessionShare });
 export type SessionShareCreated = z.infer<typeof SessionShareCreated>;
+export const SessionSharePolicyUpdate = z.object({ enabled: z.boolean() });
+export type SessionSharePolicyUpdate = z.infer<typeof SessionSharePolicyUpdate>;
+export const SessionShareMutationResult = z.object({ revoked: z.number().int().nonnegative() });
+export type SessionShareMutationResult = z.infer<typeof SessionShareMutationResult>;
 
 // Payload served by the UNauthenticated GET /shared/recaps/:token endpoint.
 // Deliberately minimal — no internal ids, no dmSecret-bearing entities, just
@@ -1023,6 +1052,8 @@ export const CommentUpdate = z.object({
 // store is plain rows, transport-agnostic.
 export const NotificationType = z.enum([
   'recap_posted',
+  'recap_share_enabled',
+  'recap_share_extended',
   'note_reply',
   'note_shared',
   'comment_reply',

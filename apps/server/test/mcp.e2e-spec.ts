@@ -34,6 +34,7 @@ const ALL_TOOLS = [
   'get_party',
   'get_session_recaps',
   'get_session',
+  'list_session_shares',
   'get_session_attendance',
   'set_session_attendance',
   'draft_session_recap',
@@ -99,6 +100,11 @@ const ALL_TOOLS = [
   'add_session_recap',
   'update_session',
   'delete_session',
+  'create_session_share',
+  'update_session_share',
+  'revoke_session_share',
+  'revoke_all_session_shares',
+  'set_recap_share_policy',
   'upsert_character',
   'delete_character',
   'update_character_hp',
@@ -237,7 +243,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(137);
+    expect(tools).toHaveLength(143);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -822,6 +828,46 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(distinct.isError).toBeFalsy();
     const distinctSession = parseResult(distinct) as { number: number };
     expect(distinctSession.number).toBe(2);
+  });
+
+  it('keeps recap-share REST/MCP policy and member disclosure in parity (#788)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+    const recap = parseResult(
+      await dmClient.callTool({
+        name: 'add_session_recap',
+        arguments: { campaignId, recap: 'MCP public sharing recap', title: 'Shared by MCP' },
+      }),
+    ) as { id: number };
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const created = parseResult(
+      await dmClient.callTool({
+        name: 'create_session_share',
+        arguments: { sessionId: recap.id, label: 'MCP guests', expiresAt },
+      }),
+    ) as { token: string; share: { id: number; tokenHash?: string } };
+    expect(created.token).toMatch(/^cf_share_[0-9a-f]{48}$/);
+    expect(created.share.tokenHash).toBeUndefined();
+
+    const visible = parseResult(
+      await viewerClient.callTool({ name: 'list_session_shares', arguments: { sessionId: recap.id } }),
+    ) as Array<{ label: string; expiresAt: string; accessCount: number; token?: string }>;
+    expect(visible).toEqual([expect.objectContaining({ label: 'MCP guests', expiresAt, accessCount: 0 })]);
+    expect(visible[0].token).toBeUndefined();
+
+    const denied = await viewerClient.callTool({
+      name: 'create_session_share',
+      arguments: { sessionId: recap.id, label: 'Not allowed', expiresAt },
+    });
+    expect(denied.isError).toBe(true);
+    expect(parseResult(denied)).toMatchObject({ error: { status: 403, code: 'forbidden' } });
+
+    const disabled = parseResult(
+      await dmClient.callTool({ name: 'set_recap_share_policy', arguments: { campaignId, enabled: false } }),
+    );
+    expect(disabled).toEqual({ revoked: 1 });
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/shared/recaps/${created.token}`)).status).toBe(404);
+    await dmClient.callTool({ name: 'set_recap_share_policy', arguments: { campaignId, enabled: true } });
   });
 
   it('create_encounter -> add_combatant -> roll_initiative -> begin_encounter -> next_turn -> end_encounter via dm PAT', async () => {
