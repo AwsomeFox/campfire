@@ -52,6 +52,90 @@ export function entityTargetProps(type: NavigableEntityType, id: number) {
   } as const;
 }
 
+// ---------------------------------------------------------------------------
+// Identity-persisted mention tokens (issue #739).
+//
+// A mention authored as plain text ("Vex") is fragile: rename Vex and the link
+// silently retargets, and two NPCs sharing a name collapse to the first match.
+// To keep a link bound to a specific record through renames and collisions, an
+// author writes a typed token inside a normal markdown link:
+//
+//   [Vex](/.cf/npc/5)
+//
+// The renderer turns that into the canonical entity URL via entityHref, and
+// rewrites the visible label to the entity's CURRENT name (rename-tolerant).
+// Deleted / hidden / foreign targets degrade to plain text (their authored
+// label) rather than a broken 404 link, so no link ever points at nothing.
+//
+// The token is a synthetic RELATIVE URL (`/.cf/...`) on purpose: it survives
+// DOMPurify's default URI allow-list (which strips unknown `scheme:` URIs),
+// never collides with a real route (those live under `/c/...`), and is owned
+// end-to-end by this module — no router or server ever interprets it. Only the
+// Markdown renderer (and the editor that inserts these) read or write it.
+// ---------------------------------------------------------------------------
+
+const CF_LINK = /^\/\.cf\/([a-z-]+)\/(\d+)$/;
+
+/** A typed entity reference parsed out of a `/.cf/<type>/<id>` token. */
+export type CfLink = { type: NavigableEntityType; id: number };
+
+/**
+ * Parse a `/.cf/<type>/<id>` token, returning null for anything that isn't a
+ * valid typed mention (a normal URL, an empty href, a malformed key). Centralized
+ * so the Markdown renderer, the editor, and tests share one strict parser.
+ */
+export function parseCfLink(href: string | null | undefined): CfLink | null {
+  if (!href) return null;
+  const m = CF_LINK.exec(href.trim());
+  if (!m) return null;
+  const id = Number(m[2]);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return { type: m[1] as NavigableEntityType, id };
+}
+
+/** Authoring side: serialize a typed mention into the `/.cf/<type>/<id>` token. */
+export function cfLinkToken(type: NavigableEntityType, id: number): string {
+  return `/.cf/${type}/${id}`;
+}
+
+/**
+ * Resolve a parsed `cf:` link to a canonical entity URL inside `campaignId`,
+ * or null when the type has no navigable surface (defensive — every value that
+ * parseCfLink accepts is navigable today, but unknown future types must never
+ * silently land on the dashboard). Mirrors entityHref's safe-fallback contract.
+ */
+export function cfLinkHref(campaignId: number, link: CfLink): string | null {
+  // entityHref always returns a string (the campaign base, at minimum), so this
+  // is a presence check on the underlying typed route rather than a null gate.
+  const href = entityHref(campaignId, { type: link.type, id: link.id });
+  // A bare campaign base (no /type segment and no selector) means this type is
+  // not navigable — surface null so the renderer falls back to plain text.
+  if (href === `/c/${campaignId}` && link.type !== 'campaign') return null;
+  return href;
+}
+
+/**
+ * Find the single non-ambiguous target whose NAME matches `needle`
+ * case-insensitively. Returns null when zero OR MORE THAN ONE visible target
+ * share the name — more than one is exactly the same-name collision the typed
+ * token exists to disambiguate, so the auto-linker must NOT silently pick one.
+ * Callers (the Markdown auto-linker) treat null as "do not auto-link this name".
+ */
+export function resolveUniqueByName(
+  targets: ReadonlyArray<Pick<MentionTarget, 'type' | 'id' | 'name'>>,
+  needle: string,
+): MentionTarget | null {
+  const lower = needle.trim().toLowerCase();
+  if (!lower) return null;
+  let hit: MentionTarget | null = null;
+  for (const t of targets) {
+    if (t.name.trim().toLowerCase() !== lower) continue;
+    if (hit) return null; // collision — caller must disambiguate explicitly
+    hit = { type: t.type, id: t.id, name: t.name };
+  }
+  return hit;
+}
+
 function focused(path: string, type: NavigableEntityType, id: number, query?: [string, number]): string {
   const search = query ? `?${query[0]}=${query[1]}` : '';
   return `${path}${search}#${entityDomId(type, id)}`;

@@ -4,7 +4,21 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { BOOTSTRAP_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
+import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
+
+// Re-export the boot-guard surface (issue #721) so callers and tests import it
+// from the db module barrel rather than reaching into boot-guard.ts directly —
+// keeps the public DB boundary in one place.
+export {
+  assertDataMount,
+  DataMountGuardError,
+  sentinelFilePath,
+  SENTINEL_FILENAME,
+  ALLOW_FRESH_DB_ENV,
+  type InstallSentinel,
+  type BootGuardOutcome,
+} from './boot-guard';
 
 export const DB = Symbol('DB');
 export type DrizzleDb = BetterSQLite3Database<typeof schema>;
@@ -1037,6 +1051,37 @@ function migrateRuleEntriesTableForIconSlug(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before compendium rule entries could carry their OWN
+ * per-entry license/attribution (issue #734): previously the entry's license was dropped
+ * on import and the reader labelled every entry with the PACK license, losing the
+ * attribution an open licence legally obliges us to show (and mislabelling mixed-license
+ * packs — an OGL pack with a CC-BY spell). Four plain ADD COLUMNs with '' defaults — same
+ * idiom as 0038. Existing rows get '' for each field, which callers treat as "inherit the
+ * pack's value", so an upgraded server renders exactly as before until a pack is
+ * reinstalled. Per migration 0050's goal in the issue ("Migrate existing rows to explicit
+ * inherited/unknown provenance"), '' is the explicit inherited marker — no backfill is
+ * possible since the per-entry license was never recorded. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the columns. Adding plain columns to the FTS content
+ * table doesn't touch the indexed columns (name/summary/body), so the triggers are
+ * unaffected.
+ */
+function migrateRuleEntriesTableForLicensing(sqlite: Database.Database): void {
+  const hasRuleEntriesTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_entries'")
+    .get();
+  if (!hasRuleEntriesTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(rule_entries)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  // Add each missing column independently — a partially-migrated DB (unlikely but possible
+  // after an interrupted upgrade) converges without re-ALTERing an existing column.
+  if (!has('license')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN license TEXT NOT NULL DEFAULT ''");
+  if (!has('attribution')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN attribution TEXT NOT NULL DEFAULT ''");
+  if (!has('author')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN author TEXT NOT NULL DEFAULT ''");
+  if (!has('source_url')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
+}
+
+/**
  * Migration for DBs created before inventory items could carry a bundled entity
  * icon (issue #307): `inventory_items.icon_slug` didn't exist. Plain ADD COLUMN
  * with a '' default — same idiom as migrateNpcsTableForIconSlug (0037). Existing
@@ -1295,6 +1340,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0047_comments_editor_provenance', run: migrateCommentsTableForEditorProvenance },
   { name: '0048_dice_rolls_terms', run: migrateDiceRollsTableForTerms },
   { name: '0049_campaigns_ics_token_expires_at', run: migrateCampaignsTableForIcsTokenExpiresAt },
+  { name: '0050_rule_entries_licensing', run: migrateRuleEntriesTableForLicensing },
 ];
 
 /**
@@ -1458,6 +1504,16 @@ export function openDatabase(dataDir: string): {
   ftsAvailable: boolean;
 } {
   fs.mkdirSync(dataDir, { recursive: true });
+
+  // Issue #721 boot guard: the mount must look correct BEFORE SQLite opens (and
+  // auto-creates) campfire.db. assertDataMount is the single arbiter of "fresh
+  // install vs broken mount": it initializes the install sentinel on first run,
+  // trusts an existing sentinel, and refuses to boot when a foreign DB appears
+  // without its sentinel (the missing/wrong-mount failure mode). Runs after the
+  // dir mkdir so a missing DATA_DIR itself doesn't trip the guard — the dir is
+  // the thing the operator mounts, the sentinel is what we write into it.
+  assertDataMount(dataDir, dbFilePath(dataDir));
+
   const sqlite = new Database(dbFilePath(dataDir));
   sqlite.pragma('journal_mode = WAL');
 

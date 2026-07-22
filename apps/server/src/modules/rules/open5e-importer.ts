@@ -99,6 +99,17 @@ export interface ImportedEntry {
   license: string;
   /** Human-readable source/document label (Open5e `document.name`), e.g. "System Reference Document 5.1". */
   source: string;
+  /**
+   * Per-entry provenance (issue #734). Optional because most importers only know the
+   * license + document label; the service layer fills these from pack metadata when the
+   * importer leaves them unset ('' → inherit the pack's value). OSR populates
+   * `attribution` from its OsrSource.attribution credit line.
+   */
+  attribution?: string;
+  /** Creator/rights-holder to credit, when separable from `attribution`. */
+  author?: string;
+  /** Deep link back to the entry on its origin site. */
+  sourceUrl?: string;
   /** Optional bundled game-icons.net slug to seed the entry's icon override (issue #305). Open5e imports leave this unset — the web app derives a default from type/dataJson. */
   iconSlug?: string;
 }

@@ -121,9 +121,39 @@ function entryToDomain(row: typeof ruleEntries.$inferSelect): RuleEntry {
     body: row.body,
     dataJson: row.dataJson,
     source: row.source ?? '',
+    // Per-entry provenance (issue #734). '' on rows written before migration 0050 means
+    // "inherit the pack's value"; the reader resolves that fallback (entry.license || pack.license).
+    license: row.license ?? '',
+    attribution: row.attribution ?? '',
+    author: row.author ?? '',
+    sourceUrl: row.sourceUrl ?? '',
     iconSlug: row.iconSlug ?? '',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+/**
+ * Resolve an imported entry's per-entry provenance against the pack-level fallbacks
+ * (issue #734). Importers know the license/source for every entry but may leave
+ * attribution/author/sourceUrl unset ('' → "inherit the pack's value"). This centralizes
+ * the fallback rule so both the fresh-install and incremental-add insert paths stamp the
+ * SAME effective values, and the reader can trust entry.license as the entry's real license
+ * rather than a dropped/blank field. The pack fallbacks are the installer's `meta`
+ * (license/sourceUrl/name): attribution falls back to the pack name (a reasonable default
+ * credit line), and license to the pack license.
+ */
+function effectiveEntryProvenance(
+  entry: ImportedEntry,
+  packLicense: string,
+  packSourceUrl: string,
+  packName: string,
+): { license: string; attribution: string; author: string; sourceUrl: string } {
+  return {
+    license: (entry.license ?? '').trim() || packLicense,
+    attribution: (entry.attribution ?? '').trim() || packName,
+    author: (entry.author ?? '').trim(),
+    sourceUrl: (entry.sourceUrl ?? '').trim() || packSourceUrl,
   };
 }
 
@@ -558,7 +588,13 @@ export class RulesService {
    * clean 400 at the POST rather than a failed job the caller must poll to discover.
    */
   enqueueUploadInstall(input: RulePackUpload, user: RequestUser): RulePackInstallJob {
+    // License open-ness is validated synchronously here so a bad-license upload gets a
+    // clean 400 at the POST rather than a failed job the caller must poll to discover.
+    // BOTH the pack license AND every entry's effective license (entry license or pack
+    // fallback) are checked up front — a non-open entry in an otherwise-open pack is
+    // rejected with an indexed error naming the offender, before any job/mutation (#734).
     this.assertOpenLicense(input.pack.license);
+    this.assertEntriesOpenLicensed(input);
     const types = [...new Set(input.entries.map((e) => e.type))];
     const job = this.newJob('upload', types);
     queueMicrotask(() =>
@@ -573,6 +609,33 @@ export class RulesService {
     if (!isOpenLicense(license)) {
       throw new BadRequestException(
         `License "${license}" is not a recognized open license. Uploaded rule packs must be OGL, ORC, Creative Commons, or public domain — copyrighted or purchased content cannot be uploaded.`,
+      );
+    }
+  }
+
+  /**
+   * Per-entry effective-license validation (issue #734). The pack-level check
+   * (assertOpenLicense) only validates the PACK license; a non-open entry ("All Rights
+   * Reserved") could otherwise smuggle into an open-licensed pack. Each entry's effective
+   * license is its own, falling back to the pack's, and ALL must be open. Throws a single
+   * indexed BadRequestException naming every offending entry (input index + slug + license)
+   * so the uploader can fix and resubmit — called synchronously at enqueue so the caller
+   * gets a 400 at the POST, not a failed job to poll for.
+   */
+  private assertEntriesOpenLicensed(input: RulePackUpload): void {
+    const offenders: Array<{ index: number; slug: string; license: string }> = [];
+    input.entries.forEach((entry, index) => {
+      const effectiveLicense = (entry.license ?? '').trim() || input.pack.license;
+      if (!isOpenLicense(effectiveLicense)) {
+        offenders.push({ index, slug: entry.slug, license: effectiveLicense });
+      }
+    });
+    if (offenders.length > 0) {
+      const detail = offenders
+        .map((o) => `entry[${o.index}] "${o.slug}" (license "${o.license}")`)
+        .join('; ');
+      throw new BadRequestException(
+        `Uploaded pack contains ${offenders.length} entr${offenders.length === 1 ? 'y' : 'ies'} with a non-open effective license. Each entry must be OGL, ORC, Creative Commons, or public domain (entry license falls back to the pack license). Offending ${offenders.length === 1 ? 'entry' : 'entries'}: ${detail}.`,
       );
     }
   }
@@ -1004,8 +1067,8 @@ export class RulesService {
    * for any system (Pathfinder 2e ORC, other OGL/CC content, homebrew), not just
    * Open5e. Reuses the same persistence path as the Open5e importer, so multi-pack
    * coexistence, incremental adds, and the concurrent-install race guard all apply
-   * identically. License open-ness is (re)validated here as defense-in-depth; the
-   * enqueue path already rejected a non-open license with a 400.
+   * identically. License open-ness (pack + per-entry effective) is re-validated here as
+   * defense-in-depth; the enqueue path already rejected a non-open license with a 400.
    */
   async installFromUpload(
     input: RulePackUpload,
@@ -1013,6 +1076,7 @@ export class RulesService {
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     this.assertOpenLicense(input.pack.license);
+    this.assertEntriesOpenLicensed(input);
 
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence — the
     // (pack_id, type, slug) unique index (issue #143) would otherwise reject an upload that
@@ -1034,6 +1098,11 @@ export class RulesService {
         dataJson: e.dataJson ?? null,
         license: e.license ?? input.pack.license,
         source: e.source ?? input.pack.name,
+        // Per-entry provenance (issue #734): fall back to pack-level values so every row has
+        // explicit, attributable provenance rather than a dropped/blank field.
+        attribution: e.attribution ?? input.pack.name,
+        author: e.author ?? '',
+        sourceUrl: e.sourceUrl ?? input.pack.sourceUrl ?? '',
         iconSlug: e.iconSlug ?? '',
       }));
 
@@ -1111,6 +1180,7 @@ export class RulesService {
           .all();
 
         for (const entry of entries) {
+          const prov = effectiveEntryProvenance(entry, meta.license, meta.sourceUrl, meta.name);
           tx.insert(ruleEntries)
             .values({
               packId: packRow.id,
@@ -1121,6 +1191,10 @@ export class RulesService {
               body: entry.body,
               dataJson: entry.dataJson,
               source: entry.source,
+              license: prov.license,
+              attribution: prov.attribution,
+              author: prov.author,
+              sourceUrl: prov.sourceUrl,
               iconSlug: entry.iconSlug ?? '',
               createdAt: ts,
               updatedAt: ts,
@@ -1180,6 +1254,7 @@ export class RulesService {
       try {
         updatedPack = this.db.transaction((tx) => {
           for (const entry of toAdd) {
+            const prov = effectiveEntryProvenance(entry, packRow.license, packRow.sourceUrl, packRow.name);
             tx.insert(ruleEntries)
               .values({
                 packId: packRow.id,
@@ -1190,6 +1265,11 @@ export class RulesService {
                 body: entry.body,
                 dataJson: entry.dataJson,
                 source: entry.source,
+                license: prov.license,
+                attribution: prov.attribution,
+                author: prov.author,
+                sourceUrl: prov.sourceUrl,
+                iconSlug: entry.iconSlug ?? '',
                 createdAt: ts,
                 updatedAt: ts,
               })
