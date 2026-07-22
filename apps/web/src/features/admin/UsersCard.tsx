@@ -160,7 +160,6 @@ function NewUserForm({
         displayName: displayName.trim() || undefined,
         serverRole,
       });
-      onCreated();
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setFieldErrors({ username: 'That username is already in use.' });
@@ -168,9 +167,13 @@ function NewUserForm({
       } else {
         setSubmitError(err instanceof ApiError ? err.message : "Couldn't create user.");
       }
-    } finally {
       setSaving(false);
+      return;
     }
+
+    // Success closes and unmounts the dialog. Do not schedule another local
+    // state update after handing lifecycle ownership back to the parent.
+    onCreated();
   }
 
   return (
