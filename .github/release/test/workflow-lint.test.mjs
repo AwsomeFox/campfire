@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 function lintBasicWorkflowSchema(source, filename) {
-  assert.equal(source.includes('\t'), false, `${filename}: tabs are not valid indentation`);
+  assert.equal(/^[ ]*\t/m.test(source), false, `${filename}: tabs are not valid indentation`);
   assert.match(source, /^name:\s*\S+/m, `${filename}: name is required`);
   assert.match(source, /^on:\s*$/m, `${filename}: on mapping is required`);
   assert.match(source, /^jobs:\s*$/m, `${filename}: jobs mapping is required`);

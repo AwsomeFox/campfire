@@ -28,7 +28,20 @@ export class GitHubApi {
     });
     if (allow404 && response.status === 404) return null;
     const text = await response.text();
-    const payload = text ? JSON.parse(text) : null;
+    let payload = null;
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        const error = new ReleaseError(
+          'GITHUB_API_ERROR',
+          `GitHub API ${method} ${path} returned non-JSON with ${response.status}.`,
+          { status: response.status, responseBody: text.slice(0, 500) },
+        );
+        error.status = response.status;
+        throw error;
+      }
+    }
     if (!response.ok) {
       const error = new ReleaseError(
         'GITHUB_API_ERROR',
