@@ -253,7 +253,9 @@ function LayoutContent() {
   const [lostAccess, setLostAccess] = useState(false);
   const [inboxCount, setInboxCount] = useState(0);
   const [pendingProposals, setPendingProposals] = useState(0);
-  const [desktopLayout, setDesktopLayout] = useState(() => window.matchMedia('(min-width: 768px)').matches);
+  const [desktopLayout, setDesktopLayout] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches,
+  );
   const menuRef = useRef<HTMLDivElement>(null);
   // Track WHICH campaign we've stale-checked, not a bare boolean — so navigating
   // to a different campaign re-checks (and clears a prior lock screen) instead of
