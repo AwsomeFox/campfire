@@ -89,9 +89,23 @@ async function openGestureFixture(page: Page) {
     // Synthetic PointerEvents are not registered as active hardware pointers by Chromium, so its
     // native capture methods reject them. The component still receives the exact pointer stream;
     // tests dispatch lostpointercapture explicitly where that browser transition is under test.
+    Object.defineProperty(window, '__releasedPointerIds', {
+      configurable: true,
+      value: [] as number[],
+    });
     Object.defineProperties(Element.prototype, {
       setPointerCapture: { configurable: true, value: () => undefined },
-      releasePointerCapture: { configurable: true, value: () => undefined },
+      releasePointerCapture: {
+        configurable: true,
+        value(this: Element, pointerId: number) {
+          (window as unknown as { __releasedPointerIds: number[] }).__releasedPointerIds.push(pointerId);
+          this.dispatchEvent(new PointerEvent('lostpointercapture', {
+            bubbles: true,
+            pointerId,
+            isPrimary: true,
+          }));
+        },
+      },
       hasPointerCapture: { configurable: true, value: () => true },
     });
   });
@@ -193,6 +207,29 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     expect(completedFog.revealed[0].y).toBeCloseTo(15);
     expect(completedFog.revealed[0].w).toBeCloseTo(45);
     expect(completedFog.revealed[0].h).toBeCloseTo(60);
+
+    await expect.poll(() => page.evaluate(
+      () => (window as unknown as { __releasedPointerIds: number[] }).__releasedPointerIds,
+    )).toEqual([1, 7, 12]);
+
+    // A release may be the only event carrying the final coordinate. The ruler must use it even
+    // when no final pointermove was delivered, while remaining visible for reading.
+    await page.getByRole('button', { name: 'Measure', exact: true }).click();
+    const measureStart = { xPct: 0.2, yPct: 0.2 };
+    const measureEnd = { xPct: 0.6, yPct: 0.35 };
+    const measurePointer = { pointerId: 13, pointerType: 'mouse', isPrimary: true } as const;
+    await dispatchPointer(surface, 'pointerdown', measureStart, measurePointer);
+    await dispatchPointer(surface, 'pointerup', measureEnd, measurePointer);
+    const ruler = page.getByTestId('map-ruler-line');
+    const finalRulerPoint = await ruler.evaluate((line) => ({
+      x: Number(line.getAttribute('x2')?.replace('%', '')),
+      y: Number(line.getAttribute('y2')?.replace('%', '')),
+    }));
+    expect(finalRulerPoint.x).toBeCloseTo(60);
+    expect(finalRulerPoint.y).toBeCloseTo(35);
+    await expect.poll(() => page.evaluate(
+      () => (window as unknown as { __releasedPointerIds: number[] }).__releasedPointerIds,
+    )).toEqual([1, 7, 12, 13]);
   });
 
   test('pointer cancellation, premature capture loss, visibility/background, and rotation roll previews back with zero PATCHes', async ({ page }) => {

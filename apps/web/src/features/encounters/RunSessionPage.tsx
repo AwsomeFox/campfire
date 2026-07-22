@@ -1440,6 +1440,16 @@ function BattleMap({
     const finalPoint = pointerToPercent(e);
     successfulPointerUpRef.current = e.pointerId;
     activeGestureRef.current = null;
+    // Pointer capture is normally released implicitly after pointerup, but doing it explicitly
+    // makes the lifecycle deterministic across mouse, pen, and touch implementations. Ownership
+    // is already cleared, so a synchronous lostpointercapture can only acknowledge this success.
+    try {
+      if (gesture.captureTarget.hasPointerCapture?.(gesture.pointerId)) {
+        gesture.captureTarget.releasePointerCapture?.(gesture.pointerId);
+      }
+    } catch {
+      // The browser may already have released capture as part of pointerup dispatch.
+    }
     // Completed measurements intentionally remain visible for reading. The three persistent
     // gesture classes clear their transient overrides before invoking their mutation callbacks.
     if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
@@ -1468,6 +1478,7 @@ function BattleMap({
     }
     // A ruler stays on screen after release so the readout can be read; it clears when the
     // next measurement starts, the tool changes, or move mode is re-entered.
+    setRuler({ start: gesture.start, end: finalPoint ?? gesture.end });
   }
 
   function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
@@ -1992,6 +2003,7 @@ function BattleMap({
               <>
                 <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none', zIndex: 7 }}>
                   <line
+                    data-testid="map-ruler-line"
                     x1={`${ruler.start.x}%`}
                     y1={`${ruler.start.y}%`}
                     x2={`${ruler.end.x}%`}
