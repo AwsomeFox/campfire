@@ -50,7 +50,9 @@ async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
  * a throwaway-encounter test ended it (issue #744). /reopen transitions 'ended' ->
  * 'running' and preserves round/turnIndex, so the combat-tracker suite still sees
  * Round 1 with its seeded initiatives intact. Safe to call when the seed fight is
- * already running (the 400 from /reopen on a non-'ended' status is ignored).
+ * already running (the 400 from /reopen on a non-'ended' status is ignored). Called
+ * from each test's `finally` block so the one-live-fight invariant holds across the
+ * serial suite regardless of which throwaway fight a test created and ended.
  */
 async function restoreSeedFight(page: Page): Promise<void> {
   const { encounterId } = seed();
