@@ -43,6 +43,18 @@ export function UndoSnackbar({
 }) {
   const [snapshot, setSnapshot] = useState<UndoSnapshot>(initialUndoState);
 
+  // Unmount guard: the restore promise in `undo()` resolves asynchronously, so
+  // the bar's parent may have unmounted it (e.g. cleared `pendingUndo`) while
+  // the request was still in flight. Guarded state updates follow the same
+  // `mountedRef` pattern as NotificationsBell.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // The timeout is held in a ref so its arming/clearing is driven entirely by
   // the snapshot's `timerArmed` flag (idle arms it; pending/failed clear it).
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -95,14 +107,24 @@ export function UndoSnackbar({
     // Duplicate-restore guard: a restore is already in flight — ignore the
     // extra click. (`failed` is NOT busy, so Retry still works.)
     if (isBusy(snapshot)) return;
-    setSnapshot((cur) => reduceUndo(cur, { type: 'undo' }));
+    // The UI labels the action "Retry" in the failed state; dispatch the
+    // matching `'retry'` event so the intent is explicit and the reducer's
+    // `'retry'` branch isn't dead code. From `idle` this is a first attempt,
+    // so it stays `'undo'`. (Both events transition to `pending` identically.)
+    const startEvent =
+      snapshot.status === 'failed' ? { type: 'retry' as const } : { type: 'undo' as const };
+    setSnapshot((cur) => reduceUndo(cur, startEvent));
     try {
       await onUndoRef.current();
-      setSnapshot((cur) => reduceUndo(cur, { type: 'succeeded' }));
+      if (mountedRef.current) {
+        setSnapshot((cur) => reduceUndo(cur, { type: 'succeeded' }));
+      }
     } catch {
-      setSnapshot((cur) =>
-        reduceUndo(cur, { type: 'failed' }),
-      );
+      if (mountedRef.current) {
+        setSnapshot((cur) =>
+          reduceUndo(cur, { type: 'failed' }),
+        );
+      }
     }
   }
 
@@ -149,9 +171,12 @@ export function UndoSnackbar({
         fontSize: 13,
       }}
     >
-      <span aria-hidden={Boolean(error)}>{error ?? message}</span>
-      {/* Visually-hidden mirror drives the live region so transitions are
-          announced; the visible span above stays focused on the action copy. */}
+      {/* The visible message is ALWAYS aria-hidden: with role="status" +
+          aria-atomic="true" the live region would otherwise concatenate it
+          with the sr-only announcement, producing duplicate reads in the
+          idle/pending states. The sr-only span below is the single
+          announcement source. */}
+      <span aria-hidden>{error ?? message}</span>
       <span className="sr-only">{announcement}</span>
       <button
         className="btn btn-secondary"

@@ -22,9 +22,12 @@
  *   - done    restore succeeded; the component unmounts after announcing
  *
  * The reducer's rule of thumb: `timerArmed` is true ONLY in `idle`. Entering
- * `pending` or `failed` clears it; resolving back to `idle` (on retry from
- * failed) re-arms it with a fresh full window so the user isn't penalised for
- * a flaky network.
+ * `pending` or `failed` clears it. The state model NEVER transitions back to
+ * `idle` — `retry` (from `failed`) goes to `pending`, and `succeeded` goes to
+ * `done` — so once the bar leaves `idle` the timer is gone for good: a retry
+ * stays paused for the whole restore window, and success closes the bar. The
+ * recovery path is therefore never removed by an auto-dismiss while the user
+ * still has a decision to make.
  */
 export type UndoStatus = 'idle' | 'pending' | 'failed' | 'done';
 
