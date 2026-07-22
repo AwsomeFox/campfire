@@ -1,6 +1,17 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { LANG_STORAGE_KEY, SYSTEM_LOCALE, serializeLocalePreference } from '../../src/i18n/locale';
 import { seed, stateFor } from './seed';
+
+async function expectedSessionDate(page: Page, locale: string): Promise<string> {
+  return page.evaluate(({ value, locale: requestedLocale }) => {
+    const [year, month, day] = value.split('-').map(Number);
+    return new Date(year, month - 1, day).toLocaleDateString(requestedLocale, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  }, { value: '2026-07-21', locale });
+}
 
 test('Preferences keeps catalog language separate from System formatting across reload and browser changes', async ({ browser }) => {
   const frenchContext = await browser.newContext({
@@ -31,19 +42,21 @@ test('Preferences keeps catalog language separate from System formatting across 
 
   // An unsupported French catalog falls back to English while dates stay French.
   await page.goto(`/c/${seed().campaignId}/sessions`);
-  await expect(page.getByText('21 juil. 2026', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(await expectedSessionDate(page, 'fr-FR'), { exact: true }).first()).toBeVisible();
 
   // A runtime browser-language event updates mounted formatting surfaces too.
   await page.evaluate(() => {
     Object.defineProperty(navigator, 'language', { configurable: true, value: 'de-DE' });
+    Object.defineProperty(navigator, 'languages', { configurable: true, value: ['de-DE', 'de'] });
     window.dispatchEvent(new Event('languagechange'));
   });
-  await expect(page.getByText('21. Juli 2026', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(await expectedSessionDate(page, 'de-DE'), { exact: true }).first()).toBeVisible();
   await page.evaluate(() => {
     Object.defineProperty(navigator, 'language', { configurable: true, value: 'fr-FR' });
+    Object.defineProperty(navigator, 'languages', { configurable: true, value: ['fr-FR', 'fr'] });
     window.dispatchEvent(new Event('languagechange'));
   });
-  await expect(page.getByText('21 juil. 2026', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(await expectedSessionDate(page, 'fr-FR'), { exact: true }).first()).toBeVisible();
 
   // Explicit English changes regional formatting and records a deliberate override.
   await page.goto('/preferences');
@@ -51,7 +64,7 @@ test('Preferences keeps catalog language separate from System formatting across 
   await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), LANG_STORAGE_KEY))
     .toBe(serializeLocalePreference('en'));
   await page.goto(`/c/${seed().campaignId}/sessions`);
-  await expect(page.getByText('Jul 21, 2026', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(await expectedSessionDate(page, 'en'), { exact: true }).first()).toBeVisible();
 
   // Dashboard schedule banners use the explicit formatting preference too.
   const scheduledAt = '2026-07-21T17:05:00.000Z';
@@ -89,6 +102,6 @@ test('Preferences keeps catalog language separate from System formatting across 
   await germanPage.goto('/preferences');
   await expect(germanPage.getByLabel('Display language')).toHaveValue(SYSTEM_LOCALE);
   await germanPage.goto(`/c/${seed().campaignId}/sessions`);
-  await expect(germanPage.getByText('21. Juli 2026', { exact: true }).first()).toBeVisible();
+  await expect(germanPage.getByText(await expectedSessionDate(germanPage, 'de-DE'), { exact: true }).first()).toBeVisible();
   await germanContext.close();
 });

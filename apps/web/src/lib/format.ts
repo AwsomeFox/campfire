@@ -17,7 +17,7 @@ const formattingLocaleSnapshot = () => localeController.resolved.formatLocale;
 
 /** Subscribe a formatting surface so a runtime browser-language change re-renders it. */
 export function useFormattingLocale(): string | undefined {
-  return useSyncExternalStore(subscribeToLocale, formattingLocaleSnapshot, () => undefined);
+  return useSyncExternalStore(subscribeToLocale, formattingLocaleSnapshot, formattingLocaleSnapshot);
 }
 
 /**

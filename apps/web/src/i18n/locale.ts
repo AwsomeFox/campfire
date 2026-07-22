@@ -104,7 +104,7 @@ export function writeLocalePreference(
 
 /** Keep the browser's complete locale instead of reducing it to a language code. */
 export function browserLocale(navigatorLike: Pick<Navigator, 'language' | 'languages'> | undefined): string | undefined {
-  const locale = navigatorLike?.language || navigatorLike?.languages?.[0];
+  const locale = navigatorLike?.languages?.[0] || navigatorLike?.language;
   return locale?.trim() || undefined;
 }
 

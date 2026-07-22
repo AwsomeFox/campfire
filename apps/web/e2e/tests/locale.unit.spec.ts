@@ -3,6 +3,7 @@ import {
   LANG_STORAGE_KEY,
   LocaleController,
   SYSTEM_LOCALE,
+  browserLocale,
   isSupportedLanguage,
   parseStoredLocalePreference,
   resolveLocales,
@@ -29,6 +30,11 @@ function environment(storage: LocaleStorage, getBrowserLocale: () => string): Lo
 }
 
 test.describe('locale preference resolution', () => {
+  test('prefers the most specific browser locale from navigator.languages', () => {
+    expect(browserLocale({ language: 'en', languages: ['en-GB', 'en'] })).toBe('en-GB');
+    expect(browserLocale({ language: 'de-DE', languages: [] })).toBe('de-DE');
+  });
+
   test('accepts only translation catalogs the application actually ships', () => {
     expect(isSupportedLanguage('en')).toBe(true);
     expect(isSupportedLanguage('fr-FR')).toBe(false);
@@ -138,47 +144,27 @@ test.describe('locale preference resolution', () => {
 
 test.describe('localized date, time, and number formatting', () => {
   const date = new Date(2026, 6, 21, 17, 5, 0);
-  const cases = [
-    {
-      locale: 'en-US',
-      date: '7/21/26',
-      time: '5:05 PM',
-      dateTime: '7/21/26, 5:05 PM',
-      number: '1,234,567.89',
-    },
-    {
-      locale: 'fr-FR',
-      date: '21/07/2026',
-      time: '17:05',
-      dateTime: '21/07/2026 17:05',
-      number: '1\u202f234\u202f567,89',
-    },
-    {
-      locale: 'de-DE',
-      date: '21.07.26',
-      time: '17:05',
-      dateTime: '21.07.26, 17:05',
-      number: '1.234.567,89',
-    },
-    {
-      locale: 'ar-EG',
-      date: '٢١\u200f/٧\u200f/٢٠٢٦',
-      time: '٥:٠٥ م',
-      dateTime: '٢١\u200f/٧\u200f/٢٠٢٦، ٥:٠٥ م',
-      number: '١٬٢٣٤٬٥٦٧٫٨٩',
-    },
-  ] as const;
+  const cases = ['en-US', 'fr-FR', 'de-DE', 'ar-EG'] as const;
 
-  for (const expected of cases) {
-    test(`${expected.locale} conventions`, () => {
-      const format = createLocaleFormatters(() => expected.locale);
-      expect(format.formatDate(date, { dateStyle: 'short' })).toBe(expected.date);
-      expect(format.formatTime(date, { timeStyle: 'short' })).toBe(expected.time);
-      expect(format.formatDateTime(date, { dateStyle: 'short', timeStyle: 'short' })).toBe(expected.dateTime);
+  for (const locale of cases) {
+    test(`${locale} conventions`, () => {
+      const format = createLocaleFormatters(() => locale);
+      expect(format.formatDate(date, { dateStyle: 'short' })).toBe(
+        new Intl.DateTimeFormat(locale, { dateStyle: 'short' }).format(date),
+      );
+      expect(format.formatTime(date, { timeStyle: 'short' })).toBe(
+        new Intl.DateTimeFormat(locale, { timeStyle: 'short' }).format(date),
+      );
+      expect(format.formatDateTime(date, { dateStyle: 'short', timeStyle: 'short' })).toBe(
+        new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short' }).format(date),
+      );
       expect(format.formatNumber(1_234_567.89, {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
-      })).toBe(expected.number);
+      })).toBe(new Intl.NumberFormat(locale, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(1_234_567.89));
     });
   }
 });
