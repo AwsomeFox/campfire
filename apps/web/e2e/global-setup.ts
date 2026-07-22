@@ -70,6 +70,17 @@ export interface SeedData {
     arcId: number;
     beatId: number;
     proposalId: number;
+    /** Identity-persisted mention fixtures (issue #739). */
+    identity: {
+      questId: number;
+      /** NPC the typed token binds to; renamed AFTER seeding so the label is stale. */
+      renamedNpcId: number;
+      /** Two NPCs sharing one name — plain-text mention must NOT auto-link. */
+      twinAId: number;
+      twinBId: number;
+      /** Soft-deleted NPC — its typed token must degrade to plain text. */
+      deletedNpcId: number;
+    };
   };
 }
 
@@ -224,6 +235,53 @@ export default async function globalSetup(config: FullConfig) {
     ].join(' · '),
     status: 'active',
   });
+  // Identity-persisted mention fixtures (issue #739). A quest whose body embeds
+  // TYPED mention tokens — `[label](/.cf/<type>/<id>)` — alongside plain-text
+  // mentions of the same name. The typed tokens bind to specific records by id
+  // so they survive renames and same-name collisions; the plain-text "Twin Bob"
+  // appears twice and must NOT be auto-linked (ambiguous name).
+  const renamedNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
+    name: 'DLRNAV Twiceborn',
+    role: 'Identity fixture',
+  });
+  const twinA = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
+    name: 'DLRNAV Twin Bob',
+    role: 'Twin A',
+  });
+  const twinB = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
+    name: 'DLRNAV Twin Bob',
+    role: 'Twin B',
+  });
+  const deadTargetNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
+    name: 'DLRNAV Ghosttarget',
+    role: 'Will be deleted',
+  });
+  const identityQuest = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/quests`, {
+    title: 'DLRNAV Identity Links',
+    body: [
+      `Stale label: [DLRNAV Twiceborn](/.cf/npc/${renamedNpc.id})`,
+      `Ambiguous plain text: DLRNAV Twin Bob and DLRNAV Twin Bob`,
+      `Resolved twin A: [Bob A](/.cf/npc/${twinA.id})`,
+      `Resolved twin B: [Bob B](/.cf/npc/${twinB.id})`,
+      `Dead target: [DLRNAV Ghosttarget](/.cf/npc/${deadTargetNpc.id})`,
+    ].join('\n\n'),
+    status: 'active',
+  });
+  // Rename the once-named NPC so the typed token's authored label ("DLRNAV
+  // Twiceborn") no longer matches its current name — the renderer must refresh
+  // the visible label to the current name while keeping the link bound to id.
+  // NPC update/delete live under /npcs/:id (not the campaigns prefix).
+  const renamed = await dm.patch(`/api/v1/npcs/${renamedNpc.id}`, {
+    data: { name: 'DLRNAV Reborn', role: renamedNpc.role },
+  });
+  if (!renamed.ok()) {
+    throw new Error(`PATCH rename npc -> ${renamed.status()}: ${await renamed.text()}`);
+  }
+  // Soft-delete the ghost target so its typed token must degrade to plain text.
+  const deleted = await dm.delete(`/api/v1/npcs/${deadTargetNpc.id}`);
+  if (!deleted.ok()) {
+    throw new Error(`DELETE ghosttarget npc -> ${deleted.status()}: ${await deleted.text()}`);
+  }
   const proposed = await dm.patch(`/api/v1/sessions/${navSession.id}?proposed=true`, {
     data: { title: navSession.title },
   });
@@ -366,6 +424,13 @@ export default async function globalSetup(config: FullConfig) {
       arcId: navArc.id,
       beatId: navBeat.id,
       proposalId: navProposal.id,
+      identity: {
+        questId: identityQuest.id,
+        renamedNpcId: renamedNpc.id,
+        twinAId: twinA.id,
+        twinBId: twinB.id,
+        deletedNpcId: deadTargetNpc.id,
+      },
     },
   };
   writeFileSync(resolve(AUTH_DIR, 'seed.json'), JSON.stringify(seed, null, 2));
