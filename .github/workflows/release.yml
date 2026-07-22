@@ -17,6 +17,7 @@ concurrency:
 jobs:
   validate:
     name: Validate release tag (no mutation)
+    if: ${{ !contains(github.ref_name, '-') && !contains(github.ref_name, '+') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

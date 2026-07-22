@@ -146,7 +146,7 @@ export function extractClosingIssueNumbers(body) {
 
 const CALLOUTS = [
   ['Migrations', /\b(migration|migrate|database schema|data backfill)\b/i],
-  ['Configuration', /\b(configuration|config|environment variable|env var|\.env\b)\b/i],
+  ['Configuration', /(?:\b(?:configuration|config|environment variable|env var)\b|\.env\b)/i],
   ['Compatibility', /\b(compatibility|breaking change|deprecat|minimum version|requires? node)\b/i],
   ['Known limitations', /\b(known limitation|known issue|not supported|unsupported|follow[- ]?up)\b/i],
 ];

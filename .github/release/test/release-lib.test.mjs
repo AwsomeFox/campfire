@@ -97,6 +97,25 @@ test('note grouping prioritizes security and accessibility and de-duplicates cha
   assert.match(notes, /## Contributors/);
 });
 
+test('configuration callouts recognize a standalone .env path', () => {
+  const notes = generateReleaseNotes({
+    tag: 'v1.2.3',
+    previousTag: 'v1.2.2',
+    changes: [{
+      number: 10,
+      sha: 'def',
+      title: 'Document operator setup',
+      body: 'Update `.env` before restarting the server.',
+      html_url: 'https://github.test/pull/10',
+      labels: [],
+      author: { login: 'grace', html_url: 'https://github.test/grace' },
+      closedIssueNumbers: [],
+    }],
+    issues: [],
+  });
+  assert.match(notes, /\*\*Configuration:\*\* \[#10\]/);
+});
+
 test('commit-range extraction omits merge and release noise and de-duplicates merged PRs', async () => {
   const commits = [
     { sha: 'feature', commit: { message: 'feat: useful' }, html_url: 'https://example/feature' },

@@ -63,6 +63,7 @@ test('release workflow is strict, least-privilege, and contains no release-decis
   lintBasicWorkflowSchema(ci, 'ci.yml');
 
   assert.match(release, /tags: \['v\[0-9\]\*\.\[0-9\]\*\.\[0-9\]\*'\]/);
+  assert.match(release, /if: \$\{\{ !contains\(github\.ref_name, '-'\) && !contains\(github\.ref_name, '\+'\) \}\}/);
   assert.doesNotMatch(release, /^\s*schedule:/m);
   assert.doesNotMatch(release, /^\s*workflow_dispatch:/m);
   assert.doesNotMatch(release, /npm version|git tag|create.pull.request|merged PR count|ten merges/i);
