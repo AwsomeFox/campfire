@@ -45,11 +45,15 @@ discovery. The relevant endpoints (all at the server root, outside `/api/v1`):
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 authorization-server metadata (endpoints, PKCE, grants). |
 | `POST /oauth/register` | RFC 7591 Dynamic Client Registration. |
 | `GET`/`POST /oauth/authorize` | Login + consent; issues an authorization code (PKCE, `code_challenge_method=S256`). |
-| `POST /oauth/token` | `authorization_code` and `refresh_token` grants. |
+| `POST /oauth/token` | `authorization_code` and rotating, single-use `refresh_token` grants. |
 | `POST /oauth/revoke` | RFC 7009 token revocation. |
 
 Issued tokens honour the same scope/role caps as PATs (DM/Player/Viewer,
 optional single-campaign binding) and never carry server-admin power.
+Authorization codes and refresh tokens are claimed atomically, so concurrent
+redemptions produce at most one token response. Reuse of a rotated refresh token
+revokes its complete refresh family; the client must start a new authorization
+flow. Replay audits record the client and affected grant, never token values.
 
 ## REST API
 

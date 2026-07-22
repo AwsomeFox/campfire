@@ -1,9 +1,9 @@
-import { timingSafeEqual } from 'node:crypto';
-import { BadRequestException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
-import { eq, lt } from 'drizzle-orm';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { BadRequestException, Inject, Injectable, UnauthorizedException, type OnApplicationBootstrap } from '@nestjs/common';
+import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { oauthClients, oauthAuthCodes, oauthAccessTokens, users } from '../../db/schema';
+import { auditLog, oauthClients, oauthAuthCodes, oauthAccessTokens, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import {
   generateAuthorizationCode,
@@ -22,6 +22,8 @@ const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
 /** Refresh-token lifetime — long-lived so a connector stays linked without re-consent. */
 const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+/** Retained refresh replay sentinels only need to live through their expiry. */
+const OAUTH_PURGE_INTERVAL_MS = 60 * 60 * 1000;
 
 export const OAUTH_SCOPES_SUPPORTED = ['mcp', 'dm', 'player', 'viewer'] as const;
 
@@ -88,8 +90,16 @@ export interface ResolvedOAuthToken {
  * zero new authorization logic — see resolveAccessToken().
  */
 @Injectable()
-export class OAuthService {
+export class OAuthService implements OnApplicationBootstrap {
   constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+
+  async onApplicationBootstrap(): Promise<void> {
+    await this.purgeExpired();
+    const timer = setInterval(() => {
+      void this.purgeExpired();
+    }, OAUTH_PURGE_INTERVAL_MS);
+    timer.unref();
+  }
 
   // ---------- Dynamic Client Registration (RFC 7591) ----------
 
@@ -207,12 +217,23 @@ export class OAuthService {
     redirectUri?: string;
     resource?: string;
   }): Promise<OAuthTokenResponse> {
-    const [row] = await this.db.select().from(oauthAuthCodes).where(eq(oauthAuthCodes.codeHash, hashOpaqueToken(input.code))).limit(1);
+    const codeHash = hashOpaqueToken(input.code);
+    const row = await this.findAuthorizationCode(codeHash);
     if (!row) {
       throw new BadRequestException({ error: 'invalid_grant', error_description: 'Authorization code not found' });
     }
-    // Single-use: consume it up front so a replay can never redeem twice, even on a later validation failure.
-    await this.db.delete(oauthAuthCodes).where(eq(oauthAuthCodes.id, row.id));
+    // Claim with one conditional write. Concurrent processes may both have read
+    // the row, but only the DELETE that changes one row is allowed to continue.
+    // This intentionally remains before validation: as before #679, any token-
+    // endpoint attempt consumes a recognized code, including a failed PKCE or
+    // redirect/client check.
+    const claimed = this.db
+      .delete(oauthAuthCodes)
+      .where(and(eq(oauthAuthCodes.id, row.id), eq(oauthAuthCodes.codeHash, codeHash)))
+      .run();
+    if (claimed.changes !== 1) {
+      throw new BadRequestException({ error: 'invalid_grant', error_description: 'Authorization code not found' });
+    }
 
     if (row.clientId !== input.client.clientId) {
       throw new BadRequestException({ error: 'invalid_grant', error_description: 'Authorization code was issued to a different client' });
@@ -247,8 +268,9 @@ export class OAuthService {
 
   /**
    * grant_type=refresh_token. Rotates the refresh token (the old one is
-   * invalidated by deleting the whole prior access-token row) and issues a fresh
-   * pair carrying the same user/role/campaign caps.
+   * atomically marked consumed) and issues a fresh pair carrying the same
+   * user/role/campaign caps. Reusing a consumed generation revokes its complete
+   * family and emits one redacted audit event.
    */
   async exchangeRefreshToken(input: {
     client: ClientRow;
@@ -256,7 +278,8 @@ export class OAuthService {
     scope?: string;
     resource?: string;
   }): Promise<OAuthTokenResponse> {
-    const [row] = await this.db.select().from(oauthAccessTokens).where(eq(oauthAccessTokens.refreshHash, hashOpaqueToken(input.refreshToken))).limit(1);
+    const refreshHash = hashOpaqueToken(input.refreshToken);
+    const row = await this.findRefreshToken(refreshHash);
     if (!row || !row.refreshExpiresAt) {
       throw new BadRequestException({ error: 'invalid_grant', error_description: 'Refresh token not found' });
     }
@@ -264,20 +287,62 @@ export class OAuthService {
       throw new BadRequestException({ error: 'invalid_grant', error_description: 'Refresh token was issued to a different client' });
     }
     if (new Date(row.refreshExpiresAt).getTime() < Date.now()) {
-      await this.db.delete(oauthAccessTokens).where(eq(oauthAccessTokens.id, row.id));
+      this.db
+        .update(oauthAccessTokens)
+        .set({ revokedAt: nowIso() })
+        .where(and(eq(oauthAccessTokens.id, row.id), isNull(oauthAccessTokens.revokedAt)))
+        .run();
       throw new BadRequestException({ error: 'invalid_grant', error_description: 'Refresh token expired' });
     }
-    // Rotation: drop the old pair, mint a new one.
-    await this.db.delete(oauthAccessTokens).where(eq(oauthAccessTokens.id, row.id));
+    if (row.refreshConsumedAt) {
+      this.revokeRefreshFamilyOnReplay(row);
+      throw new BadRequestException({ error: 'invalid_grant', error_description: 'Refresh token not found' });
+    }
+    if (row.revokedAt || row.familyRevokedAt) {
+      throw new BadRequestException({ error: 'invalid_grant', error_description: 'Refresh token not found' });
+    }
 
-    return this.issueTokenPair({
-      clientId: row.clientId,
-      userId: row.userId,
-      scope: input.scope ?? row.scope,
-      resource: input.resource ?? row.resource,
-      roleScope: this.parseRole(row.roleScope),
-      campaignId: row.campaignId,
+    const ts = nowIso();
+    const outcome = this.db.transaction((tx) => {
+      const claim = tx
+        .update(oauthAccessTokens)
+        .set({ refreshConsumedAt: ts, revokedAt: ts })
+        .where(
+          and(
+            eq(oauthAccessTokens.id, row.id),
+            eq(oauthAccessTokens.refreshHash, refreshHash),
+            isNull(oauthAccessTokens.refreshConsumedAt),
+            isNull(oauthAccessTokens.revokedAt),
+            isNull(oauthAccessTokens.familyRevokedAt),
+          ),
+        )
+        .run();
+
+      if (claim.changes !== 1) {
+        const current = tx.select().from(oauthAccessTokens).where(eq(oauthAccessTokens.id, row.id)).limit(1).get();
+        if (current?.refreshConsumedAt) this.revokeRefreshFamilyOnReplayTx(tx, current, ts);
+        return null;
+      }
+
+      // Generate and persist the successor only after this transaction owns the
+      // one-time claim. The insert and claim commit or roll back together.
+      const pair = this.buildTokenPair({
+        clientId: row.clientId,
+        userId: row.userId,
+        scope: input.scope ?? row.scope,
+        resource: input.resource ?? row.resource,
+        roleScope: this.parseRole(row.roleScope),
+        campaignId: row.campaignId,
+        familyId: row.familyId,
+      });
+      tx.insert(oauthAccessTokens).values(pair.values).run();
+      return pair.response;
     });
+
+    if (!outcome) {
+      throw new BadRequestException({ error: 'invalid_grant', error_description: 'Refresh token not found' });
+    }
+    return outcome;
   }
 
   private async issueTokenPair(input: {
@@ -288,36 +353,58 @@ export class OAuthService {
     roleScope: Role;
     campaignId: number | null;
   }): Promise<OAuthTokenResponse> {
+    const pair = this.buildTokenPair({ ...input, familyId: randomUUID() });
+    await this.db.insert(oauthAccessTokens).values(pair.values);
+    return pair.response;
+  }
+
+  private buildTokenPair(input: {
+    clientId: string;
+    userId: number;
+    scope: string | null;
+    resource: string | null;
+    roleScope: Role;
+    campaignId: number | null;
+    familyId: string;
+  }) {
     const accessToken = generateOAuthAccessToken();
     const refreshToken = generateOAuthRefreshToken();
     const ts = nowIso();
-    await this.db.insert(oauthAccessTokens).values({
-      tokenHash: hashOpaqueToken(accessToken),
-      refreshHash: hashOpaqueToken(refreshToken),
-      clientId: input.clientId,
-      userId: input.userId,
-      scope: input.scope,
-      resource: input.resource,
-      roleScope: input.roleScope,
-      campaignId: input.campaignId,
-      expiresAt: new Date(Date.now() + ACCESS_TOKEN_TTL_MS).toISOString(),
-      refreshExpiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString(),
-      createdAt: ts,
-    });
     return {
-      access_token: accessToken,
-      token_type: 'Bearer',
-      expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
-      refresh_token: refreshToken,
-      ...(input.scope ? { scope: input.scope } : {}),
+      values: {
+        tokenHash: hashOpaqueToken(accessToken),
+        refreshHash: hashOpaqueToken(refreshToken),
+        familyId: input.familyId,
+        clientId: input.clientId,
+        userId: input.userId,
+        scope: input.scope,
+        resource: input.resource,
+        roleScope: input.roleScope,
+        campaignId: input.campaignId,
+        expiresAt: new Date(Date.now() + ACCESS_TOKEN_TTL_MS).toISOString(),
+        refreshExpiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString(),
+        refreshConsumedAt: null,
+        revokedAt: null,
+        familyRevokedAt: null,
+        createdAt: ts,
+      },
+      response: {
+        access_token: accessToken,
+        token_type: 'Bearer' as const,
+        expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
+        refresh_token: refreshToken,
+        ...(input.scope ? { scope: input.scope } : {}),
+      },
     };
   }
 
   /** RFC 7009 token revocation — accepts an access OR refresh token; no error if unknown. */
   async revokeToken(rawToken: string): Promise<void> {
     const hash = hashOpaqueToken(rawToken);
-    await this.db.delete(oauthAccessTokens).where(eq(oauthAccessTokens.tokenHash, hash));
-    await this.db.delete(oauthAccessTokens).where(eq(oauthAccessTokens.refreshHash, hash));
+    await this.db
+      .update(oauthAccessTokens)
+      .set({ revokedAt: nowIso() })
+      .where(or(eq(oauthAccessTokens.tokenHash, hash), eq(oauthAccessTokens.refreshHash, hash)));
   }
 
   /**
@@ -329,6 +416,7 @@ export class OAuthService {
   async resolveAccessToken(rawToken: string): Promise<ResolvedOAuthToken | null> {
     const [row] = await this.db.select().from(oauthAccessTokens).where(eq(oauthAccessTokens.tokenHash, hashOpaqueToken(rawToken))).limit(1);
     if (!row) return null;
+    if (row.revokedAt || row.familyRevokedAt) return null;
     if (new Date(row.expiresAt).getTime() < Date.now()) {
       // Expired access token: leave the row (refresh may still be valid) — just reject the access use.
       return null;
@@ -360,6 +448,49 @@ export class OAuthService {
   async purgeExpired(): Promise<void> {
     const now = nowIso();
     await this.db.delete(oauthAuthCodes).where(lt(oauthAuthCodes.expiresAt, now));
+    await this.db.delete(oauthAccessTokens).where(lt(oauthAccessTokens.refreshExpiresAt, now));
+  }
+
+  /** Separate read helpers make the read/claim boundary explicit and testable. */
+  private async findAuthorizationCode(codeHash: string) {
+    const [row] = await this.db.select().from(oauthAuthCodes).where(eq(oauthAuthCodes.codeHash, codeHash)).limit(1);
+    return row;
+  }
+
+  private async findRefreshToken(refreshHash: string) {
+    const [row] = await this.db.select().from(oauthAccessTokens).where(eq(oauthAccessTokens.refreshHash, refreshHash)).limit(1);
+    return row;
+  }
+
+  private revokeRefreshFamilyOnReplay(row: typeof oauthAccessTokens.$inferSelect): void {
+    const ts = nowIso();
+    this.db.transaction((tx) => this.revokeRefreshFamilyOnReplayTx(tx, row, ts));
+  }
+
+  private revokeRefreshFamilyOnReplayTx(
+    tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
+    row: typeof oauthAccessTokens.$inferSelect,
+    ts: string,
+  ): void {
+    const revoked = tx
+      .update(oauthAccessTokens)
+      .set({ familyRevokedAt: ts, revokedAt: ts })
+      .where(and(eq(oauthAccessTokens.familyId, row.familyId), isNull(oauthAccessTokens.familyRevokedAt)))
+      .run();
+    if (revoked.changes === 0) return;
+
+    tx.insert(auditLog)
+      .values({
+        campaignId: row.campaignId,
+        actor: `oauth:${row.clientId}`,
+        actorRole: this.parseRole(row.roleScope),
+        action: 'oauth.refresh_replay',
+        entityType: 'oauth_token',
+        entityId: row.id,
+        detail: JSON.stringify({ clientId: row.clientId, familyRevoked: true }),
+        createdAt: ts,
+      })
+      .run();
   }
 
   private parseRole(value: string): Role {

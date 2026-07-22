@@ -50,6 +50,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'rule_entries')).toContain('icon_slug'); // 0038 (issue #305)
       expect(columnNames(sqlite, 'sessions')).toContain('dm_secret');
       expect(columnNames(sqlite, 'api_tokens')).toContain('admin_enabled');
+      expect(columnNames(sqlite, 'oauth_access_tokens')).toEqual(
+        expect.arrayContaining(['family_id', 'refresh_consumed_at', 'revoked_at', 'family_revoked_at']),
+      );
       expect(columnNames(sqlite, 'proposals')).toContain('snapshot');
       expect(columnNames(sqlite, 'encounters')).toEqual(
         expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id', 'hidden']),
@@ -123,6 +126,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // 0039 (issue #307): icon_slug ADD COLUMN backfills the pre-existing item with ''.
       expect((sqlite.prepare('SELECT icon_slug FROM inventory_items WHERE id = 1').get() as { icon_slug: string }).icon_slug).toBe('');
       expect((sqlite.prepare('SELECT admin_enabled FROM api_tokens WHERE id = 1').get() as { admin_enabled: number }).admin_enabled).toBe(0);
+      expect(
+        sqlite
+          .prepare('SELECT family_id, refresh_consumed_at, revoked_at, family_revoked_at FROM oauth_access_tokens WHERE id = 1')
+          .get(),
+      ).toEqual({ family_id: 'legacy-1', refresh_consumed_at: null, revoked_at: null, family_revoked_at: null });
       expect((sqlite.prepare('SELECT snapshot FROM proposals WHERE id = 1').get() as { snapshot: unknown }).snapshot).toBeNull();
 
       // Combatant HP-model backfill (issue #57): defaults applied to the pre-existing row.
@@ -139,7 +147,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(ruleEntry).toMatchObject({ name: 'Legacy Fireball', type: 'spell', icon_slug: '' });
 
       // Every seeded table kept exactly its one row (nothing dropped by the rebuild).
-      for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'proposals', 'encounters', 'combatants', 'attachments', 'rule_entries', 'inventory_items']) {
+      for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'oauth_access_tokens', 'proposals', 'encounters', 'combatants', 'attachments', 'rule_entries', 'inventory_items']) {
         expect(countRows(sqlite, table)).toBe(1);
       }
       // 0045 (issue #503): both seeded comments survived the upgrade, and the
@@ -217,6 +225,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // Fresh DB already has the modern columns (never touched a migration path).
       expect(columnNames(sqlite, 'characters')).toEqual(expect.arrayContaining(['xp', 'dm_secret', 'spell_slots']));
       expect(columnNames(sqlite, 'users')).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
+      expect(columnNames(sqlite, 'oauth_access_tokens')).toEqual(
+        expect.arrayContaining(['family_id', 'refresh_consumed_at', 'revoked_at', 'family_revoked_at']),
+      );
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');
     } finally {

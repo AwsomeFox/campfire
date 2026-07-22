@@ -56,7 +56,9 @@ you're linked.
 
 The connection uses short-lived access tokens that refresh transparently, so it
 keeps working without re-copying anything. Revoke it any time from your OAuth
-client, or an admin can revoke server-side.
+client, or an admin can revoke server-side. Refresh tokens rotate after every
+use; if an already-rotated token is replayed, Campfire revokes that connection's
+whole token family and the client must reconnect.
 
 !!! note "What this needs"
     Nothing to configure — the OAuth endpoints are always available. The flow

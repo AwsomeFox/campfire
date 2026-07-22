@@ -623,8 +623,10 @@ export const oauthAuthCodes = sqliteTable('oauth_auth_codes', {
 /**
  * oauth_access_tokens: issued bearer tokens presented on /mcp. `tokenHash` is
  * sha256(`cf_mcp_...`); `refreshHash` is sha256(`cf_ref_...`) for the paired
- * refresh token (rotated on every refresh). Resolves to the same RequestUser +
- * TokenContext as a PAT via `userId` + `roleScope`/`campaignId`, so all
+ * refresh token (rotated on every refresh). Consumed rows are retained as
+ * hashed replay sentinels and linked by `familyId`; a replay revokes every row
+ * in that family. Resolves to the same RequestUser + TokenContext as a PAT via
+ * `userId` + `roleScope`/`campaignId`, so all
  * effective-role caps apply unchanged. OAuth tokens NEVER carry server-admin
  * power (no adminEnabled column — hardcoded false at resolve time).
  */
@@ -632,6 +634,9 @@ export const oauthAccessTokens = sqliteTable('oauth_access_tokens', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   tokenHash: text('token_hash').notNull().unique(),
   refreshHash: text('refresh_hash').unique(),
+  // Every rotation keeps the same opaque family id. Consumed generations stay
+  // behind as replay sentinels until expiry; no raw token material is retained.
+  familyId: text('family_id').notNull(),
   clientId: text('client_id').notNull(),
   userId: integer('user_id').notNull(),
   scope: text('scope'), // granted OAuth scope string
@@ -640,6 +645,9 @@ export const oauthAccessTokens = sqliteTable('oauth_access_tokens', {
   campaignId: integer('campaign_id'),
   expiresAt: text('expires_at').notNull(), // access-token expiry
   refreshExpiresAt: text('refresh_expires_at'), // refresh-token expiry, or null
+  refreshConsumedAt: text('refresh_consumed_at'), // set exactly once by refresh CAS
+  revokedAt: text('revoked_at'), // this access/refresh pair is no longer usable
+  familyRevokedAt: text('family_revoked_at'), // replay revokes every generation
   createdAt: text('created_at').notNull(),
 });
 
