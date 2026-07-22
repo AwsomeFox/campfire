@@ -62,12 +62,8 @@ export type AiDmStreamEventType = AiDmStreamEvent['type'];
 export interface AiDmStreamHandlers {
   onEvent: (event: AiDmStreamEvent) => void;
   /** Fires after the stream reconnects following a drop — refetch session state to catch up. */
-  onReconnect?: () => void | Promise<void>;
-  /** Connection lifecycle for controls that require fresh table-wide authority. */
-  onConnectionStateChange?: (state: AiDmStreamConnectionState) => void;
+  onReconnect?: () => void;
 }
-
-export type AiDmStreamConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'closed';
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 15_000;
@@ -203,10 +199,6 @@ export function useAiDmStream(
 
     const controller = new AbortController();
     let disposed = false;
-    const setConnectionState = (state: AiDmStreamConnectionState) => {
-      if (!disposed) handlersRef.current.onConnectionStateChange?.(state);
-    };
-    setConnectionState('connecting');
 
     const sleep = (ms: number) =>
       new Promise<void>((resolve) => {
@@ -233,52 +225,36 @@ export function useAiDmStream(
             signal: controller.signal,
           });
           // 401/403 = no access (feature off, not a member, seat disabled) — retrying won't heal it.
-          if (res.status === 401 || res.status === 403) {
-            setConnectionState('closed');
-            return;
-          }
+          if (res.status === 401 || res.status === 403) return;
           if (!res.ok || !res.body) throw new Error(`AI-DM SSE connect failed (${res.status})`);
 
-          const reconciliation = attempt > 0
-            ? Promise.resolve(handlersRef.current.onReconnect?.()).catch(() => undefined)
-            : Promise.resolve();
+          if (attempt > 0) handlersRef.current.onReconnect?.();
           attempt = 0;
-          // Consume the established stream immediately. Send remains gated by the
-          // reconnecting state until the best-effort authority refresh settles.
-          let streamOpen = true;
-          void reconciliation.finally(() => {
-            if (!disposed && streamOpen) setConnectionState('connected');
-          });
 
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
-          try {
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buffer += decoder.decode(value, { stream: true });
-              let sep: number;
-              while ((sep = buffer.indexOf('\n\n')) !== -1) {
-                const data = sseBlockData(buffer.slice(0, sep));
-                buffer = buffer.slice(sep + 2);
-                if (!data) continue;
-                try {
-                  const parsed = parseAiDmStreamEvent(JSON.parse(data));
-                  if (parsed && !disposed) handlersRef.current.onEvent(parsed);
-                } catch {
-                  /* malformed frame — skip */
-                }
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let sep: number;
+            while ((sep = buffer.indexOf('\n\n')) !== -1) {
+              const data = sseBlockData(buffer.slice(0, sep));
+              buffer = buffer.slice(sep + 2);
+              if (!data) continue;
+              try {
+                const parsed = parseAiDmStreamEvent(JSON.parse(data));
+                if (parsed && !disposed) handlersRef.current.onEvent(parsed);
+              } catch {
+                /* malformed frame — skip */
               }
             }
-          } finally {
-            streamOpen = false;
           }
           // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
           throw new Error('AI-DM SSE stream ended');
         } catch {
           if (disposed || controller.signal.aborted) return;
-          setConnectionState('reconnecting');
           await sleep(Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS));
           attempt += 1;
         }
@@ -286,9 +262,6 @@ export function useAiDmStream(
     })();
 
     return () => {
-      // Surface the terminal lifecycle state before marking this effect disposed.
-      // This matters when enabled/campaign changes without unmounting the consumer.
-      handlersRef.current.onConnectionStateChange?.('closed');
       disposed = true;
       controller.abort();
     };

@@ -87,11 +87,7 @@ test.describe('AI provider stored-key clearing', () => {
     expect(clearEntry).toMatchObject({ detail: 'server' });
     expect(JSON.stringify(clearEntry)).not.toContain(STORED_KEY);
 
-    const removalPreview = await page.request.get('/api/v1/settings/ai-provider/removal-impact');
-    expect(removalPreview.ok()).toBeTruthy();
-    const remove = await page.request.delete('/api/v1/settings/ai-provider', {
-      data: { impactRevision: (await removalPreview.json()).impactRevision },
-    });
+    const remove = await page.request.delete('/api/v1/settings/ai-provider');
     expect(remove.ok()).toBeTruthy();
   });
 });

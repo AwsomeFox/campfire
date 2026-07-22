@@ -46,11 +46,12 @@ import {
   abilityScore,
   modOf,
   signed,
-  advFromEvent,
   d20Expr,
   toHitExpr,
   damageExpr,
 } from '../../lib/characterStats';
+import { RollModeChooser } from './RollModeChooser';
+import { resolveRollMode, rollModeSummary, type RollMode } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { RollResultBanner } from '../../components/RollResultBanner';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
@@ -839,6 +840,11 @@ function RollChip({
 
 function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
+  // Roll-mode chooser (issue #713): a touch- and keyboard-visible Flat / Advantage
+  // / Disadvantage selector shared by every save in this card. The chooser holds
+  // the persistent one-tap default; a shift/alt-click still overrides it for a
+  // single roll so the desktop keyboard shortcut keeps working (resolveRollMode).
+  const [mode, setMode] = useState<RollMode>('flat');
   const pb = profBonus(character.level);
   const profs = new Set(character.saveProficiencies);
 
@@ -861,10 +867,19 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 
   return (
     <Card className="space-y-2">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Saving throws</p>
         <span className="text-[11px] text-slate-500">proficiency {signed(pb)}</span>
+        <span className="ml-auto cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
+          {rollModeSummary(mode)}
+        </span>
       </div>
+      <RollModeChooser
+        value={mode}
+        onChange={setMode}
+        disabled={roller.rolling}
+        aria-label="Saving throw roll mode"
+      />
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
         {ABILITY_KEYS.map((k) => {
           const proficient = profs.has(k);
@@ -873,11 +888,12 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
             <div key={k} className="cf-inset text-center py-2 px-1.5 relative">
               <button
                 type="button"
-                onClick={(e) => void roller.roll(d20Expr(mod, advFromEvent(e)), `${character.name} · ${k} save`)}
+                onClick={(e) => void roller.roll(d20Expr(mod, resolveRollMode(mode, e)), `${character.name} · ${k} save`)}
                 disabled={roller.rolling}
                 className="w-full"
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-                title={`Roll ${k} save (${signed(mod)}) · shift-click for advantage · alt-click for disadvantage`}
+                title={`Roll ${k} save (${signed(mod)}) · ${rollModeSummary(mode)}`}
+                aria-label={`Roll ${k} save (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
               >
                 <p className="text-[10px] tracking-wide text-slate-500">{k}</p>
                 <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
@@ -906,7 +922,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
         })}
       </div>
       <p className="text-[11px] text-slate-500">
-        Tap a save to roll a d20{canEdit ? '; tap the ● to toggle proficiency' : ''}. Shift-click for advantage, alt-click for disadvantage.
+        Tap a save to roll a d20{canEdit ? '; tap the ● to toggle proficiency' : ''}. Pick a mode above; shift-click for a one-tap advantage, alt-click for disadvantage.
       </p>
     </Card>
   );
@@ -914,6 +930,9 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 
 function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: SheetCardProps & { adapter: RuleSystemAdapter; roller: Roller }) {
   const [busy, setBusy] = useState(false);
+  // Roll-mode chooser (issue #713): one persistent default for every skill roll
+  // in this card; the keyboard shortcut (shift/alt-click) still overrides once.
+  const [mode, setMode] = useState<RollMode>('flat');
   const pb = profBonus(character.level);
 
   async function cycle(name: string) {
@@ -937,12 +956,21 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
 
   return (
     <Card className="space-y-2">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Skills</p>
         <span className="text-[11px] text-slate-500">
           tap a skill to roll{canEdit ? '; tap the ○/●/★ to cycle proficiency' : ''}
         </span>
+        <span className="ml-auto cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
+          {rollModeSummary(mode)}
+        </span>
       </div>
+      <RollModeChooser
+        value={mode}
+        onChange={setMode}
+        disabled={roller.rolling}
+        aria-label="Skill check roll mode"
+      />
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
         {SKILLS.map(({ name, ability }) => {
           const rank = character.skills[name];
@@ -972,11 +1000,12 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
               )}
               <button
                 type="button"
-                onClick={(e) => void roller.roll(d20Expr(mod, advFromEvent(e)), `${character.name} · ${name} check`)}
+                onClick={(e) => void roller.roll(d20Expr(mod, resolveRollMode(mode, e)), `${character.name} · ${name} check`)}
                 disabled={roller.rolling}
                 className="flex-1 flex items-center gap-1.5 min-w-0"
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-                title={`Roll ${name} (${signed(mod)}) · shift-click for advantage · alt-click for disadvantage`}
+                title={`Roll ${name} (${signed(mod)}) · ${rollModeSummary(mode)}`}
+                aria-label={`Roll ${name} (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
               >
                 <span className="flex-1 text-left truncate">{name}</span>
                 <span className="text-[10px] text-slate-500">{ability}</span>
@@ -998,6 +1027,10 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
   const [toHit, setToHit] = useState('');
   const [damage, setDamage] = useState('');
   const [notes, setNotes] = useState('');
+  // Roll-mode chooser (issue #713): the attack "to hit" roll mode. Applies to
+  // every action's attack roll in this card; a shift/alt-click still overrides
+  // once (resolveRollMode) so the desktop shortcut keeps working.
+  const [mode, setMode] = useState<RollMode>('flat');
 
   async function saveActions(next: CharacterAction[], failMsg: string) {
     if (busy) return;
@@ -1042,16 +1075,33 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
     );
   }
 
+  // Only surface the chooser when at least one action carries a "to hit" roll —
+  // a list of feature-only actions has nothing to take with advantage.
+  const hasAttackRoll = character.actions.some((a) => a.toHit && toHitExpr(a.toHit, 'flat'));
+
   return (
     <Card className="space-y-2.5">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Actions</p>
+        {hasAttackRoll && (
+          <span className="cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
+            {rollModeSummary(mode)}
+          </span>
+        )}
         {canEdit && !adding && (
           <Btn ghost className="!min-h-0 !py-1 text-xs ml-auto" onClick={() => setAdding(true)}>
             + Add
           </Btn>
         )}
       </div>
+      {hasAttackRoll && (
+        <RollModeChooser
+          value={mode}
+          onChange={setMode}
+          disabled={roller.rolling}
+          aria-label="Attack roll mode"
+        />
+      )}
       {character.actions.length === 0 && !adding && (
         <p className="text-xs text-slate-500">
           No actions yet{canEdit ? ' — add attacks, spells, and features to roll them straight from the sheet' : ''}.
@@ -1077,9 +1127,9 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                     (attackExpr ? (
                       <RollChip
                         label={`to hit ${action.toHit}`}
-                        title={`Roll ${action.name} attack (d20 ${action.toHit}) · shift-click for advantage · alt-click for disadvantage`}
+                        title={`Roll ${action.name} attack (d20 ${action.toHit}) · ${rollModeSummary(mode)}`}
                         disabled={roller.rolling}
-                        onClick={(e) => void roller.roll(toHitExpr(action.toHit, advFromEvent(e))!, `${character.name} · ${action.name} to hit`)}
+                        onClick={(e) => void roller.roll(toHitExpr(action.toHit, resolveRollMode(mode, e))!, `${character.name} · ${action.name} to hit`)}
                       />
                     ) : (
                       <span className="text-xs text-slate-400">to hit {action.toHit}</span>

@@ -7,8 +7,6 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { AiProviderConfigService } from './ai-provider-config.service';
 import {
   AiProviderConfigUpdateDto,
-  AiProviderRemovalConfirmDto,
-  AiProviderRemovalImpactDto,
   AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA,
   AiProviderTestRequestDto,
   AiProviderTestResultDto,
@@ -84,38 +82,13 @@ export class AiProviderCampaignConfigController {
     return this.configs.clearCampaignKey(id, user);
   }
 
-  @Get('removal-impact')
-  @ApiOperation({
-    summary: 'Preview removal of a campaign AI provider override',
-    description:
-      'DM only. Authoritatively computes the campaign\'s exact server fallback or disabled outcome, including ' +
-      'AI-seat budget/runtime implications, and returns the opaque revision required to confirm deletion. No key material.',
-  })
-  @ApiResponse({ status: 200, description: 'Credential-free authoritative removal preview.', type: AiProviderRemovalImpactDto })
-  @ApiResponse({ status: 404, description: 'No campaign provider override exists.' })
-  async removalImpact(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'dm');
-    return this.configs.previewCampaignRemoval(id);
-  }
-
   @Delete()
   @HttpCode(204)
-  @ApiOperation({
-    summary: 'Confirm removal of the per-campaign AI provider override',
-    description:
-      'DM only. Requires the exact revision from GET removal-impact. Recomputes the fallback and atomically deletes ' +
-      'plus audits; stale revisions return 409 and leave the override active.',
-  })
-  @ApiBody({ type: AiProviderRemovalConfirmDto })
-  @ApiResponse({ status: 204, description: 'Deletion and secret-free audit committed.' })
-  @ApiResponse({ status: 409, description: 'Impact changed after preview; nothing was deleted.' })
-  async remove(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() body: AiProviderRemovalConfirmDto,
-    @CurrentUser() user: RequestUser,
-  ) {
+  @ApiOperation({ summary: 'Delete the per-campaign AI provider override', description: 'DM only. Reverts to the server default.' })
+  @ApiResponse({ status: 204, description: 'Deleted (or already absent).' })
+  async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
-    this.configs.deleteCampaign(id, body.impactRevision, user);
+    await this.configs.deleteCampaign(id, user);
   }
 
   @Post('test')

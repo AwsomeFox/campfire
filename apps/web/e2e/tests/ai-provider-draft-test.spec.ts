@@ -10,12 +10,7 @@ test.describe('AI provider visible-draft connection test', () => {
     test.use({ storageState: stateFor('admin') });
 
     test('sends the visible draft, invalidates stale/in-flight results, and clears a result on save failure', async ({ page }) => {
-      const prior = await page.request.get('/api/v1/settings/ai-provider/removal-impact');
-      if (prior.ok()) {
-        await page.request.delete('/api/v1/settings/ai-provider', {
-          data: { impactRevision: (await prior.json()).impactRevision },
-        });
-      }
+      await page.request.delete('/api/v1/settings/ai-provider');
 
       const requestBodies: Array<Record<string, unknown>> = [];
       let holdNext = false;

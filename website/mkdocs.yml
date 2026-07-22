@@ -83,7 +83,6 @@ nav:
   - Project:
       - Roadmap & status: reference/roadmap.md
       - Run · play · maintain (audit): reference/operator-audit.md
-      - Releasing: reference/releasing.md
       - Contributing: reference/contributing.md
 
 extra:

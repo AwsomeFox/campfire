@@ -120,9 +120,9 @@ running on 8080 — maps to the container's internal 8080).
 
 ### Image
 
-- `ghcr.io/awsomefox/campfire:latest` and `:<version>` — both the `linux/amd64` and
-  `linux/arm64` images are published only after a manually pushed, validated stable
-  SemVer tag (`vX.Y.Z`) by `.github/workflows/release.yml`.
+- `ghcr.io/awsomefox/campfire:latest` and `:<version>` — built for `linux/amd64` and
+  `linux/arm64` on every tagged release (`v*`) by `.github/workflows/ci.yml`'s
+  `release` job.
 - Single stateful volume: `/data` — the SQLite database (`campfire.db`) and uploaded
   attachments both live under here. Back up this volume; that's the entire app state.
 
