@@ -86,9 +86,12 @@ export function reduceUndo(
     case 'failed':
       return { status: 'failed', error: event.error ?? DEFAULT_UNDO_ERROR };
     default: {
-      // Exhaustiveness guard — a new event must be handled explicitly.
+      // Exhaustiveness guard — a new event must be handled explicitly. Mirrors
+      // the imageUploadState.ts pattern: void the never-typed value and return
+      // the current state rather than the event object (which is not a snapshot).
       const _exhaustive: never = event;
-      return _exhaustive;
+      void _exhaustive;
+      return state;
     }
   }
 }
