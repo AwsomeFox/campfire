@@ -1236,23 +1236,43 @@ export class EncountersService {
     // pointer we only need to react when the CURRENT combatant is the one leaving:
     // advance to the next in the sorted order (wrapping to the top if it was last).
     let newCurrentId = encounterRow.currentCombatantId;
+    // Round only changes when the removed actor was the LAST in initiative order —
+    // removing it wraps the pointer to the top of the NEXT round, exactly as
+    // advanceTurn does (issue #528). We track the wrap here and apply it below so the
+    // round counter can never desync from the turn pointer mid-combat.
+    let wrappedToNextRound = false;
     if (encounterRow.status === 'running' && encounterRow.currentCombatantId === combatantId) {
       const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
       const idx = sorted.findIndex((c) => c.id === combatantId);
       const remaining = sorted.filter((c) => c.id !== combatantId);
-      newCurrentId = remaining.length === 0 ? null : (sorted[idx + 1]?.id ?? remaining[0].id);
+      if (remaining.length === 0) {
+        newCurrentId = null;
+      } else {
+        const next = sorted[idx + 1];
+        if (next) {
+          newCurrentId = next.id;
+        } else {
+          // The current actor was last in the (pre-removal) sorted order, so stepping
+          // past it wraps to the top of the next round — mirror advanceTurn's wrap+round
+          // increment (idx + 1 >= count => round + 1).
+          newCurrentId = remaining[0].id;
+          wrappedToNextRound = true;
+        }
+      }
     }
 
     await this.db.delete(combatants).where(eq(combatants.id, combatantId));
 
     // Re-derive turnIndex against the post-removal sorted order so it stays in lockstep
-    // with the (possibly advanced) identity pointer.
+    // with the (possibly advanced) identity pointer. The round is bumped in the same
+    // UPDATE when the removal wrapped the pointer past the end (issue #528).
     if (encounterRow.status === 'running') {
       const sortedAfter = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
       const turnIndex = turnIndexFor(sortedAfter, newCurrentId);
+      const round = wrappedToNextRound ? encounterRow.round + 1 : encounterRow.round;
       await this.db
         .update(encounters)
-        .set({ currentCombatantId: newCurrentId, turnIndex, updatedAt: nowIso() })
+        .set({ currentCombatantId: newCurrentId, turnIndex, round, updatedAt: nowIso() })
         .where(eq(encounters.id, encounterId));
     }
 
