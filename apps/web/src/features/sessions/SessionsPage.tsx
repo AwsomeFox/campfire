@@ -28,6 +28,7 @@ import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { entityTargetProps } from '../../lib/entityLinks';
 
 export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -483,7 +484,7 @@ function SessionDetail({
   }
 
   return (
-    <div className="space-y-3" style={{ maxWidth: 720 }}>
+    <div className="space-y-3" style={{ maxWidth: 720 }} {...entityTargetProps('session', session.id)}>
       <div>
         <button onClick={onBack} className="text-xs text-slate-500 hover:text-slate-300 lg:hidden mb-1 block">
           ← Back to sessions

@@ -27,6 +27,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { Toggle } from '../../components/Toggle';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { entityTargetProps } from '../../lib/entityLinks';
 
 type QuestWithObjectives = Quest & { objectives: QuestObjective[] };
 type QuestStatusValue = Quest['status'];
@@ -425,7 +426,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const showSecret = isDm && (quest.dmSecret || editingDmSecret);
 
   return (
-    <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <div>

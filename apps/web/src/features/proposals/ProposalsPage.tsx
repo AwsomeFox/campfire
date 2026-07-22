@@ -12,40 +12,9 @@ import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ENTITY_ICON } from '../../lib/uiIcons';
+import { proposalTargetHref } from '../../lib/entityLinks';
 
 type EntityType = Proposal['entityType'];
-
-const entityRoute: Record<EntityType, string | null> = {
-  quest: 'quests',
-  npc: 'npcs',
-  faction: 'factions',
-  location: 'locations',
-  character: 'characters',
-  session: 'sessions',
-  encounter: 'encounters',
-  campaign: null,
-};
-
-/**
- * Absolute in-app path to a proposal's target entity, or null when it has no
- * detail view. Must be absolute + campaign-scoped: a relative `../route/id`
- * resolves against the route tree, not the URL, and drops the campaignId
- * (landing on `/route/id` → Page not found — issue #144).
- */
-function targetHref(entityType: EntityType, entityId: number | null, campaignId: number): string | null {
-  if (entityId == null || !Number.isFinite(campaignId)) return null;
-  // `entityRoute` is a lookup, not an exhaustive validator: the co-DM draft endpoint
-  // (#313) can file a proposal with entityType 'map' (map generator params, #306),
-  // which predates and sits outside the shared EntityType contract — `route` is
-  // `undefined` rather than `null` for that (and any other future) unmapped type, so
-  // fall through to "no detail view" rather than building a broken `/undefined/:id` URL.
-  const route = entityRoute[entityType];
-  if (!route) return null;
-  // Sessions have no `/:id` detail route — the list page selects a session via
-  // a `?session=` query param, so link there instead of `/sessions/:id` (404).
-  if (entityType === 'session') return `/c/${campaignId}/sessions?session=${entityId}`;
-  return `/c/${campaignId}/${route}/${entityId}`;
-}
 
 /**
  * An AI-drafted proposal (issue #341): the co-DM draft endpoint (#313) attributes these
@@ -392,7 +361,7 @@ function ProposalCard({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
-  const href = targetHref(proposal.entityType, proposal.entityId, campaignId);
+  const href = proposalTargetHref(campaignId, proposal);
   const isDelete = proposal.action === 'delete';
   // Edit-before-approve is meaningful only for create/update (delete carries no payload).
   const canEdit = !isDelete;
@@ -695,7 +664,7 @@ function MyProposalCard({
   busy: boolean;
   onWithdraw: () => void;
 }) {
-  const href = targetHref(proposal.entityType, proposal.entityId, campaignId);
+  const href = proposalTargetHref(campaignId, proposal);
   const isDelete = proposal.action === 'delete';
   return (
     <Card className="space-y-2.5">

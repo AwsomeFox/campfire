@@ -49,6 +49,21 @@ export interface SeedData {
   /** A second encounter that was started and then ended — must render read-only (#368). */
   endedEncounterId: number;
   npcId: number;
+  navigation: {
+    questId: number;
+    npcId: number;
+    factionId: number;
+    locationId: number;
+    characterId: number;
+    sessionId: number;
+    noteId: number;
+    timelineId: number;
+    itemId: number;
+    commentId: number;
+    arcId: number;
+    beatId: number;
+    proposalId: number;
+  };
 }
 
 async function okJson(ctx: APIRequestContext, method: 'post' | 'get', path: string, data?: unknown) {
@@ -117,6 +132,90 @@ export default async function globalSetup(config: FullConfig) {
   });
   const npcId: number = npc.id;
 
+  // Cross-entity navigation fixtures (issue #438). Every searchable/mentionable
+  // shape carries the same uncommon token so one browser journey can inspect the
+  // complete result set, while the named records are also embedded in quest
+  // markdown to exercise mention links.
+  const navNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
+    name: 'DLRNAV Wayfinder',
+    role: 'Navigation fixture',
+  });
+  const navFaction = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/factions`, {
+    name: 'DLRNAV Lantern Guild',
+    body: 'Navigation fixture',
+  });
+  const navLocation = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/locations`, {
+    name: 'DLRNAV Moon Gate',
+    kind: 'Navigation fixture',
+    status: 'explored',
+  });
+  const navCharacter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/characters`, {
+    name: 'DLRNAV Aria',
+    className: 'Ranger',
+    status: 'retired',
+    level: 3,
+    hpMax: 24,
+    hpCurrent: 24,
+    ac: 14,
+  });
+  const navSession = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/sessions`, {
+    number: 1,
+    title: 'DLRNAV First Crossing',
+    recap: 'The party crossed the moon gate.',
+  });
+  const navTimeline = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/timeline`, {
+    title: 'DLRNAV Sundering',
+    body: 'Navigation fixture',
+    inWorldDate: 'Year 1',
+  });
+  const navArc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/arcs`, {
+    title: 'DLRNAV Ember Arc',
+    summary: 'Navigation fixture',
+  });
+  const navBeat = await okJson(dm, 'post', `/api/v1/arcs/${navArc.id}/beats`, {
+    title: 'DLRNAV Broken Oath',
+    body: 'Navigation fixture',
+  });
+  const navItem = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/inventory`, {
+    name: 'DLRNAV Compass',
+    notes: 'Navigation fixture',
+    ownerType: 'party',
+    qty: 1,
+  });
+  const navNote = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/notes`, {
+    body: 'DLRNAV note about the crossing',
+    visibility: 'party_shared',
+    entityType: 'session',
+    entityId: navSession.id,
+  });
+  const navComment = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/comments`, {
+    entityType: 'session',
+    entityId: navSession.id,
+    body: 'DLRNAV comment about the crossing',
+  });
+  const navQuest = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/quests`, {
+    title: 'DLRNAV Grand Route',
+    body: [
+      'DLRNAV Grand Route',
+      navNpc.name,
+      navFaction.name,
+      navLocation.name,
+      navCharacter.name,
+      navSession.title,
+      navTimeline.title,
+      navArc.title,
+      navBeat.title,
+    ].join(' · '),
+    status: 'active',
+  });
+  const proposed = await dm.patch(`/api/v1/sessions/${navSession.id}?proposed=true`, {
+    data: { title: navSession.title },
+  });
+  if (!proposed.ok()) {
+    throw new Error(`PATCH proposed session -> ${proposed.status()}: ${await proposed.text()}`);
+  }
+  const navProposal = (await proposed.json()).proposal;
+
   const encounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'Ambush at the Ember Hearth',
   });
@@ -172,7 +271,28 @@ export default async function globalSetup(config: FullConfig) {
   const viewer = await loginContext(baseURL, 'viewer');
   await viewer.storageState({ path: resolve(AUTH_DIR, 'viewer.json') });
 
-  const seed: SeedData = { baseURL, campaignId, encounterId, endedEncounterId, npcId };
+  const seed: SeedData = {
+    baseURL,
+    campaignId,
+    encounterId,
+    endedEncounterId,
+    npcId,
+    navigation: {
+      questId: navQuest.id,
+      npcId: navNpc.id,
+      factionId: navFaction.id,
+      locationId: navLocation.id,
+      characterId: navCharacter.id,
+      sessionId: navSession.id,
+      noteId: navNote.id,
+      timelineId: navTimeline.id,
+      itemId: navItem.id,
+      commentId: navComment.id,
+      arcId: navArc.id,
+      beatId: navBeat.id,
+      proposalId: navProposal.id,
+    },
+  };
   writeFileSync(resolve(AUTH_DIR, 'seed.json'), JSON.stringify(seed, null, 2));
 
   await Promise.all([admin.dispose(), dm.dispose(), player.dispose(), viewer.dispose()]);
