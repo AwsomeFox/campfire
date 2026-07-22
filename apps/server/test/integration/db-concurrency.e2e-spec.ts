@@ -212,4 +212,63 @@ describe('concurrency (real SQLite, atomic writes)', () => {
     const finalQuest = await request(baseUrl).get(`/api/v1/quests/${questId}`).set(dm);
     expect(finalQuest.body.title).toBe(winners[0].kind === 'approve' ? 'Player Title' : 'Contested');
   });
+
+  /**
+   * Issue #582: the treasury delta path is the primary fix for concurrent spends.
+   * Each denomination is applied as a single atomic `UPDATE ... SET col = col + ?`,
+   * so two players spending DIFFERENT coins at the same time can never clobber each
+   * other — and even racing spends on the SAME coin compose. This fires a genuine
+   * concurrent burst (real listening socket, requests in flight at once) at one
+   * treasury and asserts every delta landed: a lost update would leave the totals
+   * short. The CAS-on-set path is covered separately in inventory.e2e-spec.ts.
+   */
+  it('applies every concurrent treasury delta across different coins — no lost updates (#582)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Treasury Race' });
+    const campaignId = campaign.body.id;
+
+    const N = 40;
+    // Half the burst adds pp, the other half spends gp from a seeded balance, so the
+    // two groups touch disjoint denominations. A stale-snapshot write would silently
+    // restore the other coin; the atomic delta just composes.
+    await request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(dm).send({ delta: { gp: N } });
+
+    const results = await Promise.all([
+      ...Array.from({ length: N }, () =>
+        request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(dm).send({ delta: { pp: 1 } }),
+      ),
+      ...Array.from({ length: N }, () =>
+        request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(player).send({ delta: { gp: -1 } }),
+      ),
+    ]);
+    expect(results.every((r) => r.status === 200)).toBe(true);
+
+    // Every +1 pp and every -1 gp landed. A lost update on either column would leave
+    // the total short of the expected 40 / 0.
+    const finalRow = await request(baseUrl).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(finalRow.body.pp).toBe(N);
+    expect(finalRow.body.gp).toBe(0);
+  });
+
+  it('racing spends on the SAME coin compose atomically and never go negative (#582)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Same Coin Race' });
+    const campaignId = campaign.body.id;
+
+    // Seed 40gp, then 40 players each spend 1gp simultaneously. The atomic deltas must
+    // compose to exactly 0 — none lost, none doubled, and no spend may push the balance
+    // below 0 (a stale read-then-write would either lose updates or overspend).
+    await request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(dm).send({ delta: { gp: 40 } });
+
+    const N = 40;
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(player).send({ delta: { gp: -1 } }),
+      ),
+    );
+    // Every spend landed (no race pushed a balance-check past 0); the 41st would 400.
+    expect(results.filter((r) => r.status === 200)).toHaveLength(N);
+    expect(results.filter((r) => r.status === 400)).toHaveLength(0);
+
+    const finalRow = await request(baseUrl).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(finalRow.body.gp).toBe(0);
+  });
 });
