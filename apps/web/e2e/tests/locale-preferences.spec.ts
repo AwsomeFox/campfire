@@ -17,6 +17,8 @@ test('Preferences keeps catalog language separate from System formatting across 
   const frenchContext = await browser.newContext({
     storageState: stateFor('player'),
     locale: 'fr-FR',
+    // Route interception below must not be bypassed by an already-registered PWA worker.
+    serviceWorkers: 'block',
   });
   const page = await frenchContext.newPage();
   const language = page.getByLabel('Display language');
@@ -31,12 +33,13 @@ test('Preferences keeps catalog language separate from System formatting across 
 
   // A tampered form value must not be persisted as a locale the app cannot render.
   await language.evaluate((element) => {
+    const select = element as HTMLSelectElement;
     const option = document.createElement('option');
     option.value = 'fr-FR';
     option.textContent = 'Unsupported';
-    element.append(option);
-    element.value = option.value;
-    element.dispatchEvent(new Event('change', { bubbles: true }));
+    select.append(option);
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
   });
   expect(await page.evaluate((key) => localStorage.getItem(key), LANG_STORAGE_KEY)).toBeNull();
 
