@@ -1,6 +1,7 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, count, eq, inArray, isNotNull } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
@@ -43,6 +44,7 @@ import {
   partyTreasury,
   aiDmSeats,
   encounterEvents,
+  auditLog,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
@@ -71,6 +73,107 @@ function uploadsRoot(): string {
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
+
+/**
+ * Issue #725: the staging area where an in-flight import parks its attachment
+ * bytes BEFORE any DB row is committed. Lives under uploadsRoot()/.staging/<nonce>/
+ * so a rename into the final uploadsRoot()/<campaignId>/ location is atomic (same
+ * filesystem — a rename across devices would fall back to copy+unlink and could
+ * fail mid-way). Cleaned up on every outcome path (success after publish, or any
+ * failure before/after the DB transaction).
+ */
+function stagingRoot(): string {
+  return path.join(uploadsRoot(), '.staging');
+}
+
+/**
+ * Create a unique staging directory for one import run. A crypto nonce keeps
+ * concurrent imports from colliding. Returned path is the dir the caller should
+ * write every staged attachment into (any sub-layout the caller wants).
+ */
+function createStagingDir(): string {
+  const dir = path.join(stagingRoot(), crypto.randomBytes(16).toString('hex'));
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Best-effort recursive removal of a staging dir — never throws (failures here
+ * are harmless: a stray staging dir is invisible to the app and can be GC'd by
+ * an operator; it does NOT orphan a campaign the way a stray uploadsRoot()/<id>/
+ * entry would, because no DB row points at it).
+ */
+function cleanupStagingDir(stagingDir: string | null): void {
+  if (!stagingDir) return;
+  try {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+  } catch {
+    /* best-effort — see doc above */
+  }
+}
+
+/**
+ * Issue #725 — preflight writability probe for the uploads root. Creates (if
+ * needed) and writes+deletes a sentinel file under uploadsRoot() so an
+ * unwritable/unmounted DATA_DIR fails the import with a clear 400 BEFORE we
+ * spend the work staging every attachment byte. Mirrors the kind of check the
+ * issue's acceptance criteria calls out ("quota/free space, and writability").
+ */
+function assertUploadsWritable(): void {
+  const root = uploadsRoot();
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    const probe = path.join(root, `.writable-probe-${crypto.randomBytes(8).toString('hex')}`);
+    fs.writeFileSync(probe, Buffer.from('ok'));
+    fs.rmSync(probe, { force: true });
+  } catch (err) {
+    throw new BadRequestException(
+      `Upload directory is not writable (cannot stage the import): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/** Module-scoped logger for the free import helpers (publish-failure warnings). */
+const importLog = new Logger('CampaignsImport');
+
+/**
+ * Issue #725: per-attachment import outcome, surfaced in the ImportResult so the
+ * caller (and tests) can tell exactly which files imported, which were skipped
+ * (invalid/oversize/dangling manifest entry), and which failed to publish.
+ */
+export interface ImportAttachmentResult {
+  /** The new attachment row id (differs from the source id). */
+  id: number;
+  kind: string;
+  filename: string;
+  size: number;
+}
+
+/**
+ * Issue #725: the import job result returned alongside the new campaign.
+ *
+ *   - `attachmentsImported` — every attachment whose row AND bytes landed.
+ *   - `attachmentsSkipped` — manifest entries dropped during preflight (no bytes
+ *     in the archive, wrong magic bytes, or over the per-file size cap); these
+ *     never had a row inserted, so there is no dangling reference.
+ *   - `attachmentsFailed` — rows committed but whose staged bytes could not be
+ *     published to the final location (rare: ENOSPC/EACCES on the rename). A
+ *     failed entry is the tolerated "row-without-file" shape (#84): the GET
+ *     route 404s that one file, the campaign is otherwise intact.
+ *
+ * The staging directory itself is always swept (best-effort) in the import's
+ * `finally` — a leftover staging entry is invisible to the app (no DB row
+ * points at it), so it is not surfaced here.
+ */
+export interface ImportResult {
+  campaign: Campaign;
+  attachmentsImported: number;
+  attachmentsSkipped: number;
+  attachmentsFailed: number;
+  attachmentDetails: ImportAttachmentResult[];
+}
 
 type CampaignCreateInput = z.infer<typeof CampaignCreate>;
 type CampaignUpdateInput = z.infer<typeof CampaignUpdate>;
@@ -722,14 +825,21 @@ export class CampaignsService {
    *  - members / audit / proposals: not imported — install-specific; only the caller
    *    becomes the new campaign's dm (same rule as create()/clone()).
    *
-   * All writes run in one synchronous db.transaction() (better-sqlite3), so a
-   * mid-import failure never leaves a half-created campaign behind.
+   * Issue #725 — staged + atomic commit. Attachment bytes are STAGED to a unique
+   * uploadsRoot()/.staging/<nonce>/ dir BEFORE any row is inserted (so a disk
+   * error aborts the import up front, not partway). Every entity row + the dm
+   * membership + the import audit row commit in ONE db.transaction() — a throw
+   * at any of those boundaries rolls the whole campaign back, no orphan rows.
+   * After commit, staged files are renamed into their final uploadsRoot()/<id>/
+   * location (atomic per-file on the same fs); a publish failure degrades only
+   * THAT one file to the #84 row-without-file shape, never a partial import.
+   * Returns an ImportResult with imported/skipped/failed counts + file details.
    */
   async importCampaign(
     input: CampaignImportInput,
     user: RequestUser,
     attachmentFiles: ImportAttachmentFile[] = [],
-  ): Promise<Campaign> {
+  ): Promise<ImportResult> {
     const doc = input;
     const campaignSrc = asRec(doc.campaign);
     const name = (str(input.name) || str(campaignSrc.name) || 'Imported Campaign').slice(0, 120);
@@ -763,10 +873,36 @@ export class CampaignsService {
     const importerId = String(user.id);
     const ts = nowIso();
 
-    // Attachment bytes are written to disk AFTER the transaction commits (a DB
-    // rollback can't un-write a file, so we defer the fs writes until the rows are
-    // durable). srcAttachmentId -> new attachment id, populated inside the tx.
-    const pendingWrites: { filePath: string; bytes: Buffer }[] = [];
+    // Issue #725: STAGE every attachment's bytes BEFORE any DB row is committed,
+    // so a mid-import failure (anywhere — preflight, the DB transaction, or the
+    // final publish) never leaves a partial import behind. The old order (commit
+    // rows first, then write files, swallowing fs errors) could report success
+    // with missing maps AND strand an inaccessible campaign (membership/audit
+    // ran after the commit). The new order is:
+    //   1. stage  — write every byte into uploadsRoot()/.staging/<nonce>/ and
+    //               confirm the filesystem will accept it. Surface ENOSPC/EACCES
+    //               here as a 400, BEFORE the DB is touched.
+    //   2. commit — insert every entity row + the importer's dm membership + the
+    //               audit row in ONE synchronous transaction. A throw at any
+    //               point rolls back the whole campaign (no orphan rows).
+    //   3. publish — rename each staged file into its final uploadsRoot()/<cid>/
+    //                location. Per-file rename is atomic on the same filesystem;
+    //                a failure here degrades to the #84 "row-without-file" shape
+    //                (the GET route 404s that one file) — never a partial import.
+    // Staging dir is cleaned up on every outcome (success post-publish, or any
+    // failure). `stagingDir` tracks the dir to remove; null until created.
+    let stagingDir: string | null = null;
+    try {
+    // Preflight (issue #725): confirm the uploads root is writable BEFORE we
+    // spend the work staging bytes, so an unwritable/unmounted DATA_DIR fails
+    // fast with a clear 400 rather than partway through. Only matters when
+    // there are attachments to write — a JSON-only import skips this entirely.
+    const hasAttachments = attachmentFiles.length > 0;
+    if (hasAttachments) {
+      assertUploadsWritable();
+    }
+
+    // srcAttachmentId -> new attachment id, populated inside the tx.
     const attMap = new Map<number, number>();
     /** Rewrite a source portraitUrl (…/attachments/<srcId>/file) to point at the freshly imported attachment. */
     const remapPortraitUrl = (url: unknown): string | null => {
@@ -776,6 +912,40 @@ export class CampaignsService {
       const newId = attMap.get(Number(m[1]));
       return newId != null ? `/api/v1/attachments/${newId}/file` : null;
     };
+
+    // STAGE: write each attachment's bytes into a unique staging dir now. The
+    // final filename embeds the NEW DB id (assigned inside the tx below), so
+    // we write under a per-attachment nonce here and rename to the final path
+    // on publish. A write failure (disk full, permission, mount loss) aborts
+    // the whole import BEFORE a single row is inserted — exactly the atomicity
+    // the issue requires. `pendingWrites` carries the staged->final mapping
+    // the publish step consumes after the tx commits.
+    const pendingWrites: { srcId: number; stagedPath: string; finalRelPath: string; bytes: Buffer }[] = [];
+    if (hasAttachments) {
+      stagingDir = createStagingDir();
+      for (const a of attachmentFiles) {
+        const nonce = crypto.randomBytes(8).toString('hex');
+        const ext = ALLOWED_MIME_TO_EXT[a.mime] ?? 'bin';
+        const stagedPath = path.join(stagingDir, `${nonce}.${ext}`);
+        try {
+          fs.writeFileSync(stagedPath, a.bytes);
+        } catch (err) {
+          // A failed stage write means we cannot durably recreate this
+          // attachment — abort the whole import rather than reporting success
+          // with a missing map (the old behavior the issue calls out).
+          cleanupStagingDir(stagingDir);
+          stagingDir = null;
+          throw new BadRequestException(
+            `Could not stage attachment "${a.filename}" for import (disk full, unwritable, or unmounted): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+        // finalRelPath is resolved against uploadsRoot() on publish, once we
+        // know the new campaign id. Stored as <campaignDir>/<newId>.<ext>.
+        pendingWrites.push({ srcId: a.srcId, stagedPath, finalRelPath: `${nonce}.${ext}`, bytes: a.bytes });
+      }
+    }
 
     const newId = this.db.transaction((tx) => {
       const [campaignRow] = tx
@@ -799,6 +969,9 @@ export class CampaignsService {
       // Attachments first (issue #236): every map/portrait ref downstream — character
       // portraitUrl, encounter mapAttachmentId, the campaign map — remaps through attMap,
       // so the rows must exist before those inserts. Empty for a JSON-only import.
+      // Issue #725: the bytes were already STAGED above (before the tx opened) — here we
+      // only insert the row. The new id is folded into pendingWrites' finalRelPath on
+      // publish, once we know it.
       for (const a of attachmentFiles) {
         const [row] = tx
           .insert(attachments)
@@ -818,7 +991,10 @@ export class CampaignsService {
           .all();
         attMap.set(a.srcId, row.id);
         const ext = ALLOWED_MIME_TO_EXT[a.mime] ?? 'bin';
-        pendingWrites.push({ filePath: path.join(uploadsRoot(), String(cid), `${row.id}.${ext}`), bytes: a.bytes });
+        // Record the FINAL on-disk path (named by the new row id) keyed to this
+        // staged file, so the publish step renames the right staging entry to it.
+        const pw = pendingWrites.find((p) => p.srcId === a.srcId);
+        if (pw) pw.finalRelPath = path.join(String(cid), `${row.id}.${ext}`);
       }
 
       // Factions (issue #266) before npcs — an npc's factionId points at one, so the
@@ -1274,39 +1450,114 @@ export class CampaignsService {
         }
       }
 
+      // Issue #725: fold the importer's dm membership AND the import audit row
+      // INTO the same transaction as the entity rows. Previously these ran AFTER
+      // the commit, so a failure here (a disabled user, a DB error) left a
+      // fully-written campaign that the importer could not even SEE (no member
+      // row) and/or a committed import with no audit trail. Now a throw rolls
+      // the whole import back — no orphaned, inaccessible campaign.
+      //
+      // addCreatorAsDmTx is the transaction-aware variant of
+      // MembersService.addCreatorAsDm() (same assignableUserTx validation: a
+      // missing/disabled user throws, rolling the import back). Dev-auth users
+      // skip membership (same rule as create()/clone()).
+      if (!user.devRole) {
+        const numericId = Number(user.id);
+        if (Number.isInteger(numericId)) {
+          this.members.addCreatorAsDmTx(tx, cid, numericId, ts);
+        }
+      }
+      // Mirrors AuditService.log()'s insert, inlined so it shares the import's
+      // atomic commit boundary (#725). The audit row lands with every entity row
+      // or not at all.
+      tx.insert(auditLog)
+        .values({
+          campaignId: cid,
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'campaign.import',
+          entityType: 'campaign',
+          entityId: cid,
+          detail: `imported "${name}" from a Campfire export`,
+          createdAt: ts,
+        })
+        .run();
+
       return cid;
     });
 
-    // Rows are durable — now write each imported attachment's bytes to disk under the
-    // new campaign's uploads dir. A failed write leaves a row-without-file (the #84
-    // tolerated shape: the GET route 404s that one file), never a broken import.
+    // COMMITTED — every entity row + the dm membership + the audit row are
+    // durable together. Now PUBLISH the staged attachment bytes by renaming each
+    // staged file into its final uploadsRoot()/<cid>/<id>.<ext> location. A
+    // rename is atomic per-file on the same filesystem (staging lives under the
+    // same uploadsRoot()/.staging/ tree precisely so this holds). A failure here
+    // degrades to the #84 "row-without-file" shape for THAT one file (the GET
+    // route 404s it) — it can never leave a half-created campaign, because every
+    // row already committed atomically.
+    let attachmentsImported = 0;
+    let attachmentsFailed = 0;
+    const attachmentDetails: ImportAttachmentResult[] = [];
     for (const w of pendingWrites) {
+      // finalRelPath was set inside the tx (named by the new row id); skip an
+      // entry whose row never made it (e.g. an orphaned staged file).
+      if (!w.finalRelPath) continue;
+      const finalPath = path.join(uploadsRoot(), w.finalRelPath);
+      const attachmentFile = attachmentFiles.find((a) => a.srcId === w.srcId);
       try {
-        fs.mkdirSync(path.dirname(w.filePath), { recursive: true });
-        fs.writeFileSync(w.filePath, w.bytes);
-      } catch {
-        /* best-effort — the DB row is the source of truth; a missing file is handled by #84 */
+        fs.mkdirSync(path.dirname(finalPath), { recursive: true });
+        // rename is atomic on the same fs; fall back to writeBytes if the staged
+        // file and final dir somehow aren't on the same volume (defensive — the
+        // staging root is under uploadsRoot() so this branch should never fire,
+        // but EXDEV must not crash the import post-commit).
+        try {
+          fs.renameSync(w.stagedPath, finalPath);
+        } catch (renameErr) {
+          if ((renameErr as NodeJS.ErrnoException).code === 'EXDEV') {
+            fs.writeFileSync(finalPath, w.bytes);
+            fs.rmSync(w.stagedPath, { force: true });
+          } else {
+            throw renameErr;
+          }
+        }
+        attachmentsImported += 1;
+        // The new attachment id is the final filename's leading integer.
+        const rowId = Number.parseInt(path.basename(finalPath), 10);
+        attachmentDetails.push({
+          id: rowId,
+          kind: attachmentFile?.kind ?? 'image',
+          filename: attachmentFile?.filename ?? '',
+          size: w.bytes.length,
+        });
+      } catch (err) {
+        // Publish failed for this one file — the row is durable, the file is
+        // not. This is the tolerated #84 shape (GET 404s the file), NOT a broken
+        // import. Count it and continue with the remaining files.
+        attachmentsFailed += 1;
+        fs.rmSync(w.stagedPath, { force: true });
+        // Surface in server logs so an operator can see which file degraded.
+        importLog.warn(
+          `import publish failed for attachment srcId=${w.srcId} -> ${w.finalRelPath}: ${
+            err instanceof Error ? err.message : String(err)
+          } (row committed; file will 404 until re-uploaded)`,
+        );
       }
     }
 
-    // Same membership rule as create()/clone(): the caller becomes the new campaign's dm.
-    if (!user.devRole) {
-      const numericId = Number(user.id);
-      if (Number.isInteger(numericId)) {
-        await this.members.addCreatorAsDm(newId, numericId);
-      }
+    const campaign = await this.getOrThrow(newId);
+    return {
+      campaign,
+      attachmentsImported,
+      attachmentsSkipped: 0, // populated by importArchive (which knows the skip count)
+      attachmentsFailed,
+      attachmentDetails,
+    };
+    } finally {
+      // Always sweep the staging dir, success OR failure. On success the staged
+      // files were renamed away (consumed); on failure the tx rolled back and
+      // the staged files are orphans. Either way nothing should remain here.
+      cleanupStagingDir(stagingDir);
+      stagingDir = null;
     }
-
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: 'dm',
-      action: 'campaign.import',
-      entityType: 'campaign',
-      entityId: newId,
-      campaignId: newId,
-      detail: `imported "${name}" from a Campfire export`,
-    });
-    return this.getOrThrow(newId);
   }
 
   /**
@@ -1323,7 +1574,7 @@ export class CampaignsService {
    * bytes that aren't a real png/jpeg/webp are simply skipped, so a hand-tampered or
    * partial archive imports its text without recreating a bogus attachment.
    */
-  async importArchive(zipBuffer: Buffer, user: RequestUser, nameOverride?: string): Promise<Campaign> {
+  async importArchive(zipBuffer: Buffer, user: RequestUser, nameOverride?: string): Promise<ImportResult> {
     if (!Buffer.isBuffer(zipBuffer) || zipBuffer.length === 0) {
       throw new BadRequestException('Empty upload — attach a Campfire .zip export.');
     }
@@ -1359,19 +1610,37 @@ export class CampaignsService {
     const input: CampaignImportInput = nameOverride ? { ...parsed.data, name: nameOverride } : parsed.data;
 
     // Pull the embedded attachment bytes named by the manifest's attachments[] entries.
+    // Issue #725: every manifest entry that does NOT yield a usable attachment file
+    // (no id, no path, missing from the archive, empty/oversize, or wrong magic bytes)
+    // is counted as SKIPPED so the ImportResult can report it — these never had a row
+    // inserted, so there is no dangling reference, but the caller deserves to know a
+    // map/portrait was dropped.
     const attachmentFiles: ImportAttachmentFile[] = [];
+    let attachmentsSkipped = 0;
     for (const a of asArr(asRec(doc).attachments)) {
       const srcId = intOrNull(a.id);
       const archivePath = str(a.file);
-      if (srcId == null || !archivePath) continue;
+      if (srcId == null || !archivePath) {
+        attachmentsSkipped += 1;
+        continue;
+      }
       const entry = zip.file(archivePath);
-      if (!entry) continue; // present=false / dangling — no bytes were shipped
+      if (!entry) {
+        attachmentsSkipped += 1; // present=false / dangling — no bytes were shipped
+        continue;
+      }
       const bytes = await entry.async('nodebuffer');
-      if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) continue;
+      if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) {
+        attachmentsSkipped += 1;
+        continue;
+      }
       // Trust the bytes, not the manifest's declared mime: sniff exactly like an upload,
       // so only genuine png/jpeg/webp are stored (and the on-disk extension is correct).
       const mime = sniffImageMime(bytes);
-      if (!mime) continue;
+      if (!mime) {
+        attachmentsSkipped += 1;
+        continue;
+      }
       attachmentFiles.push({
         srcId,
         kind: str(a.kind, 'image'),
@@ -1381,7 +1650,10 @@ export class CampaignsService {
       });
     }
 
-    return this.importCampaign(input, user, attachmentFiles);
+    const result = await this.importCampaign(input, user, attachmentFiles);
+    // Fold the preflight skip count into the result (importCampaign only sees the
+    // attachments that survived the sniff; the skip count is this layer's to report).
+    return { ...result, attachmentsSkipped };
   }
 
   /**
