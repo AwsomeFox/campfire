@@ -10,7 +10,7 @@ export interface FakeAiProviderCall {
 export interface FakeAiProvider {
   baseUrl: string;
   calls: FakeAiProviderCall[];
-  failNext(status: number, body: string): void;
+  failNext(status: number, body: string, count?: number): void;
   close(): Promise<void>;
 }
 
@@ -21,6 +21,7 @@ export interface FakeAiProvider {
 export async function startFakeAiProvider(): Promise<FakeAiProvider> {
   const calls: FakeAiProviderCall[] = [];
   let nextFailure: { status: number; body: string } | null = null;
+  let remainingFailures = 0;
 
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -40,9 +41,12 @@ export async function startFakeAiProvider(): Promise<FakeAiProvider> {
         body,
       });
 
-      if (nextFailure) {
+      if (nextFailure && remainingFailures > 0) {
         const failure = nextFailure;
-        nextFailure = null;
+        remainingFailures -= 1;
+        if (remainingFailures <= 0) {
+          nextFailure = null;
+        }
         res.writeHead(failure.status, { 'content-type': 'application/json' });
         res.end(failure.body);
         return;
@@ -66,8 +70,9 @@ export async function startFakeAiProvider(): Promise<FakeAiProvider> {
   return {
     baseUrl: `http://127.0.0.1:${port}/v1`,
     calls,
-    failNext(status, body) {
+    failNext(status, body, count = 1) {
       nextFailure = { status, body };
+      remainingFailures = count;
     },
     close: () => new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
