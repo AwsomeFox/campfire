@@ -296,7 +296,7 @@ export class EncountersService {
         if (!foundIds.has(id)) hiddenLocationIds.add(id);
       }
       for (const l of locRows) {
-        if (l.status === 'unexplored' || (l as { hidden?: boolean }).hidden || l.deletedAt !== null) {
+        if (l.status === 'unexplored' || l.deletedAt !== null) {
           hiddenLocationIds.add(l.id);
         }
       }
@@ -313,7 +313,7 @@ export class EncountersService {
         if (!foundIds.has(id)) hiddenSessionIds.add(id);
       }
       for (const s of sessRows) {
-        if ((s as { hidden?: boolean }).hidden || s.deletedAt !== null) {
+        if (s.deletedAt !== null) {
           hiddenSessionIds.add(s.id);
         }
       }

@@ -166,13 +166,14 @@ function EncounterLinks({
   const [locations, setLocations] = useState<LinkRow[]>([]);
   const [quests, setQuests] = useState<LinkRow[]>([]);
   const [sessions, setSessions] = useState<LinkRow[]>([]);
+  const [linkListsLoaded, setLinkListsLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const hasLink = encounter.locationId != null || encounter.questId != null || encounter.sessionId != null;
 
   useEffect(() => {
-    if ((!editing && !hasLink) || (locations.length || quests.length || sessions.length)) return;
+    if ((!editing && !hasLink) || linkListsLoaded) return;
     let cancelled = false;
     void Promise.all([
       api.get<LinkRow[]>(`${API}/campaigns/${campaignId}/locations`).catch(() => []),
@@ -183,11 +184,12 @@ function EncounterLinks({
       setLocations(locs);
       setQuests(qs);
       setSessions(sess);
+      setLinkListsLoaded(true);
     });
     return () => {
       cancelled = true;
     };
-  }, [editing, hasLink, campaignId, locations.length, quests.length, sessions.length]);
+  }, [editing, hasLink, campaignId, linkListsLoaded]);
 
   const locName = locations.find((l) => l.id === encounter.locationId);
   const questName = quests.find((q) => q.id === encounter.questId);
@@ -216,34 +218,43 @@ function EncounterLinks({
   return (
     <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11 }}>
       {showLoc && (
-        <Link
+        locName ? <Link
           to={entityHref(campaignId, { type: 'location', id: encounter.locationId })}
           className="tag tag-outline hover:border-accent"
           style={{ fontSize: 10 }}
         >
           <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
-          {locName ? linkLabel('location', locName) : `Location #${encounter.locationId}`}
-        </Link>
+          {linkLabel('location', locName)}
+        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
+          Location #{encounter.locationId} (unavailable)
+        </span>
       )}
       {showQuest && (
-        <Link
+        questName ? <Link
           to={entityHref(campaignId, { type: 'quest', id: encounter.questId })}
           className="tag tag-outline hover:border-accent"
           style={{ fontSize: 10 }}
         >
           <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
-          {questName ? linkLabel('quest', questName) : `Quest #${encounter.questId}`}
-        </Link>
+          {linkLabel('quest', questName)}
+        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
+          Quest #{encounter.questId} (unavailable)
+        </span>
       )}
       {showSess && (
-        <Link
+        sessName ? <Link
           to={entityHref(campaignId, { type: 'session', id: encounter.sessionId })}
           className="tag tag-outline hover:border-accent"
           style={{ fontSize: 10 }}
         >
           <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
-          {sessName ? linkLabel('session', sessName) : `Session #${encounter.sessionId}`}
-        </Link>
+          {linkLabel('session', sessName)}
+        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
+          Session #{encounter.sessionId} (unavailable)
+        </span>
       )}
       {!hasLink && canEdit && !editing && <span className="text-muted">No location / quest / session linked.</span>}
       {canEdit && (
