@@ -398,6 +398,30 @@ function migrateCampaignsTableForStorageQuota(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before the one-authoritative-live-fight invariant
+ * (issue #744): `campaigns.active_encounter_id` didn't exist. Plain nullable ADD
+ * COLUMN — no table rebuild needed, same shape as
+ * migrateCampaignsTableForMapAttachment above. The declared REFERENCES clause is
+ * omitted here (added only for fresh DBs via bootstrap) per the #69 convention —
+ * SQLite cannot ADD a foreign key to an existing table; the service layer's End
+ * clears the pointer, and ON DELETE SET NULL semantics are reproduced in
+ * EncountersService.remove(). Existing campaigns get NULL (no active fight),
+ * preserving the pre-migration behavior. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForActiveEncounter(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'active_encounter_id')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN active_encounter_id INTEGER');
+}
+
+/**
  * Migration for DBs created before XP tracking (issue #14): `characters.xp`
  * didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no table rebuild needed,
  * same as migrateApiTokensTableForAdminEnabled above. New DBs never hit this
@@ -1517,38 +1541,6 @@ function migrateParticipantSupportPreferences(sqlite: Database.Database): void {
 }
 
 /**
- * Migration for issue #711: characters gain the four combat death/temp-HP fields
- * the encounter tracker has tracked since issue #57. `hp_temp`, `death_state`,
- * `death_save_successes`, `death_save_failures` are written by the encounters
- * service on /end so a dead PC stays dead on the sheet (and is skipped by the
- * next encounter's auto-add) instead of being silently resurrected.
- *
- * Plain ADD COLUMN with NOT NULL DEFAULT — no table rebuild needed, same shape
- * as migrateCharactersTableForStatus above. Existing rows read as alive (none)
- * with zero temp HP and zero death-save counters, which is correct for every
- * pre-#711 sheet (the death subsystem existed only on combatants before). Fresh
- * DBs never hit this path — BOOTSTRAP_SQL already declares the columns.
- */
-function migrateCharactersTableForDeathTempHp(sqlite: Database.Database): void {
-  const hasCharactersTable = sqlite
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
-    .get();
-  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
-
-  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
-  const has = (name: string): boolean => columns.some((c) => c.name === name);
-  // Add each column individually — ALTER TABLE ADD COLUMN takes one column at a
-  // time. NOT NULL with a literal DEFAULT back-fills every existing row, so the
-  // post-#711 read path observes a clean alive/temp-less state on legacy sheets.
-  if (!has('hp_temp')) sqlite.exec("ALTER TABLE characters ADD COLUMN hp_temp INTEGER NOT NULL DEFAULT 0");
-  if (!has('death_state')) sqlite.exec("ALTER TABLE characters ADD COLUMN death_state TEXT NOT NULL DEFAULT 'none'");
-  if (!has('death_save_successes'))
-    sqlite.exec('ALTER TABLE characters ADD COLUMN death_save_successes INTEGER NOT NULL DEFAULT 0');
-  if (!has('death_save_failures'))
-    sqlite.exec('ALTER TABLE characters ADD COLUMN death_save_failures INTEGER NOT NULL DEFAULT 0');
-}
-
-/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1617,7 +1609,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0053_oauth_atomic_rotation', run: migrateOAuthAccessTokensForAtomicRotation },
   { name: '0054_combatants_unique_identity', run: migrateCombatantsUniqueIdentity },
   { name: '0055_participant_support_preferences', run: migrateParticipantSupportPreferences },
-  { name: '0056_characters_death_temp_hp', run: migrateCharactersTableForDeathTempHp },
+  { name: '0056_campaigns_active_encounter', run: migrateCampaignsTableForActiveEncounter },
 
 ];
 

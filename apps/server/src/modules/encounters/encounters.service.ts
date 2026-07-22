@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
+import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -27,16 +27,6 @@ type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
-
-/** Small, role-safe projection used by campaign search (no combatants/map state). */
-export type EncounterSearchEntry = {
-  id: number;
-  campaignId: number;
-  name: string;
-  locationLabel: string;
-  questLabel: string;
-  sessionLabel: string;
-};
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -215,6 +205,97 @@ export class EncountersService {
     }
   }
 
+  /**
+   * Resolve the single authoritative live encounter for a campaign (issue #744). Returns
+   * the active encounter row when there is exactly one 'running' fight — preferring the
+   * campaign's `activeEncounterId` pointer (the transactional source of truth) and
+   * falling back to a status scan for back-compat with rows written before the pointer
+   * column existed / on DBs that haven't run the migration. Returns undefined when no
+   * encounter is running. The async variant reads outside any transaction (e.g. from
+   * listForCampaign); start/reopen/reopen use the synchronous in-transaction variant
+   * below so the assertion + status flip are atomic against concurrent starts.
+   */
+  private async findLiveEncounter(
+    campaignId: number,
+  ): Promise<typeof encounters.$inferSelect | undefined> {
+    // Prefer the explicit pointer — it is the source of truth once a start/reopen lands.
+    const [campaign] = await this.db.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
+    if (campaign?.activeEncounterId !== null && campaign?.activeEncounterId !== undefined) {
+      const [row] = await this.db
+        .select()
+        .from(encounters)
+        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId)))
+        .limit(1);
+      if (row && (row.status as EncounterStatus) === 'running') return row;
+    }
+    // Back-compat scan: a 'running' encounter from before the pointer existed, or a
+    // pointer that drifted out of sync (e.g. an older server with no #744 enforcement).
+    const rows = await this.db
+      .select()
+      .from(encounters)
+      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running')));
+    return rows[0];
+  }
+
+  /**
+   * Synchronous in-transaction variant of findLiveEncounter (issue #744). better-sqlite3
+   * transactions are synchronous, so the queries here use `.all()` directly. Reading the
+   * campaign pointer + the status scan inside the SAME serialized transaction that the
+   * caller will flip status in means two concurrent /start calls serialize: the loser's
+   * read observes the winner's committed 'running' row and surfaces a 409.
+   */
+  private findLiveEncounterSync(
+    campaignId: number,
+    tx: DrizzleDb,
+  ): typeof encounters.$inferSelect | undefined {
+    const [campaign] = tx
+      .select({ activeEncounterId: campaigns.activeEncounterId })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1)
+      .all();
+    if (campaign?.activeEncounterId !== null && campaign?.activeEncounterId !== undefined) {
+      const [row] = tx
+        .select()
+        .from(encounters)
+        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId)))
+        .limit(1)
+        .all();
+      if (row && (row.status as EncounterStatus) === 'running') return row;
+    }
+    const rows = tx
+      .select()
+      .from(encounters)
+      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running')))
+      .all();
+    return rows[0];
+  }
+
+  /**
+   * Enforce the one-authoritative-live-fight invariant (issue #744) inside the caller's
+   * transaction. Throws 409 Conflict — carrying the winning encounter's id + name + a deep
+   * link — when a DIFFERENT encounter is already running in this campaign. The winner is
+   * whichever live encounter findLiveEncounterSync resolves (the pinned pointer if set,
+   * else the first 'running' row). Must run inside the same transaction as the status flip
+   * so two concurrent starts serialize and the loser deterministically sees the winner's row.
+   */
+  private assertNoOtherLiveEncounter(
+    campaignId: number,
+    encounterId: number,
+    tx: DrizzleDb,
+  ): void {
+    const live = this.findLiveEncounterSync(campaignId, tx);
+    if (live && live.id !== encounterId) {
+      throw new ConflictException({
+        code: 'ENCOUNTER_ALREADY_RUNNING',
+        message: `Encounter "${live.name}" is already the live fight for this campaign — end it before starting another.`,
+        encounterId: live.id,
+        encounterName: live.name,
+        deepLink: `/c/${campaignId}/encounters/${live.id}`,
+      });
+    }
+  }
+
   async getRowOrThrow(id: number) {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Encounter ${id} not found`);
@@ -305,6 +386,94 @@ export class EncountersService {
   }
 
   /**
+   * Redact `questId`, `locationId`, and `sessionId` to `null` on encounter domain objects
+   * (or digests) when viewed by a non-DM and the linked entity is hidden, unexplored, or deleted.
+   */
+  private async redactHiddenLinkedEntities<T extends { questId: number | null; locationId: number | null; sessionId: number | null }>(
+    items: T[],
+    campaignId: number,
+    viewerRole?: Role,
+  ): Promise<T[]> {
+    if (viewerRole === undefined || viewerRole === 'dm' || items.length === 0) {
+      return items;
+    }
+
+    const questIds = Array.from(new Set(items.map((i) => i.questId).filter((id): id is number => id !== null)));
+    const locationIds = Array.from(new Set(items.map((i) => i.locationId).filter((id): id is number => id !== null)));
+    const sessionIds = Array.from(new Set(items.map((i) => i.sessionId).filter((id): id is number => id !== null)));
+
+    const hiddenQuestIds = new Set<number>();
+    if (questIds.length > 0) {
+      const questRows = await this.db
+        .select({ id: quests.id, hidden: quests.hidden, deletedAt: quests.deletedAt })
+        .from(quests)
+        .where(and(inArray(quests.id, questIds), eq(quests.campaignId, campaignId)));
+      const foundIds = new Set(questRows.map((q) => q.id));
+      for (const id of questIds) {
+        if (!foundIds.has(id)) hiddenQuestIds.add(id);
+      }
+      for (const q of questRows) {
+        if (q.hidden || q.deletedAt !== null) {
+          hiddenQuestIds.add(q.id);
+        }
+      }
+    }
+
+    const hiddenLocationIds = new Set<number>();
+    if (locationIds.length > 0) {
+      const locRows = await this.db
+        .select({ id: locations.id, status: locations.status, deletedAt: locations.deletedAt })
+        .from(locations)
+        .where(and(inArray(locations.id, locationIds), eq(locations.campaignId, campaignId)));
+      const foundIds = new Set(locRows.map((l) => l.id));
+      for (const id of locationIds) {
+        if (!foundIds.has(id)) hiddenLocationIds.add(id);
+      }
+      for (const l of locRows) {
+        if (l.status === 'unexplored' || l.deletedAt !== null) {
+          hiddenLocationIds.add(l.id);
+        }
+      }
+    }
+
+    const hiddenSessionIds = new Set<number>();
+    if (sessionIds.length > 0) {
+      const sessRows = await this.db
+        .select({ id: sessions.id, deletedAt: sessions.deletedAt })
+        .from(sessions)
+        .where(and(inArray(sessions.id, sessionIds), eq(sessions.campaignId, campaignId)));
+      const foundIds = new Set(sessRows.map((s) => s.id));
+      for (const id of sessionIds) {
+        if (!foundIds.has(id)) hiddenSessionIds.add(id);
+      }
+      for (const s of sessRows) {
+        if (s.deletedAt !== null) {
+          hiddenSessionIds.add(s.id);
+        }
+      }
+    }
+
+    if (hiddenQuestIds.size === 0 && hiddenLocationIds.size === 0 && hiddenSessionIds.size === 0) {
+      return items;
+    }
+
+    return items.map((item) => {
+      const qId = item.questId !== null && hiddenQuestIds.has(item.questId) ? null : item.questId;
+      const lId = item.locationId !== null && hiddenLocationIds.has(item.locationId) ? null : item.locationId;
+      const sId = item.sessionId !== null && hiddenSessionIds.has(item.sessionId) ? null : item.sessionId;
+      if (qId === item.questId && lId === item.locationId && sId === item.sessionId) {
+        return item;
+      }
+      return {
+        ...item,
+        questId: qId,
+        locationId: lId,
+        sessionId: sId,
+      };
+    });
+  }
+
+  /**
    * `viewerRole` drives entity-level secrecy (issue #262): a hidden encounter is a DM's
    * prepared, not-yet-sprung fight and is dropped WHOLESALE for a non-DM viewer — mirroring
    * how QuestsService/NpcsService filter hidden rows. Omit `viewerRole` (or pass `dm`) only
@@ -318,75 +487,31 @@ export class EncountersService {
       .select()
       .from(encounters)
       .where(conditions.length > 1 ? and(...conditions) : conditions[0]);
-    const list = rows.map(encounterToDomain);
+    let list = rows.map(encounterToDomain);
     // Drop hidden encounters wholesale for a non-DM viewer (issue #262). undefined role
     // (DM-facing callers) is never filtered.
-    return viewerRole === undefined ? list : filterHidden(list, viewerRole);
-  }
-
-  /**
-   * Bounded search projection for encounter names and their optional where/why/when
-   * labels. Visibility is enforced in SQL: hidden encounters are absent for every
-   * non-DM, and a linked hidden quest or unexplored location becomes an empty string
-   * before both matching and returning. This avoids per-encounter lookups and never
-   * loads combatants or other live-table state.
-   */
-  async searchForCampaign(campaignId: number, role: Role, needle: string, limit: number): Promise<EncounterSearchEntry[]> {
-    const boundedLimit = Math.max(1, Math.min(limit, 50));
-    needle = needle.trim().toLowerCase();
-    if (!needle) return [];
-    const questLabel = role === 'dm'
-      ? sql<string>`coalesce(${quests.title}, '')`
-      : sql<string>`case when ${quests.hidden} = 0 then coalesce(${quests.title}, '') else '' end`;
-    const locationLabel = role === 'dm'
-      ? sql<string>`coalesce(${locations.name}, '')`
-      : sql<string>`case when ${locations.status} <> 'unexplored' then coalesce(${locations.name}, '') else '' end`;
-    const sessionLabel = sql<string>`case
-      when ${sessions.id} is null then ''
-      when length(trim(coalesce(${sessions.title}, ''))) > 0 then ${sessions.title}
-      else 'Session ' || ${sessions.number}
-    end`;
-
-    const rows = await this.db
-      .select({
-        id: encounters.id,
-        campaignId: encounters.campaignId,
-        name: encounters.name,
-        locationLabel,
-        questLabel,
-        sessionLabel,
-      })
-      .from(encounters)
-      .leftJoin(
-        locations,
-        and(
-          eq(locations.id, encounters.locationId),
-          eq(locations.campaignId, campaignId),
-          notDeleted(locations.deletedAt),
-        ),
-      )
-      .leftJoin(
-        quests,
-        and(eq(quests.id, encounters.questId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)),
-      )
-      .leftJoin(
-        sessions,
-        and(eq(sessions.id, encounters.sessionId), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)),
-      )
-      .where(and(
-        eq(encounters.campaignId, campaignId),
-        role === 'dm' ? undefined : eq(encounters.hidden, false),
-        or(
-          sql`instr(lower(${encounters.name}), ${needle}) > 0`,
-          sql`instr(lower(${locationLabel}), ${needle}) > 0`,
-          sql`instr(lower(${questLabel}), ${needle}) > 0`,
-          sql`instr(lower(${sessionLabel}), ${needle}) > 0`,
-        ),
-      ))
-      .orderBy(encounters.id)
-      .limit(boundedLimit);
-
-    return rows;
+    const visible = viewerRole === undefined ? list : filterHidden(list, viewerRole);
+    // One authoritative live fight (issue #744): when listing 'running' encounters, pin
+    // the campaign's activeEncounterId to the front so consumers (Dashboard / Player
+    // Display / AI Table) that take the first result follow the authoritative fight rather
+    // than an arbitrary DB ordering. With the Start/Reopen transactional guard there is at
+    // most one running encounter anyway; this is the deterministic tiebreaker for any
+    // legacy drift and a no-op otherwise.
+    if (status === 'running' && visible.length > 1) {
+      const activeId = await this.findLiveEncounter(campaignId);
+      if (activeId) {
+        list = visible.sort((a, b) => {
+          if (a.id === activeId.id) return -1;
+          if (b.id === activeId.id) return 1;
+          return 0;
+        });
+      } else {
+        list = visible;
+      }
+    } else {
+      list = visible;
+    }
+    return this.redactHiddenLinkedEntities(list, campaignId, viewerRole);
   }
 
   /**
@@ -430,7 +555,9 @@ export class EncountersService {
       const fog = parseFog(row.fog);
       if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
     }
-    return { ...encounterToDomain(row), combatants: list };
+    const domain = encounterToDomain(row);
+    const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
+    return { ...redactedDomain, combatants: list };
   }
 
   async getCombatantRowOrThrow(encounterId: number, combatantId: number) {
@@ -627,6 +754,9 @@ export class EncountersService {
 
   /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
   async create(campaignId: number, input: EncounterCreateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    if (input.locationId != null) await this.assertEntityInCampaign('location', input.locationId, campaignId);
+    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, campaignId);
+    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, campaignId);
     const ts = nowIso();
     const [encounterRow] = await this.db
       .insert(encounters)
@@ -944,7 +1074,7 @@ export class EncountersService {
       .groupBy(combatants.encounterId);
     const tallyById = new Map(tally.map((t) => [t.encounterId, { total: Number(t.total), down: Number(t.down) }]));
 
-    return rows.map((r) => {
+    const digests: EncounterDigest[] = rows.map((r) => {
       const t = tallyById.get(r.id) ?? { total: 0, down: 0 };
       return {
         id: r.id,
@@ -959,6 +1089,7 @@ export class EncountersService {
         downCount: t.down,
       };
     });
+    return this.redactHiddenLinkedEntities(digests, campaignId, viewerRole);
   }
 
   /**
@@ -1579,52 +1710,36 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
   }
 
-  /**
-   * Rolls d20+initMod for every combatant that doesn't already have an initiative.
-   *
-   * Returns the encounter (with combatants) plus `rolledCount` — the number of
-   * combatants that actually had their initiative filled this call. When the roster
-   * is already fully rolled (rolledCount === 0) this is a semantic no-op: no DB write,
-   * no audit entry, and no SSE broadcast — mirroring the encounter-PATCH no-op rule so
-   * the cockpit can't be spammed into an audit trail of empty rolls (issue #702).
-   */
-  async rollInitiative(encounterId: number, user: RequestUser, role: Role): Promise<EncounterRollInitiativeResult> {
+  /** Rolls d20+initMod for every combatant that doesn't already have an initiative. */
+  async rollInitiative(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const rows = await this.listCombatantRows(encounterId);
 
     // Roll each un-set combatant's initiative in JS, then apply them all in ONE
-    // case-based UPDATE (#72) instead of one UPDATE per combatant. Combatants that
+    // CASE-based UPDATE (#72) instead of one UPDATE per combatant. Combatants that
     // already have an initiative are excluded from the id list, so — exactly as
     // before — only null initiatives are filled and manually-set values are left
     // untouched. No write at all when nothing needs rolling.
     const rolled = rows
       .filter((row) => row.initiative === null)
       .map((row) => ({ id: row.id, initiative: rollInitiative(row.initMod, adapter.initiativeDie) }));
-
-    // Fully-rolled roster (issue #702): nothing to write, nothing meaningful to audit.
-    // Bail out before the audit.log / SSE emit so the audit trail and other clients are
-    // not disturbed by an empty roll. We still return the current encounter + rolledCount
-    // so the caller has a fresh, consistent snapshot.
-    if (rolled.length === 0) {
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
-      return { ...snapshot, rolledCount: 0 };
-    }
-
-    const cases = sql.join(
-      rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`),
-      sql` `,
-    );
-    await this.db
-      .update(combatants)
-      .set({ initiative: sql`CASE ${combatants.id} ${cases} END` })
-      .where(
-        inArray(
-          combatants.id,
-          rolled.map((r) => r.id),
-        ),
+    if (rolled.length > 0) {
+      const cases = sql.join(
+        rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`),
+        sql` `,
       );
+      await this.db
+        .update(combatants)
+        .set({ initiative: sql`CASE ${combatants.id} ${cases} END` })
+        .where(
+          inArray(
+            combatants.id,
+            rolled.map((r) => r.id),
+          ),
+        );
+    }
 
     // Filling a late joiner's initiative mid-fight (issue #54) re-sorts the order, so
     // keep the positional turnIndex aligned with the (unchanged) identity pointer.
@@ -1643,13 +1758,11 @@ export class EncountersService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
-      detail: `${rolled.length}`,
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
-    const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
-    return { ...snapshot, rolledCount: rolled.length };
+    return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
@@ -1670,10 +1783,21 @@ export class EncountersService {
     const sorted = sortCombatants(rows.map(combatantToDomain), 'running');
     const currentCombatantId = sorted[0]?.id ?? null;
 
-    await this.db
-      .update(encounters)
-      .set({ status: 'running', round: 1, turnIndex: 0, currentCombatantId, updatedAt: nowIso() })
-      .where(eq(encounters.id, encounterId));
+    // One authoritative live fight per campaign (issue #744): flip status to 'running'
+    // AND set the campaign's activeEncounterId in the SAME transaction, after asserting
+    // no other encounter is already running. better-sqlite3 transactions serialize writes,
+    // so two concurrent /start calls cannot both pass the assertion — the loser's read
+    // sees the winner's committed row and surfaces a 409 with the winner's name + link.
+    const campaignId = encounterRow.campaignId;
+    const ts = nowIso();
+    this.db.transaction((tx) => {
+      this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
+      tx.update(encounters)
+        .set({ status: 'running', round: 1, turnIndex: 0, currentCombatantId, updatedAt: ts })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      tx.update(campaigns).set({ activeEncounterId: encounterId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
+    });
 
     // Seed the combat log with the opening turn (issue #61).
     const first = sorted[0];
@@ -1689,10 +1813,10 @@ export class EncountersService {
       action: 'encounter.start',
       entityType: 'encounter',
       entityId: encounterId,
-      campaignId: encounterRow.campaignId,
+      campaignId,
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
@@ -1821,6 +1945,10 @@ export class EncountersService {
     }
 
     const ts = nowIso();
+    // Clear the campaign's activeEncounterId iff this encounter IS the active one (issue
+    // #744) — done inside the same HP-write-back transaction so a crash mid-end can't leave
+    // the pointer dangling at an 'ended' encounter. A third-party ended a non-active fight
+    // (legacy drift where the pointer disagreed with status) leaves the pointer untouched.
     this.db.transaction((tx) => {
       for (const w of characterWrites) {
         // Issue #711: write the full combat slice — HP, temp HP, death state, and
@@ -1842,6 +1970,10 @@ export class EncountersService {
         tx.update(characters).set(set).where(eq(characters.id, w.characterId)).run();
       }
       tx.update(encounters).set({ status: 'ended', endedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
+      const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
+      if (camp?.activeEncounterId === encounterId) {
+        tx.update(campaigns).set({ activeEncounterId: null, updatedAt: ts }).where(eq(campaigns.id, encounterRow.campaignId)).run();
+      }
     });
 
     await this.audit.log({
@@ -1866,6 +1998,10 @@ export class EncountersService {
    * than resetting to the top of the order. Combatant HP is untouched by /end (only the
    * write-back onto character sheets happened), so reopening leaves combat state
    * self-consistent. The same HP-writeback caveat applies on the next /end.
+   *
+   * One authoritative live fight (issue #744): the status flip + activeEncounterId write
+   * + the no-other-running assertion run in ONE transaction, mirroring start(). A reopen
+   * racing another reopen/start serializes and the loser surfaces a 409 with the winner.
    */
   async reopen(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
@@ -1873,10 +2009,13 @@ export class EncountersService {
       throw new BadRequestException(`Encounter must be 'ended' to reopen (currently '${encounterRow.status}')`);
     }
 
-    await this.db
-      .update(encounters)
-      .set({ status: 'running', endedAt: null, updatedAt: nowIso() })
-      .where(eq(encounters.id, encounterId));
+    const campaignId = encounterRow.campaignId;
+    const ts = nowIso();
+    this.db.transaction((tx) => {
+      this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
+      tx.update(encounters).set({ status: 'running', endedAt: null, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
+      tx.update(campaigns).set({ activeEncounterId: encounterId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -1884,10 +2023,10 @@ export class EncountersService {
       action: 'encounter.reopen',
       entityType: 'encounter',
       entityId: encounterId,
-      campaignId: encounterRow.campaignId,
+      campaignId,
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterId);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
@@ -1899,10 +2038,18 @@ export class EncountersService {
     // encounters.end. On FK-less (pre-#69, migrated) DBs there's no ON DELETE cascade,
     // so three separately-awaited deletes could half-fail and orphan combatants/events
     // on a vanished encounter; the transaction makes it all-or-nothing.
+    //
+    // Also null the campaign's activeEncounterId if it pointed here (issue #744) — fresh
+    // DBs get this from the declared ON DELETE SET NULL, but pre-migration DBs reproduce
+    // the same effect here so the pointer never dangles at a deleted encounter.
     this.db.transaction((tx) => {
       tx.delete(combatants).where(eq(combatants.encounterId, encounterId)).run();
       tx.delete(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).run();
       tx.delete(encounters).where(eq(encounters.id, encounterId)).run();
+      const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
+      if (camp?.activeEncounterId === encounterId) {
+        tx.update(campaigns).set({ activeEncounterId: null, updatedAt: nowIso() }).where(eq(campaigns.id, encounterRow.campaignId)).run();
+      }
     });
 
     await this.audit.log({

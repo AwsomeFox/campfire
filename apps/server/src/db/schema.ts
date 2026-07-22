@@ -40,6 +40,13 @@ export const campaigns = sqliteTable('campaigns', {
   // via the storage console; enforced on attachment upload. Nullable in older DBs
   // pre-migration; see db/db.module.ts ALTER TABLE note.
   storageQuotaBytes: integer('storage_quota_bytes'),
+  // The single authoritative live encounter for this campaign (issue #744). A campaign
+  // may have at most one 'running' fight — Start/Reopen set this pointer inside the
+  // same transaction that flips status to 'running', and End clears it. Dashboard /
+  // Player Display / AI Table read this (falling back to a 'running' scan for back-compat)
+  // instead of picking an arbitrary first result. Nullable in older DBs pre-migration;
+  // see db/db.module.ts migrateCampaignsTableForActiveEncounter().
+  activeEncounterId: integer('active_encounter_id'),
   // Soft-delete / trash timestamp (issue #116). NULL => live; an ISO timestamp => the
   // campaign is trashed: excluded from normal listings while its rows + on-disk uploads
   // survive for a grace period, restorable until an explicit purge. Migrated via

@@ -3220,4 +3220,162 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(denied.status).toBe(403);
     });
   });
+
+  // Issue #744: a campaign may have at most one authoritative live ('running') fight.
+  // Start/Reopen are transactional and reject with 409 when another fight is already live,
+  // carrying the winner's id + name + deep link. End clears the campaign's
+  // activeEncounterId so the next fight may start. Dashboard / Player Display / AI Table
+  // read the active pointer (falling back to a status scan) instead of picking an
+  // arbitrary first result.
+  describe('one authoritative live fight (issue #744)', () => {
+    // Build a preparing encounter with all combatants' initiative set, ready to start.
+    // Creating an encounter auto-adds the campaign's party (Aria) with null initiative, so
+    // /roll-initiative is what actually makes every combatant start-eligible.
+    async function makePreparedEncounter(name: string): Promise<number> {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name });
+      expect(created.status).toBe(201);
+      const id = created.body.id as number;
+      const m = await request(server)
+        .post(`/api/v1/encounters/${id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: `${name} foe`, hpMax: 10 });
+      expect(m.status).toBe(201);
+      const roll = await request(server).post(`/api/v1/encounters/${id}/roll-initiative`).set(dm);
+      expect(roll.status).toBe(201);
+      return id;
+    }
+
+    async function startEncounter(id: number): Promise<request.Response> {
+      return request(server()).post(`/api/v1/encounters/${id}/start`).set(dm);
+    }
+
+    function server() {
+      return ctx.app.getHttpServer();
+    }
+
+    it('starting a second encounter while one is already running is rejected 409 with the winner name + deep link', async () => {
+      const first = await makePreparedEncounter('Live Fight A');
+      const second = await makePreparedEncounter('Live Fight B');
+
+      const ok = await startEncounter(first);
+      expect(ok.status).toBe(201);
+
+      const conflict = await startEncounter(second);
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.code).toBe('ENCOUNTER_ALREADY_RUNNING');
+      expect(conflict.body.encounterId).toBe(first);
+      expect(conflict.body.encounterName).toBe('Live Fight A');
+      expect(conflict.body.deepLink).toBe(`/c/${campaignId}/encounters/${first}`);
+
+      // The loser stayed 'preparing' — its status flip was atomic with the assertion.
+      const loserGet = await request(server()).get(`/api/v1/encounters/${second}`).set(dm);
+      expect(loserGet.body.status).toBe('preparing');
+
+      // Clean up: end the winner so subsequent tests start fresh.
+      await request(server()).post(`/api/v1/encounters/${first}/end`).set(dm);
+    });
+
+    it('reopening an ended encounter while another is running is rejected 409', async () => {
+      const first = await makePreparedEncounter('Reopen Winner');
+      const second = await makePreparedEncounter('Reopen Loser');
+
+      // Start + end `second` so it is eligible to reopen.
+      await startEncounter(second);
+      await request(server()).post(`/api/v1/encounters/${second}/end`).set(dm);
+
+      // Now start `first` — it becomes the authoritative live fight.
+      const ok = await startEncounter(first);
+      expect(ok.status).toBe(201);
+
+      // Reopening `second` must fail: `first` is live.
+      const conflict = await request(server()).post(`/api/v1/encounters/${second}/reopen`).set(dm);
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.code).toBe('ENCOUNTER_ALREADY_RUNNING');
+      expect(conflict.body.encounterId).toBe(first);
+
+      // The loser stayed 'ended'.
+      const loserGet = await request(server()).get(`/api/v1/encounters/${second}`).set(dm);
+      expect(loserGet.body.status).toBe('ended');
+
+      await request(server()).post(`/api/v1/encounters/${first}/end`).set(dm);
+    });
+
+    it('ending the active encounter clears the pointer, allowing a new fight to start', async () => {
+      const first = await makePreparedEncounter('End Then Start 1');
+      const second = await makePreparedEncounter('End Then Start 2');
+
+      await startEncounter(first);
+      const endRes = await request(server()).post(`/api/v1/encounters/${first}/end`).set(dm);
+      expect(endRes.status).toBe(201);
+
+      // After ending, the second encounter may start without a 409.
+      const ok = await startEncounter(second);
+      expect(ok.status).toBe(201);
+      expect(ok.body.status).toBe('running');
+
+      await request(server()).post(`/api/v1/encounters/${second}/end`).set(dm);
+    });
+
+    it('GET /campaigns/:id/encounters?status=running surfaces the authoritative fight first', async () => {
+      const live = await makePreparedEncounter('Authoritative Surfacing');
+      await startEncounter(live);
+
+      const list = await request(server()).get(`/api/v1/campaigns/${campaignId}/encounters?status=running`).set(dm);
+      expect(list.status).toBe(200);
+      const running = list.body as Array<{ id: number }>;
+      expect(running.length).toBe(1);
+      expect(running[0].id).toBe(live);
+
+      await request(server()).post(`/api/v1/encounters/${live}/end`).set(dm);
+    });
+
+    it('a hidden encounter can still be the authoritative live fight and is the 409 winner by name', async () => {
+      const server = ctx.app.getHttpServer();
+      // Hidden prep encounter that the DM starts — it becomes the authoritative fight.
+      const hiddenCreated = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Secret Ambush', hidden: true });
+      expect(hiddenCreated.status).toBe(201);
+      const hiddenId = hiddenCreated.body.id as number;
+      await request(server)
+        .post(`/api/v1/encounters/${hiddenId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Ambusher', hpMax: 8 });
+      // Roll initiative for every combatant (the auto-added party + the monster) so /start is eligible.
+      const roll = await request(server).post(`/api/v1/encounters/${hiddenId}/roll-initiative`).set(dm);
+      expect(roll.status).toBe(201);
+
+      const started = await request(server).post(`/api/v1/encounters/${hiddenId}/start`).set(dm);
+      expect(started.status).toBe(201);
+
+      // A second (revealed) encounter cannot start while the hidden one is live.
+      const revealed = await makePreparedEncounter('Revealed Rival');
+      const conflict = await startEncounter(revealed);
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.encounterName).toBe('Secret Ambush');
+
+      // And the hidden fight is still hidden from a player's running list (issue #262 holds).
+      const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters?status=running`).set(player);
+      expect(playerList.body.some((e: { id: number }) => e.id === hiddenId)).toBe(false);
+
+      await request(server).post(`/api/v1/encounters/${hiddenId}/end`).set(dm);
+    });
+
+    it('deleting the active encounter clears the pointer so a new fight may start', async () => {
+      const live = await makePreparedEncounter('Delete Active');
+      await startEncounter(live);
+
+      const del = await request(server()).delete(`/api/v1/encounters/${live}`).set(dm);
+      expect(del.status).toBe(200);
+
+      // Pointer is cleared by remove(); a new encounter starts cleanly.
+      const next = await makePreparedEncounter('After Delete');
+      const ok = await startEncounter(next);
+      expect(ok.status).toBe(201);
+
+      await request(server()).post(`/api/v1/encounters/${next}/end`).set(dm);
+    });
+  });
 });

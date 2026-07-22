@@ -279,6 +279,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // Fresh DB already has the modern columns (never touched a migration path).
       expect(columnNames(sqlite, 'characters')).toEqual(expect.arrayContaining(['xp', 'dm_secret', 'spell_slots']));
       expect(columnNames(sqlite, 'users')).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
+      // Issue #744: campaigns carry the one-authoritative-live-fight pointer on fresh DBs.
+      expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
 
       expect(columnNames(sqlite, 'oauth_access_tokens')).toEqual(
         expect.arrayContaining(['family_id', 'refresh_consumed_at', 'revoked_at', 'family_revoked_at']),
@@ -290,6 +292,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['owner_user_id', 'support_text', 'visibility', 'ai_use_consent']),
       );
       expect(MIGRATION_NAMES).toContain('0055_participant_support_preferences');
+      expect(MIGRATION_NAMES).toContain('0056_campaigns_active_encounter');
+      // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
+      expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
 
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');
