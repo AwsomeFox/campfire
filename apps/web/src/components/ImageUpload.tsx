@@ -12,7 +12,7 @@ import { API, ApiError } from '../lib/api';
 import { Btn } from './ui';
 
 const ACCEPTED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = 32 * 1024 * 1024;
 
 export function attachmentFileUrl(attachmentId: number): string {
   return `${API}/attachments/${attachmentId}/file`;
@@ -148,7 +148,7 @@ export function ImageUpload({
         return;
       }
       if (file.size > MAX_BYTES) {
-        onError?.('File is too large — 8MB max.');
+        onError?.('File is too large — 32MB max.');
         return;
       }
 

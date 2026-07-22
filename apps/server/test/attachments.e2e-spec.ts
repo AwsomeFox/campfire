@@ -149,7 +149,7 @@ describe('attachments (e2e)', () => {
 
   it('oversize upload is rejected (413)', async () => {
     const server = ctx.app.getHttpServer();
-    const big = Buffer.alloc(9 * 1024 * 1024, 1); // 9MB > 8MB limit
+    const big = Buffer.alloc(33 * 1024 * 1024, 1); // 33MB > 32MB limit
     const res = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/attachments`)
       .set(dm)
