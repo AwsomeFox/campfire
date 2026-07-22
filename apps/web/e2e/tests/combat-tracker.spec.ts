@@ -57,6 +57,38 @@ test.describe('combat tracker — DM view', () => {
     await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) }).first()).toBeVisible();
   });
 
+  test('DM can clear initiative back to the unrolled state via the Clear control (issue #715)', async ({ page }) => {
+    await openEncounter(page);
+    const initInput = page.getByLabel(`Initiative for ${boss.name}`);
+
+    // The boss starts with a rolled initiative and a Clear ("×") control beside it.
+    await expect(initInput).toHaveValue(String(boss.initiative));
+    const clearBtn = page.getByLabel(`Clear initiative for ${boss.name}`);
+    await expect(clearBtn).toBeVisible();
+
+    // Clear it — PATCH { initiative: null } lands, the server writes NULL, and the input
+    // empties (placeholder '–'). The Clear button disappears because there's nothing to clear.
+    await clearBtn.click();
+    await expect(initInput).toHaveValue('');
+    await expect(clearBtn).toHaveCount(0);
+
+    // Keyboard path: typing a value then Backspace-on-empty also clears (issue #715).
+    await initInput.fill('14');
+    await initInput.press('Enter');
+    await expect(initInput).toHaveValue('14');
+    await expect(page.getByLabel(`Clear initiative for ${boss.name}`)).toBeVisible();
+    await initInput.focus();
+    await initInput.fill('');
+    await initInput.press('Backspace');
+    await expect(initInput).toHaveValue('');
+    await expect(page.getByLabel(`Clear initiative for ${boss.name}`)).toHaveCount(0);
+
+    // Restore for any later tests that assume a rolled initiative.
+    await initInput.fill(String(boss.initiative));
+    await initInput.press('Enter');
+    await expect(initInput).toHaveValue(String(boss.initiative));
+  });
+
   test('an ENDED encounter renders read-only: combatant visible but no interactive controls (#368)', async ({ page }) => {
     await page.goto(endedEncounterUrl());
     await expect(page.getByRole('heading', { name: 'Aftermath at the Ember Hearth' })).toBeVisible();
