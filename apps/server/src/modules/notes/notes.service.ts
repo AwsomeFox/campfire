@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
 import type { Note, Role, PageParams } from '@campfire/schema';
@@ -680,7 +680,7 @@ export class NotesService {
       const [row] = tx
         .update(notes)
         .set({ resolved: true, ...terminal, updatedAt: ts })
-        .where(and(eq(notes.id, id), eq(notes.kind, 'inbox'), eq(notes.resolved, false), isNull(notes.deletedAt)))
+        .where(and(eq(notes.id, id), eq(notes.kind, 'inbox'), eq(notes.resolved, false), notDeleted(notes.deletedAt)))
         .returning()
         .all();
 
