@@ -712,3 +712,125 @@ describe('levelUp honors the rule-system level cap (issue #535)', () => {
     expect(row?.level).toBe(21);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #746 — optimistic concurrency for characters. A character sheet is the
+// classic blind last-write-wins clobber victim: two tabs (or a player tab + a
+// DM tab, or a connected AI over MCP) both load the sheet, one applies a live
+// HP/level change or a DM-secret edit, and the other's stale full-snapshot save
+// silently restores the old HP max, level, status, or ability scores. PATCH
+// /characters/:id now enforces the same `expectedUpdatedAt` CAS invariant as
+// quests/npcs/locations/sessions/encounters (#157/#532) — a stale save 409s
+// with STALE_WRITE instead of clobbering the fresher edit.
+// ---------------------------------------------------------------------------
+describe('characters — optimistic concurrency (issue #746, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let characterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'CAS Character Campaign' })).body.id;
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(owner)
+      .send({ name: 'Stale Sheet', hpMax: 20, hpCurrent: 20, ac: 15 });
+    expect(char.status).toBe(201);
+    characterId = char.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('omitting expectedUpdatedAt is unchanged back-compat (unconditional write)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(owner).send({ name: 'Fresh Sheet' });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Fresh Sheet');
+  });
+
+  it('a stale expectedUpdatedAt PATCH 409s with STALE_WRITE and does NOT mutate the row', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(before.body.name).toBe('Fresh Sheet');
+
+    const conflict = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ name: 'CLOBBER', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('STALE_WRITE');
+
+    // The row is untouched — no clobber.
+    const after = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(after.body.name).toBe('Fresh Sheet');
+    expect(after.body.updatedAt).toBe(before.body.updatedAt);
+  });
+
+  it('a matching expectedUpdatedAt PATCH succeeds', async () => {
+    const server = ctx.app.getHttpServer();
+    const current = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+
+    const ok = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ ac: 17, expectedUpdatedAt: current.body.updatedAt });
+    expect(ok.status).toBe(200);
+    expect(ok.body.ac).toBe(17);
+    expect(ok.body.updatedAt).not.toBe(current.body.updatedAt); // bumped
+  });
+
+  // The headline regression from the issue: two tabs both load the sheet, both save.
+  // Tab A applies a live HP change (the common mid-session case); Tab B (still holding
+  // the pre-A updatedAt) then PATCHes its stale full snapshot — which used to silently
+  // restore the old HP. The CAS guard must now 409 Tab B and leave Tab A's HP intact.
+  it('two concurrent updates: the second (stale) one gets 409 and the first edit survives', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Both tabs load the same version.
+    const tabA = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    const tabB = await request(server).get(`/api/v1/characters/${characterId}`).set(dm);
+    expect(tabA.body.updatedAt).toBe(tabB.body.updatedAt);
+    const loadedAt = tabA.body.updatedAt;
+    const loadedHp = tabA.body.hpCurrent;
+
+    // Tab A applies a live HP change first — succeeds and bumps updatedAt. (This is the
+    // mid-session heal/damage path: a real second writer, not just a field echo.)
+    const firstSave = await request(server).post(`/api/v1/characters/${characterId}/hp`).set(dm).send({ set: 4 });
+    expect(firstSave.status).toBe(201);
+    expect(firstSave.body.hpCurrent).toBe(4);
+    expect(firstSave.body.updatedAt).not.toBe(loadedAt); // bumped
+
+    // Tab B (still holding the pre-A updatedAt) PATCHes its stale full snapshot — must
+    // 409, NOT silently restore the old hpCurrent.
+    const staleSave = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(dm)
+      .send({ hpCurrent: loadedHp, expectedUpdatedAt: loadedAt });
+    expect(staleSave.status).toBe(409);
+    expect(staleSave.body.code).toBe('STALE_WRITE');
+
+    // Tab A's HP edit survived — the stale save did not clobber it.
+    const after = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(after.body.hpCurrent).toBe(4);
+  });
+
+  // A proposal-applied update never carries expectedUpdatedAt (the DM applies a queued
+  // edit later, so any guard would be stale-by-design) — the CAS guard must be a no-op
+  // when the field is omitted, so the proposal path stays unaffected.
+  it('the proposal path (no expectedUpdatedAt) is unaffected', async () => {
+    const server = ctx.app.getHttpServer();
+    const proposal = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .query('proposed=true')
+      .send({ name: 'Proposed Rename' });
+    expect(proposal.status).toBe(202);
+    expect(proposal.body.proposal).toBeDefined();
+    // The live row is unchanged until the DM approves.
+    const live = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(live.body.name).not.toBe('Proposed Rename');
+  });
+});

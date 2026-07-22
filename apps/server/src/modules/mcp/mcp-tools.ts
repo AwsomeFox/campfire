@@ -2006,14 +2006,17 @@ export class McpToolsService {
         'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
         'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise. Set status to ' +
         "active|dead|retired|inactive to mark a PC's lifecycle — only active PCs are auto-added to new encounters. With propose:true " +
-        'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly.',
+        'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly. ' +
+        'Pass expectedUpdatedAt (the updatedAt you last read) on an update to opt into optimistic concurrency (issue #746): ' +
+        'a stale value returns 409 Conflict instead of silently clobbering a fresher edit from another tab or a connected AI.',
       {
         campaignId: CampaignIdArg,
         characterId: Id.optional().describe('Existing character id (update); omit to create'),
         propose: ProposeArg,
+        expectedUpdatedAt: ExpectedUpdatedAt,
         ...CharacterUpdate.shape,
       },
-      async ({ campaignId, characterId, propose, ...fields }) => {
+      async ({ campaignId, characterId, propose, expectedUpdatedAt, ...fields }) => {
         if (characterId !== undefined) {
           const row = await this.characters.getRowOrThrow(characterId as number);
           if (row.campaignId !== (campaignId as number)) {
@@ -2026,7 +2029,9 @@ export class McpToolsService {
             return { proposal };
           }
           const role = await this.access.requireRole(user, row.campaignId, 'player');
-          return this.characters.update(characterId as number, validated, user, role);
+          return this.characters.update(characterId as number, validated, user, role, {
+            expectedUpdatedAt: expectedUpdatedAt as string | undefined,
+          });
         }
         const validated = CharacterCreate.parse(fields); // name required on create
         if (requireWriteMode(user, propose)) {
