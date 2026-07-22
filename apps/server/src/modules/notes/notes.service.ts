@@ -712,20 +712,26 @@ export class NotesService {
         // best-effort behavior without letting a notification FK abort canon.
         const recipientExists = tx.select({ id: users.id }).from(users).where(eq(users.id, recipient)).limit(1).get();
         if (recipientExists) {
-          tx.insert(notifications)
-            .values({
-              userId: recipient,
-              campaignId: row.campaignId,
-              type: 'note_reply',
-              title: `${user.name || 'The DM'} resolved your inbox note`,
-              body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(row.body),
-              entityType: null,
-              entityId: null,
-              actorName: user.name,
-              readAt: null,
-              createdAt: ts,
-            })
-            .run();
+          try {
+            tx.insert(notifications)
+              .values({
+                userId: recipient,
+                campaignId: row.campaignId,
+                type: 'note_reply',
+                title: `${user.name || 'The DM'} resolved your inbox note`,
+                body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(row.body),
+                entityType: null,
+                entityId: null,
+                actorName: user.name,
+                readAt: null,
+                createdAt: ts,
+              })
+              .run();
+          } catch {
+            // Match NotificationsService.notifyUser: notification delivery is
+            // best-effort and must never roll back the canonical terminal
+            // transition or its audit record.
+          }
         }
       }
 

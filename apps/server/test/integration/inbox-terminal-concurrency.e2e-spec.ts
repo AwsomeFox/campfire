@@ -1,4 +1,6 @@
 import request from 'supertest';
+import { sql } from 'drizzle-orm';
+import { DB, type DrizzleDb } from '../../src/db/db.module';
 import { closeTestApp, createTestAppNoDevAuth, type TestAppContext } from '../test-app';
 
 type Agent = ReturnType<typeof request.agent>;
@@ -144,5 +146,34 @@ describe('inbox terminal idempotency (real SQLite + real HTTP)', () => {
 
     expect(await resolveAudits(noteId)).toHaveLength(1);
     expect(await replyNotifications(payload.resolvedNote)).toHaveLength(1);
+  });
+
+  it('keeps the terminal transition and audit durable when best-effort notification delivery fails', async () => {
+    const noteId = await submit('Notification failure must not block canon');
+    const payload = { resolvedNote: 'Canon survives notification failure.' };
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.run(sql`
+      CREATE TRIGGER fail_inbox_reply_notification
+      BEFORE INSERT ON notifications
+      WHEN NEW.type = 'note_reply'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated notification failure');
+      END
+    `);
+
+    try {
+      const resolved = await dmA.post(`/api/v1/notes/${noteId}/resolve`).send(payload);
+      expect(resolved.status).toBe(201);
+      expect(resolved.body).toMatchObject({ id: noteId, resolved: true, ...payload });
+      expect(await resolveAudits(noteId)).toHaveLength(1);
+      expect(await replyNotifications(payload.resolvedNote)).toHaveLength(0);
+
+      const retry = await dmB.post(`/api/v1/notes/${noteId}/resolve`).send(payload);
+      expect(retry.status).toBe(201);
+      expect(retry.body).toEqual(resolved.body);
+      expect(await resolveAudits(noteId)).toHaveLength(1);
+    } finally {
+      db.run(sql`DROP TRIGGER IF EXISTS fail_inbox_reply_notification`);
+    }
   });
 });
