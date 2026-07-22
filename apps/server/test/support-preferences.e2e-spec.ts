@@ -56,6 +56,10 @@ describe('participant-owned access-support preferences (e2e, real SQLite/auth)',
 
   it('uses a strict replacement DTO with conservative, independent privacy choices', async () => {
     const route = `${API}/campaigns/${campaignId}/session-zero/support-preferences/me`;
+    const empty = await player.get(route);
+    expect(empty.status).toBe(200);
+    expect(empty.body).toBeNull();
+    expect(empty.text).toBe('null');
     expect((await player.put(route).send({ supportText: '', visibility: 'facilitator', aiUseConsent: false })).status).toBe(400);
     expect((await player.put(route).send({ supportText: 'Pause before prompting me.', visibility: 'private', aiUseConsent: false })).status).toBe(400);
     expect((await player.put(route).send({ supportText: 'Pause before prompting me.', visibility: 'facilitator' })).status).toBe(400);
@@ -120,7 +124,8 @@ describe('participant-owned access-support preferences (e2e, real SQLite/auth)',
     expect((await player.delete(`${base}/me`)).status).toBe(204);
     const afterDelete = await player.get(`${base}/me`);
     expect(afterDelete.status).toBe(200);
-    expect(afterDelete.text).toBe('');
+    expect(afterDelete.body).toBeNull();
+    expect(afterDelete.text).toBe('null');
     expect(JSON.stringify((await dm.get(`${base}/summary`)).body)).not.toContain(sentinel);
     expect((await player.delete(`${base}/me`)).status).toBe(404);
   });

@@ -626,12 +626,12 @@ export class McpToolsService {
     this.tool(
       server,
       'get_ai_support_preferences',
-      'Practical participation support preferences that their owners explicitly consented to AI use. Human ' +
+      'DM only: practical participation support preferences that their owners explicitly consented to AI use. Human ' +
         'table/facilitator visibility is independent and never widens this result. Re-read before prep/live use so ' +
         'revoked consent immediately stops disclosure; an empty array means no AI-authorized preferences.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireMember(user, campaignId as number);
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         return this.supportPreferences.listForAi(campaignId as number);
       },
     );
@@ -3395,11 +3395,11 @@ export class McpToolsService {
       {
         title: 'AI-authorized access supports',
         description:
-          'Only practical support preferences whose participant explicitly opted into AI use. Facilitator visibility ' +
+          'DM only. Practical support preferences whose participant explicitly opted into AI use. Facilitator visibility ' +
           'alone never grants this resource access to the text.',
       },
       async (campaignId) => {
-        await this.access.requireMember(user, campaignId);
+        await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
         return this.supportPreferences.listForAi(campaignId);
       },
     );

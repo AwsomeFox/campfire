@@ -102,7 +102,7 @@ export default function SessionZeroPage() {
         api.get<ParticipantSupportPreference[]>(`${API}/campaigns/${cid}/session-zero/support-preferences`),
       ]);
       setCharter(c);
-      setOwnSupport(own);
+      setOwnSupport(own ?? null);
       setVisibleSupports(visible);
       setSupportDraft(
         own

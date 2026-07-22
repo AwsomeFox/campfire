@@ -1,5 +1,6 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Put } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Put, Res } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -28,9 +29,13 @@ export class SupportPreferencesController {
 
   @Get('me')
   @ApiOperation({ summary: 'Get your own support preference', description: 'Returns null when you have not submitted one.' })
-  async own(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+  async own(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Res() response: Response,
+  ): Promise<void> {
     await this.access.requireMember(user, campaignId);
-    return this.supports.getOwn(campaignId, user.id);
+    response.status(200).json(await this.supports.getOwn(campaignId, user.id));
   }
 
   @Get('summary')

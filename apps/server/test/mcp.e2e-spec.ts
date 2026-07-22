@@ -1193,6 +1193,14 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     );
     expect(JSON.stringify(visible)).toContain(consentedText);
 
+    const viewerClient = await mcpClient(viewerToken);
+    const memberDenied = await viewerClient.callTool({
+      name: 'get_ai_support_preferences',
+      arguments: { campaignId },
+    });
+    expect(memberDenied.isError).toBe(true);
+    expect(parseResult(memberDenied)).toMatchObject({ error: { status: 403, code: 'forbidden' } });
+
     // Human visibility stays facilitator-only while consent is revoked. The very
     // next model-facing read must drop the text; there is no cache/grace period.
     await dmAgent.put(route).send({ supportText: consentedText, visibility: 'facilitator', aiUseConsent: false });
@@ -1205,7 +1213,8 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(deleted.isError).toBeFalsy();
     const afterDelete = await dmAgent.get(route);
     expect(afterDelete.status).toBe(200);
-    expect(afterDelete.text).toBe('');
+    expect(afterDelete.body).toBeNull();
+    expect(afterDelete.text).toBe('null');
   });
 
   it('structured errors: isError content is JSON {"error":{status,code,message}}', async () => {
@@ -2029,6 +2038,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     await dmAgent.put(route).send({ supportText: text, visibility: 'facilitator', aiUseConsent: true });
     const visible = await client.readResource({ uri: `campfire://campaign/${campaignId}/ai-support-preferences` });
     expect(JSON.stringify(visible.contents)).toContain(text);
+
+    const viewerClient = await mcpClient(viewerToken);
+    await expect(
+      viewerClient.readResource({ uri: `campfire://campaign/${campaignId}/ai-support-preferences` }),
+    ).rejects.toThrow();
   });
 
   it('reading campfire://campaigns and campfire://campaign/{id}/summary returns the same JSON as the read tools (issue #26)', async () => {

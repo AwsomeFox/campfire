@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, or } from 'drizzle-orm';
 import type { z } from 'zod';
 import { ParticipantSupportPreferenceUpsert } from '@campfire/schema';
 import type {
@@ -58,12 +58,20 @@ export class SupportPreferencesService {
 
   /** Table members see table-shared rows plus their own; facilitators see every row. */
   async listForHuman(campaignId: number, user: RequestUser, role: Role): Promise<ParticipantSupportPreference[]> {
+    const visibility = role === 'dm'
+      ? eq(participantSupportPreferences.campaignId, campaignId)
+      : and(
+          eq(participantSupportPreferences.campaignId, campaignId),
+          or(
+            eq(participantSupportPreferences.visibility, 'table'),
+            eq(participantSupportPreferences.ownerUserId, user.id),
+          ),
+        );
     const rows = await this.db
       .select()
       .from(participantSupportPreferences)
-      .where(eq(participantSupportPreferences.campaignId, campaignId));
+      .where(visibility);
     return rows
-      .filter((row) => role === 'dm' || row.visibility === 'table' || row.ownerUserId === user.id)
       .map(toDomain)
       .sort((a, b) => a.ownerName.localeCompare(b.ownerName) || a.id - b.id);
   }
