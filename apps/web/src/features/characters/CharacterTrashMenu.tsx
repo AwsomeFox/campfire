@@ -30,7 +30,7 @@ export function CharacterTrashMenu({
   /** True while the DELETE request is in flight — disables both the menu item and the confirm button. */
   busy: boolean;
   /** Fired after the user confirms the dialog. The parent runs the soft-delete + undo wiring. */
-  onTrash: () => void;
+  onTrash: () => void | Promise<void>;
   /** Extra classes for the kebab trigger (e.g. card-corner positioning on the roster). */
   triggerClassName?: string;
   /** Optional accessible label suffix for the trigger, to disambiguate multiple cards. */

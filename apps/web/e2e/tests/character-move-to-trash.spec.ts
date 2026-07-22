@@ -73,8 +73,9 @@ test.describe('Character Move to Trash — owner (issue #716)', () => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/party`);
 
-    const card = page.locator('.cf-card', { hasText: name });
-    const trigger = card.getByRole('button', { name: `Actions for ${name} (roster card)` });
+    // The roster card is identified by its stable kebab trigger (role + accessible
+    // name) rather than the brittle `.cf-card` class — see playwright.config.ts.
+    const trigger = page.getByRole('button', { name: `Actions for ${name} (roster card)` });
     await expect(trigger).toBeVisible();
     await trigger.click();
 
@@ -94,8 +95,9 @@ test.describe('Character Move to Trash — owner (issue #716)', () => {
     ]);
     expect(deleteRequest.status()).toBe(200);
 
-    // Card is gone from the roster; the undo snackbar appears.
-    await expect(card).toBeHidden();
+    // Card is gone from the roster; the undo snackbar appears. The kebab trigger
+    // (the card's stable handle) is removed with it.
+    await expect(trigger).toBeHidden();
     const snackbar = page.locator('[role="status"]', { hasText: `${name} moved to the Trash.` });
     await expect(snackbar).toBeVisible();
 
@@ -105,8 +107,8 @@ test.describe('Character Move to Trash — owner (issue #716)', () => {
     ]);
     expect(restoreRequest.status()).toBe(201);
 
-    // Restored: the card reappears.
-    await expect(page.locator('.cf-card', { hasText: name })).toBeVisible();
+    // Restored: the card reappears — its kebab trigger is visible again.
+    await expect(page.getByRole('button', { name: `Actions for ${name} (roster card)` })).toBeVisible();
   });
 });
 
@@ -171,8 +173,8 @@ test.describe('Character Move to Trash — unrelated viewer denied (issue #716)'
     await expect(page.getByRole('button', { name: `Actions for ${name}` })).toHaveCount(0);
 
     await page.goto(`/c/${campaignId}/party`);
-    const card = page.locator('.cf-card', { hasText: name });
-    await expect(card.getByRole('button', { name: `Actions for ${name} (roster card)` })).toHaveCount(0);
+    // No kebab trigger on a roster card the viewer cannot edit.
+    await expect(page.getByRole('button', { name: `Actions for ${name} (roster card)` })).toHaveCount(0);
   });
 });
 
@@ -197,13 +199,14 @@ test.describe('Character Move to Trash — encounter link preserved (issue #716)
 
     // Trash the character from the roster via the kebab menu.
     await page.goto(`/c/${campaignId}/party`);
-    const card = page.locator('.cf-card', { hasText: name });
-    await card.getByRole('button', { name: `Actions for ${name} (roster card)` }).click();
+    const trigger = page.getByRole('button', { name: `Actions for ${name} (roster card)` });
+    await trigger.click();
     await page.getByRole('menuitem', { name: 'Move to Trash…' }).click();
     const dialog = page.getByRole('dialog', { name: `Move ${name} to the Trash?` });
     await expect(dialog).toContainText('Encounters referencing');
     await dialog.getByRole('button', { name: 'Move to Trash' }).click();
-    await expect(card).toBeHidden();
+    // Card removed: its kebab trigger is gone.
+    await expect(trigger).toBeHidden();
 
     // The encounter's combatant list still carries the trashed character's row —
     // the soft-delete does not cascade into combatant records.
