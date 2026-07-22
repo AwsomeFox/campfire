@@ -411,6 +411,21 @@ export const ObjectivePatch = z.object({ text: z.string().min(1).max(500).option
 export const ObjectiveReorder = z.object({ objectiveIds: z.array(Id).min(1) });
 export type ObjectiveReorder = z.infer<typeof ObjectiveReorder>;
 
+// Bounded quest-board projection (issue #786). The list endpoint exposes objective
+// progress and at most one objective body: the first incomplete objective in the
+// DM-controlled order. Full objective collections remain on the quest detail and
+// campaign-summary contracts, so a large quest cannot inflate every board load.
+export const QuestListObjective = QuestObjective.pick({ id: true, text: true });
+export type QuestListObjective = z.infer<typeof QuestListObjective>;
+export const QuestListItem = Quest.extend({
+  objectiveProgress: z.object({
+    completed: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+  nextObjective: QuestListObjective.nullable(),
+});
+export type QuestListItem = z.infer<typeof QuestListItem>;
+
 // "What changed since last session" (issue #66). `since` is the reference instant
 // the diff was taken against — by default the campaign's latest session date
 // (max of each session's playedAt, falling back to its createdAt), or the caller's

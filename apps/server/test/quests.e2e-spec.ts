@@ -184,34 +184,74 @@ describe('quests (e2e)', () => {
     expect(inboxRes.status).toBe(201);
   });
 
-  it('GET /campaigns/:id/quests embeds objectives per quest', async () => {
+  it('GET /campaigns/:id/quests returns bounded role-safe progress in objective order', async () => {
     const server = ctx.app.getHttpServer();
 
     const createRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/quests`)
       .set(dm)
-      .send({ title: 'Quest with objectives' });
+      .send({ title: 'Quest with progress', status: 'active', dmSecret: 'list projection secret' });
     const questId = createRes.body.id;
 
-    await request(server).post(`/api/v1/quests/${questId}/objectives`).set(dm).send({ text: 'Objective A' });
-    await request(server).post(`/api/v1/quests/${questId}/objectives`).set(dm).send({ text: 'Objective B' });
+    const later = await request(server)
+      .post(`/api/v1/quests/${questId}/objectives`)
+      .set(dm)
+      .send({ text: 'Second incomplete by order', sortOrder: 30 });
+    const completed = await request(server)
+      .post(`/api/v1/quests/${questId}/objectives`)
+      .set(dm)
+      .send({ text: 'Completed first', sortOrder: 10 });
+    const next = await request(server)
+      .post(`/api/v1/quests/${questId}/objectives`)
+      .set(dm)
+      .send({ text: 'First incomplete by order', sortOrder: 20 });
+    await request(server)
+      .patch(`/api/v1/quests/${questId}/objectives/${completed.body.id}`)
+      .set(player)
+      .send({ done: true });
+
+    const hiddenQuest = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(dm)
+      .send({ title: 'Hidden progress', status: 'active', hidden: true, dmSecret: 'hidden list secret' });
+    const hiddenObjective = await request(server)
+      .post(`/api/v1/quests/${hiddenQuest.body.id}/objectives`)
+      .set(dm)
+      .send({ text: 'Hidden objective must not leak' });
 
     const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(dm);
     expect(listRes.status).toBe(200);
     const found = listRes.body.find((q: { id: number }) => q.id === questId);
     expect(found).toBeDefined();
-    expect(Array.isArray(found.objectives)).toBe(true);
-    expect(found.objectives).toHaveLength(2);
-    expect(found.objectives.map((o: { text: string }) => o.text).sort()).toEqual(['Objective A', 'Objective B']);
+    expect(found).not.toHaveProperty('objectives');
+    expect(found.objectiveProgress).toEqual({ completed: 1, total: 3 });
+    expect(found.nextObjective).toEqual({ id: next.body.id, text: 'First incomplete by order' });
+    expect(found.nextObjective.id).not.toBe(later.body.id);
+    expect(found.dmSecret).toBe('list projection secret');
 
-    // status filter still works alongside the embed
+    const dmHidden = listRes.body.find((q: { id: number }) => q.id === hiddenQuest.body.id);
+    expect(dmHidden.nextObjective).toEqual({ id: hiddenObjective.body.id, text: 'Hidden objective must not leak' });
+
+    for (const headers of [player, viewer]) {
+      const nonDmRes = await request(server).get(`/api/v1/campaigns/${campaignId}/quests`).set(headers);
+      expect(nonDmRes.status).toBe(200);
+      expect(nonDmRes.body.some((q: { id: number }) => q.id === hiddenQuest.body.id)).toBe(false);
+      const visible = nonDmRes.body.find((q: { id: number }) => q.id === questId);
+      expect(visible.objectiveProgress).toEqual({ completed: 1, total: 3 });
+      expect(visible.nextObjective).toEqual({ id: next.body.id, text: 'First incomplete by order' });
+      expect(visible.dmSecret).toBeFalsy();
+      expect(JSON.stringify(nonDmRes.body)).not.toContain('Hidden objective must not leak');
+      expect(JSON.stringify(nonDmRes.body)).not.toContain('hidden list secret');
+    }
+
+    // Status filtering still applies before the bounded objective projection.
     const filteredRes = await request(server)
       .get(`/api/v1/campaigns/${campaignId}/quests`)
-      .query({ status: 'available' })
+      .query({ status: 'active' })
       .set(dm);
     expect(filteredRes.status).toBe(200);
-    expect(filteredRes.body.every((q: { status: string }) => q.status === 'available')).toBe(true);
-    expect(filteredRes.body.find((q: { id: number }) => q.id === questId).objectives).toHaveLength(2);
+    expect(filteredRes.body.every((q: { status: string }) => q.status === 'active')).toBe(true);
+    expect(filteredRes.body.find((q: { id: number }) => q.id === questId).objectiveProgress).toEqual({ completed: 1, total: 3 });
   });
 
   it('soft-deleting a parent quest hides it but keeps subquests (issue #116) — restore re-nests them', async () => {
