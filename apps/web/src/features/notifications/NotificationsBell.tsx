@@ -13,6 +13,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -23,6 +24,27 @@ import { Btn, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
+
+/**
+ * Reports whether the viewport is below the desktop breakpoint (768px), so the
+ * notifications panel can switch from a top-right desktop flyout to a
+ * thumb-reachable bottom sheet on phones (issue #664). Matches the
+ * `(min-width: 768px)` query Layout.tsx uses to gate the bell renderer.
+ */
+function useIsNarrowViewport(): boolean {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches,
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const media = window.matchMedia('(max-width: 767px)');
+    const onChange = (event: MediaQueryListEvent) => setNarrow(event.matches);
+    setNarrow(media.matches);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
+  return narrow;
+}
 
 const POLL_MS = 60_000;
 const NOTIFICATIONS_DIALOG_ID = 'notifications-dialog';
@@ -553,39 +575,93 @@ export function NotificationsPanel() {
   return <OpenNotificationsPanel notifications={notifications} />;
 }
 
+function CloseButton({ onClose, label }: { onClose: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      onClick={onClose}
+      className="shrink-0 flex items-center justify-center rounded-md"
+      style={{
+        width: 36,
+        height: 36,
+        color: 'var(--color-text)',
+        fontSize: 18,
+        lineHeight: 1,
+        border: '1px solid var(--color-divider)',
+      }}
+    >
+      ✕
+    </button>
+  );
+}
+
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
   const { count, items, loadError, closePanel, markRead, markAllRead } = notifications;
+  const narrow = useIsNarrowViewport();
+  // useDialog already wires Escape-to-close, focus trap, focus restore to the
+  // trigger, and an inert background (issue #650/#92). It runs once per mount,
+  // so it stays put when the panel re-renders across the breakpoint.
   const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
   const itemCountAnnouncement = items === null
     ? (loadError ? "Couldn't load notifications." : 'Loading items.')
     : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`;
 
+  // Bottom sheet on phones (issue #664), top-right flyout everywhere else —
+  // matches the MoreSheet pattern in Layout.tsx so a thumb reaches the close
+  // button and the surface sits above the mobile tab bar.
+  const rootClassName = narrow
+    ? 'fixed inset-0 z-50 flex items-end justify-center'
+    : 'fixed inset-0 z-50';
+  const rootStyle = {
+    background: narrow
+      ? 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)'
+      : 'color-mix(in srgb, var(--color-neutral-900) 35%, transparent)',
+  };
+
+  const panelClassName = narrow
+    ? 'cf-card elev-lg w-full flex flex-col'
+    : 'cf-card elev-lg fixed flex flex-col';
+  const panelStyle: CSSProperties = narrow
+    ? {
+        maxWidth: 440,
+        maxHeight: 'calc(100dvh - 16px)',
+        borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
+        padding: 0,
+        paddingBottom: 'env(safe-area-inset-bottom)',
+        overflow: 'hidden',
+      }
+    : {
+        top: 12,
+        right: 12,
+        width: 'min(380px, calc(100vw - 24px))',
+        maxHeight: 'min(520px, calc(100vh - 24px))',
+        padding: 0,
+        overflow: 'hidden',
+      };
+
   return (
-    <div
-      className="fixed inset-0 z-50"
-      style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 35%, transparent)' }}
-      onClick={closePanel}
-    >
+    <div className={rootClassName} style={rootStyle} onClick={closePanel}>
       <div
         id={NOTIFICATIONS_DIALOG_ID}
         ref={dialogRef}
-        className="cf-card elev-lg fixed flex flex-col"
+        className={panelClassName}
         role="dialog"
         aria-modal="true"
         aria-label="Notifications"
         aria-describedby={NOTIFICATIONS_COUNT_ID}
-        style={{
-          top: 12,
-          right: 12,
-          width: 'min(380px, calc(100vw - 24px))',
-          maxHeight: 'min(520px, calc(100vh - 24px))',
-          padding: 0,
-          overflow: 'hidden',
-        }}
+        style={panelStyle}
         onClick={(event) => event.stopPropagation()}
       >
+        {narrow && (
+          <div
+            aria-hidden="true"
+            className="mx-auto mt-2.5 mb-1 shrink-0"
+            style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--color-neutral-700)' }}
+          />
+        )}
         <div
-          className="flex items-center gap-2 px-4 py-3 border-b"
+          className="flex items-center gap-2 px-4 py-3 border-b shrink-0"
           style={{ borderColor: 'var(--color-divider)' }}
         >
           <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-heading)' }}>
@@ -602,10 +678,11 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
           </span>
           <div className="flex-1" />
           {count > 0 && (
-            <Btn ghost style={{ fontSize: 11, minHeight: 26 }} onClick={() => void markAllRead()}>
+            <Btn ghost style={{ fontSize: 11, minHeight: 32 }} onClick={() => void markAllRead()}>
               Mark all read
             </Btn>
           )}
+          <CloseButton onClose={closePanel} label="Close notifications" />
         </div>
         <div className="overflow-y-auto p-2" style={{ overscrollBehavior: 'contain' }}>
           {items === null && !loadError && (
@@ -634,7 +711,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
               key={notification.id}
               type="button"
               onClick={() => void markRead(notification)}
-              className="w-full text-left flex items-start gap-2.5 px-2.5 py-2.5 rounded-md"
+              className="w-full text-left flex items-start gap-2.5 px-2.5 py-2.5 rounded-md min-h-[44px]"
               style={{
                 background: notification.readAt
                   ? 'transparent'
