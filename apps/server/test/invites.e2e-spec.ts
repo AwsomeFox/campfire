@@ -1,7 +1,9 @@
 import request from 'supertest';
-import { count, eq } from 'drizzle-orm';
+import { and, count, eq } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaignInvites } from '../src/db/schema';
+import { campaignInvites, campaignMembers, campaigns } from '../src/db/schema';
+import { InvitesService } from '../src/modules/membership/invites.service';
+import { UsersService } from '../src/modules/users/users.service';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 describe('campaign invites / join codes (e2e, real cookie sessions)', () => {
@@ -287,3 +289,169 @@ describe('campaign invites / join codes (e2e, real cookie sessions)', () => {
     });
   });
 });
+
+describe('issue #655: maxUses TOCTOU — interleaved accepts never exceed the cap (service layer, real SQLite)', () => {
+  // This is the deterministic regression guard for the race. The public HTTP
+  // endpoint is exercised end-to-end by the suites above; here we drive the
+  // service directly so the two contenders provably interleave at every await
+  // boundary (better-sqlite3 queries resolve on a microtask, so `Promise.all` of
+  // two service calls lets each run up to its first await before the other
+  // starts — exactly the window the old read-then-write code lost). An HTTP-level
+  // `Promise.all` of N accepts does NOT reliably reproduce the bug: Node's event
+  // loop + supertest's per-request connection lifecycle serialise the work enough
+  // that the race window often closes before a second contender reads, so the
+  // old code would sporadically pass — a flaky regression test is worse than none.
+  let ctx: TestAppContext;
+  let invites: InvitesService;
+  let usersService: UsersService;
+  let db: DrizzleDb;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    invites = ctx.app.get(InvitesService);
+    usersService = ctx.app.get(UsersService);
+    db = ctx.app.get<DrizzleDb>(DB);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function seedCampaignWithInvite(maxUses: number, role: 'player' | 'viewer' = 'player'): Promise<{
+    campaignId: number;
+    code: string;
+    inviteId: number;
+  }> {
+    const dm = await usersService.create({ username: `dm-${Math.random().toString(36).slice(2)}`, password: 'dm-password-1', serverRole: 'user' });
+    const ts = new Date().toISOString();
+    const [campaign] = await db
+      .insert(campaigns)
+      .values({ name: 'Race', createdAt: ts, updatedAt: ts })
+      .returning();
+    await db
+      .insert(campaignMembers)
+      .values({ campaignId: campaign.id, userId: dm.id, role: 'dm', characterId: null, createdAt: ts, updatedAt: ts })
+      .run();
+    const [inv] = await db
+      .insert(campaignInvites)
+      .values({
+        campaignId: campaign.id,
+        code: `CODE-${campaign.id}-${Math.random().toString(36).slice(2)}`,
+        role,
+        createdByUserId: dm.id,
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+        maxUses,
+        useCount: 0,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+    return { campaignId: campaign.id, code: inv.code, inviteId: inv.id };
+  }
+
+  it('two interleaved join() calls on a maxUses=1 invite seat exactly one; the loser gets 404 and useCount stays at 1', async () => {
+    const { code, inviteId, campaignId } = await seedCampaignWithInvite(1);
+    const u1 = await usersService.create({ username: 'race-u1', password: 'u1-password-1', serverRole: 'user' });
+    const u2 = await usersService.create({ username: 'race-u2', password: 'u2-password-1', serverRole: 'user' });
+
+    const reqUser = (id: number) => ({ id: String(id), name: `u${id}`, role: 'user' as const, serverRole: 'user' as const });
+    // Fire both WITHOUT awaiting either first: they interleave at every internal
+    // await. On the old (pre-fix) code both fulfilled and useCount landed at 2.
+    const settled = await Promise.allSettled([
+      invites.join(code, reqUser(u1.id)),
+      invites.join(code, reqUser(u2.id)),
+    ]);
+    const winners = settled.filter((s) => s.status === 'fulfilled');
+
+    // Exactly one seat — never two.
+    expect(winners).toHaveLength(1);
+    // The loser sees the same uniform 404 a sequential latecomer would.
+    const loser = settled.find((s) => s.status === 'rejected') as PromiseRejectedResult;
+    expect(loser.reason).toBeInstanceOf(Error);
+    expect(loser.reason.message).toBe('This invite link is invalid or no longer active');
+
+    const [invite] = await db.select().from(campaignInvites).where(eq(campaignInvites.id, inviteId));
+    expect(invite.useCount).toBe(1); // the cap — never 2
+    expect(invite.maxUses).toBe(1);
+
+    const [seats] = await db
+      .select({ value: count() })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.role, 'player')));
+    expect(seats.value).toBe(1); // exactly one membership — never two
+  });
+
+  it('two interleaved accept() calls on a maxUses=1 invite seat exactly one; the loser gets 404 and useCount stays at 1', async () => {
+    const { inviteId, campaignId, code } = await seedCampaignWithInvite(1);
+    // accept() mints a brand-new user account as part of the call, so the two
+    // contenders don't share a pre-existing user. Local login is on by default.
+    const settled = await Promise.allSettled([
+      invites.accept(code, { username: 'race-accept-a', password: 'aa-password-1', displayName: 'A' }),
+      invites.accept(code, { username: 'race-accept-b', password: 'bb-password-1', displayName: 'B' }),
+    ]);
+    const winners = settled.filter((s) => s.status === 'fulfilled');
+
+    expect(winners).toHaveLength(1);
+    const loser = settled.find((s) => s.status === 'rejected') as PromiseRejectedResult;
+    expect(loser.reason).toBeInstanceOf(Error);
+    expect(loser.reason.message).toBe('This invite link is invalid or no longer active');
+
+    const [invite] = await db.select().from(campaignInvites).where(eq(campaignInvites.id, inviteId));
+    expect(invite.useCount).toBe(1);
+    const [seats] = await db
+      .select({ value: count() })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.role, 'player')));
+    expect(seats.value).toBe(1);
+  });
+
+  it('an unlimited invite (maxUses null) seats both interleaved joiners — the cap guard does not over-restrict', async () => {
+    const { inviteId, campaignId, code } = await seedCampaignWithInvite(1).then(async (r) => {
+      // switch the seeded invite to unlimited
+      await db.update(campaignInvites).set({ maxUses: null }).where(eq(campaignInvites.id, r.inviteId));
+      return r;
+    });
+    const u1 = await usersService.create({ username: 'unlim-u1', password: 'u1-password-1', serverRole: 'user' });
+    const u2 = await usersService.create({ username: 'unlim-u2', password: 'u2-password-1', serverRole: 'user' });
+    const reqUser = (id: number) => ({ id: String(id), name: `u${id}`, role: 'user' as const, serverRole: 'user' as const });
+
+    const settled = await Promise.allSettled([
+      invites.join(code, reqUser(u1.id)),
+      invites.join(code, reqUser(u2.id)),
+    ]);
+    expect(settled.every((s) => s.status === 'fulfilled')).toBe(true);
+
+    const [invite] = await db.select().from(campaignInvites).where(eq(campaignInvites.id, inviteId));
+    expect(invite.useCount).toBe(2);
+    const [seats] = await db
+      .select({ value: count() })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.role, 'player')));
+    expect(seats.value).toBe(2);
+  });
+
+  it('a maxUses=3 invite seats exactly 3 of 5 interleaved joiners; the rest get 404', async () => {
+    const { inviteId, campaignId, code } = await seedCampaignWithInvite(3);
+    const ids: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const u = await usersService.create({ username: `cap5-${i}`, password: `u${i}-password-1`, serverRole: 'user' });
+      ids.push(u.id);
+    }
+    const reqUser = (id: number) => ({ id: String(id), name: `u${id}`, role: 'user' as const, serverRole: 'user' as const });
+
+    const settled = await Promise.allSettled(ids.map((id) => invites.join(code, reqUser(id))));
+    const winners = settled.filter((s) => s.status === 'fulfilled');
+    const losers = settled.filter((s) => s.status === 'rejected');
+    expect(winners).toHaveLength(3);
+    expect(losers).toHaveLength(2);
+
+    const [invite] = await db.select().from(campaignInvites).where(eq(campaignInvites.id, inviteId));
+    expect(invite.useCount).toBe(3);
+    const [seats] = await db
+      .select({ value: count() })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.role, 'player')));
+    expect(seats.value).toBe(3);
+  });
+});
+
