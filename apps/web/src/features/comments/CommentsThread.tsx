@@ -163,7 +163,7 @@ export function CommentsThread({
       {confirmingDelete !== null && (
         <ConfirmDialog
           title="Delete comment?"
-          body="This cannot be undone. Deleting a top-level comment also removes its replies."
+          body="The comment will be hidden and shown as [deleted], but any replies are preserved. A DM or the author can restore it later."
           confirmLabel="Delete"
           onConfirm={() => remove(confirmingDelete)}
           onCancel={() => setConfirmingDelete(null)}
