@@ -17,7 +17,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
+import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -29,6 +29,7 @@ import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { entityTargetProps } from '../../lib/entityLinks';
+import { useCampaign } from '../../app/CampaignContext';
 import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
 
 export default function SessionsPage() {
@@ -41,6 +42,7 @@ export default function SessionsPage() {
   const isDm = role === 'dm';
 
   const selectedId = searchParams.get('session');
+  const recapAction = searchParams.get('action');
   const tab: 'log' | 'schedule' = searchParams.get('tab') === 'schedule' ? 'schedule' : 'log';
 
   function setTab(next: 'log' | 'schedule') {
@@ -77,6 +79,23 @@ export default function SessionsPage() {
   }, []);
 
   const [showAddForm, setShowAddForm] = useState(false);
+  useEffect(() => {
+    // Reconcile browser Back/Forward for a deep-linked form. Local button opens
+    // do not change recapAction, so they remain controlled by showAddForm.
+    if (isDm && recapAction === 'new-recap') setShowAddForm(true);
+    else if (recapAction !== 'new-recap') setShowAddForm(false);
+  }, [isDm, recapAction]);
+
+  function clearRecapAction() {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (next.get('action') === 'new-recap' || next.get('action') === 'edit-recap') next.delete('action');
+        return next;
+      },
+      { replace: true },
+    );
+  }
   // Soft-delete Undo (issue #116/#269) lifted to the page level: on delete we refresh
   // the list immediately (so the trashed session stops showing without a manual reload)
   // and close the detail — the Undo bar must therefore outlive the now-unmounted detail.
@@ -113,7 +132,7 @@ export default function SessionsPage() {
   // URL points at a session that's gone) — otherwise the detail pane sat on a
   // misleading "No sessions yet" empty state even with sessions in the list.
   useEffect(() => {
-    if (isDesktop && tab === 'log' && sessions.length > 0 && !selected) {
+    if (isDesktop && tab === 'log' && recapAction !== 'new-recap' && sessions.length > 0 && !selected) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -123,7 +142,7 @@ export default function SessionsPage() {
         { replace: true },
       );
     }
-  }, [isDesktop, tab, sessions, selected, setSearchParams]);
+  }, [isDesktop, tab, recapAction, sessions, selected, setSearchParams]);
 
   function selectSession(id: number) {
     setSearchParams((prev) => {
@@ -317,6 +336,8 @@ export default function SessionsPage() {
               session={selected}
               campaignId={cid}
               isDm={isDm}
+              startEditing={recapAction === 'edit-recap'}
+              onEditActionHandled={clearRecapAction}
               onBack={backToList}
               onChange={load}
               onDeleted={handleDeleted}
@@ -337,10 +358,25 @@ export default function SessionsPage() {
               nextNumber={nextNumber()}
               onCreated={(created) => {
                 setShowAddForm(false);
-                selectSession(created.id);
+                setSearchParams(
+                  (prev) => {
+                    const next = new URLSearchParams(prev);
+                    next.set('session', String(created.id));
+                    next.delete('action');
+                    return next;
+                  },
+                  { replace: recapAction === 'new-recap' },
+                );
                 void load();
               }}
-              onCancel={sessions.length > 0 ? () => setShowAddForm(false) : undefined}
+              onCancel={
+                sessions.length > 0
+                  ? () => {
+                      setShowAddForm(false);
+                      clearRecapAction();
+                    }
+                  : undefined
+              }
             />
           )}
         </main>
@@ -364,6 +400,8 @@ function SessionDetail({
   session,
   campaignId,
   isDm,
+  startEditing,
+  onEditActionHandled,
   onBack,
   onChange,
   onDeleted,
@@ -371,13 +409,16 @@ function SessionDetail({
   session: SessionListItem;
   campaignId: number;
   isDm: boolean;
+  /** Open the existing recap editor when arriving from a post-encounter deep link. */
+  startEditing: boolean;
+  /** Removes the one-shot URL action after save/cancel so refresh does not reopen it. */
+  onEditActionHandled: () => void;
   onBack: () => void;
   onChange: () => void;
   /** Session was soft-deleted — the page refreshes the list + owns the Undo bar. */
   onDeleted: (id: number, number: number) => void | Promise<void>;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [sharing, setSharing] = useState(false);
+  const [editing, setEditing] = useState(isDm && startEditing);
   const [titleDraft, setTitleDraft] = useState(session.title);
   const [dateDraft, setDateDraft] = useState(toDateInputValue(session.playedAt));
   // The list omits the full recap body (issue #71) — fetch it for the opened session.
@@ -397,8 +438,7 @@ function SessionDetail({
   const [historyNonce, setHistoryNonce] = useState(0);
 
   useEffect(() => {
-    setEditing(false);
-    setSharing(false);
+    setEditing(isDm && startEditing);
     setTitleDraft(session.title);
     setDateDraft(toDateInputValue(session.playedAt));
     setRecapLoading(true);
@@ -419,7 +459,7 @@ function SessionDetail({
     return () => {
       cancelled = true;
     };
-  }, [session]);
+  }, [session, isDm, startEditing]);
 
   async function save() {
     setSaving(true);
@@ -437,6 +477,7 @@ function SessionDetail({
       setRecap(updated.recap);
       setLoadedUpdatedAt(updated.updatedAt);
       setEditing(false);
+      onEditActionHandled();
       setHistoryNonce((n) => n + 1);
       onChange();
     } catch (e) {
@@ -514,11 +555,18 @@ function SessionDetail({
           </div>
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Recap</label>
+              <label
+                htmlFor={`session-${session.id}-recap`}
+                className="text-xs font-bold text-slate-500 uppercase tracking-wide"
+              >
+                Recap
+              </label>
               <div className="flex-1" />
               <TemplateButton value={recapDraft} onInsert={setRecapDraft} />
             </div>
             <TextArea
+              id={`session-${session.id}-recap`}
+              autoFocus={startEditing}
               style={{ minHeight: 200 }}
               value={recapDraft}
               onChange={(e) => setRecapDraft(e.target.value)}
@@ -531,7 +579,14 @@ function SessionDetail({
                 Reload latest
               </Btn>
             )}
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={() => {
+                setEditing(false);
+                onEditActionHandled();
+              }}
+            >
               Cancel
             </Btn>
             <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
@@ -558,16 +613,13 @@ function SessionDetail({
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
           </Btn>
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setSharing((v) => !v)}>
-            {sharing ? 'Hide sharing' : 'Share'}
-          </Btn>
           <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} busy={deleting}>
             {deleting ? 'Deleting…' : 'Delete'}
           </Btn>
         </div>
       )}
 
-      {isDm && !editing && sharing && <SharePanel sessionId={session.id} />}
+      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} isDm={isDm} />}
 
       {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
           regretted edit can be recovered. Refetches whenever a save/restore happens. */}
@@ -751,19 +803,21 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
   );
 }
 
-/**
- * DM-only share-link management for one recap. The raw link is shown ONCE at
- * creation (the server stores only a hash) — after that the list shows the
- * display prefix, and the DM can revoke or mint a fresh link at any time.
- */
-function SharePanel({ sessionId }: { sessionId: number }) {
+type ShareLifetime = '1' | '7' | '30' | 'never';
+
+/** Member-visible status plus DM-only capability controls for one recap. */
+function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+  const campaign = useCampaign(campaignId);
   const [shares, setShares] = useState<SessionShare[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
-  const [revokingId, setRevokingId] = useState<number | null>(null);
-  const [newLink, setNewLink] = useState<string | null>(null);
+  const [label, setLabel] = useState('');
+  const [lifetime, setLifetime] = useState<ShareLifetime>('7');
+  const [acknowledgedNever, setAcknowledgedNever] = useState(false);
+  const [newLink, setNewLink] = useState<{ shareId: number; url: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const policyEnabled = campaign?.publicRecapSharingEnabled !== false;
 
   const load = useCallback(async () => {
     setError(null);
@@ -784,12 +838,19 @@ function SharePanel({ sessionId }: { sessionId: number }) {
   }, [load]);
 
   async function create() {
+    if (lifetime === 'never' && !acknowledgedNever) return;
     setCreating(true);
     setError(null);
     setCopied(false);
     try {
-      const res = await api.post<SessionShareCreated>(`${API}/sessions/${sessionId}/shares`);
-      setNewLink(`${window.location.origin}/share/${res.token}`);
+      const expiresAt = lifetime === 'never'
+        ? null
+        : new Date(Date.now() + Number(lifetime) * 24 * 60 * 60 * 1000).toISOString();
+      const res = await api.post<SessionShareCreated>(`${API}/sessions/${sessionId}/shares`, { label, expiresAt });
+      setNewLink({ shareId: res.share.id, url: `${window.location.origin}/share/${res.token}` });
+      setLabel('');
+      setLifetime('7');
+      setAcknowledgedNever(false);
       await load();
     } catch {
       setError("Couldn't create a share link.");
@@ -798,24 +859,10 @@ function SharePanel({ sessionId }: { sessionId: number }) {
     }
   }
 
-  async function revoke(id: number) {
-    setRevokingId(id);
-    setError(null);
-    try {
-      await api.delete(`${API}/sessions/${sessionId}/shares/${id}`);
-      setNewLink(null);
-      await load();
-    } catch {
-      setError("Couldn't revoke that link.");
-    } finally {
-      setRevokingId(null);
-    }
-  }
-
   async function copy() {
     if (!newLink) return;
     try {
-      await navigator.clipboard.writeText(newLink);
+      await navigator.clipboard.writeText(newLink.url);
       setCopied(true);
     } catch {
       /* clipboard unavailable — the link is selectable below */
@@ -823,24 +870,76 @@ function SharePanel({ sessionId }: { sessionId: number }) {
   }
 
   return (
-    <Card className="space-y-3">
-      <div className="flex items-center gap-2">
-        <h3 className="font-bold text-white text-sm m-0">Read-only share links</h3>
-        <div className="flex-1" />
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={create} disabled={creating}>
-          {creating ? 'Creating…' : '+ New link'}
-        </Btn>
+    <Card className="space-y-3" data-testid="recap-share-panel">
+      <div className="flex items-center gap-2 flex-wrap">
+        <h3 className="font-bold text-white text-sm m-0">Public recap sharing</h3>
+        {!loading && shares.length > 0 && <span className="tag tag-accent">{shares.length} active</span>}
       </div>
-      <p className="text-[11.5px] text-slate-500 m-0">
-        Anyone with a link can read this recap — no account needed. The full link is shown only once, so copy it now;
-        revoke it here any time.
+      <p className="text-[11.5px] text-slate-300 m-0">
+        Anyone who receives an active link can forward it and read the current recap without an account. All campaign
+        members can see who enabled sharing, when it expires, and how often it has been opened.
       </p>
+      {!policyEnabled && (
+        <p className="text-xs text-amber-300 m-0" role="status">
+          Public recap sharing is disabled in Campaign settings. Existing links were revoked.
+        </p>
+      )}
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      {isDm && policyEnabled && (
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_150px_auto] items-end">
+          <div className="field !mb-0">
+            <label htmlFor={`share-label-${sessionId}`}>Label</label>
+            <TextInput
+              id={`share-label-${sessionId}`}
+              value={label}
+              maxLength={120}
+              onChange={(event) => setLabel(event.target.value)}
+              placeholder="e.g. Absent players"
+            />
+          </div>
+          <div className="field !mb-0">
+            <label htmlFor={`share-expiry-${sessionId}`}>Expires</label>
+            <select
+              id={`share-expiry-${sessionId}`}
+              className="input"
+              value={lifetime}
+              onChange={(event) => {
+                setLifetime(event.target.value as ShareLifetime);
+                setAcknowledgedNever(false);
+              }}
+            >
+              <option value="1">In 24 hours</option>
+              <option value="7">In 7 days</option>
+              <option value="30">In 30 days</option>
+              <option value="never">Never</option>
+            </select>
+          </div>
+          <Btn
+            className="!min-h-0 !py-2 text-xs !bg-violet-700 !border-violet-700 !text-white"
+            onClick={create}
+            busy={creating}
+            disabled={lifetime === 'never' && !acknowledgedNever}
+          >
+            {creating ? 'Creating…' : 'Create link'}
+          </Btn>
+          {lifetime === 'never' && (
+            <label className="sm:col-span-3 flex items-start gap-2 text-xs text-amber-200">
+              <input
+                type="checkbox"
+                checked={acknowledgedNever}
+                onChange={(event) => setAcknowledgedNever(event.target.checked)}
+              />
+              <span>I understand this link remains public until a DM revokes it.</span>
+            </label>
+          )}
+        </div>
+      )}
+
       {newLink && (
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap" aria-live="polite">
           <code className="text-xs break-all flex-1 min-w-0" style={{ color: 'var(--color-accent)' }}>
-            {newLink}
+            {newLink.url}
           </code>
           <Btn ghost className="!min-h-0 !py-1.5 text-xs shrink-0" onClick={copy}>
             {copied ? 'Copied ✓' : 'Copy link'}
@@ -853,20 +952,102 @@ function SharePanel({ sessionId }: { sessionId: number }) {
       ) : shares.length === 0 ? (
         <p className="text-sm text-slate-600 m-0">No active links.</p>
       ) : (
-        <ul className="m-0 p-0 space-y-1.5" style={{ listStyle: 'none' }}>
+        <ul className="m-0 p-0 space-y-2" style={{ listStyle: 'none' }}>
           {shares.map((s) => (
-            <li key={s.id} className="flex items-center gap-2.5 text-xs">
-              <code className="text-slate-400">{s.tokenPrefix}…</code>
-              <span className="text-muted">created {formatDate(s.createdAt)}</span>
-              <div className="flex-1" />
-              <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={() => revoke(s.id)} busy={revokingId === s.id}>
-                {revokingId === s.id ? 'Revoking…' : 'Revoke'}
-              </Btn>
-            </li>
+            <ShareRow
+              key={s.id}
+              share={s}
+              sessionId={sessionId}
+              isDm={isDm}
+              onChanged={load}
+              onRevoked={(shareId) => setNewLink((current) => current?.shareId === shareId ? null : current)}
+            />
           ))}
         </ul>
       )}
     </Card>
+  );
+}
+
+function ShareRow({
+  share,
+  sessionId,
+  isDm,
+  onChanged,
+  onRevoked,
+}: {
+  share: SessionShare;
+  sessionId: number;
+  isDm: boolean;
+  onChanged: () => Promise<void>;
+  onRevoked: (shareId: number) => void;
+}) {
+  const [draftLabel, setDraftLabel] = useState(share.label);
+  const [busy, setBusy] = useState<'label' | 'extend' | 'revoke' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function mutate(kind: 'label' | 'extend' | 'revoke') {
+    setBusy(kind);
+    setError(null);
+    try {
+      if (kind === 'revoke') {
+        await api.delete(`${API}/sessions/${sessionId}/shares/${share.id}`);
+        onRevoked(share.id);
+      } else {
+        const currentExpiry = share.expiresAt ? Date.parse(share.expiresAt) : Date.now();
+        const body = kind === 'label'
+          ? { label: draftLabel }
+          : { expiresAt: new Date(Math.max(Date.now(), currentExpiry) + 7 * 24 * 60 * 60 * 1000).toISOString() };
+        await api.patch(`${API}/sessions/${sessionId}/shares/${share.id}`, body);
+      }
+      await onChanged();
+    } catch {
+      setError(`Couldn't ${kind === 'revoke' ? 'revoke' : kind === 'extend' ? 'extend' : 'rename'} this link.`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <li className="rounded-md border border-slate-700/70 p-2.5 text-xs space-y-2">
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="min-w-0 flex-1 space-y-1">
+          <p className="m-0 text-slate-200 font-semibold break-words">{share.label || 'Unlabelled link'}</p>
+          <p className="m-0 text-muted">
+            Created by {share.createdBy || 'Unknown member'} · {share.expiresAt ? `expires ${formatDateTime(share.expiresAt)}` : 'never expires'}
+          </p>
+          <p className="m-0 text-muted">
+            Opened {share.accessCount} {share.accessCount === 1 ? 'time' : 'times'}
+            {share.lastAccessedAt ? ` · last ${formatDateTime(share.lastAccessedAt)}` : ' · not opened yet'}
+          </p>
+        </div>
+        <code className="text-slate-300 shrink-0" aria-label="Share token display prefix">{share.tokenPrefix}…</code>
+      </div>
+      {isDm && (
+        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+          <label className="sr-only" htmlFor={`share-row-label-${share.id}`}>Edit share label</label>
+          <TextInput
+            id={`share-row-label-${share.id}`}
+            className="!min-h-0 !py-1.5 text-xs flex-1"
+            maxLength={120}
+            value={draftLabel}
+            onChange={(event) => setDraftLabel(event.target.value)}
+          />
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'label'} disabled={busy !== null || draftLabel === share.label} onClick={() => void mutate('label')}>
+            {busy === 'label' ? 'Saving…' : 'Save label'}
+          </Btn>
+          {share.expiresAt && (
+            <Btn ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'extend'} disabled={busy !== null} onClick={() => void mutate('extend')}>
+              {busy === 'extend' ? 'Extending…' : 'Extend 7 days'}
+            </Btn>
+          )}
+          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'revoke'} disabled={busy !== null} onClick={() => void mutate('revoke')}>
+            {busy === 'revoke' ? 'Revoking…' : 'Revoke'}
+          </Btn>
+        </div>
+      )}
+      {error && <p className="m-0 text-red-400" role="alert">{error}</p>}
+    </li>
   );
 }
 
@@ -958,6 +1139,7 @@ function AddRecapForm({
       <TextInput
         id="new-recap-title"
         className="min-w-0"
+        autoFocus
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder={'e.g. "The Dragon’s Shadow"'}

@@ -1,5 +1,16 @@
 import { createZodDto } from 'nestjs-zod';
-import { SessionCreate, SessionUpdate, SessionAttendanceSet, ScheduledSessionCreate, ScheduledSessionUpdate, RsvpSet, ExpectedUpdatedAt } from '@campfire/schema';
+import {
+  SessionCreate,
+  SessionUpdate,
+  SessionAttendanceSet,
+  ScheduledSessionCreate,
+  ScheduledSessionUpdate,
+  RsvpSet,
+  ExpectedUpdatedAt,
+  SessionShareCreate,
+  SessionShareUpdate,
+  SessionSharePolicyUpdate,
+} from '@campfire/schema';
 
 // .strict() at the DTO layer only (shared exports stay lenient for mcp-tools.ts /
 // proposals.service.ts — see encounters.dto.ts): an unrecognized body key 400s
@@ -14,3 +25,6 @@ export class SessionAttendanceSetDto extends createZodDto(SessionAttendanceSet.s
 export class ScheduledSessionCreateDto extends createZodDto(ScheduledSessionCreate.strict()) {}
 export class ScheduledSessionUpdateDto extends createZodDto(ScheduledSessionUpdate.strict()) {}
 export class RsvpSetDto extends createZodDto(RsvpSet.strict()) {}
+export class SessionShareCreateDto extends createZodDto(SessionShareCreate.strict()) {}
+export class SessionShareUpdateDto extends createZodDto(SessionShareUpdate) {}
+export class SessionSharePolicyUpdateDto extends createZodDto(SessionSharePolicyUpdate.strict()) {}

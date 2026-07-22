@@ -12,7 +12,7 @@
  * that maps to their own character (via campaign characters' ownerUserId).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   AoeShape,
   AoeTemplate,
@@ -1011,6 +1011,9 @@ export default function RunSessionPage() {
       )}
 
       {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
+      {isDm && encounter.status === 'ended' && (
+        <EncounterNextSteps campaignId={cid} sessionId={encounter.sessionId} />
+      )}
 
       <EncounterLinks
         campaignId={cid}
@@ -2928,6 +2931,58 @@ function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
         </span>
       </div>
     </Card>
+  );
+}
+
+/**
+ * A deliberately small hand-off into existing post-session surfaces. This is not an
+ * aftermath workflow: it stores no state and creates no new domain actions. Links are
+ * DM-only because recap authoring and party-wide XP awards are DM capabilities, and a
+ * session-specific destination is only rendered when the encounter actually has one.
+ */
+function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; sessionId: number | null }) {
+  const sessionsPath = `/c/${campaignId}/sessions`;
+  const recapPath =
+    sessionId == null
+      ? `${sessionsPath}?action=new-recap`
+      : `${sessionsPath}?session=${sessionId}&action=edit-recap`;
+
+  return (
+    <section className="cf-card p-5 space-y-3" aria-labelledby="encounter-next-heading">
+      <div className="space-y-1">
+        <h2 id="encounter-next-heading" className="text-sm font-bold text-white m-0">
+          Next
+        </h2>
+        <p className="text-xs text-slate-400 m-0">Wrap up the table while the encounter is still fresh.</p>
+      </div>
+      <nav
+        aria-label="Post-encounter next steps"
+        className={`grid grid-cols-1 gap-2 ${sessionId == null ? 'sm:grid-cols-2' : 'sm:grid-cols-3'}`}
+      >
+        <Link to={recapPath} className="btn btn-primary min-w-0 min-h-11 flex-col !items-start text-left">
+          <span className="font-semibold">Write recap</span>
+          <span className="text-[11px] text-muted font-normal">
+            {sessionId == null ? 'Create a session recap.' : 'Edit the linked session recap.'}
+          </span>
+        </Link>
+        <Link
+          to={`/c/${campaignId}/party?action=award-xp`}
+          className="btn btn-secondary min-w-0 min-h-11 flex-col !items-start text-left"
+        >
+          <span className="font-semibold">Award XP</span>
+          <span className="text-[11px] text-muted font-normal">Open the party XP form.</span>
+        </Link>
+        {sessionId != null && (
+          <Link
+            to={`${sessionsPath}?session=${sessionId}`}
+            className="btn btn-secondary min-w-0 min-h-11 flex-col !items-start text-left"
+          >
+            <span className="font-semibold">Open linked session</span>
+            <span className="text-[11px] text-muted font-normal">Review its details and recap.</span>
+          </Link>
+        )}
+      </nav>
+    </section>
   );
 }
 

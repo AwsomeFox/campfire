@@ -4,13 +4,37 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { BOOTSTRAP_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
+import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
+
+// Re-export the boot-guard surface (issue #721) so callers and tests import it
+// from the db module barrel rather than reaching into boot-guard.ts directly —
+// keeps the public DB boundary in one place.
+export {
+  assertDataMount,
+  DataMountGuardError,
+  sentinelFilePath,
+  SENTINEL_FILENAME,
+  ALLOW_FRESH_DB_ENV,
+  type InstallSentinel,
+  type BootGuardOutcome,
+} from './boot-guard';
 
 export const DB = Symbol('DB');
 export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 
 /** Module-scoped logger for the free functions (openDatabase et al.) that run outside a Nest provider. */
 const dbLog = new Logger('Database');
+
+/**
+ * The version of THIS running binary, single-sourced from apps/server/package.json (the same
+ * source /healthz and /readyz report — see health.controller.ts). Recorded alongside the
+ * migration log in `__db_meta` (issue #726) so a subsequently booted OLDER binary can detect
+ * that the DB was last touched by a newer app version and refuse to start against a schema it
+ * does not understand, rather than silently writing into it.
+ */
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const APP_VERSION: string = require('../../package.json').version;
 
 /**
  * Startup diagnostic (issue #235): run `PRAGMA foreign_key_check` once enforcement is on
@@ -332,6 +356,26 @@ function migrateCampaignsTableForIcsToken(sqlite: Database.Database): void {
   if (hasIcsToken) return;
 
   sqlite.exec('ALTER TABLE campaigns ADD COLUMN ics_token TEXT');
+}
+
+/**
+ * Migration for issue #554: `campaigns.ics_token_expires_at` didn't exist on
+ * pre-#554 DBs. Plain nullable ADD COLUMN — no table rebuild needed, same shape
+ * as migrateCampaignsTableForIcsToken above. Existing rows (which have no
+ * expiry) default to NULL and keep working until the DM rotates; rotating then
+ * stamps a fresh expiry on the new token (see SchedulingService.rotateFeed).
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForIcsTokenExpiresAt(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'ics_token_expires_at')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN ics_token_expires_at TEXT');
 }
 
 /**
@@ -680,6 +724,24 @@ function migrateDiceRollsTableForKeepDrop(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before compound dice expressions (issue #536): `dice_rolls`
+ * gained `terms` (JSON of the per-term breakdown). Plain nullable ADD COLUMN — no table
+ * rebuild needed, same shape as migrateDiceRollsTableForKeepDrop above. Existing rolls
+ * get NULL (== a classic single-term roll, no breakdown), preserving their meaning. New
+ * DBs never hit this path — BOOTSTRAP_SQL declares the column.
+ */
+function migrateDiceRollsTableForTerms(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('terms')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN terms TEXT');
+}
+
+/**
  * Migration for DBs created before soft-delete / trash (issue #116): the trashable
  * entities gained a nullable `deleted_at` timestamp — NULL means live, an ISO string
  * means the row is in the trash (excluded from normal reads, restorable). Idempotent
@@ -726,6 +788,33 @@ function migrateCommentsTableForSoftDelete(sqlite: Database.Database): void {
   const has = (name: string) => columns.some((c) => c.name === name);
   if (!has('deleted_at')) sqlite.exec('ALTER TABLE comments ADD COLUMN deleted_at TEXT');
   if (!has('deleted_by')) sqlite.exec('ALTER TABLE comments ADD COLUMN deleted_by TEXT');
+}
+
+/**
+ * Migration for DBs created before comment editor provenance (issue #783): the
+ * comments table gained `edited_at` + `edited_by` (nullable), stamped ONLY when a
+ * non-author (a DM moderating) edits another member's comment so the original
+ * author is never the apparent writer of rewritten prose. Plain nullable ADD
+ * COLUMNs — no table rebuild, same idempotent shape as the soft-delete migration
+ * above. Existing rows come in with both NULL (== self-authored / never edited by
+ * anyone else), which is exactly the pre-migration state. New DBs never hit this
+ * path — BOOTSTRAP_SQL already declares both columns.
+ *
+ * Deliberately separate from 0045_comments_soft_delete: that migration predates
+ * this trust fix and the two address distinct concerns (tombstone lifecycle vs.
+ * honest edit attribution). Keeping them as their own recorded, idempotent steps
+ * means an operator reading the migration log can tell the two apart.
+ */
+function migrateCommentsTableForEditorProvenance(sqlite: Database.Database): void {
+  const hasCommentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'")
+    .get();
+  if (!hasCommentsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(comments)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('edited_at')) sqlite.exec('ALTER TABLE comments ADD COLUMN edited_at TEXT');
+  if (!has('edited_by')) sqlite.exec('ALTER TABLE comments ADD COLUMN edited_by TEXT');
 }
 
 /**
@@ -962,6 +1051,37 @@ function migrateRuleEntriesTableForIconSlug(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before compendium rule entries could carry their OWN
+ * per-entry license/attribution (issue #734): previously the entry's license was dropped
+ * on import and the reader labelled every entry with the PACK license, losing the
+ * attribution an open licence legally obliges us to show (and mislabelling mixed-license
+ * packs — an OGL pack with a CC-BY spell). Four plain ADD COLUMNs with '' defaults — same
+ * idiom as 0038. Existing rows get '' for each field, which callers treat as "inherit the
+ * pack's value", so an upgraded server renders exactly as before until a pack is
+ * reinstalled. Per migration 0050's goal in the issue ("Migrate existing rows to explicit
+ * inherited/unknown provenance"), '' is the explicit inherited marker — no backfill is
+ * possible since the per-entry license was never recorded. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the columns. Adding plain columns to the FTS content
+ * table doesn't touch the indexed columns (name/summary/body), so the triggers are
+ * unaffected.
+ */
+function migrateRuleEntriesTableForLicensing(sqlite: Database.Database): void {
+  const hasRuleEntriesTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_entries'")
+    .get();
+  if (!hasRuleEntriesTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(rule_entries)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  // Add each missing column independently — a partially-migrated DB (unlikely but possible
+  // after an interrupted upgrade) converges without re-ALTERing an existing column.
+  if (!has('license')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN license TEXT NOT NULL DEFAULT ''");
+  if (!has('attribution')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN attribution TEXT NOT NULL DEFAULT ''");
+  if (!has('author')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN author TEXT NOT NULL DEFAULT ''");
+  if (!has('source_url')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
+}
+
+/**
  * Migration for DBs created before inventory items could carry a bundled entity
  * icon (issue #307): `inventory_items.icon_slug` didn't exist. Plain ADD COLUMN
  * with a '' default — same idiom as migrateNpcsTableForIconSlug (0037). Existing
@@ -1159,6 +1279,73 @@ function migrateCampaignMembersTableForUserFk(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #788: privacy metadata and policy for public recap capabilities.
+ * Existing links were created without an explicit "never" decision, so the
+ * upgrade gives them a conservative seven-day sunset. A deliberately never-
+ * expiring link created after the migration is represented by NULL and is not
+ * touched again because this named migration runs only once.
+ */
+function migratePublicRecapSharePolicy(sqlite: Database.Database): void {
+  const cutoff = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const migrate = sqlite.transaction(() => {
+    const hasCampaigns = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'").get();
+    if (hasCampaigns) {
+      const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'public_recap_sharing_enabled')) {
+        sqlite.exec('ALTER TABLE campaigns ADD COLUMN public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1');
+      }
+    }
+
+    const hasShares = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_shares'").get();
+    if (!hasShares) return;
+    const columns = sqlite.prepare('PRAGMA table_info(session_shares)').all() as Array<{ name: string }>;
+    const has = (name: string) => columns.some((column) => column.name === name);
+    const legacyNeedsExpiry = !has('expires_at');
+    if (!has('label')) sqlite.exec("ALTER TABLE session_shares ADD COLUMN label TEXT NOT NULL DEFAULT ''");
+    if (legacyNeedsExpiry) sqlite.exec('ALTER TABLE session_shares ADD COLUMN expires_at TEXT');
+    if (!has('access_count')) sqlite.exec('ALTER TABLE session_shares ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0');
+    if (!has('first_accessed_at')) sqlite.exec('ALTER TABLE session_shares ADD COLUMN first_accessed_at TEXT');
+    if (!has('last_accessed_at')) sqlite.exec('ALTER TABLE session_shares ADD COLUMN last_accessed_at TEXT');
+    if (legacyNeedsExpiry) sqlite.prepare('UPDATE session_shares SET expires_at = ? WHERE expires_at IS NULL').run(cutoff);
+
+    // Pre-#788 rows stored a numeric actor id. Recover a useful member-facing
+    // creator label where the corresponding user still exists; audit rows keep
+    // the immutable actor identity either way.
+    sqlite.exec(`
+      UPDATE session_shares
+      SET created_by = COALESCE(
+        (SELECT NULLIF(users.display_name, '') FROM users WHERE CAST(users.id AS TEXT) = session_shares.created_by),
+        (SELECT users.username FROM users WHERE CAST(users.id AS TEXT) = session_shares.created_by),
+        created_by
+      )
+      WHERE created_by <> '' AND created_by NOT GLOB '*[^0-9]*';
+    `);
+  });
+  migrate();
+}
+
+/**
+ * Migration for issue #723 (PWA restore safety): the `server_meta` table didn't
+ * exist before install/data-generation identity was tracked. The table itself is
+ * a single-row singleton (key='singleton') carrying a per-install UUID and a
+ * monotonic `data_generation` bumped on every whole-server restore — see
+ * ServerMetaService. CREATE TABLE IF NOT EXISTS is fully idempotent, and a fresh
+ * DB never hits this path because BOOTSTRAP_SQL already declares the table. Runs
+ * with foreign_keys OFF (no FK constraints here regardless), same as the other
+ * new-table migrations above (e.g. 0040 ai_provider_config).
+ */
+function migrateServerMetaTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS server_meta (
+      key TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL,
+      data_generation INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+/**
  * Issue #679: retain consumed refresh-token generations as replay sentinels and
  * link rotations into a revocable family. Existing live rows each become the
  * root of their own family, preserving every issued token while allowing the
@@ -1178,9 +1365,6 @@ function migrateOAuthAccessTokensForAtomicRotation(sqlite: Database.Database): v
     if (!has('revoked_at')) sqlite.exec('ALTER TABLE oauth_access_tokens ADD COLUMN revoked_at TEXT');
     if (!has('family_revoked_at')) sqlite.exec('ALTER TABLE oauth_access_tokens ADD COLUMN family_revoked_at TEXT');
     sqlite.exec("UPDATE oauth_access_tokens SET family_id = 'legacy-' || id WHERE family_id IS NULL");
-    // Fresh databases receive this index from bootstrap.sql.ts. Create it here as
-    // well so upgraded installations get the same schema and family revocation
-    // never degrades into a full oauth_access_tokens table scan.
     sqlite.exec('CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id)');
   });
   migrate();
@@ -1245,7 +1429,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0044_combatants_npc_id', run: migrateCombatantsTableForNpcId },
   { name: '0045_comments_soft_delete', run: migrateCommentsTableForSoftDelete },
   { name: '0046_campaign_members_user_fk', run: migrateCampaignMembersTableForUserFk },
-  { name: '0047_oauth_atomic_rotation', run: migrateOAuthAccessTokensForAtomicRotation },
+  { name: '0047_comments_editor_provenance', run: migrateCommentsTableForEditorProvenance },
+  { name: '0048_dice_rolls_terms', run: migrateDiceRollsTableForTerms },
+  { name: '0049_campaigns_ics_token_expires_at', run: migrateCampaignsTableForIcsTokenExpiresAt },
+  { name: '0050_rule_entries_licensing', run: migrateRuleEntriesTableForLicensing },
+  { name: '0051_server_meta', run: migrateServerMetaTable },
+  { name: '0052_public_recap_share_policy', run: migratePublicRecapSharePolicy },
+  { name: '0053_oauth_atomic_rotation', run: migrateOAuthAccessTokensForAtomicRotation },
 ];
 
 /**
@@ -1260,6 +1450,104 @@ function ensureMigrationsTable(sqlite: Database.Database): void {
       applied_at TEXT NOT NULL
     );
   `);
+}
+
+/**
+ * Create the single-row metadata table if absent (issue #726). `__db_meta` carries
+ * the app version that last booted (and therefore last migrated) this database, so
+ * a subsequently booted OLDER binary can detect it is running against a schema
+ * touched by a newer app version and refuse to start — rather than silently writing
+ * into a DB whose shape it does not understand. `key` is the singleton PRIMARY KEY
+ * (always 'app_version'); `value` is a semver-ish string (e.g. "0.14.1").
+ */
+function ensureDbMetaTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS __db_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+/**
+ * Read the recorded app version from `__db_meta`, or null when no row exists yet
+ * (a DB created before issue #726, or a genuinely fresh DB on the first boot that
+ * records it). Exported for tests.
+ */
+export function getRecordedAppVersion(sqlite: Database.Database): string | null {
+  ensureDbMetaTable(sqlite);
+  const row = sqlite
+    .prepare("SELECT value FROM __db_meta WHERE key = 'app_version'")
+    .get() as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+/**
+ * Compare two semver-ish strings ("MAJOR.MINOR.PATCH", optional pre-release).
+ * Returns a negative number when `a` is older than `b`, zero when equal, positive
+ * when `a` is newer. Only the leading numeric triple is compared — a pre-release
+ * suffix on either side is ignored (the project does not gate on pre-release
+ * ordering, and treating e.g. "0.14.1-rc.1" as equal to "0.14.1" is the safe
+ * direction for a downgrade guard). Non-parseable components compare as 0, so a
+ * malformed stored value can never be misread as "newer than" the running binary.
+ * Exported so the test can exercise the ordering directly.
+ */
+export function compareAppVersions(a: string, b: string): number {
+  const parse = (v: string): [number, number, number] => {
+    const parts = v.split('-')[0].split('.');
+    const n = (s: string | undefined): number => {
+      const m = /^\d+/.exec((s ?? '').trim());
+      return m ? Number(m[0]) : 0;
+    };
+    return [n(parts[0]), n(parts[1]), n(parts[2])];
+  };
+  const [ax, ay, az] = parse(a);
+  const [bx, by, bz] = parse(b);
+  if (ax !== bx) return ax - bx;
+  if (ay !== by) return ay - by;
+  return az - bz;
+}
+
+/**
+ * Issue #726: refuse to boot when the database was last migrated by a NEWER app
+ * version than this running binary. Migrations only ever move the schema forward,
+ * so an older binary running against a newer-shaped schema would silently read/
+ * write columns and tables it does not understand — corrupting data or crashing
+ * deep in a service. Throwing here (before BOOTSTRAP_SQL / migrations / any
+ * request handling) keeps the container from joining the load balancer: the
+ * operator's only recourse is to restore the pre-upgrade DB snapshot or boot a
+ * binary >= the recorded version, which the error message spells out. A null
+ * recorded version (pre-#726 DB or genuinely first boot) is treated as compatible.
+ */
+function assertDbVersionCompatible(sqlite: Database.Database): void {
+  const recorded = getRecordedAppVersion(sqlite);
+  if (recorded === null) return;
+  if (compareAppVersions(recorded, APP_VERSION) > 0) {
+    throw new Error(
+      `Database was last migrated by Campfire v${recorded}, which is NEWER than this ` +
+        `running binary (v${APP_VERSION}). Migrations only ever move the schema forward, ` +
+        `so an older binary running against a newer schema is unsupported — it would ` +
+        `silently corrupt data. Either boot Campfire >= v${recorded}, or restore the ` +
+        `pre-upgrade database snapshot (see GET /api/v1/backup / docs/administration/operations).`,
+    );
+  }
+}
+
+/**
+ * Record THIS binary's app version as the one that last migrated the database
+ * (issue #726). Called only after migrations have run successfully so the recorded
+ * version always reflects a schema the binary actually understands — a migration
+ * that throws leaves the previous (older) recorded version intact.
+ */
+function recordAppVersion(sqlite: Database.Database): void {
+  ensureDbMetaTable(sqlite);
+  sqlite
+    .prepare(
+      "INSERT INTO __db_meta (key, value, updated_at) VALUES ('app_version', ?, ?) " +
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+    )
+    .run(APP_VERSION, new Date().toISOString());
 }
 
 /**
@@ -1311,14 +1599,35 @@ export function openDatabase(dataDir: string): {
   ftsAvailable: boolean;
 } {
   fs.mkdirSync(dataDir, { recursive: true });
+
+  // Issue #721 boot guard: the mount must look correct BEFORE SQLite opens (and
+  // auto-creates) campfire.db. assertDataMount is the single arbiter of "fresh
+  // install vs broken mount": it initializes the install sentinel on first run,
+  // trusts an existing sentinel, and refuses to boot when a foreign DB appears
+  // without its sentinel (the missing/wrong-mount failure mode). Runs after the
+  // dir mkdir so a missing DATA_DIR itself doesn't trip the guard — the dir is
+  // the thing the operator mounts, the sentinel is what we write into it.
+  assertDataMount(dataDir, dbFilePath(dataDir));
+
   const sqlite = new Database(dbFilePath(dataDir));
   sqlite.pragma('journal_mode = WAL');
+
+  // Issue #726: BEFORE migrating, refuse to boot if the DB was last migrated by a
+  // newer binary. The guard runs before BOOTSTRAP_SQL / runMigrations so a downgraded
+  // binary never touches a newer-shaped schema even with an idempotent ADD COLUMN.
+  assertDbVersionCompatible(sqlite);
 
   // Foreign-key enforcement is OFF here (SQLite's default at open) so the ordered
   // migrations below — some of which rebuild a table via the 12-step DROP/CREATE
   // pattern — are never blocked by a constraint mid-rebuild. It is turned ON at the
   // end, after the schema is settled, for all of the app's runtime writes.
   runMigrations(sqlite);
+
+  // Issue #726: AFTER migrations succeed, record THIS binary as the one that last
+  // migrated the DB. Placed here (not inside runMigrations) so a migration that
+  // throws never advances the recorded version — the next boot still sees the older
+  // recorded version, and the guard stays meaningful for a subsequent older binary.
+  recordAppVersion(sqlite);
 
   sqlite.exec(BOOTSTRAP_SQL);
   // BOOTSTRAP_SQL runs AFTER the migrations so a just-rebuilt table (e.g. users) is

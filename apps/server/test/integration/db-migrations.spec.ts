@@ -39,7 +39,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
 
       expect(columnNames(sqlite, 'campaigns')).toEqual(
-        expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at']),
+        expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at', 'public_recap_sharing_enabled']),
       );
       expect(columnNames(sqlite, 'characters')).toEqual(
         expect.arrayContaining(['xp', 'save_proficiencies', 'skills', 'actions', 'spell_slots', 'dm_secret']),
@@ -114,7 +114,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
 
       // ADD COLUMN with a default backfills existing rows.
       const campaign = sqlite.prepare('SELECT * FROM campaigns WHERE id = 1').get() as Record<string, unknown>;
-      expect(campaign).toMatchObject({ name: 'Legacy Campaign', rule_system: '' });
+      expect(campaign).toMatchObject({ name: 'Legacy Campaign', rule_system: '', public_recap_sharing_enabled: 1 });
       expect(campaign.ics_token).toBeNull();
       // 0049 (issue #554): the ICS token expiry column is added by migration on
       // old-shaped DBs, null on the legacy row (no expiry until the DM rotates).
@@ -281,6 +281,53 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(countRows(second.sqlite, '__migrations')).toBe(countAfterFirst);
     } finally {
       second.sqlite.close();
+    }
+  });
+
+  it('0052 upgrades legacy recap shares with a seven-day sunset and audit metadata columns', () => {
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.pragma('foreign_keys = OFF');
+      const now = '2026-07-22T00:00:00.000Z';
+      legacy.prepare("INSERT INTO users (id, username, display_name, password_hash, server_role, disabled, created_at, updated_at) VALUES (1, 'legacy-share-dm', 'Legacy Share DM', 'hash', 'user', 0, ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Legacy Share Campaign', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO sessions (id, campaign_id, number, created_at, updated_at) VALUES (1, 1, 1, ?, ?)").run(now, now);
+      legacy.exec(`
+        DROP TABLE session_shares;
+        CREATE TABLE session_shares (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL,
+          campaign_id INTEGER NOT NULL,
+          created_by TEXT NOT NULL DEFAULT '',
+          token_hash TEXT NOT NULL UNIQUE,
+          token_prefix TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      legacy.prepare('INSERT INTO session_shares VALUES (1, 1, 1, ?, ?, ?, ?, ?)').run('1', 'legacy-token-hash', 'cf_share_abcd', now, now);
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0052_public_recap_share_policy'").run();
+    } finally {
+      legacy.close();
+    }
+
+    const beforeUpgrade = Date.now();
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'session_shares')).toEqual(
+        expect.arrayContaining(['label', 'expires_at', 'access_count', 'first_accessed_at', 'last_accessed_at']),
+      );
+      const row = upgraded.sqlite.prepare('SELECT * FROM session_shares WHERE id = 1').get() as Record<string, unknown>;
+      expect(row).toMatchObject({ label: '', access_count: 0, created_by: 'Legacy Share DM' });
+      const expiry = Date.parse(String(row.expires_at));
+      expect(expiry).toBeGreaterThanOrEqual(beforeUpgrade + 6 * 24 * 60 * 60 * 1000);
+      expect(expiry).toBeLessThanOrEqual(beforeUpgrade + 8 * 24 * 60 * 60 * 1000);
+    } finally {
+      upgraded.sqlite.close();
     }
   });
 
