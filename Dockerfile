@@ -12,6 +12,7 @@
 # the `deps`/`prod-deps` build stages — the final `runtime` stage stays slim.
 
 ARG NODE_IMAGE=node:24-slim
+ARG APP_VERSION=0.0.0-dev
 
 # ---------------------------------------------------------------------------
 # deps: full install (incl. devDependencies) used to build all three workspaces.
@@ -27,6 +28,22 @@ COPY package.json package-lock.json ./
 COPY apps/server/package.json apps/server/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/schema/package.json packages/schema/package.json
+
+# Stamp the release version into every workspace package.json so the running
+# app (healthz, DB migration guard, MCP server-info) reports the right version
+# without requiring a version-bump commit in the repo.
+ARG APP_VERSION
+RUN node -e '
+  const fs = require("fs");
+  const v = process.env.APP_VERSION;
+  if (v && v !== "0.0.0-dev") {
+    for (const f of ["package.json","apps/server/package.json","apps/web/package.json","packages/schema/package.json"]) {
+      const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+      pkg.version = v;
+      fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + "\n");
+    }
+  }
+'
 
 RUN npm ci
 

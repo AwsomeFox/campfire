@@ -42,34 +42,46 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.image }}:latest
 
-      - name: Append image link to release
+      - name: Generate release notes and update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           IMAGE="${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}"
           RELEASE_TAG="${GITHUB_REF_NAME}"
 
-          # Fetch current release body
-          CURRENT_BODY=$(gh release view "$RELEASE_TAG" --json body -q .body)
+          # Find the previous release tag for the changelog range
+          PREV_TAG=$(gh release list --limit 10 --json tagName,isPrerelease,isDraft \
+            -q "[.[] | select(.tagName != \"${RELEASE_TAG}\" and .isPrerelease == false and .isDraft == false)] | .[0].tagName // empty")
 
-          # Append container image info (skip if already present)
-          if echo "$CURRENT_BODY" | grep -q "ghcr.io"; then
-            echo "Image link already present in release body, skipping."
+          # Build the release body: auto-generated changelog + container info
+          NOTES="## What's Changed"$'\n\n'
+
+          if [ -n "$PREV_TAG" ]; then
+            # Use GitHub's auto-generated notes API for a nice PR-based changelog
+            API_NOTES=$(gh api repos/${{ github.repository }}/releases/generate-notes \
+              -f tag_name="$RELEASE_TAG" \
+              -f previous_tag_name="$PREV_TAG" \
+              -q .body 2>/dev/null || true)
+
+            if [ -n "$API_NOTES" ]; then
+              NOTES="$API_NOTES"
+            else
+              # Fallback: simple commit log
+              NOTES="${NOTES}$(git log "${PREV_TAG}..${RELEASE_TAG}" --pretty=format:'* %s (%h)' --no-merges)"$'\n'
+            fi
           else
-            UPDATED_BODY="${CURRENT_BODY}
-
----
-
-## Container image
-
-\`\`\`
-docker pull ${IMAGE}
-\`\`\`"
-
-            gh release edit "$RELEASE_TAG" --notes "$UPDATED_BODY"
-            echo "✅ Updated release ${RELEASE_TAG} with image link: ${IMAGE}"
+            NOTES="${NOTES}This is the first release."$'\n'
           fi
+
+          # Append container image pull instructions
+          NOTES="${NOTES}"$'\n\n---\n\n'"## Container image"$'\n\n'
+          NOTES="${NOTES}"'```'$'\n'"docker pull ${IMAGE}"$'\n''```'
+
+          gh release edit "$RELEASE_TAG" --notes "$NOTES"
+          echo "✅ Updated release ${RELEASE_TAG} with changelog and image link"
