@@ -1386,6 +1386,151 @@ describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)'
   });
 });
 
+describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'No-op Initiative Campaign' })).body.id;
+    // An active party member so encounter auto-add yields a real combatant to roll for.
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Aria', stats: { DEX: 12 }, hpCurrent: 20, hpMax: 20 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  // Helper: count audit rows for a given action+entity so the no-op assertion can prove
+  // the audit trail was NOT touched by an empty roll.
+  async function countInitiativeAudits(encounterId: number): Promise<number> {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rows = await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId));
+    return rows.filter((row) => row.action === 'encounter.roll_initiative').length;
+  }
+
+  it('a fully-rolled roster is a no-op: rolledCount=0, no audit entry, no SSE broadcast', async () => {
+    const server = ctx.app.getHttpServer();
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'All Rolled' })
+    ).body.id;
+    // One party combatant; fill it once with a real roll.
+    const first = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(first.status).toBe(201);
+    expect(first.body.rolledCount).toBe(1);
+    const auditsBefore = await countInitiativeAudits(encounterId);
+
+    // Watch for an encounter.updated broadcast — a no-op must NOT emit one.
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      const again = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+      expect(again.status).toBe(201);
+      // rolledCount=0 signals the no-op to the client (issue #702).
+      expect(again.body.rolledCount).toBe(0);
+      // Combatants are still returned as a fresh snapshot.
+      for (const c of again.body.combatants as CombatantShape[]) {
+        expect(c.initiative).not.toBeNull();
+      }
+      // No new audit row was written for the empty roll.
+      const auditsAfter = await countInitiativeAudits(encounterId);
+      expect(auditsAfter).toBe(auditsBefore);
+      // No SSE broadcast fired (mirrors the PATCH no-op contract).
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(0);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('a partial roster rolls only the missing ones and returns the count', async () => {
+    const server = ctx.app.getHttpServer();
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Partial' })
+    ).body.id;
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const partyId = (getRes.body.combatants as CombatantShape[])[0].id;
+
+    // Pin the party member's initiative, then add two monsters at null initiative.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${partyId}`).set(dm).send({ initiative: 7 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'M1', hpMax: 10 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'M2', hpMax: 10 });
+
+    const auditsBefore = await countInitiativeAudits(encounterId);
+    const rollRes = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(rollRes.status).toBe(201);
+    // Exactly the two monsters were rolled (issue #702: count is surfaced to the client).
+    expect(rollRes.body.rolledCount).toBe(2);
+    // Everyone now has an initiative; the pinned party member is untouched.
+    for (const c of rollRes.body.combatants as CombatantShape[]) {
+      expect(c.initiative).not.toBeNull();
+    }
+    const pinned = (rollRes.body.combatants as CombatantShape[]).find((c) => c.id === partyId);
+    expect(pinned?.initiative).toBe(7);
+    // A meaningful roll writes exactly one audit row.
+    const auditsAfter = await countInitiativeAudits(encounterId);
+    expect(auditsAfter).toBe(auditsBefore + 1);
+  });
+
+  it('reinforcements added mid-fight roll to a non-zero count, then a fully-rolled re-roll is a no-op', async () => {
+    const server = ctx.app.getHttpServer();
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Reinforce' })
+    ).body.id;
+    // Roll the initial roster, then start so the fight is running.
+    const initial = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(initial.status).toBe(201);
+    expect(initial.body.rolledCount).toBeGreaterThan(0);
+    await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+
+    // Add a reinforcement mid-fight — it lands at null initiative.
+    const reinf = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Late Orc', hpMax: 12 });
+    expect(reinf.status).toBe(201);
+    expect(reinf.body.initiative).toBeNull();
+
+    // Rolling now fills ONLY the reinforcement and reports exactly one.
+    const fillRes = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(fillRes.status).toBe(201);
+    expect(fillRes.body.rolledCount).toBe(1);
+    const lateOrc = (fillRes.body.combatants as CombatantShape[]).find((c) => c.name === 'Late Orc');
+    expect(lateOrc?.initiative).not.toBeNull();
+
+    // A second roll is now a no-op: nothing left to fill.
+    const auditsBefore = await countInitiativeAudits(encounterId);
+    const noop = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(noop.status).toBe(201);
+    expect(noop.body.rolledCount).toBe(0);
+    const auditsAfter = await countInitiativeAudits(encounterId);
+    expect(auditsAfter).toBe(auditsBefore);
+  });
+
+  it('a zero-combatant encounter rolls nothing and reports rolledCount=0 without auditing', async () => {
+    const server = ctx.app.getHttpServer();
+    // A fresh campaign with no party members, so the encounter starts truly empty.
+    const emptyCampaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Empty Encounter Campaign' })).body.id;
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${emptyCampaignId}/encounters`).set(dm).send({ name: 'Empty' })
+    ).body.id;
+    const auditsBefore = await countInitiativeAudits(encounterId);
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.rolledCount).toBe(0);
+    expect((res.body.combatants as CombatantShape[]).length).toBe(0);
+    const auditsAfter = await countInitiativeAudits(encounterId);
+    expect(auditsAfter).toBe(auditsBefore);
+  });
+});
+
 describe('encounters — issue #50: character/combatant HP stay in sync (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;

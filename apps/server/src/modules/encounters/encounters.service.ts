@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
+import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -1531,36 +1531,52 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
   }
 
-  /** Rolls d20+initMod for every combatant that doesn't already have an initiative. */
-  async rollInitiative(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+  /**
+   * Rolls d20+initMod for every combatant that doesn't already have an initiative.
+   *
+   * Returns the encounter (with combatants) plus `rolledCount` — the number of
+   * combatants that actually had their initiative filled this call. When the roster
+   * is already fully rolled (rolledCount === 0) this is a semantic no-op: no DB write,
+   * no audit entry, and no SSE broadcast — mirroring the encounter-PATCH no-op rule so
+   * the cockpit can't be spammed into an audit trail of empty rolls (issue #702).
+   */
+  async rollInitiative(encounterId: number, user: RequestUser, role: Role): Promise<EncounterRollInitiativeResult> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const rows = await this.listCombatantRows(encounterId);
 
     // Roll each un-set combatant's initiative in JS, then apply them all in ONE
-    // CASE-based UPDATE (#72) instead of one UPDATE per combatant. Combatants that
+    // case-based UPDATE (#72) instead of one UPDATE per combatant. Combatants that
     // already have an initiative are excluded from the id list, so — exactly as
     // before — only null initiatives are filled and manually-set values are left
     // untouched. No write at all when nothing needs rolling.
     const rolled = rows
       .filter((row) => row.initiative === null)
       .map((row) => ({ id: row.id, initiative: rollInitiative(row.initMod, adapter.initiativeDie) }));
-    if (rolled.length > 0) {
-      const cases = sql.join(
-        rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`),
-        sql` `,
-      );
-      await this.db
-        .update(combatants)
-        .set({ initiative: sql`CASE ${combatants.id} ${cases} END` })
-        .where(
-          inArray(
-            combatants.id,
-            rolled.map((r) => r.id),
-          ),
-        );
+
+    // Fully-rolled roster (issue #702): nothing to write, nothing meaningful to audit.
+    // Bail out before the audit.log / SSE emit so the audit trail and other clients are
+    // not disturbed by an empty roll. We still return the current encounter + rolledCount
+    // so the caller has a fresh, consistent snapshot.
+    if (rolled.length === 0) {
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+      return { ...snapshot, rolledCount: 0 };
     }
+
+    const cases = sql.join(
+      rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`),
+      sql` `,
+    );
+    await this.db
+      .update(combatants)
+      .set({ initiative: sql`CASE ${combatants.id} ${cases} END` })
+      .where(
+        inArray(
+          combatants.id,
+          rolled.map((r) => r.id),
+        ),
+      );
 
     // Filling a late joiner's initiative mid-fight (issue #54) re-sorts the order, so
     // keep the positional turnIndex aligned with the (unchanged) identity pointer.
@@ -1579,11 +1595,13 @@ export class EncountersService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
+      detail: `${rolled.length}`,
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
-    return this.getWithCombatantsOrThrow(encounterId, role);
+    const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
+    return { ...snapshot, rolledCount: rolled.length };
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {

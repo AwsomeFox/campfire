@@ -3836,6 +3836,14 @@ export const CombatantUpdate = z.object({
 export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
+// roll-initiative response (issue #702). The encounter (with combatants) is returned as
+// before, plus a `rolledCount` of how many combatants had their initiative filled this
+// call. A fully-rolled roster is a no-op: rolledCount=0, no audit entry, no SSE broadcast.
+export const EncounterRollInitiativeResult = EncounterWithCombatants.extend({
+  rolledCount: z.number().int().nonnegative(),
+});
+export type EncounterRollInitiativeResult = z.infer<typeof EncounterRollInitiativeResult>;
+
 // ---------- persistent per-encounter combat log (issue #61) ----------
 // The in-encounter dice/turn history used to be client-only React state, capped and
 // lost on reload. `encounter_events` persists a per-encounter trail written by the
