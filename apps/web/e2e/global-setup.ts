@@ -195,7 +195,7 @@ export default async function globalSetup(config: FullConfig) {
 
   // Issue #621 browser fixture: use the public upload/search/encounter APIs so both the
   // compendium reader and combat card consume exactly the same persisted dataJson string.
-  const statblockUpload = await okJson(dm, 'post', '/api/v1/rules/packs/upload', {
+  const statblockUpload = await okJson(admin, 'post', '/api/v1/rules/packs/upload', {
     source: 'upload',
     pack: {
       slug: 'e2e-open5e-actions',
@@ -213,7 +213,7 @@ export default async function globalSetup(config: FullConfig) {
       },
     ],
   });
-  await waitForInstall(dm, statblockUpload.id);
+  await waitForInstall(admin, statblockUpload.id);
   const [statblockEntry] = await okJson(dm, 'get', '/api/v1/rules/search?q=fixture%20sentinel&type=monster&pack=e2e-open5e-actions');
   if (!statblockEntry) throw new Error('Uploaded statblock fixture was not searchable');
   const statblockEntryId: number = statblockEntry.id;
