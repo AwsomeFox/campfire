@@ -751,23 +751,41 @@ describe('rules / rule packs — install permission gating (e2e, real sessions)'
     await adminAgent.delete(`/api/v1/rules/packs/${job.pack.id}`);
   });
 
-  it('a DM of a campaign (not a server admin) can install a pack (issue #20)', async () => {
-    // The DM user creates a campaign — the creator is auto-inserted as its DM.
+  it('a DM of a campaign (not a server admin) is FORBIDDEN from every server-scoped rule-pack mutation (issue #736)', async () => {
+    // Rule packs are server-wide: installing/uploading/uninstalling/editing one affects
+    // EVERY campaign on the server, not just the caller's. Issue #736 closed the hole
+    // where a DM of any campaign could mutate these global packs (the old #20 policy).
+    // The DM user creates a campaign — the creator is auto-inserted as its DM, so they
+    // really do hold a campaign-DM role — but that must NOT grant server-wide pack powers.
     const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'DM Install Campaign' });
     expect(campRes.status).toBe(201);
 
     const installRes = await dmAgent
       .post('/api/v1/rules/packs/install')
       .send({ source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
-    expect(installRes.status).toBe(202);
-    const job = await pollWithAgent(dmAgent, installRes.body.id);
-    expect(job.status).toBe('completed');
-    expect(job.pack.slug).toBe('open5e-srd');
+    expect(installRes.status).toBe(403);
 
-    // A DM may install, but uninstall stays server-admin only.
-    const dmUninstall = await dmAgent.delete(`/api/v1/rules/packs/${job.pack.id}`);
-    expect(dmUninstall.status).toBe(403);
-    await adminAgent.delete(`/api/v1/rules/packs/${job.pack.id}`);
+    const uploadRes = await dmAgent.post('/api/v1/rules/packs/upload').send({
+      source: 'upload',
+      pack: { slug: 'dm-upload', name: 'DM Upload', license: 'CC-BY-4.0' },
+      entries: [{ slug: 'a', name: 'A', type: 'other' }],
+    });
+    expect(uploadRes.status).toBe(403);
+
+    // Uninstall was already server-admin-only; it stays that way.
+    const uninstallRes = await dmAgent.delete('/api/v1/rules/packs/1');
+    expect(uninstallRes.status).toBe(403);
+
+    // The entry icon override is gated identically (editing an entry affects every
+    // campaign using the pack).
+    const entryRes = await dmAgent.patch('/api/v1/rules/entries/1').send({ iconSlug: 'fire' });
+    expect(entryRes.status).toBe(403);
+
+    // ...but campaign-DM reads remain open, same as any authenticated user.
+    const listRes = await dmAgent.get('/api/v1/rules/packs');
+    expect(listRes.status).toBe(200);
+    const searchRes = await dmAgent.get('/api/v1/rules/search').query({ q: 'anything' });
+    expect(searchRes.status).toBe(200);
   });
 });
 

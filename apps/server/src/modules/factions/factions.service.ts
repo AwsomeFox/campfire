@@ -154,8 +154,17 @@ export class FactionsService {
    * Reputation control (issue #221) — the AI-scribe entry point ("the party burned the
    * guildhall — drop Guild reputation"). `delta` adjusts the current score (clamped to
    * [-100, 100]); an explicit `reputation` sets it outright; `standing` sets the label.
-   * At least one of the three must be present. Routes through `update` so revision/audit
-   * behavior is identical to any other write.
+   * At least one of the three must be present.
+   *
+   * Concurrency (issue #657): the read, the clamp, and the write all run inside ONE
+   * synchronous better-sqlite3 transaction — mirroring patchHp/patchXp (#653) and
+   * patchTreasury (#582). The { delta } path is applied as a single atomic
+   * `UPDATE ... SET reputation = reputation + ?` (the column on both sides of `+`, so
+   * SQLite reads the latest committed value inside statement atomicity — no read-then-write
+   * window). Two concurrent +5 adjustments now compose to +10 instead of the second
+   * clobbering the first. Audit + revision side-effects fire after the tx commits, so
+   * they stay identical to any other faction write (this deliberately does NOT route
+   * through `update()`, which would re-introduce the read-modify-write race).
    */
   async adjustReputation(
     id: number,
@@ -166,15 +175,65 @@ export class FactionsService {
     if (input.delta === undefined && input.reputation === undefined && input.standing === undefined) {
       throw new BadRequestException('Provide at least one of: delta, reputation, standing');
     }
-    const existing = await this.getRowOrThrow(id);
-    const patch: FactionUpdateInput = {};
-    if (input.reputation !== undefined) {
-      patch.reputation = input.reputation;
-    } else if (input.delta !== undefined) {
-      patch.reputation = Math.max(-100, Math.min(100, existing.reputation + input.delta));
-    }
-    if (input.standing !== undefined) patch.standing = input.standing;
-    return this.update(id, patch, user, role);
+    const ts = nowIso();
+    let row!: typeof factions.$inferSelect;
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(factions).where(eq(factions.id, id)).limit(1).all();
+      if (!fresh) throw new NotFoundException(`Faction ${id} not found`);
+
+      // { reputation } is an absolute set; { delta } is the primary add/subtract path and
+      // is applied atomically as `reputation + ?` so concurrent deltas compose. Clamp to
+      // [-100, 100] on the absolute path; the delta path clamps the RESULT (read after the
+      // atomic UPDATE via RETURNING) so a delta that would overshoot the bounds still lands
+      // at the edge instead of escaping the schema's range.
+      const setValues: Record<string, unknown> = { updatedAt: ts };
+      if (input.standing !== undefined) setValues.standing = input.standing;
+
+      if (input.reputation !== undefined) {
+        setValues.reputation = Math.max(-100, Math.min(100, input.reputation));
+      } else if (input.delta !== undefined) {
+        // The atomic delta: `reputation = reputation + ?`. SQLite resolves the RHS column
+        // to the live row value inside this one statement, so a racing delta can never be
+        // computed from a stale read. We re-clamp the RETURNING value below.
+        setValues.reputation = sql`${factions.reputation} + ${input.delta}`;
+      }
+
+      const [updated] = tx
+        .update(factions)
+        .set(setValues)
+        .where(eq(factions.id, id))
+        .returning()
+        .all();
+
+      if (input.delta !== undefined) {
+        const clamped = Math.max(-100, Math.min(100, updated.reputation));
+        if (clamped !== updated.reputation) {
+          const [reclamped] = tx
+            .update(factions)
+            .set({ reputation: clamped, updatedAt: ts })
+            .where(eq(factions.id, id))
+            .returning()
+            .all();
+          row = reclamped;
+          return;
+        }
+      }
+      row = updated;
+    });
+
+    // Audit + revision side-effects mirror `update()` exactly, but fire AFTER the tx
+    // commits so a failure here never leaves a half-written reputation. The detail payload
+    // records the effective patch shape the caller supplied.
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'faction.update',
+      entityType: 'faction',
+      entityId: id,
+      campaignId: row.campaignId,
+      detail: JSON.stringify(input),
+    });
+    return redactSecret(toDomain(row), role);
   }
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {

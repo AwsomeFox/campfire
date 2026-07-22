@@ -207,15 +207,40 @@ export class InventoryService {
 
   // ---------- treasury ----------
 
-  /** Lazily creates the campaign's zeroed coin row on first access. */
-  async getTreasury(campaignId: number): Promise<Treasury> {
+  /**
+   * Lazily creates the campaign's zeroed coin row on first access.
+   *
+   * Issue #658: a plain read-then-insert races under concurrent first-access —
+   * two callers each see `!row`, both INSERT, and the second loses the
+   * `campaignId` PRIMARY KEY constraint, surfacing as an unhandled 500. The
+   * INSERT therefore carries `onConflictDoNothing({ target: campaignId })`: one
+   * call wins the insert, the loser's conflict is silently ignored, and the
+   * method re-reads so both callers observe the same single row.
+   *
+   * The existence probe is split into its own method (`readLazyRow`) so the
+   * concurrency regression in db-concurrency.e2e-spec.ts can park both racers
+   * between the read and the insert — better-sqlite3 is synchronous, so without
+   * that coordination the two HTTP requests never actually race at the SQL
+   * layer. Mirrors the `getRowOrThrow` seam used by #653's HP race test.
+   */
+  async readLazyRow(campaignId: number): Promise<typeof partyTreasury.$inferSelect | undefined> {
     const [row] = await this.db.select().from(partyTreasury).where(eq(partyTreasury.campaignId, campaignId)).limit(1);
+    return row;
+  }
+
+  async getTreasury(campaignId: number): Promise<Treasury> {
+    const row = await this.readLazyRow(campaignId);
     if (row) return treasuryToDomain(row);
     const [created] = await this.db
       .insert(partyTreasury)
       .values({ campaignId, updatedAt: nowIso() })
+      .onConflictDoNothing({ target: partyTreasury.campaignId })
       .returning();
-    return treasuryToDomain(created);
+    // A losing racer's INSERT RETURNING is empty (the conflict was ignored) —
+    // re-read the winning row instead of returning a phantom `undefined`.
+    if (created) return treasuryToDomain(created);
+    const [winner] = await this.db.select().from(partyTreasury).where(eq(partyTreasury.campaignId, campaignId)).limit(1);
+    return treasuryToDomain(winner!);
   }
 
   async patchTreasury(campaignId: number, patch: TreasuryPatchInput, user: RequestUser, role: Role): Promise<Treasury> {

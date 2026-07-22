@@ -223,5 +223,35 @@ describe('Issue #24: admin storage management (e2e)', () => {
       expect(run.body.bytesReclaimed).toBeGreaterThanOrEqual(TINY_PNG.length);
       expect(fs.existsSync(strayPath)).toBe(false); // gone
     });
+
+    // Issue #695 — orphan cleanup must clear encounter.mapAttachmentId references for
+    // the orphan rows it drops, mirroring remove(). Otherwise the encounter keeps
+    // pointing at a deleted row and renders a broken battle map.
+    it('clears encounter.mapAttachmentId when cleaning an orphaned battle map row', async () => {
+      const server = ctx.app.getHttpServer();
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'orphan-encounter-map.png', contentType: 'image/png' });
+      const orphanId = up.body.id;
+
+      const enc = await adminAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Orphan Cleanup Fight' });
+      const encounterId = enc.body.id;
+      const patch = await adminAgent.patch(`/api/v1/encounters/${encounterId}`).send({ mapAttachmentId: orphanId });
+      expect(patch.body.mapAttachmentId).toBe(orphanId);
+
+      // Manufacture a row-without-file so cleanupOrphans targets it.
+      const diskPath = path.join(ctx.dataDir, 'uploads', String(campaignId), `${orphanId}.png`);
+      expect(fs.existsSync(diskPath)).toBe(true);
+      fs.rmSync(diskPath);
+
+      const run = await adminAgent.post('/api/v1/admin/storage/cleanup');
+      expect(run.status).toBe(201);
+      expect(run.body.rowsDeleted).toBeGreaterThanOrEqual(1);
+
+      const getRes = await adminAgent.get(`/api/v1/encounters/${encounterId}`);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.mapAttachmentId).toBeNull();
+    });
   });
 });
