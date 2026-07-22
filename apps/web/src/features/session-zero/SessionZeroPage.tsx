@@ -159,6 +159,11 @@ export default function SessionZeroPage() {
         supportDraft,
       );
       setOwnSupport(saved);
+      setSupportDraft({
+        supportText: saved.supportText,
+        visibility: saved.visibility,
+        aiUseConsent: saved.aiUseConsent,
+      });
       setVisibleSupports((rows) => [...rows.filter((row) => row.id !== saved.id), saved]);
       setSupportMessage('Your support preference was saved.');
     } catch (e) {

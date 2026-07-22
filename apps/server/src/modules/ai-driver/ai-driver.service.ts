@@ -1515,7 +1515,7 @@ export class AiDriverService {
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for
     // every turn, so revocation cannot linger in a cached prompt.
-    const supports = await this.supportPreferences.listForAi(campaignId);
+    const supports = await this.supportPreferences.listForPublicAiNarration(campaignId);
     if (supports.length > 0) {
       parts.push(`## Participant-authorized practical supports\n${JSON.stringify(supports)}`);
     }

@@ -69,14 +69,23 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
     });
     h.script({ text: 'Second turn.' });
     await h.sendMessage(campaignId, { input: 'continue' });
+    expect(h.mock.received.at(-1)?.system ?? '').not.toContain(supportText);
+
+    await request(h.server).put(route).set(player).send({
+      supportText,
+      visibility: 'table',
+      aiUseConsent: true,
+    });
+    h.script({ text: 'Third turn.' });
+    await h.sendMessage(campaignId, { input: 'continue at the table' });
     expect(h.mock.received.at(-1)?.system ?? '').toContain(supportText);
 
     await request(h.server).put(route).set(player).send({
       supportText,
-      visibility: 'facilitator',
+      visibility: 'table',
       aiUseConsent: false,
     });
-    h.script({ text: 'Third turn.' });
+    h.script({ text: 'Fourth turn.' });
     await h.sendMessage(campaignId, { input: 'continue again' });
     expect(h.mock.received.at(-1)?.system ?? '').not.toContain(supportText);
   });

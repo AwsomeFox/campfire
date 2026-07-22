@@ -113,6 +113,31 @@ export class SupportPreferencesService {
       .sort((a, b) => a.participantName.localeCompare(b.participantName));
   }
 
+  /**
+   * Model-facing read for narration broadcast to the whole table. Consent alone is
+   * insufficient here: facilitator-only text must never influence public output.
+   */
+  async listForPublicAiNarration(campaignId: number): Promise<AiSupportPreference[]> {
+    const rows = await this.db
+      .select()
+      .from(participantSupportPreferences)
+      .where(
+        and(
+          eq(participantSupportPreferences.campaignId, campaignId),
+          eq(participantSupportPreferences.aiUseConsent, true),
+          eq(participantSupportPreferences.visibility, 'table'),
+        ),
+      );
+    return rows
+      .map((row) => ({
+        participantName: row.ownerName || 'Participant',
+        supportText: row.supportText,
+        visibility: 'table' as const,
+        aiUseConsent: true as const,
+      }))
+      .sort((a, b) => a.participantName.localeCompare(b.participantName));
+  }
+
   async upsert(
     campaignId: number,
     input: UpsertInput,
