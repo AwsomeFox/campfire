@@ -59,6 +59,8 @@ test.describe('combat-log accessibility formatting', () => {
     const damage = event(2, 'damage', { target: 'Ash Hound', detail: 'took 1 damage' });
     const appended = advanceCombatLogAnnouncements([...initial, damage], baseline.cursor);
     expect(appended.appendedEvents.map((entry) => entry.id)).toEqual([2]);
+    expect(appended.cursor).toBe(baseline.cursor);
+    expect(appended.cursor.seenEventIds).toBe(baseline.cursor.seenEventIds);
 
     const duplicateRefetch = advanceCombatLogAnnouncements([...initial, damage], appended.cursor);
     expect(duplicateRefetch.appendedEvents).toEqual([]);

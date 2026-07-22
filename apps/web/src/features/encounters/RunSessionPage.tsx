@@ -2838,7 +2838,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
       >
         {events.length === 0 ? (
           <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-            Nothing yet — damage, conditions, deaths and turns will show here as the fight unfolds.
+            Nothing yet — damage, healing, conditions, deaths, rolls, turns, notes, overrides and corrections will show here as the fight unfolds.
           </p>
         ) : (
           <ol style={{ display: 'flex', flexDirection: 'column', gap: 4, listStyle: 'none', margin: 0, padding: 0 }}>

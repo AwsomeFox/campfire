@@ -1,7 +1,7 @@
 import type { EncounterEvent } from '@campfire/schema';
 
 export interface CombatLogAnnouncementCursor {
-  seenEventIds: ReadonlySet<number>;
+  seenEventIds: Set<number>;
 }
 
 export interface CombatLogAnnouncementAdvance {
@@ -71,7 +71,7 @@ export function advanceCombatLogAnnouncements(
   events: readonly EncounterEvent[],
   cursor: CombatLogAnnouncementCursor | null,
 ): CombatLogAnnouncementAdvance {
-  const seenEventIds = new Set(cursor?.seenEventIds ?? []);
+  const seenEventIds = cursor?.seenEventIds ?? new Set<number>();
   const appendedEvents: EncounterEvent[] = [];
 
   for (const event of events) {
@@ -79,5 +79,5 @@ export function advanceCombatLogAnnouncements(
     seenEventIds.add(event.id);
   }
 
-  return { cursor: { seenEventIds }, appendedEvents };
+  return { cursor: cursor ?? { seenEventIds }, appendedEvents };
 }
