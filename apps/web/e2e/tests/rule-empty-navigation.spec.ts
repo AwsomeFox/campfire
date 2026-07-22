@@ -3,21 +3,19 @@ import { stateFor } from './seed';
 
 async function openRuleSystemStep(page: import('@playwright/test').Page) {
   await page.goto('/?newCampaign=1');
-  const dialog = page.getByRole('dialog', { name: 'New campaign' });
-  await expect(dialog).toBeVisible();
-  await dialog.getByLabel('Name').fill('Rules navigation test');
-  await dialog.getByRole('button', { name: /Next: rule system/ }).click();
-  await expect(dialog.getByText('No rule systems are installed on this server yet.')).toBeVisible();
-  return dialog;
+  await expect(page.getByRole('heading', { name: 'New campaign' })).toBeVisible();
+  await page.getByLabel('Name').fill('Rules navigation test');
+  await page.getByRole('button', { name: /Next: rule system/ }).click();
+  await expect(page.getByText('No rule systems are installed on this server yet.')).toBeVisible();
 }
 
 test.describe('empty rule-system navigation', () => {
   test('server admins get the exact rules route and an accessible return to campaign setup', async ({ browser }) => {
     const context = await browser.newContext({ storageState: stateFor('admin') });
     const page = await context.newPage();
-    const dialog = await openRuleSystemStep(page);
+    await openRuleSystemStep(page);
 
-    const rulesLink = dialog.getByRole('link', { name: 'Server admin → Rule systems' });
+    const rulesLink = page.getByRole('link', { name: 'Server admin → Rule systems' });
     await expect(rulesLink).toHaveAttribute('href', '/admin/rules?returnTo=%2F%3FnewCampaign%3D1');
     await rulesLink.click();
 
@@ -28,7 +26,7 @@ test.describe('empty rule-system navigation', () => {
     await expect(returnLink).toBeVisible();
     await returnLink.click();
     await expect(page).toHaveURL(/\?newCampaign=1$/);
-    await expect(page.getByRole('dialog', { name: 'New campaign' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'New campaign' })).toBeVisible();
 
     await context.close();
   });
@@ -36,10 +34,10 @@ test.describe('empty rule-system navigation', () => {
   test('non-admin DMs get ask-an-admin guidance without an admin-console link', async ({ browser }) => {
     const context = await browser.newContext({ storageState: stateFor('dm') });
     const page = await context.newPage();
-    const dialog = await openRuleSystemStep(page);
+    await openRuleSystemStep(page);
 
-    await expect(dialog.getByText('Ask a server admin to install a rule system', { exact: false })).toBeVisible();
-    await expect(dialog.getByRole('link', { name: 'Server admin → Rule systems' })).toHaveCount(0);
+    await expect(page.getByText('Ask a server admin to install a rule system', { exact: false })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Server admin → Rule systems' })).toHaveCount(0);
 
     await context.close();
   });

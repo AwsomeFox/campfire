@@ -93,9 +93,6 @@ export function NewCampaignWizard({
 
   return (
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="new-campaign-title"
       className="fixed inset-0 z-50 flex flex-col"
       style={{ background: 'var(--color-bg)' }}
     >
@@ -112,7 +109,7 @@ export function NewCampaignWizard({
         style={{ maxWidth: 560, padding: '28px 20px 48px' }}
       >
         <div>
-          <h3 id="new-campaign-title" style={{ margin: 0 }}>New campaign</h3>
+          <h3 style={{ margin: 0 }}>New campaign</h3>
           <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
             {step === 'details'
               ? "You'll be the DM. Invite players once it exists."
