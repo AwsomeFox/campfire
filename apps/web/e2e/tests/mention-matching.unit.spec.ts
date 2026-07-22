@@ -44,6 +44,13 @@ test.describe('Unicode markdown mention matching (issue #627)', () => {
     expect(linkedText('東京京都。王来了。', ['東京', '京都', '王'])).toEqual(['東京', '京都', '王']);
   });
 
+  test('skips single-character names in whitespace-delimited scripts', () => {
+    expect(linkedText('A met I at the inn.', ['A', 'I'])).toEqual([]);
+    expect(buildMentionCandidates(targets('A', 'I', '王')).map((candidate) => candidate.target.name)).toEqual([
+      '王',
+    ]);
+  });
+
   test('returns every repeated mention and is stateless across adjacent text-node calls', () => {
     expect(linkedText('زيد، زيد؛ زيد', ['زيد'])).toEqual(['زيد', 'زيد', 'زيد']);
     expect(linkedText('Vex.', ['Vex'])).toEqual(['Vex']);

@@ -52,6 +52,8 @@ export function buildMentionCandidates(targets: ReadonlyArray<MentionTarget>): M
   for (const target of targets) {
     const key = normalizeMentionName(target.name);
     if (!key) continue;
+    const baseCharacterCount = [...key.replace(/\p{M}/gu, '')].length;
+    if (baseCharacterCount < 2 && !SCRIPT_WITHOUT_REQUIRED_SPACES.test(key)) continue;
     byKey.set(key, byKey.has(key) ? null : target);
   }
 
