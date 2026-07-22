@@ -1298,12 +1298,13 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
     expect(res.status).toBe(200);
     const bySource = Object.fromEntries(res.body.map((m: { source: string }) => [m.source, m]));
     // Every install source is described.
-    for (const s of ['open5e', 'pf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'other']) {
+    for (const s of ['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'other']) {
       expect(bySource[s]).toBeDefined();
     }
     // Wired live sources install without a url.
     expect(bySource['open-legend']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
     expect(bySource['open5e']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
+    expect(bySource['sf2e']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
     // Systems with no open source are honestly flagged manual-upload (and carry a note + license).
     for (const s of ['pf1e', 'starfinder', 'archmage', 'osr']) {
       expect(bySource[s]).toMatchObject({ sourceKind: 'manual-upload', installableWithoutUrl: false });
@@ -1311,6 +1312,35 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(bySource[s].note.length).toBeGreaterThan(0);
       expect(typeof bySource[s].license).toBe('string');
     }
+  });
+});
+
+describe('rules / rule packs — Starfinder 2e install (e2e, fake AoN server)', () => {
+  let ctx: TestAppContext;
+  let pf2e: import('./fake-pf2e').FakePf2e;
+  let server: Server;
+
+  beforeAll(async () => {
+    const { startFakePf2e } = await import('./fake-pf2e');
+    ctx = await createTestApp();
+    pf2e = await startFakePf2e();
+    server = ctx.app.getHttpServer();
+  });
+
+  afterAll(async () => {
+    await pf2e.close();
+    await closeTestApp(ctx);
+  });
+
+  it('installs under the sf2e-srd slug and maps sections onto Campfire rule-entry types', async () => {
+    const res = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'sf2e', url: pf2e.baseUrl });
+    expect(res.status).toBe(202);
+    expect(res.body.source).toBe('sf2e');
+    const job = await pollJob(server, dm, res.body.id);
+    expect(job.status).toBe('completed');
+    expect(job.pack.slug).toBe('sf2e-srd');
+    expect(job.pack.name).toMatch(/Starfinder 2e/);
+    expect(job.pack.license).toMatch(/ORC/);
   });
 });
 

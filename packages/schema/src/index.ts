@@ -1106,6 +1106,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  * family so every shipped importer is reachable from the endpoint:
  *   - 'open5e'      — D&D 5e SRD (default, the built-in API importer)
  *   - 'pf2e'        — Pathfinder 2e (Archives of Nethys, issue #295)
+ *   - 'sf2e'        — Starfinder 2e (Archives of Nethys, issue #400)
  *   - 'pf1e'        — Pathfinder 1e SRD (issue #296)
  *   - 'starfinder'  — Starfinder 1e SRD (issue #297)
  *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)
@@ -1118,6 +1119,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
 export const RulePackInstallSource = z.enum([
   'open5e',
   'pf2e',
+  'sf2e',
   'pf1e',
   'starfinder',
   'archmage',
@@ -1239,6 +1241,15 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     note: 'Live import from the Archives of Nethys 2e Elasticsearch backend.',
     candidateSourceUrl: 'https://elasticsearch.aonprd.com',
   },
+  sf2e: {
+    source: 'sf2e',
+    label: 'Starfinder 2e (Archives of Nethys)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'ORC / OGL',
+    note: 'Live import from the Archives of Nethys SF2e Elasticsearch backend (aonsf index).',
+    candidateSourceUrl: 'https://elasticsearch.aonprd.com',
+  },
   'open-legend': {
     source: 'open-legend',
     label: 'Open Legend',
@@ -1263,8 +1274,8 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     sourceKind: 'manual-upload',
     installableWithoutUrl: false,
     license: 'Open Game License v1.0a',
-    note: 'No live open source: unlike PF2e, the Archives of Nethys Starfinder site exposes no Elasticsearch backend, and the community Starjammer SRD (HTTP 410) and Dragonlash API are offline. Upload an OGL JSON pack, or pass `url`.',
-    candidateSourceUrl: null,
+    note: 'Foundry system pack data is stored as multi-file JSON and LevelDB databases. Upload an OGL-licensed JSON pack (or pass an explicit `url`).',
+    candidateSourceUrl: 'https://github.com/foundryvtt-starfinder/foundryvtt-starfinder',
   },
   archmage: {
     source: 'archmage',
@@ -1877,6 +1888,19 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   degreeOfSuccess: pf2eDegreeOfSuccess,
 };
 
+/** Stable family id of the Starfinder 2e adapter. */
+export const SF2E_ADAPTER_ID = 'sf2e';
+/** Pack slug the SF2e importer installs under. */
+export const SF2E_PACK_SLUG = 'sf2e-srd';
+
+export type Sf2eRuleSystemAdapter = Pf2eRuleSystemAdapter;
+
+export const Sf2eAdapter: Sf2eRuleSystemAdapter = {
+  ...Pf2eAdapter,
+  id: SF2E_ADAPTER_ID,
+  label: 'Starfinder 2e',
+};
+
 // Sibling ruleset adapters (issues #296-300) live in their own files (type-only imports
 // from here, so no runtime cycle) and register below. Adding a system is one import + one
 // ADAPTERS entry, never a sweep across the combat code.
@@ -1905,6 +1929,8 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [PF2E_ADAPTER_ID]: Pf2eAdapter,
   // Pack slug the PF2e importer installs under — campaigns store the slug in `ruleSystem`.
   [PF2E_PACK_SLUG]: Pf2eAdapter,
+  [SF2E_ADAPTER_ID]: Sf2eAdapter,
+  [SF2E_PACK_SLUG]: Sf2eAdapter,
   [PF1E_PACK_SLUG]: Pathfinder1eAdapter, // Pathfinder 1e (issue #296)
   [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
   [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
@@ -2025,7 +2051,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),

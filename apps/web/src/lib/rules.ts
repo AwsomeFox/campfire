@@ -21,6 +21,7 @@ import type { RulePackInstallSection, RulePackInstallSource, OsrInstallSystem } 
 import {
   OPEN_LEGEND_PACK_SLUG,
   PF2E_PACK_SLUG,
+  SF2E_PACK_SLUG,
   PF1E_PACK_SLUG,
   STARFINDER_ADAPTER_ID,
   OSR_RULE_SYSTEM_SLUGS,
@@ -133,6 +134,17 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     sections: FIVE_E_SECTIONS,
     packSlug: PF2E_PACK_SLUG,
     requiresUrl: SOURCES_REQUIRING_URL.has('pf2e'),
+  },
+  {
+    source: 'sf2e',
+    label: 'Starfinder 2e',
+    license: 'Archives of Nethys · ORC / OGL',
+    blurb: 'Starfinder 2e (remaster/playtest) content from the Archives of Nethys open dataset.',
+    mechanics: 'Initiative d20 + Perception · proficiency adds your level · level-based DCs · PF2e-style mechanics & conditions · four degrees of success.',
+    // SF2e accepts the 5e-shaped section names (the importer imports its full set regardless).
+    sections: FIVE_E_SECTIONS,
+    packSlug: SF2E_PACK_SLUG,
+    requiresUrl: SOURCES_REQUIRING_URL.has('sf2e'),
   },
   {
     source: 'pf1e',
