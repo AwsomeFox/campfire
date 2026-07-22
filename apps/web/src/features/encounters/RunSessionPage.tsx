@@ -108,14 +108,15 @@ const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {
   hard: 'Hard',
   deadly: 'Deadly',
 };
-// Inline band colors — no `tag-danger` class exists in nocturne.css, and difficulty
-// wants a green→red ramp distinct from the accent-colored status chips.
+// Band colors live as --cf-difficulty-* tokens in index.css (issue #668) so a
+// theme or dark/light swap can reach them; difficulty wants a green→red ramp
+// distinct from the accent-colored status chips and from the destructive family.
 const DIFFICULTY_STYLE: Record<DifficultyBand, { background: string; color: string }> = {
-  trivial: { background: 'var(--color-neutral-800)', color: 'var(--color-neutral-100)' },
-  easy: { background: '#14532d', color: '#bbf7d0' },
-  medium: { background: '#713f12', color: '#fde68a' },
-  hard: { background: '#7c2d12', color: '#fed7aa' },
-  deadly: { background: '#7f1d1d', color: '#fecaca' },
+  trivial: { background: 'var(--cf-difficulty-trivial-bg)', color: 'var(--cf-difficulty-trivial-fg)' },
+  easy: { background: 'var(--cf-difficulty-easy-bg)', color: 'var(--cf-difficulty-easy-fg)' },
+  medium: { background: 'var(--cf-difficulty-medium-bg)', color: 'var(--cf-difficulty-medium-fg)' },
+  hard: { background: 'var(--cf-difficulty-hard-bg)', color: 'var(--cf-difficulty-hard-fg)' },
+  deadly: { background: 'var(--cf-difficulty-deadly-bg)', color: 'var(--cf-difficulty-deadly-fg)' },
 };
 
 /**
