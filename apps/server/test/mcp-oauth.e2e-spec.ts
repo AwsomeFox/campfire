@@ -27,6 +27,12 @@ function pkce(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
+type PkceMethod = 'S256' | 'plain';
+
+function pkceChallenge(verifier: string, method: PkceMethod): string {
+  return method === 'S256' ? createHash('sha256').update(verifier).digest('base64url') : verifier;
+}
+
 const REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
 
 describe('mcp oauth authorization flow (e2e)', () => {
@@ -57,6 +63,31 @@ describe('mcp oauth authorization flow (e2e)', () => {
     expect(res.body.client_id).toMatch(/^cf_client_/);
     expect(res.body.client_secret).toBeUndefined(); // public client
     return res.body.client_id as string;
+  }
+
+  async function issueAuthorizationCode(clientId: string, challenge: string, method: PkceMethod): Promise<string> {
+    const res = await agent.post('/oauth/authorize').type('form').send({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      code_challenge: challenge,
+      code_challenge_method: method,
+      decision: 'approve',
+    });
+    expect(res.status).toBe(302);
+    const code = new URL(res.headers.location).searchParams.get('code');
+    expect(code).toMatch(/^cf_oac_/);
+    return code as string;
+  }
+
+  async function exchangeAuthorizationCode(clientId: string, code: string, verifier: string) {
+    return request(server).post('/oauth/token').type('form').send({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: REDIRECT_URI,
+      client_id: clientId,
+      code_verifier: verifier,
+    });
   }
 
   /** Walk the authorize (consent) + token exchange, returning the token response. */
@@ -207,29 +238,44 @@ describe('mcp oauth authorization flow (e2e)', () => {
     expect(summary.campaign.id).toBe(campaignId);
   });
 
-  it('rejects the token exchange when the PKCE code_verifier is wrong', async () => {
-    const clientId = await registerClient();
-    const { challenge } = pkce();
-    const state = randomBytes(8).toString('hex');
-    const post = await agent.post('/oauth/authorize').type('form').send({
-      response_type: 'code',
-      client_id: clientId,
-      redirect_uri: REDIRECT_URI,
-      code_challenge: challenge,
-      code_challenge_method: 'S256',
-      state,
-      decision: 'approve',
+  describe.each(['S256', 'plain'] as const)('%s PKCE verification', (method) => {
+    const pkceFailure = { error: 'invalid_grant', error_description: 'PKCE verification failed' };
+
+    it('accepts a matching verifier', async () => {
+      const clientId = await registerClient();
+      const verifier = randomBytes(32).toString('base64url');
+      const code = await issueAuthorizationCode(clientId, pkceChallenge(verifier, method), method);
+
+      const res = await exchangeAuthorizationCode(clientId, code, verifier);
+
+      expect(res.status).toBe(200);
+      expect(res.body.access_token).toMatch(/^cf_mcp_/);
+      expect(res.body.refresh_token).toMatch(/^cf_ref_/);
     });
-    const code = new URL(post.headers.location).searchParams.get('code');
-    const res = await request(server).post('/oauth/token').type('form').send({
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: REDIRECT_URI,
-      client_id: clientId,
-      code_verifier: 'the-wrong-verifier-value-that-does-not-match',
+
+    it('rejects an equal-length verifier mismatch with the OAuth error contract', async () => {
+      const clientId = await registerClient();
+      const verifier = randomBytes(32).toString('base64url');
+      const code = await issueAuthorizationCode(clientId, pkceChallenge(verifier, method), method);
+      const wrongVerifier = `${verifier[0] === 'A' ? 'B' : 'A'}${verifier.slice(1)}`;
+
+      const res = await exchangeAuthorizationCode(clientId, code, wrongVerifier);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(pkceFailure);
     });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('invalid_grant');
+
+    it('rejects a byte-length mismatch without throwing or leaking comparison details', async () => {
+      const clientId = await registerClient();
+      const verifier = randomBytes(32).toString('base64url');
+      const malformedChallenge = `${pkceChallenge(verifier, method)}x`;
+      const code = await issueAuthorizationCode(clientId, malformedChallenge, method);
+
+      const res = await exchangeAuthorizationCode(clientId, code, verifier);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(pkceFailure);
+    });
   });
 
   it('an authorization code is single-use', async () => {
