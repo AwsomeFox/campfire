@@ -22,6 +22,7 @@ import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { MetricsCard } from './MetricsCard';
 import { RequireServerAdmin } from './RequireServerAdmin';
 import { GameIcon } from '../../components/GameIcon';
+import { ActorRoleBadge } from './ActorRoleBadge';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -129,9 +130,12 @@ function RecentAuditCard() {
         <ul className="divide-y divide-slate-800">
           {entries.map((e) => (
             <li key={e.id} className="py-1.5 flex items-center justify-between gap-3 text-xs">
-              <span className="text-slate-300 truncate">
+              <span className="text-slate-300 truncate flex items-center gap-1.5">
                 <code className="text-[11px] text-amber-400">{e.action}</code>
                 <span className="text-slate-500"> · {e.actor}</span>
+                {/* #526: badge the actor's role so a privileged server-admin action
+                    stands out from a campaign-DM's in the overview feed. */}
+                <ActorRoleBadge role={e.actorRole} />
               </span>
               <span className="text-slate-600 whitespace-nowrap">{new Date(e.createdAt).toLocaleString()}</span>
             </li>
