@@ -276,7 +276,7 @@ body {
    only its redundant supporting sentence and card subtitle are suppressed. */
 @media (max-width: 280px) {
   .login-shell {
-    padding: 8px;
+    padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
     row-gap: 10px;
   }
 
