@@ -34,6 +34,10 @@ export default function NpcPage() {
   const { campaignId, npcId } = useParams<{ campaignId: string; npcId: string }>();
   const cid = Number(campaignId);
   const id = Number(npcId);
+  // Gate the auxiliary panels (and the core fetch) on finite ids so a route with a
+  // missing/garbage param doesn't fire `/campaigns/NaN/...` on mount. Mirrors the
+  // `Number.isFinite` guard the core `load()` already applies (issue #697 review).
+  const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
   const { roleIn } = useAuth();
   const role = roleIn(cid);
@@ -50,17 +54,17 @@ export default function NpcPage() {
   // `error`/`notFound` (which are reserved for the core NPC fetch below).
   const locationsPanel = usePanelData<Location[]>(
     useCallback(() => api.get<Location[]>(`${API}/campaigns/${cid}/locations`), [cid]),
-    true,
+    idReady,
     "Couldn't load locations for the editor.",
   );
   const factionsPanel = usePanelData<Faction[]>(
     useCallback(() => api.get<Faction[]>(`${API}/campaigns/${cid}/factions`), [cid]),
-    true,
+    idReady,
     "Couldn't load factions for the editor.",
   );
   const questsPanel = usePanelData<Quest[]>(
     useCallback(() => api.get<Quest[]>(`${API}/campaigns/${cid}/quests`), [cid]),
-    true,
+    idReady,
     "Couldn't load connected quests.",
   );
   const locations = locationsPanel.data ?? [];

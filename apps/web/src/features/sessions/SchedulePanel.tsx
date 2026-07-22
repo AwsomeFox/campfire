@@ -385,8 +385,12 @@ function FeedCard({
     setBusy(true);
     setMutateError(null);
     try {
-      await api.post<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`);
-      await feedPanel.retry();
+      // The rotate endpoint returns the new feed directly (see
+      // CampaignCalendarFeedController.rotate) — fold it into the panel cache instead
+      // of an extra GET via feedPanel.retry(), which also avoids rendering a stale URL
+      // if that follow-up fetch failed.
+      const next = await api.post<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`);
+      feedPanel.setData(next);
       onChange();
     } catch {
       setMutateError("Couldn't update the calendar feed.");
@@ -399,8 +403,11 @@ function FeedCard({
     setBusy(true);
     setMutateError(null);
     try {
-      await api.delete(`${API}/campaigns/${campaignId}/calendar-feed`);
-      await feedPanel.retry();
+      // DELETE returns the disabled feed payload (null token/url); use it to update the
+      // panel directly instead of a follow-up GET, so the URL vanishes immediately even
+      // if a later fetch would have failed.
+      const next = await api.delete<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`);
+      feedPanel.setData(next);
       onChange();
     } catch {
       setMutateError("Couldn't disable the calendar feed.");

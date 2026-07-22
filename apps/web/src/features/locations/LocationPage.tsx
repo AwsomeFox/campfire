@@ -43,6 +43,10 @@ export default function LocationPage() {
   const { campaignId, locationId } = useParams<{ campaignId: string; locationId: string }>();
   const cid = Number(campaignId);
   const id = Number(locationId);
+  // Gate the auxiliary panels (and the core fetch) on finite ids so a route with a
+  // missing/garbage param doesn't fire `/campaigns/NaN/...` on mount. Mirrors the
+  // `Number.isFinite` guard the core `load()` already applies (issue #697 review).
+  const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
   const { roleIn } = useAuth();
   const role = roleIn(cid);
@@ -61,22 +65,22 @@ export default function LocationPage() {
   // core location fetch below.
   const locationsPanel = usePanelData<Location[]>(
     useCallback(() => api.get<Location[]>(`${API}/campaigns/${cid}/locations`), [cid]),
-    true,
+    idReady,
     "Couldn't load the location list.",
   );
   const npcsPanel = usePanelData<Npc[]>(
     useCallback(() => api.get<Npc[]>(`${API}/campaigns/${cid}/npcs`), [cid]),
-    true,
+    idReady,
     "Couldn't load NPCs for this location.",
   );
   const questsPanel = usePanelData<Quest[]>(
     useCallback(() => api.get<Quest[]>(`${API}/campaigns/${cid}/quests`), [cid]),
-    true,
+    idReady,
     "Couldn't load connected quests.",
   );
   const campaignPanel = usePanelData<Campaign>(
     useCallback(() => api.get<Campaign>(`${API}/campaigns/${cid}`), [cid]),
-    true,
+    idReady,
     "Couldn't load the campaign map.",
   );
   const allLocations = locationsPanel.data ?? [];
