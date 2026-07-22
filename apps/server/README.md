@@ -200,7 +200,7 @@ free-text string, not a FK).
   signupEnabled, oidcEnabled, oidcProviderName, version}`. `oidcEnabled` is true only when `OIDC_ISSUER`,
   `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are all set (see "OIDC / SSO
   login" below). `oidcProviderName` is the optional public display name only;
-  issuer, client, group, and secret configuration is never included.
+  issuer, client, group, and secret configuration details are never included.
 - `POST /auth/setup` (public, only while zero users exist, else 409) —
   creates the first user as `serverRole: 'admin'`, starts a session.
 - `POST /auth/login` (public) — 401 generic on bad credentials, 403 if
