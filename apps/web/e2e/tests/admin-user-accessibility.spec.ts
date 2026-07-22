@@ -34,8 +34,8 @@ test.describe('admin user creation accessibility', () => {
     await expect(password).toHaveAttribute('autocomplete', 'new-password');
     await expect(password).toHaveAccessibleDescription(/At least 8 characters/);
     await expect(role).toHaveAccessibleDescription(/Admins can manage/);
-    await expect(page.getByRole('button', { name: 'Cancel creating user' })).toHaveCount(1);
-    await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: 'Cancel creating user' })).toHaveCount(1);
+    await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0);
 
     await page.keyboard.press('Tab');
     await expect(displayName).toBeFocused();
