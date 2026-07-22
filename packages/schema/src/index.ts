@@ -2763,13 +2763,48 @@ export const AiProviderConfigView = z.object({
 });
 export type AiProviderConfigView = z.infer<typeof AiProviderConfigView>;
 
-// Result of POST .../ai-provider/test — a live connection probe through the
-// effective (decrypted, server-side) config. Never echoes any credential.
+// Non-persisting candidate for POST .../ai-provider/test (issue #852). This is
+// deliberately narrower than AiProviderConfigUpdate: testing cannot mutate the
+// allowlist or sampling params. `apiKey` is WRITE-ONLY. Omitted OR '' means
+// "reuse the current credential chain", matching the form's leave-key-blank
+// behavior: this scope's stored key first, then the permitted environment/server
+// fallback. A non-empty value tests that candidate key without storing it.
+export const AiProviderTestRequest = z
+  .object({
+    providerType: AiProviderConfigType,
+    model: z.string().min(1).max(120),
+    baseUrl: AiProviderBaseUrl.optional(),
+    apiKey: z.string().max(4096).optional(),
+  })
+  .strict();
+export type AiProviderTestRequest = z.infer<typeof AiProviderTestRequest>;
+
+// Non-secret credential source used by a connection test. `candidate` means the
+// request supplied a non-empty write-only key; every other value describes a
+// server-side reuse/fallback decision and carries no key material.
+export const AiProviderTestCredentialSource = z.enum([
+  'candidate',
+  'stored',
+  'environment',
+  'server',
+  'not-required',
+  'none',
+]);
+export type AiProviderTestCredentialSource = z.infer<typeof AiProviderTestCredentialSource>;
+
+// Result of POST .../ai-provider/test — a live, non-persisting probe of the
+// submitted candidate. `testedTarget` distinguishes a campaign draft that can use
+// its own endpoint from one whose blank key inherits the server credential AND,
+// for SSRF safety, the server-owned provider/endpoint. Never echoes a credential.
 export const AiProviderTestResult = z.object({
   ok: z.boolean(),
   scope: z.enum(['server', 'campaign']),
+  testedTarget: z.enum(['server-default', 'campaign-override', 'inherited-server-default']),
   providerType: AiProviderConfigType,
   model: z.string(),
+  baseUrl: z.string().nullable(),
+  credentialSource: AiProviderTestCredentialSource,
+  testedAt: IsoDate,
   error: z.string().nullable().default(null),
 });
 export type AiProviderTestResult = z.infer<typeof AiProviderTestResult>;

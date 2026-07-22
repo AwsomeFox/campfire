@@ -1,10 +1,15 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Post, Put } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ApiBody, ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { AiProviderConfigService } from './ai-provider-config.service';
-import { AiProviderConfigUpdateDto } from './ai-provider-config.dto';
+import {
+  AiProviderConfigUpdateDto,
+  AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA,
+  AiProviderTestRequestDto,
+  AiProviderTestResultDto,
+} from './ai-provider-config.dto';
 
 /**
  * Per-campaign AI provider override (issue #310) — DM only.
@@ -87,15 +92,21 @@ export class AiProviderCampaignConfigController {
 
   @Post('test')
   @ApiOperation({
-    summary: 'Test the effective AI provider connection for a campaign',
+    summary: 'Test a campaign AI provider draft',
     description:
-      'DM only. Builds the provider from the effective (override-or-server, decrypted) config and runs a minimal probe. ' +
-      'Returns ok/error only — never any credential.',
+      'DM only. Tests the submitted provider/model/base URL and optional write-only key without saving them. A blank ' +
+      'or omitted key reuses this campaign override\'s stored key when present. Otherwise it may inherit the server ' +
+      'credential together with the server-owned provider/base URL (never a campaign-controlled destination). Returns ' +
+      'only non-secret target/scope/credential-source metadata and the redacted result.',
   })
-  @ApiResponse({ status: 201, description: 'The connection test result.' })
-  async test(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  @ApiBody({ schema: AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA })
+  @ApiResponse({ status: 201, description: 'The non-persisting connection test result.', type: AiProviderTestResultDto })
+  async test(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiProviderTestRequestDto,
+    @CurrentUser() user: RequestUser,
+  ) {
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
-    const r = await this.configs.testConnection(id);
-    return { scope: 'campaign' as const, ...r };
+    return this.configs.testConnection(id, body);
   }
 }
