@@ -39,6 +39,24 @@
     "announceSuccess": ", success vs DC {{dc}}",
     "announceFail": ", fail vs DC {{dc}}",
     "announceRoll": "Rolled {{label}}{{expr}}: {{total}} ({{rolls}}{{kept}}){{check}}{{flourish}}",
-    "rollError": "Couldn't roll."
+    "rollError": "Couldn't roll.",
+    "saveRollTitle": "Save roll",
+    "saveRollNameLabel": "Roll name",
+    "saveRollNamePlaceholder": "Longsword, Stealth, …",
+    "saveRollCancel": "Cancel",
+    "saveRollConfirm": "Save",
+    "duplicateTitle": "Replace preset?",
+    "duplicateBody": "A preset named \"{{label}}\" already exists. Replace it?",
+    "duplicateConfirm": "Replace",
+    "limitTitle": "Preset limit reached",
+    "limitBody": "You can save up to {{max}} custom rolls. Delete one first, or replace an existing name.",
+    "limitConfirm": "Got it",
+    "deleteUndo": "\"{{label}}\" deleted — Undo",
+    "memoryOnlyBadge": "Not saved (in-memory only)",
+    "memoryOnlyTitle": "Roll could not be saved",
+    "memoryOnlyBody": "Your browser blocked storage (private mode or quota), so this preset is in-memory only and won't survive a reload.",
+    "memoryOnlyConfirm": "OK",
+    "undo": "Undo",
+    "savedAnnounce": "Roll \"{{label}}\" saved."
   }
 }
