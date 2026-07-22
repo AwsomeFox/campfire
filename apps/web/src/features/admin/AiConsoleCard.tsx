@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { AiConsoleOverview, AiProviderHealthEntry } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
+import { ProviderForm } from '../settings/ProviderForm';
 
 function fmt(n: number): string {
   return n.toLocaleString();
@@ -100,7 +101,10 @@ export function AiConsoleCard() {
           {/* Budgets & caps */}
           <CapsEditor ov={ov} onSaved={setOv} onError={setError} />
 
-          {/* Model allowlist */}
+          {/* Default AI provider + write-only key (issue #399) — the fallback every campaign inherits. */}
+          <ProviderDefaultSection ov={ov} onChanged={load} />
+
+          {/* Model allowlist — kept next to the provider it constrains. */}
           <AllowlistEditor ov={ov} onSaved={setOv} onError={setError} />
 
           {/* Per-campaign usage table */}
@@ -200,6 +204,27 @@ function CapsEditor({
           {saving ? 'Saving…' : 'Save cap'}
         </Btn>
       </div>
+    </div>
+  );
+}
+
+function ProviderDefaultSection({ ov, onChanged }: { ov: AiConsoleOverview; onChanged: () => void }) {
+  return (
+    <div className="cf-inset p-3.5 space-y-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Default AI provider</p>
+        <span className={`cf-chip ${ov.serverProviderConfigured ? 'cf-chip-completed' : 'cf-chip-private'}`}>
+          {ov.serverProviderConfigured
+            ? `Configured${ov.serverProviderType ? ` · ${ov.serverProviderType}` : ''}`
+            : 'Not set'}
+        </span>
+      </div>
+      <p className="text-[11px] text-slate-500">
+        One set of credentials, one bill. This is the server default every campaign falls back to unless a DM sets a
+        per-campaign override. The API key is <strong>write-only</strong> — it is never shown back, only its last 4
+        digits. Setting it here is all a DM needs to run AI (no per-campaign key required).
+      </p>
+      <ProviderForm basePath="/settings/ai-provider" scope="server" onChanged={onChanged} />
     </div>
   );
 }

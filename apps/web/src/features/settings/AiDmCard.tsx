@@ -14,8 +14,9 @@
  * unless a budget + provider are set. We surface those server messages verbatim.
  */
 import { useEffect, useState } from 'react';
-import type { AiDmMode, AiDmSeat, AiProviderConfigType, AiProviderConfigView, AiProviderTestResult } from '@campfire/schema';
+import type { AiDmMode, AiDmSeat, AiProviderEffectiveView } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { ProviderForm } from './ProviderForm';
 
 const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
   {
@@ -37,27 +38,33 @@ const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
   },
 ];
 
-const PROVIDER_TYPES: AiProviderConfigType[] = ['openai', 'anthropic', 'mock'];
-
 const MODE_LABEL: Record<AiDmMode, string> = { off: 'Off', co_dm: 'Co-DM', driver: 'Driver' };
 const MODE_TAG: Record<AiDmMode, string> = { off: 'tag-neutral', co_dm: 'tag-accent-2', driver: 'tag-accent' };
 
 export default function AiDmCard({ campaignId }: { campaignId: number }) {
   const [seat, setSeat] = useState<AiDmSeat | null>(null);
-  const [provider, setProvider] = useState<AiProviderConfigView | null>(null);
+  const [effective, setEffective] = useState<AiProviderEffectiveView | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadEffective = async () => {
+    try {
+      setEffective(await api.get<AiProviderEffectiveView>(`${API}/campaigns/${campaignId}/ai-provider/effective`));
+    } catch {
+      // Non-fatal: the status line degrades gracefully if this read fails.
+      setEffective(null);
+    }
+  };
 
   const load = async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const [s, p] = await Promise.all([
+      const [s] = await Promise.all([
         api.get<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`),
-        api.get<AiProviderConfigView | null>(`${API}/campaigns/${campaignId}/ai-provider`),
+        loadEffective(),
       ]);
       setSeat(s);
-      setProvider(p);
     } catch (err) {
       setLoadError(err instanceof ApiError ? err.message : "Couldn't load AI DM settings.");
     } finally {
@@ -104,12 +111,13 @@ export default function AiDmCard({ campaignId }: { campaignId: number }) {
         </span>
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Experimental. A server admin must enable server-side AI for any of this to take effect; until then, saving here
-        returns a clear "disabled" message. The API key is write-only — it's never shown back to you.
+        Experimental. A server admin must enable server-side AI and set the provider + API key in the AI console for
+        any of this to take effect; until then, saving here returns a clear "disabled" message. This page carries only
+        the settings that vary per table — mode, budget, and steering.
       </p>
 
       <ModeSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
-      <ProviderSection campaignId={campaignId} provider={provider} onChanged={(p) => setProvider(p)} />
+      <EffectiveProviderSection campaignId={campaignId} effective={effective} onChanged={() => void loadEffective()} />
       <BudgetSection campaignId={campaignId} seat={seat} usagePct={usagePct} onChanged={(s) => setSeat(s)} />
       <InstructionsSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
     </div>
@@ -190,142 +198,75 @@ function ModeSection({
   );
 }
 
-function ProviderSection({
+/**
+ * Effective-provider status + optional per-campaign override (issue #399).
+ *
+ * The provider + API key now live in the server-admin AI console. Here we show only a
+ * non-secret status line — which provider is in effect and whether it's the server
+ * default or a campaign override — read from the DM-safe `/ai-provider/effective`
+ * endpoint (never any key). The full per-campaign provider form is kept, but tucked
+ * behind an Advanced disclosure since most tables just use the server default.
+ */
+function EffectiveProviderSection({
   campaignId,
-  provider,
+  effective,
   onChanged,
 }: {
   campaignId: number;
-  provider: AiProviderConfigView | null;
-  onChanged: (p: AiProviderConfigView) => void;
+  effective: AiProviderEffectiveView | null;
+  onChanged: () => void;
 }) {
-  const [providerType, setProviderType] = useState<AiProviderConfigType>(provider?.providerType ?? 'openai');
-  const [model, setModel] = useState(provider?.model ?? '');
-  const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? '');
-  const [apiKey, setApiKey] = useState(''); // write-only; blank keeps the stored key
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [showOverride, setShowOverride] = useState(false);
 
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<AiProviderTestResult | null>(null);
-
-  async function save() {
-    if (!model.trim()) {
-      setError('A model is required.');
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    setSaved(false);
-    try {
-      const body: Record<string, unknown> = { providerType, model: model.trim() };
-      if (baseUrl.trim()) body.baseUrl = baseUrl.trim();
-      // Only send apiKey when the DM typed one — an omitted key keeps the stored value.
-      if (apiKey !== '') body.apiKey = apiKey;
-      const updated = await api.put<AiProviderConfigView>(`${API}/campaigns/${campaignId}/ai-provider`, body);
-      onChanged(updated);
-      setApiKey(''); // never retain the plaintext key in state
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save the provider.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function test() {
-    setTesting(true);
-    setTestResult(null);
-    try {
-      const r = await api.post<AiProviderTestResult>(`${API}/campaigns/${campaignId}/ai-provider/test`);
-      setTestResult(r);
-    } catch (err) {
-      setTestResult({
-        ok: false,
-        scope: 'campaign',
-        providerType,
-        model,
-        error: err instanceof ApiError ? err.message : 'Test failed.',
-      });
-    } finally {
-      setTesting(false);
-    }
-  }
+  const sourceLabel = effective?.source === 'campaign' ? 'campaign override' : 'server default';
+  const sourceTag = effective?.source === 'campaign' ? 'tag-accent' : 'tag-accent-2';
 
   return (
-    <Section title="Provider & model" id="ai-dm-provider">
-      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        {provider
-          ? provider.configured
-            ? `A key is stored for this campaign (ends ••${provider.keyLast4 ?? '????'}). Leave the key blank to keep it, or enter a new one to rotate.`
-            : 'No API key stored yet for this campaign. It may fall back to the server default when set.'
-          : 'Using the server default (if configured). Set a provider below to override it for this campaign.'}
-      </p>
-      <div className="flex gap-2 flex-wrap">
-        <div className="field" style={{ maxWidth: 160 }}>
-          <label htmlFor="ai-provider-type">Provider</label>
-          <select
-            id="ai-provider-type"
-            className="input"
-            value={providerType}
-            onChange={(e) => setProviderType(e.target.value as AiProviderConfigType)}
-          >
-            {PROVIDER_TYPES.map((t) => (
-              <option key={t} value={t}>{t}</option>
-            ))}
-          </select>
+    <Section title="AI provider" id="ai-dm-provider">
+      {effective?.configured ? (
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span style={{ fontSize: 13, fontWeight: 600 }}>
+              {effective.providerType} / {effective.model || '—'}
+            </span>
+            <span className={`tag ${sourceTag}`} style={{ fontSize: 10 }}>{sourceLabel}</span>
+          </div>
+          <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+            {effective.source === 'campaign'
+              ? 'This campaign overrides the server default below. No API key is needed here to use AI.'
+              : 'Inherited from the server default set by your server admin. No API key is needed here to use AI.'}
+          </p>
         </div>
-        <div className="field" style={{ flex: 1, minWidth: 160 }}>
-          <label htmlFor="ai-provider-model">Model</label>
-          <input
-            id="ai-provider-model"
-            className="input"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="e.g. gpt-4o-mini"
-          />
-        </div>
-      </div>
-      <div className="field">
-        <label htmlFor="ai-provider-baseurl">Base URL (optional)</label>
-        <input
-          id="ai-provider-baseurl"
-          className="input"
-          value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-          placeholder="Leave blank for the provider default"
-        />
-      </div>
-      <div className="field">
-        <label htmlFor="ai-provider-key">API key {provider?.configured ? '(set — blank keeps it)' : '(write-only)'}</label>
-        <input
-          id="ai-provider-key"
-          className="input"
-          type="password"
-          autoComplete="off"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder={provider?.configured ? '•••••••• (unchanged)' : 'Paste a key to set it'}
-        />
-      </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
-      {testResult && (
-        <p className="text-sm" style={{ color: testResult.ok ? 'var(--color-accent, #4ade80)' : '#f87171' }}>
-          {testResult.ok
-            ? `Connection OK — ${testResult.providerType} / ${testResult.model}`
-            : `Connection failed: ${testResult.error ?? 'unknown error'}`}
+      ) : (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          No AI provider configured — ask your server admin to set one in the AI console. You can also set a
+          campaign-specific override below.
         </p>
       )}
-      <div className="flex gap-2 items-center flex-wrap">
-        <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
-          {saving ? 'Saving…' : 'Save provider'}
+
+      <div className="flex flex-col gap-2" style={{ marginTop: 4 }}>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          style={{ fontSize: 12, alignSelf: 'flex-start', padding: '2px 4px' }}
+          aria-expanded={showOverride}
+          onClick={() => setShowOverride((v) => !v)}
+        >
+          {showOverride ? '▾' : '▸'} Advanced: override provider for this campaign
         </button>
-        <button className="btn btn-secondary" style={{ fontSize: 12.5 }} disabled={testing} onClick={() => void test()}>
-          {testing ? 'Testing…' : 'Test connection'}
-        </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+        {showOverride && (
+          <div
+            className="flex flex-col gap-2"
+            style={{ borderLeft: '2px solid var(--color-divider)', paddingLeft: 12 }}
+          >
+            <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+              Optional. Most campaigns leave this blank and use the server default. Set a provider here to override it
+              for this table only (a key is optional — a keyless override still uses the server key with the server's
+              endpoint).
+            </p>
+            <ProviderForm basePath={`/campaigns/${campaignId}/ai-provider`} scope="campaign" onChanged={onChanged} />
+          </div>
+        )}
       </div>
     </Section>
   );
