@@ -123,6 +123,7 @@ export class SchedulingService {
       .select()
       .from(scheduledSessions)
       .where(and(
+        eq(scheduledSessions.campaignId, campaignId),
         or(
           sql`instr(lower(${scheduledSessions.title}), ${needle}) > 0`,
           sql`instr(lower(${scheduledSessions.scheduledAt}), ${needle}) > 0`,

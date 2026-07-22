@@ -29,6 +29,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
   let hiddenEncounterId: number;
   let safelyLinkedEncounterId: number;
   let scheduledSessionId: number;
+  let otherCampaignScheduleId: number;
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -206,6 +207,20 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
           notes: 'Bring level seven sheets for the bridge finale.',
         })
     ).body.id;
+
+    const otherCampaignId = (
+      await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Search Camp' })
+    ).body.id;
+    otherCampaignScheduleId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${otherCampaignId}/schedule`)
+        .set(dm)
+        .send({
+          title: 'Saturday game in another campaign',
+          scheduledAt: '2031-09-20T19:30:00.000Z',
+          notes: 'Bring level seven sheets somewhere else.',
+        })
+    ).body.id;
   });
 
   afterAll(async () => {
@@ -333,6 +348,9 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
         expect(res.status).toBe(200);
         expect(res.body.results).toEqual(expect.arrayContaining([
           expect.objectContaining({ type: 'scheduled_session', id: scheduledSessionId, matchedField: field }),
+        ]));
+        expect(res.body.results).not.toEqual(expect.arrayContaining([
+          expect.objectContaining({ type: 'scheduled_session', id: otherCampaignScheduleId }),
         ]));
         expect(JSON.stringify(res.body)).not.toContain('rsvps');
       }
