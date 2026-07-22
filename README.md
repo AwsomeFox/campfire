@@ -180,7 +180,7 @@ produces — copy them off-box for real disaster recovery.
 or `NaN`/`Infinity` value falls back to the documented 24h default rather than silently
 becoming 0/Infinity/negative, and the effective cadence is logged at boot so a misconfiguration
 is visible. The value is clamped to a sane range (min one minute, max 30 days). At boot the
-server also checks that `BACKUP_DIR` exists and is writable, and disables scheduling for that
+server also checks that `BACKUP_DIR` exists and is writable and traversable, and disables scheduling for that
 boot (with a loud error log) if it isn't — so a misconfigured path fails immediately instead of
 silently swallowing every scheduled write.
 

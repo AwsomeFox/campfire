@@ -5,8 +5,8 @@
  * memory: a single `setInterval` set on boot, with no record of when a backup
  * last ran. Frequent restarts (a container that bounces every few minutes)
  * could therefore go forever without ever crossing an interval boundary, and
- * invalid `BACKUP_INTERVAL_HOURS` values (`0`, negative, `NaN`, fractional
- * footguns) were silently coerced with no signal to the operator.
+ * invalid `BACKUP_INTERVAL_HOURS` values (`0`, negative, `NaN`, or infinite)
+ * were silently coerced with no signal to the operator.
  *
  * This module extracts the two decisions that drive the fix into pure,
  * side-effect-free functions so they can be unit-tested without booting Nest,
@@ -15,7 +15,7 @@
  *     configured cadence. Invalid input falls back to 24h (the documented
  *     default) instead of becoming 0/Infinity/negative.
  *   - {@link isBackupOverdue}: the catch-up decision. Given the persisted
- *     last-backup timestamp, the configured interval, and "now", returns
+ *     last-attempt timestamp, the configured interval, and "now", returns
  *     whether a scheduled run was missed while the server was down (or whether
  *     this is the first-ever boot after enabling the scheduler).
  *

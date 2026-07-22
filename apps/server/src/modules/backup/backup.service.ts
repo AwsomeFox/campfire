@@ -121,7 +121,7 @@ export class BackupService implements OnApplicationBootstrap {
    *      values fall back to the documented default instead of silently becoming
    *      0/Infinity/negative) and log the EFFECTIVE cadence so an operator sees
    *      any discrepancy with what they configured.
-   *   2. Validate BACKUP_DIR exists and is writable before arming the timer,
+   *   2. Validate BACKUP_DIR exists and is writable/traversable before arming the timer,
    *      so a misconfigured path fails loudly at boot rather than silently
    *      swallowing every scheduled write.
    *   3. Persist lastAttemptAt / lastSuccessAt / nextRunAt under the
@@ -138,16 +138,17 @@ export class BackupService implements OnApplicationBootstrap {
     const dir = this.backupDir();
 
     // Validate the destination up front. mkdirSync(recursive) covers the common
-    // "first run, dir doesn't exist yet" case; the W_OK probe then catches a
-    // path that exists but isn't writable (e.g. a read-only mount). A failure
+    // "first run, dir doesn't exist yet" case; the W_OK | X_OK probe then
+    // catches a path that cannot accept entries or be traversed (e.g. a
+    // read-only/non-searchable mount). A failure
     // here disables scheduling for this boot — better to fail loudly than to
     // arm a timer whose every tick throws into the void.
     try {
       fs.mkdirSync(dir, { recursive: true });
-      fs.accessSync(dir, fs.constants.W_OK);
+      fs.accessSync(dir, fs.constants.W_OK | fs.constants.X_OK);
     } catch (err) {
       this.logger.error(
-        `Scheduled backups disabled: BACKUP_DIR "${dir}" is not writable ` +
+        `Scheduled backups disabled: BACKUP_DIR "${dir}" is not writable/traversable ` +
           `(${err instanceof Error ? err.message : String(err)}). Fix the path and restart.`,
       );
       return;

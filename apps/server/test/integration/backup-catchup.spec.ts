@@ -205,6 +205,15 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     holder = new DbHolder();
     const service = makeService();
 
+    // Root bypasses POSIX mode bits, so this environment cannot exercise the
+    // EACCES branch without producing a false pass. Mirror the storage
+    // fail-closed suite's explicit skip-with-warning behavior.
+    if (process.getuid && process.getuid() === 0) {
+      // eslint-disable-next-line no-console
+      console.warn('skipping BACKUP_DIR EACCES scheduler test under root');
+      return;
+    }
+
     // Point BACKUP_DIR at a path that already exists as a FILE → not writable
     // as a directory. mkdirSync(recursive) is a no-op on an existing file, and
     // fs.accessSync(W_OK) on a file still passes, so to force the not-writable
@@ -214,13 +223,8 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     fs.chmodSync(blockingParent, 0o555); // r-x: cannot create children
     process.env.BACKUP_DIR = path.join(blockingParent, 'backups');
 
-    // Only treat a genuinely unwritable path as a failure when not root (root
-    // ignores POSIX perms). Skip the assertion body in that case.
-    const isRoot = process.getuid && process.getuid() === 0;
-    if (!isRoot) {
-      await service.onApplicationBootstrap();
-      // No archive written, and the stale catch-up path was never taken.
-      expect(fs.readdirSync(blockingParent).length).toBe(0);
-    }
+    await service.onApplicationBootstrap();
+    // No archive written, and the stale catch-up path was never taken.
+    expect(fs.readdirSync(blockingParent).length).toBe(0);
   });
 });
