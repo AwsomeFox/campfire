@@ -17,6 +17,7 @@ export const ENTITY_ICON = {
   faction: 'black-flag',
   location: 'treasure-map',
   session: 'book-cover',
+  scheduled_session: 'calendar',
   character: 'shield',
   encounter: 'crossed-swords',
   campaign: 'campfire',

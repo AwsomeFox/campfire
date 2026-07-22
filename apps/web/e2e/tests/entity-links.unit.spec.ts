@@ -24,6 +24,7 @@ const expected = {
   character: '/c/7/characters/11#entity-character-11',
   encounter: '/c/7/encounters/11#entity-encounter-11',
   session: '/c/7/sessions?session=11#entity-session-11',
+  scheduled_session: '/c/7/sessions?tab=schedule&schedule=11#entity-scheduled_session-11',
   timeline: '/c/7/timeline?event=11#entity-timeline-11',
   item: '/c/7/inventory?item=11#entity-item-11',
   note: '/c/7/notes?note=11#entity-note-11',
@@ -66,7 +67,7 @@ test.describe('source adapters', () => {
   }
 
   const searchTypes = [
-    'quest', 'npc', 'faction', 'location', 'character', 'session', 'note', 'timeline', 'item', 'arc', 'beat',
+    'quest', 'npc', 'faction', 'location', 'character', 'session', 'encounter', 'scheduled_session', 'note', 'timeline', 'item', 'arc', 'beat',
   ] as const satisfies readonly SearchResult['type'][];
   for (const type of searchTypes) {
     test(`search ${type} uses the canonical target`, () => {

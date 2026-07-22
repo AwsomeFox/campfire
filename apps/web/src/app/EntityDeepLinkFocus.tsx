@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 
-const ENTITY_HASH = /^#entity-[a-z-]+-\d+$/;
+const ENTITY_HASH = /^#entity-[a-z_-]+-\d+$/;
 
 /**
  * Focus a deep-linked record after its async page data renders.

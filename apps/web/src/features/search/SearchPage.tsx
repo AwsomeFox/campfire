@@ -4,7 +4,7 @@
  * each entity's page. Role visibility is enforced server-side — a player never
  * sees hidden entities or dmSecret text here.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { SearchResponse, SearchResult } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -20,6 +20,8 @@ const typeLabel: Record<SearchResult['type'], string> = {
   location: 'Locations',
   character: 'Characters',
   session: 'Sessions',
+  encounter: 'Encounters',
+  scheduled_session: 'Scheduled sessions',
   note: 'Notes',
   timeline: 'Timeline',
   item: 'Inventory',
@@ -35,6 +37,8 @@ const typeIcon: Record<SearchResult['type'], string> = {
   location: ENTITY_ICON.location,
   character: ENTITY_ICON.character,
   session: ENTITY_ICON.session,
+  encounter: ENTITY_ICON.encounter,
+  scheduled_session: ENTITY_ICON.scheduled_session,
   note: ENTITY_ICON.note,
   timeline: ENTITY_ICON.timeline,
   item: ENTITY_ICON.item,
@@ -42,6 +46,23 @@ const typeIcon: Record<SearchResult['type'], string> = {
   arc: ENTITY_ICON.arc,
   beat: ENTITY_ICON.beat,
 };
+
+const typeOrder: SearchResult['type'][] = [
+  'quest',
+  'npc',
+  'faction',
+  'location',
+  'character',
+  'encounter',
+  'session',
+  'scheduled_session',
+  'timeline',
+  'arc',
+  'beat',
+  'item',
+  'comment',
+  'note',
+];
 
 export default function SearchPage() {
   const { campaignId: campaignIdParam } = useParams<{ campaignId: string }>();
@@ -53,6 +74,7 @@ export default function SearchPage() {
   const [data, setData] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const resultRefs = useRef<Array<HTMLAnchorElement | null>>([]);
 
   useEffect(() => {
     setInput(q);
@@ -91,20 +113,27 @@ export default function SearchPage() {
     return groups;
   }, [data]);
 
-  const order: SearchResult['type'][] = [
-    'quest',
-    'npc',
-    'faction',
-    'location',
-    'character',
-    'session',
-    'timeline',
-    'arc',
-    'beat',
-    'item',
-    'comment',
-    'note',
-  ];
+  const orderedResults = useMemo(
+    () => typeOrder.flatMap((type) => grouped.get(type) ?? []),
+    [grouped],
+  );
+  const resultIndex = useMemo(
+    () => new Map(orderedResults.map((result, index) => [`${result.type}-${result.id}`, index])),
+    [orderedResults],
+  );
+
+  function moveResultFocus(event: KeyboardEvent<HTMLAnchorElement>, index: number) {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || orderedResults.length === 0) return;
+    event.preventDefault();
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? orderedResults.length - 1
+        : event.key === 'ArrowDown'
+          ? (index + 1) % orderedResults.length
+          : (index - 1 + orderedResults.length) % orderedResults.length;
+    resultRefs.current[nextIndex]?.focus();
+  }
 
   return (
     <div className="max-w-3xl mx-auto px-4 mt-6 space-y-4">
@@ -120,8 +149,14 @@ export default function SearchPage() {
           autoFocus
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Search quests, NPCs, locations, sessions, notes…"
+          placeholder="Search encounters, scheduled sessions, quests, NPCs, notes…"
           aria-label="Search this campaign"
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown' && orderedResults.length > 0) {
+              event.preventDefault();
+              resultRefs.current[0]?.focus();
+            }
+          }}
         />
       </form>
 
@@ -129,15 +164,19 @@ export default function SearchPage() {
       {error && <ErrorNote message={error} />}
 
       {!loading && !error && q.trim() && data && data.results.length === 0 && (
-        <EmptyState icon="magnifying-glass" title={`No results for “${q}”`} hint="Try a different word or a name." />
+        <EmptyState
+          icon="magnifying-glass"
+          title={`No results for “${q}”`}
+          hint="Try an encounter name, scheduled-session date or time, or another campaign keyword."
+        />
       )}
 
       {!loading && !error && data && data.results.length > 0 && (
-        <div className="space-y-5">
+        <div className="space-y-5" data-search-results aria-label="Search results" role="region">
           <p className="text-xs text-muted">
             {data.results.length} result{data.results.length === 1 ? '' : 's'} for “{q}”
           </p>
-          {order
+          {typeOrder
             .filter((t) => grouped.has(t))
             .map((t) => (
               <div key={t} className="space-y-2">
@@ -148,7 +187,15 @@ export default function SearchPage() {
                 </h2>
                 <div className="space-y-2">
                   {grouped.get(t)!.map((r) => (
-                    <Link key={`${r.type}-${r.id}`} to={searchResultHref(campaignId, r)} className="block">
+                    <Link
+                      key={`${r.type}-${r.id}`}
+                      to={searchResultHref(campaignId, r)}
+                      className="block"
+                      ref={(element) => {
+                        resultRefs.current[resultIndex.get(`${r.type}-${r.id}`)!] = element;
+                      }}
+                      onKeyDown={(event) => moveResultFocus(event, resultIndex.get(`${r.type}-${r.id}`)!)}
+                    >
                       <Card className="hover:border-slate-600 transition-colors">
                         <div className="text-sm font-medium text-white">{r.title}</div>
                         {r.snippet && (
@@ -170,7 +217,7 @@ export default function SearchPage() {
 
       {!q.trim() && !loading && (
         <p className="text-sm text-muted">
-          Type a query above to search across this campaign. Tip: press <kbd>Enter</kbd> to search.
+          Search quests, encounters, scheduled sessions, people, places, recaps, notes, and more. Press <kbd>Enter</kbd> to search.
         </p>
       )}
 

@@ -15,6 +15,7 @@ import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from 
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
+import { entityTargetProps } from '../../lib/entityLinks';
 
 const RSVP_OPTIONS: Array<{ status: RsvpStatus; label: string; icon: string }> = [
   { status: 'yes', label: 'In', icon: '✓' },
@@ -123,7 +124,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         <div className="space-y-1">
           <h2 className="text-sm font-bold text-white m-0">Past</h2>
           {past.map((s) => (
-            <p key={s.id} className="text-muted text-xs m-0">
+            <p key={s.id} className="text-muted text-xs m-0" {...entityTargetProps('scheduled_session', s.id)}>
               {formatWhen(s.scheduledAt)}
               {s.title ? ` — ${s.title}` : ''}
             </p>
@@ -197,7 +198,7 @@ function ScheduleItem({
 
   return (
     <Card className={hero ? '!border-[var(--color-accent-800)]' : ''}>
-      <div className="space-y-3">
+      <div className="space-y-3" {...entityTargetProps('scheduled_session', schedule.id)}>
         {error && <ErrorNote message={error} />}
         <div className="flex items-baseline gap-2.5 flex-wrap">
           <span className={hero ? 'text-lg font-extrabold text-white' : 'text-sm font-bold text-white'}>
