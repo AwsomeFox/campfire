@@ -8,7 +8,7 @@
  * pages) and MembersPage's audit list — out of scope here to avoid duplicating
  * owned surfaces; this page covers the General + Rule system + Danger tab.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { Campaign, CampaignCloneMode, DangerLevel, RulePack } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
@@ -20,6 +20,16 @@ import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { useAnnounce } from '../../components/Announcer';
+import {
+  confirmOpen,
+  initialStatusConfirmState,
+  isArchivingTransition,
+  reduceStatusConfirm,
+  undoArmed,
+  type CampaignStatus,
+  type StatusConfirmSnapshot,
+} from './statusConfirmState';
 
 const DANGER_LEVELS: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
 
@@ -346,12 +356,40 @@ function GeneralCard({
   );
 }
 
-const STATUSES: Campaign['status'][] = ['active', 'paused', 'completed'];
+const STATUSES: CampaignStatus[] = ['active', 'paused', 'completed'];
+
+const STATUS_LABEL: Record<CampaignStatus, string> = {
+  active: 'Active',
+  paused: 'Paused',
+  completed: 'Completed',
+};
+
+/** Consequence copy per target status, so the confirmation spells out the real effect. */
+const STATUS_CONSEQUENCE: Record<CampaignStatus, string> = {
+  active:
+    "The campaign becomes editable again — quests, notes, rolls and encounters are no longer read-only, and it leaves the Archive group on the campaign hub.",
+  paused:
+    "The campaign becomes read-only for everyone (quests, notes, rolls — everything) and is grouped under Archive on the campaign hub. No one can edit it until you set it back to Active.",
+  completed:
+    "The campaign becomes read-only for everyone and is grouped under Archive on the campaign hub, marking the story finished. Set it back to Active to resume play.",
+};
+
+/** Window during which Undo is offered after an archiving change (issue #640). */
+const STATUS_UNDO_TIMEOUT_MS = 8000;
 
 /**
- * Archive control (issue #16). Status is PATCHed on its own — the server
- * rejects any other field on an archived (paused/completed) campaign, so this
- * card is the one switch that always works, both ways.
+ * Archive control (issues #16, #640).
+ *
+ * #640 — the fire-on-change select used to apply Paused/Completed the instant
+ * the DM picked them, locking the whole campaign read-only with no chance to
+ * back out. Now the flow is: pick → preview (current→proposed + consequence)
+ * → Apply → ConfirmDialog for archiving directions → PATCH → Undo snackbar.
+ * Un-archiving (anything → Active) is the safe direction: it PATCHes directly
+ * with no confirm, since the recovery IS the edit.
+ *
+ * Status is PATCHed on its own — the server rejects any other field on an
+ * archived (paused/completed) campaign, so this card is the one switch that
+ * always works, both ways.
  */
 function StatusCard({
   campaignId,
@@ -362,15 +400,106 @@ function StatusCard({
   campaign: Campaign;
   onSaved: (c: Campaign) => void;
 }) {
+  const announce = useAnnounce();
+  const [snapshot, setSnapshot] = useState<StatusConfirmSnapshot>(initialStatusConfirmState);
   const [saving, setSaving] = useState(false);
+  const [undoBusy, setUndoBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  async function changeStatus(value: Campaign['status']) {
+  // If the persisted status changes out from under us (reload or an external
+  // edit), drop every pending transient so the select reflects the real server
+  // state. Our OWN successful PATCH transitions to `undo` explicitly in
+  // applyStatus — that phase must survive this effect (which fires because
+  // onSaved updates campaign.status), so the recovery snackbar isn't yanked the
+  // instant the lock lands. Likewise `confirming` is a mid-action state the DM
+  // is actively driving; only reset preview/idle.
+  useEffect(() => {
+    setSnapshot((cur) => {
+      if (cur.phase === 'undo' || cur.phase === 'confirming') return cur;
+      return cur.phase === 'idle' ? cur : { ...initialStatusConfirmState };
+    });
+  }, [campaign.status]);
+
+  // Arm/clear the undo snackbar's real timeout solely from the snapshot. The
+  // reducer guarantees undoArmed is true only in `undo`, so entering it arms
+  // the timeout and leaving it (expire/undo/reset) clears it — mirroring the
+  // UndoSnackbar timer pattern so the recovery window can't leak on unmount.
+  useEffect(() => {
+    if (!undoArmed(snapshot)) {
+      if (undoTimerRef.current != null) {
+        clearTimeout(undoTimerRef.current);
+        undoTimerRef.current = null;
+      }
+      return;
+    }
+    undoTimerRef.current = setTimeout(() => {
+      setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'expire' }));
+    }, STATUS_UNDO_TIMEOUT_MS);
+    return () => {
+      if (undoTimerRef.current != null) {
+        clearTimeout(undoTimerRef.current);
+        undoTimerRef.current = null;
+      }
+    };
+  }, [snapshot]);
+
+  // Unmount safety: never leak a pending undo timer if the card is removed.
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current != null) clearTimeout(undoTimerRef.current);
+    };
+  }, []);
+
+  function onSelect(value: CampaignStatus) {
+    setError(null);
+    // The recovery direction (anything → Active) PATCHes directly with no
+    // preview or confirm: the edit itself IS the recovery, so gating it would
+    // just add friction to the safe path. Archiving and archive-tier reshuffles
+    // (Paused ↔ Completed) go through the preview → confirm flow (#640).
+    if (!isArchivingTransition(campaign.status, value)) {
+      void applyStatus(value);
+      return;
+    }
+    setSnapshot((cur) =>
+      reduceStatusConfirm(cur, { type: 'select', status: value, current: campaign.status }),
+    );
+  }
+
+  function requestConfirm() {
+    setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'requestConfirm' }));
+  }
+
+  function cancelConfirm() {
+    setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'cancelConfirm' }));
+  }
+
+  function cancelPreview() {
+    setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'cancel' }));
+  }
+
+  async function applyStatus(value: CampaignStatus) {
     setSaving(true);
     setError(null);
+    const from = campaign.status;
     try {
       const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { status: value });
       onSaved(updated);
+      // Announce via the app-root live region (survives the card re-rendering
+      // into the archived state) so a screen reader hears the lock land.
+      announce(
+        isArchivingTransition(from, value)
+          ? `Campaign ${STATUS_LABEL[value].toLowerCase()}: now read-only. Undo available for a few seconds.`
+          : `Campaign ${STATUS_LABEL[value].toLowerCase()}.`,
+      );
+      // Arm the undo window only for archiving directions — un-archiving needs
+      // no recovery (the edit itself is the recovery), and arming it there
+      // would surface a pointless snackbar after every resume.
+      if (isArchivingTransition(from, value)) {
+        setSnapshot({ phase: 'undo', pending: null, appliedFrom: from });
+      } else {
+        setSnapshot({ ...initialStatusConfirmState });
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't change the campaign status.");
     } finally {
@@ -378,10 +507,49 @@ function StatusCard({
     }
   }
 
+  async function undoApply() {
+    if (!snapshot.appliedFrom) return;
+    if (undoBusy) return; // duplicate-restore guard, mirroring UndoSnackbar.
+    setUndoBusy(true);
+    setError(null);
+    const target = snapshot.appliedFrom;
+    try {
+      // Cancel the auto-dismiss timer SYNCHRONOUSLY before awaiting, so a slow
+      // network can't yank the snackbar mid-restore (the #694 lesson).
+      if (undoTimerRef.current != null) {
+        clearTimeout(undoTimerRef.current);
+        undoTimerRef.current = null;
+      }
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { status: target });
+      onSaved(updated);
+      announce(`Campaign ${STATUS_LABEL[target].toLowerCase()}: reverted to ${STATUS_LABEL[target].toLowerCase()}.`);
+      setSnapshot({ ...initialStatusConfirmState });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't undo the status change.");
+      // Leave the snackbar up — the DM can retry by clicking Undo again. The
+      // reducer's `undo` phase persists until expire/undo/reset, and we did not
+      // clear appliedFrom, so a re-click still has a target.
+    } finally {
+      setUndoBusy(false);
+    }
+  }
+
+  function dismissUndo() {
+    setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'expire' }));
+  }
+
   const archived = campaign.status !== 'active';
+  const pending = snapshot.pending;
+  const archiving = pending ? isArchivingTransition(campaign.status, pending) : false;
+  const undoOpen = undoArmed(snapshot);
+  const confirming = confirmOpen(snapshot);
+  // The preview card is visible in `preview` AND `confirming`: the modal opens
+  // ON TOP of the preview, and CancelConfirm returns to preview, so keeping
+  // the preview mounted through the confirm avoids a flash.
+  const previewVisible = pending && (snapshot.phase === 'preview' || snapshot.phase === 'confirming');
 
   return (
-    <div className="card elev-sm">
+    <div className="card elev-sm" data-testid="campaign-status-settings">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="card-kicker" style={{ margin: 0 }}>Status &amp; archive</span>
         {archived && <span className="tag tag-neutral" style={{ fontSize: 10 }}>read-only</span>}
@@ -395,18 +563,143 @@ function StatusCard({
         <select
           id="settings-status"
           className="input"
-          value={campaign.status}
-          disabled={saving}
-          onChange={(e) => void changeStatus(e.target.value as Campaign['status'])}
+          value={pending ?? campaign.status}
+          disabled={saving || undoOpen}
+          onChange={(e) => onSelect(e.target.value as CampaignStatus)}
         >
           {STATUSES.map((status) => (
             <option key={status} value={status}>
-              {status.charAt(0).toUpperCase() + status.slice(1)}
+              {STATUS_LABEL[status]}
             </option>
           ))}
         </select>
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+
+      {/* Preview card: current → proposed + consequence + Apply/Cancel. The
+          select no longer PATCHes on change (#640). Stays mounted through the
+          `confirming` phase so the ConfirmDialog opens on top of it and
+          CancelConfirm returns to the preview without a flash. */}
+      {previewVisible && (
+        <div
+          data-testid="status-change-preview"
+          style={{
+            border: '1px solid var(--color-divider)',
+            borderRadius: 'var(--radius-md)',
+            padding: '10px 12px',
+            fontSize: 11.5,
+          }}
+          className="flex flex-col gap-1.5"
+        >
+          <p style={{ margin: 0, color: 'var(--color-text)' }}>
+            Change status from <strong>{STATUS_LABEL[campaign.status]}</strong> to{' '}
+            <strong>{STATUS_LABEL[pending]}</strong>?
+          </p>
+          <p className="text-muted" style={{ margin: 0 }}>{STATUS_CONSEQUENCE[pending]}</p>
+          <div className="flex gap-2 items-center" style={{ marginTop: 4 }}>
+            <button
+              className="btn btn-primary"
+              style={{ fontSize: 12.5 }}
+              disabled={saving || confirming}
+              aria-busy={saving || undefined}
+              onClick={() => {
+                // Archiving directions route through the ConfirmDialog (opened
+                // via requestConfirm → `confirming` phase) so the consequence is
+                // spelled out twice — once in the preview, once in the modal —
+                // matching the audit's "consequence-rich confirmation" requirement.
+                // The safe direction (anything → Active) PATCHes directly with no
+                // confirm, because the edit itself IS the recovery.
+                if (archiving) {
+                  requestConfirm();
+                } else {
+                  void applyStatus(pending);
+                }
+              }}
+            >
+              {saving ? 'Applying…' : `Apply ${STATUS_LABEL[pending]}`}
+            </button>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12.5 }}
+              disabled={saving}
+              onClick={cancelPreview}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Consequence-rich confirmation for archiving directions. Opens ONLY in
+          the `confirming` phase (after the Apply click), NOT on select — so the
+          DM gets a chance to back out of the preview before the modal commits.
+          The body distinguishes Paused vs Completed so the DM knows what kind of
+          read-only they're committing to. */}
+      {confirming && pending && (
+        <ConfirmDialog
+          title={`Archive this campaign as ${STATUS_LABEL[pending]}?`}
+          body={
+            <div className="flex flex-col gap-2">
+              <p style={{ margin: 0 }}>
+                {STATUS_CONSEQUENCE[pending]}
+              </p>
+              <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+                You can undo this for a few seconds, or set the status back to Active at any time.
+              </p>
+            </div>
+          }
+          confirmLabel={`Archive as ${STATUS_LABEL[pending]}`}
+          busy={saving}
+          onCancel={cancelConfirm}
+          onConfirm={() => void applyStatus(pending)}
+        />
+      )}
+
+      {/* Undo snackbar — inline (not the shared UndoSnackbar) because the
+          recovery here is a campaign-status PATCH, not a restore endpoint, and
+          the shared component is wired to `onExpire`/`onUndo` semantics that
+          don't fit. Keeps the same accessible role=status + aria-live pattern. */}
+      {undoOpen && snapshot.appliedFrom && (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          data-testid="status-change-undo"
+          style={{
+            marginTop: 8,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+            flexWrap: 'wrap',
+            padding: '10px 12px',
+            borderRadius: 'var(--radius-md, 10px)',
+            background: 'var(--color-neutral-800, #1c1c22)',
+            color: 'var(--color-neutral-100, #f2f2f5)',
+            border: '1px solid var(--color-neutral-700, #333)',
+            fontSize: 12.5,
+          }}
+        >
+          <span>Campaign archived as {STATUS_LABEL[campaign.status]}. Undo?</span>
+          <button
+            className="btn btn-secondary"
+            style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
+            disabled={undoBusy}
+            aria-busy={undoBusy || undefined}
+            onClick={() => void undoApply()}
+          >
+            {undoBusy ? 'Restoring…' : 'Undo'}
+          </button>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
+            disabled={undoBusy}
+            onClick={dismissUndo}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {error && <p className="text-sm" style={{ color: '#f87171' }} role="alert">{error}</p>}
     </div>
   );
 }
