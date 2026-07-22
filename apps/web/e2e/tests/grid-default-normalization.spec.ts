@@ -3,10 +3,17 @@ import { seed, stateFor } from './seed';
 
 interface EncounterResponse {
   id: number;
+  mapAttachmentId?: number | null;
   gridSize: number | null;
   gridScale: number | null;
   gridUnit: string | null;
 }
+
+const DEDUPED_RETRY_MAP_ID = 865_001;
+const PNG_1PX = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
 
 function encounterUrl(encounterId: number): string {
   return `/c/${seed().campaignId}/encounters/${encounterId}`;
@@ -16,6 +23,12 @@ function isDefaultPatch(request: Request): boolean {
   if (request.method() !== 'PATCH') return false;
   const body = request.postDataJSON() as Record<string, unknown> | null;
   return body?.gridScale === 5 && body?.gridUnit === 'ft' && Object.keys(body).length === 2;
+}
+
+function isScaleOnlyDefaultPatch(request: Request): boolean {
+  if (request.method() !== 'PATCH') return false;
+  const body = request.postDataJSON() as Record<string, unknown> | null;
+  return body?.gridScale === 5 && Object.keys(body).length === 1;
 }
 
 async function createGridEncounter(page: Page, name: string): Promise<number> {
@@ -39,6 +52,13 @@ async function meaningfulDefaultAuditCount(page: Page, encounterId: number): Pro
   expect(response.ok()).toBe(true);
   const rows = (await response.json()) as Array<{ entityId: number | null; detail: string }>;
   return rows.filter((row) => row.entityId === encounterId && row.detail.includes('gridScale') && row.detail.includes('gridUnit')).length;
+}
+
+async function gridScaleFiveAuditCount(page: Page, encounterId: number): Promise<number> {
+  const response = await page.request.get(`/api/v1/campaigns/${seed().campaignId}/audit?limit=500&action=encounter.update`);
+  expect(response.ok()).toBe(true);
+  const rows = (await response.json()) as Array<{ entityId: number | null; detail: string }>;
+  return rows.filter((row) => row.entityId === encounterId && row.detail.includes('"gridScale":5')).length;
 }
 
 test.describe('battle-grid default normalization — issue #865', () => {
@@ -134,6 +154,70 @@ test.describe('battle-grid default normalization — issue #865', () => {
       .poll(async () => readEncounter(page, encounterId))
       .toMatchObject({ gridSize: 8, gridScale: 5, gridUnit: 'ft' });
     expect(await meaningfulDefaultAuditCount(page, encounterId)).toBe(1);
+  });
+
+  test('a deduped default attempt retries after the non-default request owning the pending key fails', async ({ page }) => {
+    const encounterId = await createGridEncounter(page, 'Grid normalization — deduped retry');
+    const configured = await page.request.patch(`/api/v1/encounters/${encounterId}`, {
+      data: { gridScale: 10, gridUnit: 'ft' },
+    });
+    expect(configured.ok()).toBe(true);
+    let attempts = 0;
+    let releaseFirst!: () => void;
+    const firstRequestHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    await page.route(`**/api/v1/attachments/${DEDUPED_RETRY_MAP_ID}/file`, (route) =>
+      route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1PX }),
+    );
+    await page.route(`**/api/v1/encounters/${encounterId}`, async (route) => {
+      if (route.request().method() === 'GET') {
+        const response = await route.fetch();
+        const encounter = (await response.json()) as EncounterResponse;
+        await route.fulfill({ response, json: { ...encounter, mapAttachmentId: DEDUPED_RETRY_MAP_ID } });
+        return;
+      }
+      if (!isScaleOnlyDefaultPatch(route.request())) {
+        await route.continue();
+        return;
+      }
+      attempts += 1;
+      if (attempts === 1) {
+        await firstRequestHeld;
+        await route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: JSON.stringify({ message: 'Injected colliding grid-default failure' }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto(encounterUrl(encounterId));
+    await expect(page.getByRole('heading', { name: 'Grid normalization — deduped retry' })).toBeVisible();
+    await page.getByRole('button', { name: 'Grid & fog' }).click();
+    await expect(page.getByLabel('scale')).toHaveValue('10');
+
+    // A user-authored write owns the same pending patch key but does not own a default-attempt
+    // marker. While it is held in flight, fresh server truth makes the field missing and causes
+    // the normalization effect to dedupe against this request.
+    await page.getByLabel('scale').fill('5');
+    await expect.poll(() => attempts).toBe(1);
+    const cleared = await page.request.patch(`/api/v1/encounters/${encounterId}`, { data: { gridScale: null } });
+    expect(cleared.ok()).toBe(true);
+    await expect.poll(async () => (await readEncounter(page, encounterId)).gridScale).toBeNull();
+    releaseFirst();
+
+    // A fresh authoritative read still sees the missing fields. The normalization effect must
+    // be able to own a new attempt after the request that previously held the equivalent
+    // pending key failed; a marker from the deduped effect may not suppress this retry.
+    await expect.poll(() => attempts, { timeout: 7_000 }).toBe(2);
+    await expect
+      .poll(async () => readEncounter(page, encounterId))
+      .toMatchObject({ gridSize: 8, gridScale: 5, gridUnit: 'ft' });
+    expect(await gridScaleFiveAuditCount(page, encounterId)).toBe(1);
   });
 
   test('two DM clients produce exactly one meaningful default PATCH', async ({ page, browser }) => {

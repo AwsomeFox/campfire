@@ -745,6 +745,7 @@ export default function RunSessionPage() {
       const pendingKey = `${eid}:${encounterPatchKey(patch)}`;
       if (pendingEncounterPatchKeys.current.has(pendingKey)) return false;
       pendingEncounterPatchKeys.current.add(pendingKey);
+      if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
       // Record the default intent before dispatch. Strict Mode's second effect pass, mutation
       // renders, and stale polling/SSE responses therefore all see committed-looking defaults;
@@ -787,7 +788,6 @@ export default function RunSessionPage() {
 
     const attemptKey = gridDefaultAttemptKey(encounter.id, patch);
     if (gridDefaultAttempts.current.has(attemptKey)) return;
-    gridDefaultAttempts.current.add(attemptKey);
     queueEncounterPatch(patch, attemptKey);
   }, [encounter, isDm, queueEncounterPatch]);
 
