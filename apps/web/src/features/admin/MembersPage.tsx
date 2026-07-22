@@ -273,6 +273,7 @@ function ReadOnlyMemberTable({ members }: { members: CampaignMember[] }) {
             <tr key={m.id}>
               <td className="py-2.5 pr-4">
                 <span className="font-semibold text-white">{m.displayName || m.username}</span>
+                {m.disabled && <span className="ml-2 text-[10px] text-rose-400">disabled</span>}
               </td>
               <td className="pr-4">
                 <span className={`cf-chip ${ROLE_CHIP[m.role]}`}>{ROLE_LABEL[m.role]}</span>
@@ -502,6 +503,7 @@ function MemberRow({
       <div className="min-w-0">
         <p className="text-[13.5px] m-0 flex items-center gap-1.5">
           {member.displayName || member.username}
+          {member.disabled && <span className="text-[10px] text-rose-400">disabled</span>}
         </p>
         <p className="text-muted text-[11px] m-0">{character?.name || 'no character linked'}</p>
       </div>
@@ -513,7 +515,7 @@ function MemberRow({
         disabled={savingRole}
         onChange={(e) => changeRole(e.target.value as Role)}
       >
-        <option value="dm">dm</option>
+        <option value="dm" disabled={member.disabled}>dm</option>
         <option value="player">player</option>
         <option value="viewer">viewer</option>
       </select>

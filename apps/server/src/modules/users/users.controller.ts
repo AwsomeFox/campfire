@@ -8,7 +8,47 @@ import { RoleResolver } from '../membership/role-resolver.service';
 import { UsersService } from './users.service';
 import { TokensService } from '../tokens/tokens.service';
 import { AuditService } from '../audit/audit.service';
-import { UserCreateDto, UserUpdateDto, PasswordChangeDto, AdminTokenCreateDto } from './users.dto';
+import { UserCreateDto, UserUpdateDto, PasswordChangeDto, AdminTokenCreateDto, CampaignDmRepairDto } from './users.dto';
+
+/**
+ * Narrow server-operator recovery surface for #849. It exposes only authority
+ * metadata and can assign an enabled recovery DM to an already-orphaned campaign;
+ * it never reads campaign entities or confers implicit campaign access.
+ */
+@ApiTags('membership integrity')
+@Controller('admin/membership-integrity')
+@ServerRoles('admin')
+export class MembershipIntegrityController {
+  constructor(private readonly users: UsersService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'Inspect campaign DM authority integrity',
+    description:
+      'Server-admin only. Returns campaign ids/names, usable/disabled DM counts, and migration repair history. ' +
+      'No campaign content or DM-secret fields are returned; server admin remains distinct from campaign membership.',
+  })
+  @ApiResponse({ status: 200, description: 'Secret-free authority diagnostics and migration repair metadata.' })
+  @ApiResponse({ status: 403, description: 'Requires current server-admin power.' })
+  report() {
+    return this.users.membershipIntegrity();
+  }
+
+  @Post('repair-dm')
+  @ApiOperation({
+    summary: 'Assign an enabled recovery DM to an orphaned campaign',
+    description:
+      'Server-admin only and allowed only while the campaign has zero enabled DMs. The target account must exist ' +
+      'and be enabled. This does not otherwise expose campaign content or grant the calling admin campaign access.',
+  })
+  @ApiResponse({ status: 201, description: 'Enabled target assigned/promoted as recovery DM.' })
+  @ApiResponse({ status: 400, description: 'Target account is disabled.' })
+  @ApiResponse({ status: 404, description: 'Campaign or target account does not exist.' })
+  @ApiResponse({ status: 409, description: 'Campaign already has an enabled DM; use normal membership controls.' })
+  repair(@Body() body: CampaignDmRepairDto, @CurrentUser() actor: RequestUser) {
+    return this.users.repairCampaignDm(body, actor);
+  }
+}
 
 /**
  * User directory lookup — used by the DM's add-member picker. Declared before
@@ -90,9 +130,12 @@ export class UsersController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a user', description: 'Server-admin only. Refuses to demote/disable the last enabled admin.' })
+  @ApiOperation({
+    summary: 'Update a user',
+    description: 'Server-admin only. Refuses to demote/disable the last enabled admin or disable a campaign\'s last enabled DM.',
+  })
   @ApiResponse({ status: 200, description: 'Updated user.' })
-  @ApiResponse({ status: 409, description: 'Would demote or disable the last enabled admin.' })
+  @ApiResponse({ status: 409, description: 'Would demote/disable the last enabled admin or disable a campaign\'s last enabled DM.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: UserUpdateDto, @CurrentUser() actor: RequestUser) {
     const updated = await this.users.update(id, body);
     // #23: log the admin-meaningful transitions (role change / disable-enable),
@@ -114,9 +157,9 @@ export class UsersController {
 
   @Delete(':id')
   @HttpCode(204)
-  @ApiOperation({ summary: 'Delete a user', description: 'Server-admin only. Refuses to delete the last enabled admin, or a user who is the sole DM of any campaign.' })
+  @ApiOperation({ summary: 'Delete a user', description: 'Server-admin only. Refuses to delete the last enabled admin, or the last enabled DM of any campaign.' })
   @ApiResponse({ status: 204, description: 'Deleted.' })
-  @ApiResponse({ status: 409, description: 'Last enabled admin, or sole DM of one or more campaigns.' })
+  @ApiResponse({ status: 409, description: 'Last enabled admin, or last enabled DM of one or more campaigns.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() actor: RequestUser) {
     // Capture the username before the row is gone, so the trail names the target.
     const target = await this.users.getOrThrow(id);

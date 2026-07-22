@@ -1041,6 +1041,124 @@ function migrateAiScribeTables(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #849: campaign_members.user_id used to be an unconstrained integer, so
+ * a typo or stale import could create a "ghost" DM that could never authenticate
+ * but still defeated the last-DM guard. SQLite cannot ALTER-ADD a foreign key,
+ * therefore upgraded databases use a transactional table rebuild.
+ *
+ * Unsafe legacy rows are handled before constraints become active:
+ *  - a missing user or campaign removes the meaningless membership;
+ *  - a missing character clears only that optional link;
+ *  - every repair is recorded as identifier/role metadata (no campaign body or
+ *    secrets) in membership_integrity_repairs for operator diagnosis.
+ *
+ * The rebuilt table carries the complete modern FK set, not only the new user
+ * FK, so fresh and upgraded databases have the same schema. Migrations run while
+ * foreign_keys is OFF and the entire copy/drop/rename sequence is one SQLite
+ * transaction, so a failure leaves the original table untouched.
+ */
+function migrateCampaignMembersTableForUserFk(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS membership_integrity_repairs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL,
+      member_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      action TEXT NOT NULL,
+      invalid_reference_id INTEGER,
+      created_at TEXT NOT NULL,
+      UNIQUE(member_id, reason)
+    );
+  `);
+
+  const hasMembersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_members'")
+    .get();
+  if (!hasMembersTable) return; // fresh DB — BOOTSTRAP_SQL creates the constrained table.
+
+  const foreignKeys = sqlite.pragma('foreign_key_list(campaign_members)') as Array<{
+    table: string;
+    from: string;
+    on_delete: string;
+  }>;
+  const hasUserCascade = foreignKeys.some(
+    (fk) => fk.table === 'users' && fk.from === 'user_id' && fk.on_delete.toUpperCase() === 'CASCADE',
+  );
+  if (hasUserCascade) return;
+
+  const repairedAt = new Date().toISOString();
+  const migrate = sqlite.transaction(() => {
+    sqlite
+      .prepare(`
+        INSERT OR IGNORE INTO membership_integrity_repairs
+          (campaign_id, member_id, user_id, role, reason, action, invalid_reference_id, created_at)
+        SELECT cm.campaign_id, cm.id, cm.user_id, cm.role,
+               'missing_user', 'removed_membership', cm.user_id, ?
+        FROM campaign_members cm
+        LEFT JOIN users u ON u.id = cm.user_id
+        WHERE u.id IS NULL
+      `)
+      .run(repairedAt);
+
+    sqlite
+      .prepare(`
+        INSERT OR IGNORE INTO membership_integrity_repairs
+          (campaign_id, member_id, user_id, role, reason, action, invalid_reference_id, created_at)
+        SELECT cm.campaign_id, cm.id, cm.user_id, cm.role,
+               'missing_campaign', 'removed_membership', cm.campaign_id, ?
+        FROM campaign_members cm
+        JOIN users u ON u.id = cm.user_id
+        LEFT JOIN campaigns c ON c.id = cm.campaign_id
+        WHERE c.id IS NULL
+      `)
+      .run(repairedAt);
+
+    sqlite
+      .prepare(`
+        INSERT OR IGNORE INTO membership_integrity_repairs
+          (campaign_id, member_id, user_id, role, reason, action, invalid_reference_id, created_at)
+        SELECT cm.campaign_id, cm.id, cm.user_id, cm.role,
+               'missing_character', 'cleared_character', cm.character_id, ?
+        FROM campaign_members cm
+        JOIN users u ON u.id = cm.user_id
+        JOIN campaigns c ON c.id = cm.campaign_id
+        LEFT JOIN characters ch ON ch.id = cm.character_id
+        WHERE cm.character_id IS NOT NULL AND ch.id IS NULL
+      `)
+      .run(repairedAt);
+
+    sqlite.exec(`
+      CREATE TABLE campaign_members_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(campaign_id, user_id)
+      );
+
+      INSERT INTO campaign_members_new
+        (id, campaign_id, user_id, role, character_id, created_at, updated_at)
+      SELECT cm.id, cm.campaign_id, cm.user_id, cm.role,
+             CASE WHEN ch.id IS NULL THEN NULL ELSE cm.character_id END,
+             cm.created_at, cm.updated_at
+      FROM campaign_members cm
+      JOIN users u ON u.id = cm.user_id
+      JOIN campaigns c ON c.id = cm.campaign_id
+      LEFT JOIN characters ch ON ch.id = cm.character_id;
+
+      DROP TABLE campaign_members;
+      ALTER TABLE campaign_members_new RENAME TO campaign_members;
+    `);
+  });
+  migrate();
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1098,6 +1216,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0043_ai_scribe_jobs', run: migrateAiScribeTables },
   { name: '0044_combatants_npc_id', run: migrateCombatantsTableForNpcId },
   { name: '0045_comments_soft_delete', run: migrateCommentsTableForSoftDelete },
+  { name: '0046_campaign_members_user_fk', run: migrateCampaignMembersTableForUserFk },
 ];
 
 /**

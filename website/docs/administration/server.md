@@ -7,7 +7,7 @@ pages**, visible only to server admins:
 | Page | Path | What's there |
 |---|---|---|
 | **Overview** | `/admin` | A metrics snapshot — entity counts, on-disk DB size, uptime, running version, recent activity — and links to the pages below |
-| **Users** | `/admin/users` | Create, reset, disable, delete accounts |
+| **Users** | `/admin/users` | Create, reset, disable, delete accounts; diagnose/recover campaign DM authority |
 | **Rule packs** | `/admin/rules` | Install/remove shared compendium content |
 | **AI** | `/admin/ai` | The AI Dungeon Master console (kill switch, token cap, provider health) |
 | **Authentication** | `/admin/auth` | Local-login toggle, self-service signup, OIDC/SSO |
@@ -20,8 +20,15 @@ pages**, visible only to server admins:
   (admin or user).
 - **Reset** a user's password.
 - **Disable** or **delete** an account. The **last enabled admin** is protected — you
-  can't demote, disable, or delete your way into a locked-out server, and you can't
-  delete a user who is the **sole DM** of a campaign without reassigning first.
+  can't demote, disable, or delete your way into a locked-out server. An account also
+  cannot be disabled/deleted while it is a campaign's last **enabled DM**; disabled or
+  missing accounts never count as backup authority.
+- **Campaign authority integrity** reports campaigns with no enabled DM, disabled DM
+  seats, and any ghost rows cleaned during migration. It intentionally exposes only
+  campaign id/name and authority/repair metadata — no campaign content or DM secrets.
+  For a legacy orphan, choose an enabled account and assign it as recovery DM. Recovery
+  is refused while any enabled DM already exists, so normal membership controls remain
+  the path for healthy campaigns.
 
 _(Accounts also get created when someone accepts a DM **invite link**, or — if you
 enable it — when someone signs themselves up. See [Admin vs DM](access-model.md).)_
@@ -69,4 +76,6 @@ do; treat a token like a password. An admin can list and revoke another user's t
 
 Being the server admin does **not** make you the DM of every campaign — you manage
 accounts, settings, and content, but you don't automatically see campaigns' DM
-secrets. See [Admin vs DM](access-model.md) for the full model.
+secrets. Authority diagnostics do not change that: only an explicit recovery
+assignment creates a membership for the selected target account. See
+[Admin vs DM](access-model.md) for the full model.

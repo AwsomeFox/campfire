@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, count, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { MemberCreate, MemberUpdate } from '@campfire/schema';
 import type { CampaignMember } from '@campfire/schema';
@@ -14,6 +14,7 @@ import type { RequestUser } from '../../common/user.types';
 
 type MemberCreateInput = z.infer<typeof MemberCreate>;
 type MemberUpdateInput = z.infer<typeof MemberUpdate>;
+type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 @Injectable()
 export class MembersService {
@@ -36,6 +37,7 @@ export class MembersService {
         updatedAt: campaignMembers.updatedAt,
         username: users.username,
         displayName: users.displayName,
+        disabled: users.disabled,
       })
       .from(campaignMembers)
       .leftJoin(users, eq(campaignMembers.userId, users.id))
@@ -49,6 +51,7 @@ export class MembersService {
       characterId: r.characterId,
       username: r.username ?? '',
       displayName: r.displayName ?? '',
+      disabled: r.disabled ?? true,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
@@ -64,21 +67,41 @@ export class MembersService {
     return row;
   }
 
-  private async dmCount(campaignId: number, excludeMemberId?: number): Promise<number> {
-    const rows = await this.db
-      .select()
+  /** Count only DM seats whose account can actually authenticate (#849). */
+  private usableDmCountTx(tx: SyncDb, campaignId: number): number {
+    return tx
+      .select({ value: count() })
       .from(campaignMembers)
-      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.role, 'dm')));
-    return rows.filter((r) => r.id !== excludeMemberId).length;
+      .innerJoin(users, eq(campaignMembers.userId, users.id))
+      .where(
+        and(
+          eq(campaignMembers.campaignId, campaignId),
+          eq(campaignMembers.role, 'dm'),
+          eq(users.disabled, false),
+        ),
+      )
+      .get()?.value ?? 0;
+  }
+
+  private assignableUserTx(tx: SyncDb, userId: number): typeof users.$inferSelect {
+    const user = tx.select().from(users).where(eq(users.id, userId)).limit(1).get();
+    if (!user) throw new NotFoundException(`User ${userId} not found`);
+    if (user.disabled) {
+      throw new BadRequestException(`User ${userId} is disabled and cannot be assigned to a campaign`);
+    }
+    return user;
   }
 
   /** Auto-inserts the creator as 'dm' when a campaign is created (skipped for dev:* users). */
   async addCreatorAsDm(campaignId: number, userId: number): Promise<void> {
     const ts = nowIso();
-    await this.db
-      .insert(campaignMembers)
-      .values({ campaignId, userId, role: 'dm', characterId: null, createdAt: ts, updatedAt: ts })
-      .onConflictDoNothing();
+    this.db.transaction((tx) => {
+      this.assignableUserTx(tx, userId);
+      tx.insert(campaignMembers)
+        .values({ campaignId, userId, role: 'dm', characterId: null, createdAt: ts, updatedAt: ts })
+        .onConflictDoNothing()
+        .run();
+    });
   }
 
   /**
@@ -86,13 +109,18 @@ export class MembersService {
    * existence/campaign check — a nonexistent id, or another campaign's character id,
    * would silently pass through and get denormalized-joined against on listForCampaign.
    */
-  private async validateCharacterRef(characterId: number | null | undefined, campaignId: number): Promise<void> {
+  private validateCharacterRefTx(
+    tx: SyncDb,
+    characterId: number | null | undefined,
+    campaignId: number,
+  ): void {
     if (characterId == null) return;
-    const [row] = await this.db
+    const row = tx
       .select({ id: characters.id })
       .from(characters)
       .where(and(eq(characters.id, characterId), eq(characters.campaignId, campaignId)))
-      .limit(1);
+      .limit(1)
+      .get();
     if (!row) throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
   }
 
@@ -104,50 +132,59 @@ export class MembersService {
    * clears ownership only when the character is still owned by this member, so an explicit
    * DM reassignment via PATCH /characters/:id is never clobbered.
    */
-  private async syncCharacterOwnership(
+  private syncCharacterOwnershipTx(
+    tx: SyncDb,
     userId: number,
     previousCharacterId: number | null,
     nextCharacterId: number | null,
-  ): Promise<void> {
+    updatedAt: string,
+  ): void {
     if (previousCharacterId === nextCharacterId) return;
     const ownerUserId = String(userId);
     if (previousCharacterId != null) {
-      await this.db
+      tx
         .update(characters)
-        .set({ ownerUserId: null, updatedAt: nowIso() })
-        .where(and(eq(characters.id, previousCharacterId), eq(characters.ownerUserId, ownerUserId)));
+        .set({ ownerUserId: null, updatedAt })
+        .where(and(eq(characters.id, previousCharacterId), eq(characters.ownerUserId, ownerUserId)))
+        .run();
     }
     if (nextCharacterId != null) {
-      await this.db
+      tx
         .update(characters)
-        .set({ ownerUserId, updatedAt: nowIso() })
-        .where(eq(characters.id, nextCharacterId));
+        .set({ ownerUserId, updatedAt })
+        .where(eq(characters.id, nextCharacterId))
+        .run();
     }
   }
 
   async create(campaignId: number, input: MemberCreateInput, actor: RequestUser): Promise<CampaignMember> {
-    const [existing] = await this.db
-      .select()
-      .from(campaignMembers)
-      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, input.userId)))
-      .limit(1);
-    if (existing) throw new ConflictException('User is already a member of this campaign');
-    await this.validateCharacterRef(input.characterId, campaignId);
-
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(campaignMembers)
-      .values({
-        campaignId,
-        userId: input.userId,
-        role: input.role,
-        characterId: input.characterId ?? null,
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
+    const row = this.db.transaction((tx) => {
+      this.assignableUserTx(tx, input.userId);
+      const existing = tx
+        .select({ id: campaignMembers.id })
+        .from(campaignMembers)
+        .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, input.userId)))
+        .limit(1)
+        .get();
+      if (existing) throw new ConflictException('User is already a member of this campaign');
+      this.validateCharacterRefTx(tx, input.characterId, campaignId);
 
-    await this.syncCharacterOwnership(input.userId, null, input.characterId ?? null);
+      const inserted = tx
+        .insert(campaignMembers)
+        .values({
+          campaignId,
+          userId: input.userId,
+          role: input.role,
+          characterId: input.characterId ?? null,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .get();
+      this.syncCharacterOwnershipTx(tx, input.userId, null, input.characterId ?? null, ts);
+      return inserted;
+    });
 
     await this.audit.log({
       actor: auditActor(actor),
@@ -178,26 +215,48 @@ export class MembersService {
   }
 
   async update(campaignId: number, memberId: number, input: MemberUpdateInput, actor: RequestUser): Promise<CampaignMember> {
-    const existing = await this.getRowOrThrow(campaignId, memberId);
-
-    const demotingLastDm = input.role !== undefined && input.role !== 'dm' && existing.role === 'dm';
-    if (demotingLastDm) {
-      const remaining = await this.dmCount(campaignId, memberId);
-      if (remaining === 0) {
-        throw new ConflictException('Cannot demote the last dm of this campaign');
-      }
-    }
-    await this.validateCharacterRef(input.characterId, campaignId);
-
-    const update: Partial<typeof campaignMembers.$inferInsert> = { updatedAt: nowIso() };
+    const ts = nowIso();
+    const update: Partial<typeof campaignMembers.$inferInsert> = { updatedAt: ts };
     if (input.role !== undefined) update.role = input.role;
     if (input.characterId !== undefined) update.characterId = input.characterId;
 
-    await this.db.update(campaignMembers).set(update).where(eq(campaignMembers.id, memberId));
+    // Re-read the member, count usable DMs, validate references, mutate the role,
+    // and sync character ownership inside one synchronous SQLite transaction.
+    // Concurrent REST/MCP/account-lifecycle changes therefore serialize at the
+    // same invariant (#654 + #849).
+    this.db.transaction((tx) => {
+      const row = tx
+        .select({ member: campaignMembers, disabled: users.disabled })
+        .from(campaignMembers)
+        .innerJoin(users, eq(campaignMembers.userId, users.id))
+        .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
+        .limit(1)
+        .get();
+      if (!row) throw new NotFoundException(`Member ${memberId} not found`);
 
-    if (input.characterId !== undefined) {
-      await this.syncCharacterOwnership(existing.userId, existing.characterId, input.characterId);
-    }
+      const promotingDisabledDm = input.role === 'dm' && row.member.role !== 'dm' && row.disabled;
+      if (promotingDisabledDm) {
+        throw new BadRequestException(`User ${row.member.userId} is disabled and cannot be assigned as dm`);
+      }
+
+      const demotingUsableDm =
+        input.role !== undefined && input.role !== 'dm' && row.member.role === 'dm' && !row.disabled;
+      if (demotingUsableDm && this.usableDmCountTx(tx, campaignId) <= 1) {
+        throw new ConflictException('Cannot demote the last dm of this campaign');
+      }
+
+      // Preserve the established error precedence: last-DM conflict before an
+      // invalid character link in a combined patch (reviewed in #654).
+      this.validateCharacterRefTx(tx, input.characterId, campaignId);
+      tx.update(campaignMembers)
+        .set(update)
+        .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
+        .run();
+
+      if (input.characterId !== undefined && row.member.characterId !== input.characterId) {
+        this.syncCharacterOwnershipTx(tx, row.member.userId, row.member.characterId, input.characterId, ts);
+      }
+    });
 
     await this.audit.log({
       actor: auditActor(actor),
@@ -233,25 +292,33 @@ export class MembersService {
    * never destroy other people's data).
    */
   async remove(campaignId: number, memberId: number, actor: RequestUser, opts?: { selfLeave?: boolean }): Promise<void> {
-    const existing = await this.getRowOrThrow(campaignId, memberId);
+    const existing = this.db.transaction((tx) => {
+      const row = tx
+        .select({ member: campaignMembers, disabled: users.disabled })
+        .from(campaignMembers)
+        .innerJoin(users, eq(campaignMembers.userId, users.id))
+        .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
+        .limit(1)
+        .get();
+      if (!row) throw new NotFoundException(`Member ${memberId} not found`);
 
-    if (existing.role === 'dm') {
-      const remaining = await this.dmCount(campaignId, memberId);
-      if (remaining === 0) {
+      if (row.member.role === 'dm' && !row.disabled && this.usableDmCountTx(tx, campaignId) <= 1) {
         throw new ConflictException(
           opts?.selfLeave
             ? 'You are the last dm of this campaign — hand dm off to someone else before leaving'
             : 'Cannot remove the last dm of this campaign',
         );
       }
-    }
 
-    await this.db.delete(campaignMembers).where(eq(campaignMembers.id, memberId));
-
-    await this.db
-      .update(characters)
-      .set({ ownerUserId: null, updatedAt: nowIso() })
-      .where(and(eq(characters.campaignId, campaignId), eq(characters.ownerUserId, String(existing.userId))));
+      tx.delete(campaignMembers)
+        .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
+        .run();
+      tx.update(characters)
+        .set({ ownerUserId: null, updatedAt: nowIso() })
+        .where(and(eq(characters.campaignId, campaignId), eq(characters.ownerUserId, String(row.member.userId))))
+        .run();
+      return row.member;
+    });
 
     // Issue #527: the revocation event MUST be emitted whenever the DB delete above
     // succeeded, regardless of whether audit logging throws. If audit failure were

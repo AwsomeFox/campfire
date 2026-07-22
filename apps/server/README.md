@@ -75,8 +75,8 @@ New tables (`db/bootstrap.sql.ts`): `users` (username UNIQUE COLLATE NOCASE,
 login" — `serverRole` admin|user, `disabled`, `oidcSub` — nullable, unique
 per issuer, indexed), `user_sessions` (id -> `tokenHash`, `userId`,
 `expiresAt`, `lastSeenAt`), `settings` (key/value JSON store),
-`campaign_members` (campaignId, userId, role dm|player|viewer,
-`characterId`, UNIQUE(campaignId, userId)).
+`campaign_members` (campaignId, userId → users.id with `ON DELETE CASCADE`,
+role dm|player|viewer, `characterId`, UNIQUE(campaignId, userId)).
 
 Passwords: `node:crypto` `scryptSync` (N=16384, r=8, p=1, random 16-byte
 salt), stored as `scrypt:N:r:p:saltHex:hashHex`; compared with
@@ -181,14 +181,26 @@ an operator hands an AI agent is no longer secretly root.
 
 - Cannot demote (`serverRole` away from `admin`), disable, or delete the
   **last enabled admin** (`UsersService`).
-- Cannot demote or remove the **last `dm` of a campaign**
-  (`MembersService.remove()`/`update()`).
-- Cannot **delete a user** who is the sole `dm` of any campaign
-  (`UsersService.remove()`) — checked across every campaign that user dms;
-  409 lists the affected campaign names ("reassign DM first"). This mirrors
-  the `MembersService` guard above, which alone isn't enough: deleting the
-  `users` row bypasses `MembersService.remove()` entirely and cascades
-  `campaign_members` directly, so the same check has to be re-applied here.
+- Cannot demote/remove, disable, or delete the **last usable `dm` of a
+  campaign**. A DM seat is usable only while its referenced user exists and is
+  enabled; disabled or legacy ghost rows never count. Membership mutations and
+  account disable/delete checks run in synchronous SQLite transactions so
+  concurrent REST/MCP/admin requests cannot consume the final two seats at once.
+- `campaign_members.user_id` is an enforced `users.id` foreign key (`ON DELETE
+  CASCADE`) on fresh and upgraded databases. Migration `0046` transactionally
+  rebuilds the table, removes rows whose user/campaign is missing, clears invalid
+  optional character links, and records identifier/role-only repair history in
+  `membership_integrity_repairs`.
+
+Server admins can inspect **Admin → Users → Campaign authority integrity** or
+`GET /admin/membership-integrity`. The report contains only campaign id/name,
+usable/disabled DM counts, and migration repair metadata — never campaign
+entities or DM-secret fields, and it grants no implicit campaign role. If a
+legacy database is already orphaned, `POST /admin/membership-integrity/repair-dm`
+(`{campaignId,userId}`) can assign an existing enabled account, but only while
+the campaign has zero usable DMs. MCP exposes the same operations as
+`get_membership_integrity` and `repair_campaign_dm`; PAT callers need an
+explicitly admin-enabled token.
 
 Deleting a user cascades to their `user_sessions` and `campaign_members`
 rows; their notes/characters are left as-is (`Character.ownerUserId` is a
@@ -440,8 +452,11 @@ domain modules. If the domain modules imported `ProposalsModule` directly
   identity) — `party_shared` and `dm_shared` notes plus the dm's own
   `private` notes are included; other members' `private` notes are
   deliberately excluded. `members` is the same sanitized shape
-  `GET /members` already returns (no password/session data ever lived on
-  `CampaignMember`). `audit` is capped at the latest 500 entries.
+  `GET /members` already returns, including the account's `disabled` marker
+  (no password/session data ever lived on `CampaignMember`). Imports and clones
+  never replay exported memberships: only the authenticated caller becomes the
+  new campaign's enabled DM, through the same FK-checked membership path used by
+  normal campaign creation. `audit` is capped at the latest 500 entries.
   `Content-Disposition: attachment; filename="campfire-<slug>-<date>.json"`.
 - **mdzip**: a zip (via `jszip`, pure-JS, no native dep) of markdown —
   `campaign.md` (+ visible notes), `quests/<slug>.md` (objectives rendered as
@@ -479,7 +494,7 @@ claude mcp add --transport http campfire http://host:8080/mcp \
   --header "Authorization: Bearer cf_pat_..."
 ```
 
-**Tool catalog** (64 — `modules/mcp/mcp-tools.ts`; see `test/mcp.e2e-spec.ts`'s
+**Tool catalog** (137 — `modules/mcp/mcp-tools.ts`; see `test/mcp.e2e-spec.ts`'s
 `ALL_TOOLS` for the exact, test-pinned list). This is full REST parity: an
 agent can run an entire campaign — world-building, session prep, and live
 combat — over MCP alone.
@@ -520,7 +535,9 @@ combat — over MCP alone.
   returns the stored result, while a different resolution conflicts).
 - **Write — proposals & membership:** `approve_proposal` (dm),
   `reject_proposal` (dm), `add_member`/`update_member`/`remove_member` (dm;
-  refuses to demote/remove the campaign's last dm).
+  refuses to demote/remove the campaign's last enabled dm), plus
+  `get_membership_integrity`/`repair_campaign_dm` (server-admin authority
+  diagnostics/recovery; no campaign-secret access).
 - **Write — compendium:** `install_rule_pack` (**server admin**, not just
   campaign dm — checked via `hasServerAdminPower(user)`, matching the REST
   `@ServerRoles('admin')` gate on `POST /rules/packs/install`. A PAT only
