@@ -525,6 +525,7 @@ export default function LocationPage() {
                 <RevisionHistoryPanel
                   entityType="location"
                   entityId={id}
+                  currentSnapshot={{ body: location.body }}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);

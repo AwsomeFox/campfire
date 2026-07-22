@@ -9,23 +9,26 @@
  *  - Catalog sections live as one JSON file per domain under `locales/en/` (e.g.
  *    `combat.json`, `nav.json`). They're merged automatically via `import.meta.glob`,
  *    so adding a new domain file needs no wiring here.
- *  - Language is picked by the detector: an explicit user override in localStorage
- *    (`cf.lang`) wins, otherwise the browser's `navigator.language`, otherwise `en`.
- *  - `<html lang>` is kept in sync with the active language (see `applyHtmlLang`).
+ *  - Locale resolution lives in `locale.ts`. The rendered catalog and `Intl`
+ *    formatting locale are separate, so an English-only UI can still use the
+ *    browser's French, German, Arabic, etc. regional conventions.
+ *  - `<html lang>` and `dir` follow the catalog that actually rendered.
  *
  * To add a locale later: create `locales/<lng>/` JSON files mirroring the English keys
  * and register them in `resources` below (or extend the glob to other language folders).
  */
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
-import LanguageDetector from 'i18next-browser-languagedetector';
+import { localeController, SUPPORTED_LANGUAGES } from './locale';
 
-/** localStorage key holding the user's explicit language override (empty = follow browser). */
-export const LANG_STORAGE_KEY = 'cf.lang';
-
-/** Languages Campfire ships a catalog for. English is the source/default. */
-export const SUPPORTED_LANGUAGES = [{ code: 'en', label: 'English' }] as const;
-export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]['code'];
+export {
+  LANG_STORAGE_KEY,
+  isSupportedLanguage,
+  localeController,
+  SUPPORTED_LANGUAGES,
+  SYSTEM_LOCALE,
+} from './locale';
+export type { LanguageCode, LocalePreference, ResolvedLocaleState } from './locale';
 
 /**
  * Merge every `locales/en/*.json` domain file into one catalog object. Each file is
@@ -47,32 +50,38 @@ export const resources = {
   en: { translation: en },
 } as const;
 
+const initialLocale = localeController.resolved;
+
 void i18n
-  .use(LanguageDetector)
   .use(initReactI18next)
   .init({
     resources,
+    lng: initialLocale.catalogLocale,
     fallbackLng: 'en',
     // Only offer languages we actually ship a catalog for; anything else falls back to `en`.
     supportedLngs: SUPPORTED_LANGUAGES.map((l) => l.code),
     nonExplicitSupportedLngs: true, // treat `en-US`, `en-GB`, … as `en`
     interpolation: { escapeValue: false }, // React already escapes
-    detection: {
-      // Explicit user choice (cf.lang) beats the browser's Accept-Language.
-      order: ['localStorage', 'navigator', 'htmlTag'],
-      lookupLocalStorage: LANG_STORAGE_KEY,
-      caches: ['localStorage'],
-    },
-  });
+  })
+  .then(() => applyHtmlLang(i18n.resolvedLanguage || i18n.language || 'en'));
 
-/** Keep the document's `lang` attribute in step with the active language. */
+/** Keep document metadata aligned with the catalog that actually rendered. */
 export function applyHtmlLang(lng: string): void {
   if (typeof document !== 'undefined') {
-    document.documentElement.lang = lng.split('-')[0] || 'en';
+    const catalogLocale = lng || 'en';
+    document.documentElement.lang = catalogLocale;
+    document.documentElement.dir = i18n.dir(catalogLocale);
   }
 }
 
-applyHtmlLang(i18n.language || 'en');
+applyHtmlLang(initialLocale.catalogLocale);
 i18n.on('languageChanged', applyHtmlLang);
+
+localeController.subscribe(() => {
+  const catalogLocale = localeController.resolved.catalogLocale;
+  if (i18n.resolvedLanguage !== catalogLocale && i18n.language !== catalogLocale) {
+    void i18n.changeLanguage(catalogLocale);
+  }
+});
 
 export default i18n;

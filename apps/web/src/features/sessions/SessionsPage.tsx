@@ -17,7 +17,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { formatDate as formatLocaleDate } from '../../lib/format';
+import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -31,6 +31,7 @@ import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { entityTargetProps } from '../../lib/entityLinks';
 
 export default function SessionsPage() {
+  useFormattingLocale();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -570,6 +571,7 @@ function SessionDetail({
         <RevisionHistoryPanel
           entityType="session"
           entityId={session.id}
+          currentSnapshot={{ recap }}
           label="Recap history"
           reloadNonce={historyNonce}
           onRestored={() => {
