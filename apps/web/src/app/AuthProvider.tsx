@@ -8,6 +8,11 @@ import { api, ApiError, API } from '../lib/api';
 import { queryClient } from '../lib/query';
 import { clearApiCache } from '../lib/swCache';
 import { AuthContext, type AuthState } from './auth';
+import {
+  clearAuthStorage,
+  setAuthStorage,
+  useAuthStorageListener,
+} from '../features/auth/useAuthStorageListener';
 
 /**
  * Blends a #rrggbb hex color toward white by `ratio` (0-1). Used to derive a
@@ -61,6 +66,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // cached campaign data belonging to a prior session before it renders.
   const lastUserIdRef = useRef<number | null>(null);
 
+  const handleMultiTabSignOut = useCallback(() => {
+    setMe(null);
+    lastUserIdRef.current = null;
+    applyAccentColor(null);
+    applyTextSize('default');
+    clearAuthStorage();
+    void clearApiCache();
+    queryClient.clear();
+  }, []);
+
+  useAuthStorageListener(handleMultiTabSignOut);
+
   const refresh = useCallback(async () => {
     try {
       const nextMe = await api.get<Me>(`${API}/me`);
@@ -84,12 +101,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setConnectionError(false);
       applyAccentColor(nextMe.user.accentColor);
       applyTextSize(nextMe.user.textSize);
+      setAuthStorage(nextMe.user);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setMe(null);
         setConnectionError(false);
         applyAccentColor(null);
         applyTextSize('default');
+        clearAuthStorage();
       } else {
         // Network error or non-401 server failure (API down, 5xx, etc). Don't treat
         // this as "not logged in" — that would bounce a real session to /login. Surface
@@ -107,13 +126,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await api.post(`${API}/auth/logout`);
-    setMe(null);
-    // Drop this account's cached campaign data so the next person to sign in on
-    // this device never inherits it (issue #268).
-    lastUserIdRef.current = null;
-    await clearApiCache();
-    queryClient.clear();
+    try {
+      await api.post(`${API}/auth/logout`);
+    } finally {
+      clearAuthStorage();
+      setMe(null);
+      // Drop this account's cached campaign data so the next person to sign in on
+      // this device never inherits it (issue #268).
+      lastUserIdRef.current = null;
+      await clearApiCache();
+      queryClient.clear();
+    }
   }, []);
 
   const isAdmin = me?.user.serverRole === 'admin';
@@ -136,3 +159,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
+
