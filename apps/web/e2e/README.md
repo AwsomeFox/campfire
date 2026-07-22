@@ -17,6 +17,7 @@ campaign fixtures described below.
 | Spec | Checks |
 | --- | --- |
 | `first-run/setup.spec.ts` | Pristine DB → setup form → authenticated campaign hub without reload; `/setup` and `/login` redirect safely after configuration and do not remain in browser history. |
+| `first-run/login-responsive.spec.ts` | Local, SSO-only, mixed, signup, install-hint, validation-error, password-manager, 200%-reflow, and short-landscape login layouts; initial-viewport screenshots, semantic/visual order, keyboard flow, and axe scans. |
 | `dmsecret-visibility.spec.ts` | A DM sees an NPC's `dmSecret` panel; a player and a viewer never do (the secret string is absent from their DOM). |
 | `combat-tracker.spec.ts` | DM sees exact initiative + HP math (`30 / 30`), running state / round, and the DM-only run controls (Next turn / End / Cast). Player & viewer get a monster's HP **redacted to a band** ("Healthy") and see **no** DM controls or edit inputs. |
 | `role-navigation.spec.ts` | Login-per-role smoke + role-appropriate nav: DM gets the "Dungeon master" section (Members/Settings/…), player/viewer don't and read as Player/Viewer; the server-admin console (`/admin`) is reachable by admin and refused to a non-admin. |
