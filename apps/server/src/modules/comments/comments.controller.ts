@@ -71,10 +71,15 @@ export class CommentsController {
   ) {}
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get a comment', description: 'Requires campaign membership.' })
-  @ApiResponse({ status: 200, description: 'Comment.' })
+  @ApiOperation({
+    summary: 'Get a comment',
+    description:
+      'Requires campaign membership. A tombstoned comment (issue #503) is returned as a redacted "[deleted]" ' +
+      'placeholder rather than 404 — the row stays so replies keep their parent. Requires membership.',
+  })
+  @ApiResponse({ status: 200, description: 'Comment (body redacted if tombstoned).' })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    const row = await this.comments.getRowOrThrow(id);
+    const row = await this.comments.getRowOrThrow(id, true);
     const role = await this.access.requireMember(user, row.campaignId);
     return this.comments.getOrThrow(id, role);
   }
@@ -89,11 +94,34 @@ export class CommentsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a comment', description: 'Author or DM only. Requires campaign membership (write). Deleting a top-level comment removes its replies too.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({
+    summary: 'Delete a comment (tombstone)',
+    description:
+      'Author or DM only. Requires campaign membership (write). Soft-deletes (tombstones) the comment: ' +
+      'its body is redacted to "[deleted]" but the row remains, so replies keep their parent and the thread ' +
+      'topology is preserved (issue #503 — a root author must not destroy other members\' replies). ' +
+      'Reversible via POST /comments/:id/restore. The deletedAt/deletedBy fields are set on the returned shape.',
+  })
+  @ApiResponse({ status: 200, description: 'Tombstoned.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    const row = await this.comments.getRowOrThrow(id);
+    const row = await this.comments.getRowOrThrow(id, true);
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
     return this.comments.remove(id, user, role);
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({
+    summary: 'Restore a tombstoned comment',
+    description:
+      'Author or DM only. Requires campaign membership (write). Undoes a soft-delete (issue #503): clears ' +
+      'deletedAt/deletedBy and returns the comment with its original body. 404 if the comment is not currently ' +
+      'tombstoned. Mirrors the notes restore() authorization so a DM can reverse a moderation and the author ' +
+      'can reverse their own soft-delete.',
+  })
+  @ApiResponse({ status: 201, description: 'Restored comment.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.comments.getRowOrThrow(id, true);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    return this.comments.restore(id, user, role);
   }
 }

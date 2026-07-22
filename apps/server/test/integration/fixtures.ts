@@ -245,6 +245,24 @@ export function writeOldSchemaDb(dataDir: string): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    -- comments: no deleted_at / deleted_by (issue #503, migration 0045). The
+    -- tombstone columns are what the soft-delete migration adds; a root + reply
+    -- pair is seeded so the migration test can also prove reply topology is
+    -- preserved when the migration runs (the parent_id soft pointer survives).
+    CREATE TABLE comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id INTEGER NOT NULL,
+      parent_id INTEGER,
+      author_user_id TEXT NOT NULL,
+      author_name TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL,
+      in_character INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   // Seed one row per table so migrations must preserve real data, not just an empty schema.
@@ -286,6 +304,14 @@ export function writeOldSchemaDb(dataDir: string): void {
   ).run(now, now);
   sqlite.prepare(
     "INSERT INTO inventory_items (campaign_id, owner_type, name, qty, notes, created_at, updated_at) VALUES (1, 'party', 'Legacy Longsword', 1, '', ?, ?)",
+  ).run(now, now);
+  // A root comment + a reply under it (issue #503). The migration must preserve
+  // both rows AND their parent_id threading while adding the tombstone columns.
+  sqlite.prepare(
+    "INSERT INTO comments (campaign_id, entity_type, entity_id, parent_id, author_user_id, author_name, body, in_character, created_at, updated_at) VALUES (1, 'session', 1, NULL, 'legacy-dm', 'Legacy DM', 'Legacy root comment', 0, ?, ?)",
+  ).run(now, now);
+  sqlite.prepare(
+    "INSERT INTO comments (campaign_id, entity_type, entity_id, parent_id, author_user_id, author_name, body, in_character, created_at, updated_at) VALUES (1, 'session', 1, 1, 'legacy-player', 'Legacy Player', 'Legacy reply that must survive', 0, ?, ?)",
   ).run(now, now);
 
   sqlite.close();

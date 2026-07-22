@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, isNull, ne } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
 import type { Comment, Role, PageParams } from '@campfire/schema';
@@ -18,7 +18,24 @@ type CommentCreateInput = z.infer<typeof CommentCreate>;
 type CommentUpdateInput = z.infer<typeof CommentUpdate>;
 type EntityTypeValue = z.infer<typeof EntityType>;
 
+/**
+ * Body shown in place of the real content for a tombstoned comment (issue #503).
+ * Neutral copy: doesn't name the author or the moderator by design (a reader who
+ * already saw the body shouldn't learn who yanked it from the placeholder alone;
+ * the audit log and the author themselves already know). Replies stay visible.
+ */
+const TOMBSTONE_BODY = '[deleted]';
+
+/**
+ * Map a DB row to the API shape. A tombstoned comment (deletedAt set) keeps its
+ * id/parent/author metadata and threading position but has its body redacted to a
+ * neutral placeholder — so the row stays in list/get responses (replies anchor to
+ * it via parentId) without leaking the original prose. updatedAt is NOT bumped on
+ * tombstone (it records content edits, not lifecycle), so the placeholder sits at
+ * the original timestamp.
+ */
 function toDomain(row: typeof comments.$inferSelect): Comment {
+  const tombstoned = row.deletedAt != null;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -27,8 +44,10 @@ function toDomain(row: typeof comments.$inferSelect): Comment {
     parentId: row.parentId,
     authorUserId: row.authorUserId,
     authorName: row.authorName,
-    body: row.body,
+    body: tombstoned ? TOMBSTONE_BODY : row.body,
     inCharacter: row.inCharacter,
+    deletedAt: row.deletedAt,
+    deletedBy: row.deletedBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -233,15 +252,28 @@ export class CommentsService {
     return rows.map(toDomain);
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(comments).where(eq(comments.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Comment ${id} not found`);
+    // A tombstoned comment reads as nonexistent to normal callers. Callers that
+    // intentionally operate on the tombstoned row pass includeDeleted=true:
+    // getOrThrow (serves the [deleted] placeholder so replies' parent resolves),
+    // remove/restore (operate on the tombstone), and resolveParent (a reply to a
+    // tombstoned root must still anchor — the thread topology is the whole point
+    // of preserving the row). 404 (not 403) mirrors the secrecy convention so a
+    // non-author learns nothing about a removed comment.
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Comment ${id} not found`);
     return row;
   }
 
-  /** GET by id 404s (not 403) for a comment on an entity the caller can't see (issue #230). */
+  /**
+   * GET by id 404s (not 403) for a comment on an entity the caller can't see (issue #230).
+   * A tombstoned comment is served to everyone who can see the anchor entity (as a
+   * redacted placeholder) — it must stay reachable so replies' parent pointer
+   * resolves and the thread doesn't break. GET /comments/:id on a tombstoned root
+   * therefore returns the placeholder rather than 404.
+   */
   async getOrThrow(id: number, role: Role): Promise<Comment> {
-    const row = await this.getRowOrThrow(id);
+    const row = await this.getRowOrThrow(id, true);
     await this.assertAnchorVisible(row.campaignId, row.entityType as EntityTypeValue, row.entityId, role);
     return toDomain(row);
   }
@@ -258,7 +290,11 @@ export class CommentsService {
     entityId: number,
     parentId: number,
   ): Promise<number> {
-    const parent = await this.getRowOrThrow(parentId);
+    // A reply may anchor to a tombstoned root — that is the entire point of
+    // tombstoning rather than hard-deleting (issue #503): the row stays so
+    // replies keep their parent. So resolve the parent with includeDeleted=true;
+    // the web UI still threads replies under a [deleted] placeholder.
+    const parent = await this.getRowOrThrow(parentId, true);
     if (
       parent.campaignId !== campaignId ||
       parent.entityType !== entityType ||
@@ -332,19 +368,34 @@ export class CommentsService {
     return toDomain(row);
   }
 
-  /** author-or-DM; deleting a top-level comment cascades to its direct replies */
-  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
-    const existing = await this.getRowOrThrow(id);
+  /**
+   * author-or-DM. Tombstones the comment (issue #503): sets deleted_at + deleted_by
+   * and redacts the body in responses, but does NOT remove the row — replies keep
+   * their parent pointer and the thread topology stays intact. This is the safe
+   * default chosen over a DM-moderated cascade: deleting a root that OTHER members
+   * have replied to must never destroy their content, and the tombstone is reversible
+   * via {@link restore}. The same tombstone semantics apply to a reply (uniform,
+   * always-reversible lifecycle) — there is no hard-delete path through the API, so
+   * an author can never accidentally destroy content that threads off their post.
+   * A row is only truly removed by a campaign purge (the DB-level CASCADE).
+   *
+   * Idempotent on a tombstoned row: deleting an already-tombstoned comment re-stamps
+   * deleted_at/deleted_by (a DM moderating after an author's soft-delete, say) but
+   * does not 404 and does not touch replies.
+   */
+  async remove(id: number, user: RequestUser, role: Role): Promise<Comment> {
+    const existing = await this.getRowOrThrow(id, true);
     // A comment on an entity the caller can no longer see is, to them, nonexistent (issue #230).
     await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may delete this comment');
     }
-    await this.db.delete(comments).where(eq(comments.id, id));
-    // A dangling reply (parent gone) would render orphaned; remove the subtree.
-    if (existing.parentId === null) {
-      await this.db.delete(comments).where(eq(comments.parentId, id));
-    }
+    const ts = nowIso();
+    const [row] = await this.db
+      .update(comments)
+      .set({ deletedAt: ts, deletedBy: auditActor(user) })
+      .where(eq(comments.id, id))
+      .returning();
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -352,7 +403,50 @@ export class CommentsService {
       entityType: 'comment',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (tombstoned; replies preserved)',
     });
+    // Tell anyone who replied to this root that the context above them changed, so
+    // their reply doesn't read as a non-sequitur under a now-redacted parent.
+    await this.notifyTombstone(existing, user);
+    // Return the tombstoned comment (redacted to a [deleted] placeholder by
+    // toDomain) so the endpoint is self-describing and matches its OpenAPI shape;
+    // clients don't need a follow-up GET to see the deletion took effect.
+    return toDomain(row);
+  }
+
+  /**
+   * Undo a tombstone (issue #503). Author or DM; clears deleted_at/deleted_by and
+   * returns the comment with its original body. 404 if the comment isn't currently
+   * tombstoned. Mirrors the notes restore() authorization (author or DM) so a DM
+   * can reverse a moderation and the author can reverse their own soft-delete.
+   */
+  async restore(id: number, user: RequestUser, role: Role): Promise<Comment> {
+    const existing = await this.getRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Comment ${id} is not tombstoned`);
+    // A comment on an entity the caller can no longer see is, to them, nonexistent (issue #230).
+    await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
+    if (existing.authorUserId !== user.id && role !== 'dm') {
+      throw new ForbiddenException('Only the author or a DM may restore this comment');
+    }
+    // Restore is a LIFECYCLE event, not a content edit — do not bump updatedAt.
+    // The web UI shows an "edited" badge when updatedAt !== createdAt, so bumping
+    // here would falsely mark a restored comment as edited. Provenance of the
+    // tombstone (who deleted it, when) is preserved in the audit log, not on the
+    // row (deletedAt/deletedBy are cleared so the comment reads as live again).
+    const [row] = await this.db
+      .update(comments)
+      .set({ deletedAt: null, deletedBy: null })
+      .where(eq(comments.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'comment.restore',
+      entityType: 'comment',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return toDomain(row);
   }
 
   /**
@@ -384,6 +478,49 @@ export class CommentsService {
         type: 'comment_reply',
         title: `${user.name || 'Someone'} posted on a ${row.entityType} discussion`,
         body: excerpt(row.body),
+        entityType: row.entityType as EntityTypeValue,
+        entityId: row.entityId,
+        actorName: user.name,
+      });
+    }
+  }
+
+  /**
+   * Fan-out when a root is tombstoned (issue #503): the AUTHORS of its direct
+   * replies are told the comment above theirs was deleted, so their reply doesn't
+   * silently sit under a redacted placeholder with no explanation. Only a ROOT
+   * deletion changes the context of replies (a reply deletion has no children), so
+   * this is a no-op for reply deletions. The tombstoned comment's own author is the
+   * actor and is skipped (they pulled the trigger; they don't need a notification).
+   * Best-effort — a notification failure never fails the delete.
+   *
+   * Reuses the `comment_reply` notification type (rather than introducing a new
+   * enum value) so this stays additive and doesn't churn the NotificationType
+   * schema; the title/body copy distinguishes a tombstone from a new reply.
+   */
+  private async notifyTombstone(row: typeof comments.$inferSelect, user: RequestUser): Promise<void> {
+    if (row.parentId !== null) return; // only a root deletion changes replies' context.
+    const replies = await this.db
+      .select({ authorUserId: comments.authorUserId })
+      .from(comments)
+      .where(
+        and(
+          eq(comments.parentId, row.id),
+          eq(comments.campaignId, row.campaignId),
+          isNull(comments.deletedAt),
+          ne(comments.authorUserId, user.id),
+        ),
+      );
+    const recipients = new Set<number>();
+    for (const reply of replies) {
+      const authorId = Number(reply.authorUserId);
+      if (Number.isInteger(authorId) && authorId > 0) recipients.add(authorId);
+    }
+    for (const recipient of recipients) {
+      await this.notifications.notifyUser(recipient, row.campaignId, user, {
+        type: 'comment_reply',
+        title: `A comment you replied to was deleted`,
+        body: `The discussion on this ${row.entityType} lost its top comment; your reply is preserved.`,
         entityType: row.entityType as EntityTypeValue,
         entityId: row.entityId,
         actorName: user.name,
