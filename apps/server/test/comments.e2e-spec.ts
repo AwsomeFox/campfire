@@ -153,31 +153,204 @@ describe('comments / threaded discussion (e2e)', () => {
     expect(dmEdit.body.body).toBe('DM moderated');
   });
 
-  it('author-or-DM delete permission + reply cascade', async () => {
+  it('author-or-DM delete permission: a non-author non-DM cannot delete (403)', async () => {
     const server = ctx.app.getHttpServer();
     const parent = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/comments`)
       .set(authorPlayer)
       .send({ ...anchor(), body: 'Parent to delete' });
     const parentId = parent.body.id;
-    const reply = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/comments`)
-      .set(otherPlayer)
-      .send({ ...anchor(), body: 'A reply that should cascade', parentId });
-    const replyId = reply.body.id;
 
     // A non-author, non-DM cannot delete.
     const forbidden = await request(server).delete(`/api/v1/comments/${parentId}`).set(viewer);
     expect(forbidden.status).toBe(403);
 
-    // The DM deletes the parent; the reply cascades away.
-    const del = await request(server).delete(`/api/v1/comments/${parentId}`).set(dm);
-    expect(del.status).toBe(200);
+    // The comment is untouched — still live, original body.
+    const stillThere = await request(server).get(`/api/v1/comments/${parentId}`).set(dm);
+    expect(stillThere.status).toBe(200);
+    expect(stillThere.body.body).toBe('Parent to delete');
+    expect(stillThere.body.deletedAt).toBeNull();
+  });
 
-    const gone = await request(server).get(`/api/v1/comments/${parentId}`).set(dm);
-    expect(gone.status).toBe(404);
-    const replyGone = await request(server).get(`/api/v1/comments/${replyId}`).set(dm);
-    expect(replyGone.status).toBe(404);
+  // ── issue #503: tombstone roots while preserving replies ───────────────────
+  // The regression: a root author used to be able to permanently destroy other
+  // members' replies (delete cascaded to children). Now a root delete tombstones
+  // the root (body redacted) and leaves every reply intact and still threaded.
+  describe('issue #503 — tombstone root, preserve replies', () => {
+    it('author soft-deletes a root: replies SURVIVE and the root becomes a tombstone', async () => {
+      const server = ctx.app.getHttpServer();
+      const parent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Root the author will tombstone' });
+      const parentId = parent.body.id;
+      const reply = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(otherPlayer)
+        .send({ ...anchor(), body: 'A reply that must survive the root delete', parentId });
+      const replyId = reply.body.id;
+
+      // The AUTHOR (not just the DM) can delete their own root.
+      const del = await request(server).delete(`/api/v1/comments/${parentId}`).set(authorPlayer);
+      expect(del.status).toBe(200);
+
+      // The reply is STILL readable — the root author did not destroy it.
+      const survivingReply = await request(server).get(`/api/v1/comments/${replyId}`).set(otherPlayer);
+      expect(survivingReply.status).toBe(200);
+      expect(survivingReply.body.body).toBe('A reply that must survive the root delete');
+      expect(survivingReply.body.deletedAt).toBeNull();
+
+      // The root is now a tombstone: reachable, body redacted, but the row remains
+      // so the reply's parentId still resolves and threading isn't broken.
+      const tombstone = await request(server).get(`/api/v1/comments/${parentId}`).set(otherPlayer);
+      expect(tombstone.status).toBe(200);
+      expect(tombstone.body.body).toBe('[deleted]');
+      expect(tombstone.body.deletedAt).not.toBeNull();
+      expect(tombstone.body.deletedBy).toBe('dev:author-1');
+
+      // The thread list shows BOTH the tombstone placeholder and the surviving reply.
+      const list = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments`)
+        .query({ entityType: 'session', entityId: sessionId })
+        .set(otherPlayer);
+      expect(list.status).toBe(200);
+      const ids = list.body.map((c: { id: number }) => c.id);
+      expect(ids).toContain(parentId);
+      expect(ids).toContain(replyId);
+      const tombInList = list.body.find((c: { id: number }) => c.id === parentId);
+      expect(tombInList.body).toBe('[deleted]');
+    });
+
+    it('a DM moderating tombstones the root the same way (replies preserved)', async () => {
+      const server = ctx.app.getHttpServer();
+      const parent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(otherPlayer)
+        .send({ ...anchor(), body: 'Root a DM will moderate' });
+      const parentId = parent.body.id;
+      const reply = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Reply under a DM-moderated root', parentId });
+      const replyId = reply.body.id;
+
+      const del = await request(server).delete(`/api/v1/comments/${parentId}`).set(dm);
+      expect(del.status).toBe(200);
+
+      // Reply survives DM moderation of its parent.
+      const survivingReply = await request(server).get(`/api/v1/comments/${replyId}`).set(authorPlayer);
+      expect(survivingReply.status).toBe(200);
+      expect(survivingReply.body.body).toBe('Reply under a DM-moderated root');
+
+      const tombstone = await request(server).get(`/api/v1/comments/${parentId}`).set(dm);
+      expect(tombstone.status).toBe(200);
+      expect(tombstone.body.body).toBe('[deleted]');
+      expect(tombstone.body.deletedBy).toBe('dev:dm-1');
+    });
+
+    it('restore undoes a tombstone: body returns, replies still threaded', async () => {
+      const server = ctx.app.getHttpServer();
+      const parent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Root that will be restored' });
+      const parentId = parent.body.id;
+      const reply = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(otherPlayer)
+        .send({ ...anchor(), body: 'Reply present across the tombstone window', parentId });
+      const replyId = reply.body.id;
+
+      // Author tombstones, then restores.
+      await request(server).delete(`/api/v1/comments/${parentId}`).set(authorPlayer);
+      const restored = await request(server).post(`/api/v1/comments/${parentId}/restore`).set(authorPlayer);
+      expect(restored.status).toBe(201);
+      expect(restored.body.body).toBe('Root that will be restored');
+      expect(restored.body.deletedAt).toBeNull();
+      expect(restored.body.deletedBy).toBeNull();
+
+      // The reply was never touched and is still there.
+      const survivingReply = await request(server).get(`/api/v1/comments/${replyId}`).set(otherPlayer);
+      expect(survivingReply.status).toBe(200);
+      expect(survivingReply.body.body).toBe('Reply present across the tombstone window');
+    });
+
+    it('restore is author-or-DM gated: a non-author non-DM cannot restore', async () => {
+      const server = ctx.app.getHttpServer();
+      const parent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Root restore-perm check' });
+      const parentId = parent.body.id;
+      await request(server).delete(`/api/v1/comments/${parentId}`).set(authorPlayer);
+
+      const forbidden = await request(server).post(`/api/v1/comments/${parentId}/restore`).set(viewer);
+      expect(forbidden.status).toBe(403);
+
+      // A DM CAN restore someone else's tombstoned comment (moderation undo).
+      const dmRestore = await request(server).post(`/api/v1/comments/${parentId}/restore`).set(dm);
+      expect(dmRestore.status).toBe(201);
+    });
+
+    it('restore 404s on a comment that is not tombstoned', async () => {
+      const server = ctx.app.getHttpServer();
+      const live = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Never deleted' });
+      const res = await request(server).post(`/api/v1/comments/${live.body.id}/restore`).set(authorPlayer);
+      expect(res.status).toBe(404);
+    });
+
+    it('a tombstoned root body is redacted for the DM too (no privileged read of original prose)', async () => {
+      const server = ctx.app.getHttpServer();
+      const parent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Secret prose that should vanish on tombstone' });
+      const parentId = parent.body.id;
+      await request(server).delete(`/api/v1/comments/${parentId}`).set(authorPlayer);
+
+      const dmRead = await request(server).get(`/api/v1/comments/${parentId}`).set(dm);
+      expect(dmRead.status).toBe(200);
+      expect(dmRead.body.body).toBe('[deleted]');
+      // The original prose must not leak anywhere in the response.
+      expect(JSON.stringify(dmRead.body)).not.toContain('Secret prose');
+    });
+
+    it('audits every removal (soft-delete + restore) with actor + role + entity ref', async () => {
+      const server = ctx.app.getHttpServer();
+      const parent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Root whose lifecycle is audited' });
+      const parentId = parent.body.id;
+
+      // Soft-delete by the author.
+      await request(server).delete(`/api/v1/comments/${parentId}`).set(authorPlayer);
+      // Restore by the DM (moderation undo).
+      await request(server).post(`/api/v1/comments/${parentId}/restore`).set(dm);
+
+      const auditRes = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/audit`)
+        .query({ limit: 500 })
+        .set(dm);
+      expect(auditRes.status).toBe(200);
+      const forThisComment = auditRes.body.filter((a: { entityId: number; entityType: string }) =>
+        a.entityType === 'comment' && a.entityId === parentId,
+      );
+      const actions = forThisComment.map((a: { action: string }) => a.action);
+
+      // create + delete + restore all recorded against this comment id.
+      expect(actions).toContain('comment.create');
+      const del = forThisComment.find((a: { action: string }) => a.action === 'comment.delete');
+      expect(del).toBeDefined();
+      expect(del.actorRole).toBe('player'); // the author (authorPlayer) soft-deleted.
+      expect(del.detail).toContain('tombstoned');
+      const restore = forThisComment.find((a: { action: string }) => a.action === 'comment.restore');
+      expect(restore).toBeDefined();
+      expect(restore.actorRole).toBe('dm'); // the DM restored.
+    });
   });
 
   // Anchored-entity secrecy (issue #230, re: #123): a comment thread must be at least
