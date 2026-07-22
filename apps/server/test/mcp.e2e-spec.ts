@@ -903,11 +903,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
   it('get_encounter and list_encounters redact hidden-quest and unexplored-location links for a viewer PAT (issue #485)', async () => {
     const dmC = await mcpClient(dmToken);
     const quest = parseResult(
-      await dmC.callTool({ name: 'add_quest', arguments: { campaignId, title: 'Secret MCP Quest', hidden: true } }),
+      await dmC.callTool({ name: 'create_quest', arguments: { campaignId, title: 'Secret MCP Quest', hidden: true } }),
     ) as { id: number };
 
     const loc = parseResult(
-      await dmC.callTool({ name: 'add_location', arguments: { campaignId, name: 'Secret Cave', status: 'unexplored' } }),
+      await dmC.callTool({ name: 'upsert_location', arguments: { campaignId, name: 'Secret Cave', status: 'unexplored' } }),
     ) as { id: number };
 
     const enc = parseResult(
