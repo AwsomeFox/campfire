@@ -1,6 +1,10 @@
 import type { Proposal } from '@campfire/schema';
 
 export function isAiProposal(proposal: Proposal): boolean {
+  // Co-DM drafts (#313/#341) are attributed by the server to
+  // `ai-dm:<campaignId>`, while human/collaborator proposals use real user ids.
+  // Keep this contract explicit here so any future attribution change updates
+  // the filter, badge, and bulk-selection scope together.
   return proposal.proposerUserId.startsWith('ai-dm:');
 }
 
