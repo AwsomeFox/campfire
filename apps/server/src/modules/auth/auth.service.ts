@@ -18,6 +18,7 @@ import { hashPassword, verifyPassword, generateSessionToken, hashSessionToken } 
 import { minRole, type RequestUser, type TokenContext } from '../../common/user.types';
 import { UsersService } from '../users/users.service';
 import { SettingsService } from '../settings/settings.service';
+import { ServerMetaService } from '../server-meta/server-meta.service';
 import { SESSION_MAX_AGE_MS, SESSION_SLIDING_UPDATE_INTERVAL_MS } from './auth.constants';
 
 type SetupInput = z.infer<typeof SetupRequest>;
@@ -50,6 +51,7 @@ export class AuthService implements OnApplicationBootstrap {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly usersService: UsersService,
     private readonly settingsService: SettingsService,
+    private readonly serverMetaService: ServerMetaService,
   ) {}
 
   /**
@@ -299,8 +301,15 @@ export class AuthService implements OnApplicationBootstrap {
       role: m.role as Me['memberships'][number]['role'],
       characterId: m.characterId,
     }));
+    // Issue #723: the install/data-generation identity rides on every /me so the
+    // PWA can namespace (and invalidate) its SW runtime cache. Fetched in PARALLEL
+    // with nothing else here (the user + memberships reads above are already done),
+    // and /me is rare + the row is a single primary-key lookup, so the extra query
+    // is negligible. Always reflects the LIVE DB, which is what we want right after
+    // a restore + reopen.
+    const instance = await this.serverMetaService.getInstance();
     if (!tokenContext) {
-      return { user, memberships };
+      return { user, memberships, instance };
     }
 
     if (tokenContext.campaignId !== null) {
@@ -311,6 +320,7 @@ export class AuthService implements OnApplicationBootstrap {
     return {
       user,
       memberships,
+      instance,
       token: {
         tokenId: tokenContext.tokenId,
         name: tokenContext.name,

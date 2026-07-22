@@ -1279,6 +1279,27 @@ function migrateCampaignMembersTableForUserFk(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for issue #723 (PWA restore safety): the `server_meta` table didn't
+ * exist before install/data-generation identity was tracked. The table itself is
+ * a single-row singleton (key='singleton') carrying a per-install UUID and a
+ * monotonic `data_generation` bumped on every whole-server restore — see
+ * ServerMetaService. CREATE TABLE IF NOT EXISTS is fully idempotent, and a fresh
+ * DB never hits this path because BOOTSTRAP_SQL already declares the table. Runs
+ * with foreign_keys OFF (no FK constraints here regardless), same as the other
+ * new-table migrations above (e.g. 0040 ai_provider_config).
+ */
+function migrateServerMetaTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS server_meta (
+      key TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL,
+      data_generation INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1341,6 +1362,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0048_dice_rolls_terms', run: migrateDiceRollsTableForTerms },
   { name: '0049_campaigns_ics_token_expires_at', run: migrateCampaignsTableForIcsTokenExpiresAt },
   { name: '0050_rule_entries_licensing', run: migrateRuleEntriesTableForLicensing },
+  { name: '0051_server_meta', run: migrateServerMetaTable },
 ];
 
 /**
