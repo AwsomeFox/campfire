@@ -11,6 +11,7 @@ import { RouteErrorBoundary } from './RouteErrorBoundary';
 import { Skeleton } from '../components/ui';
 import { SetupPage } from '../features/auth/SetupPage';
 import { LoginPage } from '../features/auth/LoginPage';
+import { OidcRecoveryPage } from '../features/auth/OidcRecoveryPage';
 import { SignupPage } from '../features/auth/SignupPage';
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage';
 import { JoinPage } from '../features/auth/JoinPage';
@@ -46,6 +47,10 @@ export const router = createBrowserRouter([
   {
     path: '/login',
     element: page(<LoginPage />),
+  },
+  {
+    path: '/login/sso-error',
+    element: page(<OidcRecoveryPage />),
   },
   {
     path: '/signup',
