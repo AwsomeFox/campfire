@@ -31,6 +31,7 @@ import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials } from './avatar';
 import { GameIcon } from '../../components/GameIcon';
+import { entityTargetProps } from '../../lib/entityLinks';
 import {
   ABILITY_KEYS,
   type Ability,
@@ -167,7 +168,7 @@ export default function CharacterPage() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
       <div>
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/party`)}>
           ← Back

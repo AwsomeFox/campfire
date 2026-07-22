@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import type { MentionTarget } from '@campfire/schema';
-import { useMentions, mentionRoute } from '../app/MentionsContext';
+import { useMentions } from '../app/MentionsContext';
+import { mentionTargetHref } from '../lib/entityLinks';
 
 /** Escape a string for safe inclusion in a RegExp. */
 function escapeRegExp(s: string): string {
@@ -65,7 +66,7 @@ function useAutoLink(
         if (!target) continue;
         if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
         const a = document.createElement('a');
-        a.setAttribute('href', `/c/${campaignId}/${mentionRoute[target.type]}/${target.id}`);
+        a.setAttribute('href', mentionTargetHref(campaignId, target));
         a.setAttribute('data-mention', `${target.type}:${target.id}`);
         a.className = 'cf-mention';
         a.textContent = m[0];

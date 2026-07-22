@@ -20,6 +20,7 @@ import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from './EntityPicker';
 import { GameIcon } from '../../components/GameIcon';
 import { ENTITY_ICON, NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
+import { noteTargetHref, entityTargetProps } from '../../lib/entityLinks';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 
@@ -40,17 +41,6 @@ const VIS_CYCLE: Record<'private' | 'dm_shared' | 'party_shared', Note['visibili
   private: 'dm_shared',
   dm_shared: 'party_shared',
   party_shared: 'private',
-};
-
-const entityRoute: Record<EntityTypeValue, string | null> = {
-  quest: 'quests',
-  npc: 'npcs',
-  faction: 'factions',
-  location: 'locations',
-  character: 'characters',
-  session: 'sessions',
-  encounter: 'encounters',
-  campaign: null, // links to campaign dashboard
 };
 
 const entityIcon: Record<EntityTypeValue, string> = {
@@ -459,12 +449,7 @@ function NoteCard({
   onDelete?: () => void;
 }) {
   const meta = visMeta[note.visibility];
-  const anchorPath = note.entityType ? entityRoute[note.entityType] : null;
-  const anchorHref = note.entityType
-    ? anchorPath
-      ? `/c/${campaignId}/${anchorPath}/${note.entityId}`
-      : `/c/${campaignId}`
-    : null;
+  const anchorHref = noteTargetHref(campaignId, note);
 
   const isWhisper = note.visibility === 'whisper';
   // Whisper indicator, from the reader's point of view: the author sees who it went to,
@@ -479,7 +464,7 @@ function NoteCard({
     : '';
 
   return (
-    <div className="cf-card p-4 space-y-2">
+    <div className="cf-card p-4 space-y-2" {...entityTargetProps('note', note.id)}>
       <Markdown className="text-slate-100">{note.body}</Markdown>
       <div className="flex items-center gap-2 flex-wrap">
         {isWhisper ? (
@@ -497,7 +482,7 @@ function NoteCard({
           </>
         )}
         <div className="ml-auto flex items-center gap-2">
-          {note.entityType && anchorHref && (
+          {note.entityType && (
             <Link to={anchorHref} className="inline-flex items-center gap-1 text-[11px] text-amber-400 hover:underline">
               <GameIcon slug={entityIcon[note.entityType]} size={12} /> {entityLabel(note)}
             </Link>

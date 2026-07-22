@@ -32,6 +32,7 @@ import type {
   TokenSize,
 } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
+import { entityTargetProps } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
@@ -763,7 +764,7 @@ export default function RunSessionPage() {
   const currentCombatantId = encounter.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
 
   return (
-    <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+    <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
       <div>
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/encounters`)}>
           ← Back

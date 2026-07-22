@@ -12,6 +12,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { entityTargetProps } from '../../lib/entityLinks';
 import { IconPicker } from '../../components/IconPicker';
 import { Markdown } from '../../components/Markdown';
 import { getIcon } from '../../lib/icons';
@@ -388,7 +389,7 @@ function ItemRow({
   const hasOverride = !!(item.iconSlug && item.iconSlug.trim());
 
   return (
-    <li className="py-2 flex flex-wrap items-start gap-x-3 gap-y-2">
+    <li className="py-2 flex flex-wrap items-start gap-x-3 gap-y-2" {...entityTargetProps('item', item.id)}>
       {editable ? (
         <button
           type="button"

@@ -22,6 +22,7 @@ import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
 import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea, DmPanel } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { entityTargetProps } from '../../lib/entityLinks';
 
 interface EventDraft {
   title: string;
@@ -300,7 +301,7 @@ export default function TimelinePage() {
       ) : (
         <ol style={{ display: 'flex', flexDirection: 'column', gap: 10, listStyle: 'none', margin: 0, padding: 0 }}>
           {events.map((e) => (
-            <li key={e.id} className="card elev-sm">
+            <li key={e.id} className="card elev-sm" {...entityTargetProps('timeline', e.id)}>
               {editingId === e.id ? (
                 <div>
                   <EventForm draft={editDraft} setDraft={setEditDraft} />
