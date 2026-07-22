@@ -14,6 +14,7 @@ import { UsersCard } from './UsersCard';
 import { ResetRequestsCard } from './ResetRequestsCard';
 import { SettingsCard } from './SettingsCard';
 import { GameIcon } from '../../components/GameIcon';
+import { MembershipIntegrityCard } from './MembershipIntegrityCard';
 
 function AdminUsers() {
   const [users, setUsers] = useState<User[] | null>(null);
@@ -68,6 +69,7 @@ function AdminUsers() {
       <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="person" size={20} /> Users</h1>
       {error && <ErrorNote message={error} onRetry={load} />}
       <UsersCard users={users ?? []} onChange={load} />
+      <MembershipIntegrityCard users={users ?? []} />
       <ResetRequestsCard />
       <SettingsCard settings={settings} onChange={load} />
     </div>

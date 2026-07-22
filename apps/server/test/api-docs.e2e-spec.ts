@@ -75,6 +75,20 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
     });
   });
 
+  it('documents membership integrity diagnostics and recovery (#849)', async () => {
+    const res = await request(app.getHttpServer()).get('/api/openapi.json');
+    const diagnostics = res.body.paths?.['/api/v1/admin/membership-integrity']?.get;
+    const recovery = res.body.paths?.['/api/v1/admin/membership-integrity/repair-dm']?.post;
+    expect(diagnostics?.description).toContain('No campaign content or DM-secret fields');
+    expect(recovery?.responses).toEqual(expect.objectContaining({ '201': expect.any(Object), '409': expect.any(Object) }));
+
+    const requestSchema = recovery?.requestBody?.content?.['application/json']?.schema as { $ref?: string } | undefined;
+    const schemaName = requestSchema?.$ref?.split('/').pop();
+    expect(res.body.components?.schemas?.[schemaName!]?.properties).toEqual(
+      expect.objectContaining({ campaignId: expect.any(Object), userId: expect.any(Object) }),
+    );
+  });
+
   it('documents the strict write-only AI provider draft test contract (issue #852)', async () => {
     const res = await request(app.getHttpServer()).get('/api/openapi.json');
     for (const path of [
