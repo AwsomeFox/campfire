@@ -13,6 +13,16 @@ export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 const dbLog = new Logger('Database');
 
 /**
+ * The version of THIS running binary, single-sourced from apps/server/package.json (the same
+ * source /healthz and /readyz report — see health.controller.ts). Recorded alongside the
+ * migration log in `__db_meta` (issue #726) so a subsequently booted OLDER binary can detect
+ * that the DB was last touched by a newer app version and refuse to start against a schema it
+ * does not understand, rather than silently writing into it.
+ */
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const APP_VERSION: string = require('../../package.json').version;
+
+/**
  * Startup diagnostic (issue #235): run `PRAGMA foreign_key_check` once enforcement is on
  * and log a warning for any pre-existing referential violation. This is a READ-ONLY probe —
  * it never mutates data (an automatic "repair" that silently deleted dangling rows could
@@ -1302,6 +1312,104 @@ function ensureMigrationsTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Create the single-row metadata table if absent (issue #726). `__db_meta` carries
+ * the app version that last booted (and therefore last migrated) this database, so
+ * a subsequently booted OLDER binary can detect it is running against a schema
+ * touched by a newer app version and refuse to start — rather than silently writing
+ * into a DB whose shape it does not understand. `key` is the singleton PRIMARY KEY
+ * (always 'app_version'); `value` is a semver-ish string (e.g. "0.14.1").
+ */
+function ensureDbMetaTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS __db_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+/**
+ * Read the recorded app version from `__db_meta`, or null when no row exists yet
+ * (a DB created before issue #726, or a genuinely fresh DB on the first boot that
+ * records it). Exported for tests.
+ */
+export function getRecordedAppVersion(sqlite: Database.Database): string | null {
+  ensureDbMetaTable(sqlite);
+  const row = sqlite
+    .prepare("SELECT value FROM __db_meta WHERE key = 'app_version'")
+    .get() as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+/**
+ * Compare two semver-ish strings ("MAJOR.MINOR.PATCH", optional pre-release).
+ * Returns a negative number when `a` is older than `b`, zero when equal, positive
+ * when `a` is newer. Only the leading numeric triple is compared — a pre-release
+ * suffix on either side is ignored (the project does not gate on pre-release
+ * ordering, and treating e.g. "0.14.1-rc.1" as equal to "0.14.1" is the safe
+ * direction for a downgrade guard). Non-parseable components compare as 0, so a
+ * malformed stored value can never be misread as "newer than" the running binary.
+ * Exported so the test can exercise the ordering directly.
+ */
+export function compareAppVersions(a: string, b: string): number {
+  const parse = (v: string): [number, number, number] => {
+    const parts = v.split('-')[0].split('.');
+    const n = (s: string | undefined): number => {
+      const m = /^\d+/.exec((s ?? '').trim());
+      return m ? Number(m[0]) : 0;
+    };
+    return [n(parts[0]), n(parts[1]), n(parts[2])];
+  };
+  const [ax, ay, az] = parse(a);
+  const [bx, by, bz] = parse(b);
+  if (ax !== bx) return ax - bx;
+  if (ay !== by) return ay - by;
+  return az - bz;
+}
+
+/**
+ * Issue #726: refuse to boot when the database was last migrated by a NEWER app
+ * version than this running binary. Migrations only ever move the schema forward,
+ * so an older binary running against a newer-shaped schema would silently read/
+ * write columns and tables it does not understand — corrupting data or crashing
+ * deep in a service. Throwing here (before BOOTSTRAP_SQL / migrations / any
+ * request handling) keeps the container from joining the load balancer: the
+ * operator's only recourse is to restore the pre-upgrade DB snapshot or boot a
+ * binary >= the recorded version, which the error message spells out. A null
+ * recorded version (pre-#726 DB or genuinely first boot) is treated as compatible.
+ */
+function assertDbVersionCompatible(sqlite: Database.Database): void {
+  const recorded = getRecordedAppVersion(sqlite);
+  if (recorded === null) return;
+  if (compareAppVersions(recorded, APP_VERSION) > 0) {
+    throw new Error(
+      `Database was last migrated by Campfire v${recorded}, which is NEWER than this ` +
+        `running binary (v${APP_VERSION}). Migrations only ever move the schema forward, ` +
+        `so an older binary running against a newer schema is unsupported — it would ` +
+        `silently corrupt data. Either boot Campfire >= v${recorded}, or restore the ` +
+        `pre-upgrade database snapshot (see GET /api/v1/backup / docs/administration/operations).`,
+    );
+  }
+}
+
+/**
+ * Record THIS binary's app version as the one that last migrated the database
+ * (issue #726). Called only after migrations have run successfully so the recorded
+ * version always reflects a schema the binary actually understands — a migration
+ * that throws leaves the previous (older) recorded version intact.
+ */
+function recordAppVersion(sqlite: Database.Database): void {
+  ensureDbMetaTable(sqlite);
+  sqlite
+    .prepare(
+      "INSERT INTO __db_meta (key, value, updated_at) VALUES ('app_version', ?, ?) " +
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+    )
+    .run(APP_VERSION, new Date().toISOString());
+}
+
+/**
  * Apply every not-yet-recorded migration in order, recording each in
  * `__migrations` as it succeeds. Runs BEFORE BOOTSTRAP_SQL (some migrations, e.g.
  * the users 12-step rebuild, must reshape an existing table before the CREATE
@@ -1353,11 +1461,22 @@ export function openDatabase(dataDir: string): {
   const sqlite = new Database(dbFilePath(dataDir));
   sqlite.pragma('journal_mode = WAL');
 
+  // Issue #726: BEFORE migrating, refuse to boot if the DB was last migrated by a
+  // newer binary. The guard runs before BOOTSTRAP_SQL / runMigrations so a downgraded
+  // binary never touches a newer-shaped schema even with an idempotent ADD COLUMN.
+  assertDbVersionCompatible(sqlite);
+
   // Foreign-key enforcement is OFF here (SQLite's default at open) so the ordered
   // migrations below — some of which rebuild a table via the 12-step DROP/CREATE
   // pattern — are never blocked by a constraint mid-rebuild. It is turned ON at the
   // end, after the schema is settled, for all of the app's runtime writes.
   runMigrations(sqlite);
+
+  // Issue #726: AFTER migrations succeed, record THIS binary as the one that last
+  // migrated the DB. Placed here (not inside runMigrations) so a migration that
+  // throws never advances the recorded version — the next boot still sees the older
+  // recorded version, and the guard stays meaningful for a subsequent older binary.
+  recordAppVersion(sqlite);
 
   sqlite.exec(BOOTSTRAP_SQL);
   // BOOTSTRAP_SQL runs AFTER the migrations so a just-rebuilt table (e.g. users) is
