@@ -3,6 +3,8 @@ import { DB_HOLDER, type DbHolder } from '../../src/db/db.module';
 import { createTestApp, closeTestApp, type TestAppContext } from '../test-app';
 import { dm, player } from './fixtures';
 import { CharactersService } from '../../src/modules/characters/characters.service';
+import { InventoryService } from '../../src/modules/inventory/inventory.service';
+import { TimelineService } from '../../src/modules/timeline/timeline.service';
 
 /**
  * Hold each pair of reads until both requests have fetched the real SQLite row.
@@ -34,6 +36,44 @@ function synchronizeCharacterLookupPairs(service: CharactersService, characterId
     await gate.promise;
     return row;
   });
+}
+
+/**
+ * Issue #658: better-sqlite3 is synchronous, so two concurrent HTTP requests never
+ * naturally race at the SQL layer — the first request's SELECT-then-INSERT runs to
+ * completion before the second request's handler starts. To prove the lazy-create
+ * race deterministically we park both callers at the row-existence probe: each
+ * caller's private `readLazyRow` runs first (both observe an empty table), then
+ * both wait on a shared gate. When the second caller arrives the gate releases and
+ * BOTH callers fall through to INSERT against an empty table — exactly the race
+ * that, without `onConflictDoNothing`, throws SQLITE_CONSTRAINT_PRIMARYKEY and
+ * surfaces as an unhandled 500. Mirrors `synchronizeCharacterLookupPairs`.
+ */
+function synchronizeLazyCreateProbe(
+  service: { readLazyRow: (campaignId: number) => Promise<unknown> },
+  campaignId: number,
+) {
+  const original = service.readLazyRow.bind(service);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let arrivals = 0;
+  let armed = true;
+
+  const spy = jest.spyOn(service, 'readLazyRow').mockImplementation(async (id: number) => {
+    const row = await original(id);
+    if (id !== campaignId || !armed) return row;
+    arrivals += 1;
+    if (arrivals === 2) {
+      // Both probes have observed an empty table — release both, then race the INSERTs.
+      armed = false;
+      release();
+    }
+    await gate;
+    return row;
+  });
+  return spy;
 }
 
 /**
@@ -355,5 +395,101 @@ describe('concurrency (real SQLite, atomic writes)', () => {
 
     const finalRow = await request(baseUrl).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
     expect(finalRow.body.gp).toBe(0);
+  });
+
+  /**
+   * Issue #658: a brand-new campaign has no treasury row yet. Two concurrent
+   * first-accesses each pass the `if (!row)` check and race the INSERT — without
+   * `onConflictDoNothing` the loser violates the `campaignId` PRIMARY KEY and
+   * Nest surfaces the raw UNIQUE-constraint throw as an unhandled 500. The fixed
+   * service's INSERT carries `.onConflictDoNothing({ target: campaignId })`: one
+   * caller wins the insert, the other's conflict is silently ignored, and the
+   * loser re-reads the winning row. Both calls return 200 and exactly one row
+   * persists.
+   *
+   * `synchronizeLazyCreateProbe` parks both racers between their read (empty)
+   * and INSERT so the race is deterministic — otherwise better-sqlite3's
+   * synchronous execution serialises the two requests and the bug never triggers.
+   */
+  it('two concurrent treasury first-accesses both succeed and create one row (#658)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Treasury Lazy Create Race' });
+    const campaignId = campaign.body.id;
+
+    const inventory = ctx.app.get(InventoryService);
+    const probeSpy = synchronizeLazyCreateProbe(inventory, campaignId);
+
+    let results: request.Response[];
+    try {
+      results = await Promise.all([
+        request(baseUrl).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm),
+        request(baseUrl).get(`/api/v1/campaigns/${campaignId}/treasury`).set(player),
+      ]);
+    } finally {
+      probeSpy.mockRestore();
+    }
+
+    // No 500 — both callers observe the single zeroed row.
+    expect(results.every((r) => r.status === 200)).toBe(true);
+    for (const r of results) {
+      expect(r.body.campaignId).toBe(campaignId);
+      expect(r.body.gp).toBe(0);
+      expect(r.body.pp).toBe(0);
+    }
+
+    // Exactly one treasury row exists for the campaign (no UNIQUE violation,
+    // no duplicate inserts). The raw handle proves the on-disk state directly.
+    const sqlite = ctx.app.get<DbHolder>(DB_HOLDER).raw;
+    const n = sqlite
+      .prepare('SELECT COUNT(*) AS n FROM party_treasury WHERE campaign_id = ?')
+      .get(campaignId) as { n: number };
+    expect(n.n).toBe(1);
+  });
+
+  /**
+   * Issue #658: the calendar lazy-create has the same read-then-insert shape as
+   * the treasury. Two concurrent first writes to a fresh campaign's calendar
+   * previously raced the INSERT and 500'd on the `campaignId` PRIMARY KEY.
+   * `onConflictDoNothing` lets the loser's insert be ignored; the loser then
+   * UPDATEs the winner's row with its own patch. Both calls return 200 and only
+   * one calendar row is created.
+   */
+  it('two concurrent calendar first-accesses both succeed and create one row (#658)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Calendar Lazy Create Race' });
+    const campaignId = campaign.body.id;
+
+    const timeline = ctx.app.get(TimelineService);
+    const probeSpy = synchronizeLazyCreateProbe(timeline, campaignId);
+
+    let results: request.Response[];
+    try {
+      results = await Promise.all([
+        request(baseUrl)
+          .put(`/api/v1/campaigns/${campaignId}/timeline/calendar`)
+          .set(dm)
+          .send({ currentDate: '1st of Hammer, 1492 DR' }),
+        request(baseUrl)
+          .put(`/api/v1/campaigns/${campaignId}/timeline/calendar`)
+          .set(dm)
+          .send({ currentDate: '2nd of Hammer, 1492 DR' }),
+      ]);
+    } finally {
+      probeSpy.mockRestore();
+    }
+
+    // No 500 — both racers observed a 200 and one of the two writes is the
+    // persisted current date.
+    expect(results.every((r) => r.status === 200)).toBe(true);
+    const dates = results.map((r) => r.body.currentDate).sort();
+    expect(dates).toEqual(['1st of Hammer, 1492 DR', '2nd of Hammer, 1492 DR']);
+
+    // Exactly one calendar row exists; its current date matches one of the racers.
+    // (`current_date` is quoted because it is a SQLite reserved keyword that
+    // otherwise resolves to today's date rather than the column.)
+    const sqlite = ctx.app.get<DbHolder>(DB_HOLDER).raw;
+    const rows = sqlite
+      .prepare('SELECT "current_date" AS currentDate FROM timeline_calendars WHERE campaign_id = ?')
+      .all(campaignId) as Array<{ currentDate: string }>;
+    expect(rows).toHaveLength(1);
+    expect(['1st of Hammer, 1492 DR', '2nd of Hammer, 1492 DR']).toContain(rows[0].currentDate);
   });
 });
