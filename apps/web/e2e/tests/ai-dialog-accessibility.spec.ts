@@ -135,7 +135,7 @@ test.describe('AI mode disclosure accessibility', () => {
     await page.setViewportSize({ width: 360, height: 640 });
     await page.goto(`/c/${campaignId}`);
 
-    const trigger = page.getByRole('button', { name: 'An AI is co-DMing this campaign — what that means' });
+    const trigger = page.getByRole('button', { name: 'An AI is co-DMing this campaign — it only proposes; a human DM approves. What that means' });
     await trigger.focus();
     await page.keyboard.press('Enter');
 
