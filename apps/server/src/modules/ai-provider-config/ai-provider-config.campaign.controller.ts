@@ -33,6 +33,20 @@ export class AiProviderCampaignConfigController {
     return this.configs.getCampaignView(id);
   }
 
+  @Get('effective')
+  @ApiOperation({
+    summary: 'Get the non-secret effective AI provider indicator for a campaign',
+    description:
+      'DM only. Returns which provider is in effect and whether it comes from the server default or a campaign ' +
+      'override (`{ configured, providerType, model, source }`). Carries NO key material — this lets a DM (who ' +
+      'cannot read the admin-only server config) render the effective-provider status line.',
+  })
+  @ApiResponse({ status: 200, description: 'The non-secret effective-provider view.' })
+  async effective(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    return this.configs.getEffectiveView(id);
+  }
+
   @Put()
   @ApiOperation({
     summary: 'Set the per-campaign AI provider override',
