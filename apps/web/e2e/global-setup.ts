@@ -50,6 +50,12 @@ export interface SeedData {
   endedEncounterId: number;
   npcId: number;
   xpRecipients: Record<'active' | 'retired' | 'dead' | 'inactive', { id: number; name: string; xp: number }>;
+  semantic: {
+    campaignId: number;
+    locationId: number;
+    quests: Record<'available' | 'active' | 'completed' | 'failed', { id: number; title: string }>;
+    npcs: Record<'friendly' | 'neutral' | 'hostile' | 'custom', { id: number; name: string }>;
+  };
   navigation: {
     questId: number;
     npcId: number;
@@ -283,6 +289,45 @@ export default async function globalSetup(config: FullConfig) {
     xpRecipients[fixture.status] = { id: character.id, name: fixture.name, xp: fixture.xp };
   }
 
+  // Isolated status/disposition spectrum for issue #875. Keeping this in its own
+  // campaign makes list/dashboard visual snapshots deterministic and gives related
+  // quest cards a single canonical source NPC + location.
+  const semanticCampaign = await okJson(dm, 'post', '/api/v1/campaigns', { name: 'E2E — Semantic Spectrum' });
+  const semanticCampaignId: number = semanticCampaign.id;
+
+  const semanticLocation = await okJson(dm, 'post', `/api/v1/campaigns/${semanticCampaignId}/locations`, {
+    name: 'Semantic Crossroads',
+    kind: 'Test fixture',
+    status: 'explored',
+  });
+  const semanticNpcs = {} as SeedData['semantic']['npcs'];
+  for (const fixture of [
+    { key: 'friendly', name: 'Semantic Friendly NPC', disposition: 'friendly', locationId: semanticLocation.id },
+    { key: 'neutral', name: 'Semantic Neutral NPC', disposition: 'neutral' },
+    { key: 'hostile', name: 'Semantic Hostile NPC', disposition: 'hostile' },
+    // This used to match the list/detail substring heuristic. It must now be neutral.
+    { key: 'custom', name: 'Semantic Trusted Ally NPC', disposition: 'trusted ally' },
+  ] as const) {
+    const { key, ...npcFixture } = fixture;
+    const created = await okJson(dm, 'post', `/api/v1/campaigns/${semanticCampaignId}/npcs`, npcFixture);
+    semanticNpcs[key] = { id: created.id, name: fixture.name };
+  }
+
+  const semanticQuests = {} as SeedData['semantic']['quests'];
+  for (const fixture of [
+    { status: 'available', title: 'Semantic Available Quest' },
+    { status: 'active', title: 'Semantic Active Quest' },
+    { status: 'completed', title: 'Semantic Completed Quest' },
+    { status: 'failed', title: 'Semantic Failed Quest' },
+  ] as const) {
+    const created = await okJson(dm, 'post', `/api/v1/campaigns/${semanticCampaignId}/quests`, {
+      ...fixture,
+      giverNpcId: semanticNpcs.friendly.id,
+      body: `${fixture.title} body`,
+    });
+    semanticQuests[fixture.status] = { id: created.id, title: fixture.title };
+  }
+
   // --- capture a real session storageState per role ----------------------------
   await admin.storageState({ path: resolve(AUTH_DIR, 'admin.json') });
   await dm.storageState({ path: resolve(AUTH_DIR, 'dm.json') });
@@ -300,6 +345,12 @@ export default async function globalSetup(config: FullConfig) {
     endedEncounterId,
     npcId,
     xpRecipients,
+    semantic: {
+      campaignId: semanticCampaignId,
+      locationId: semanticLocation.id,
+      quests: semanticQuests,
+      npcs: semanticNpcs,
+    },
     navigation: {
       questId: navQuest.id,
       npcId: navNpc.id,

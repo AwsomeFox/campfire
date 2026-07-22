@@ -369,7 +369,8 @@ export function levelForXp(xp: number): number {
 }
 
 // ---------- quest ----------
-export const QuestStatus = z.enum(['available', 'active', 'completed', 'failed']);
+export const QUEST_STATUSES = ['available', 'active', 'completed', 'failed'] as const;
+export const QuestStatus = z.enum(QUEST_STATUSES);
 
 export const QuestObjective = z.object({
   id: Id,
@@ -504,6 +505,12 @@ export const StoryArcWithBeats = StoryArc.extend({ beats: z.array(StoryBeatWithB
 export type StoryArcWithBeats = z.infer<typeof StoryArcWithBeats>;
 
 // ---------- npc ----------
+// NPC disposition remains open text so campaigns can use setting-specific values.
+// These are the canonical values the shipped UI gives semantic treatment; every
+// other value is deliberately presented as neutral.
+export const CANONICAL_NPC_DISPOSITIONS = ['friendly', 'neutral', 'hostile'] as const;
+export const CanonicalNpcDisposition = z.enum(CANONICAL_NPC_DISPOSITIONS);
+
 export const Npc = z.object({
   id: Id,
   campaignId: Id,
@@ -3669,6 +3676,7 @@ export type DiceRoll = z.infer<typeof DiceRoll>;
 export type DangerLevel = z.infer<typeof DangerLevel>;
 export type CampaignCloneMode = z.infer<typeof CampaignCloneMode>;
 export type QuestStatus = z.infer<typeof QuestStatus>;
+export type CanonicalNpcDisposition = z.infer<typeof CanonicalNpcDisposition>;
 export type LocationStatus = z.infer<typeof LocationStatus>;
 export type NoteVisibility = z.infer<typeof NoteVisibility>;
 export type NoteKind = z.infer<typeof NoteKind>;
