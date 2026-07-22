@@ -28,6 +28,12 @@ test.describe('empty rule-system navigation', () => {
     await expect(page).toHaveURL(/\?newCampaign=1$/);
     await expect(page.getByRole('heading', { name: 'New campaign' })).toBeVisible();
 
+    await page.getByLabel('Name').fill('Rules navigation success cleanup');
+    await page.getByRole('button', { name: /Next: rule system/ }).click();
+    await page.getByRole('button', { name: 'Create campaign' }).click();
+    await expect(page).toHaveURL(/\/c\/\d+$/);
+    expect(new URL(page.url()).search).toBe('');
+
     await context.close();
   });
 

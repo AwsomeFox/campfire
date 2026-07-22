@@ -383,7 +383,7 @@ export function HomePage() {
     // refresh (issue #103). allSettled so an API hiccup on one refresh still
     // lets us proceed rather than trapping the user on the wizard.
     await Promise.allSettled([refresh(), refreshAuth()]);
-    setWizardOpen(false);
+    closeWizard();
     navigate(`/c/${c.id}`);
   }
 
