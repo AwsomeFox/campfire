@@ -114,6 +114,15 @@ export class OidcService {
     return (await this.getEffectiveConfig()) !== null;
   }
 
+  /** Public login metadata. Deliberately excludes issuer, client, group, and secret configuration. */
+  async getPublicStatus(): Promise<{ enabled: boolean; providerName: string | null }> {
+    const resolved = await this.getEffectiveConfig();
+    return {
+      enabled: resolved !== null,
+      providerName: resolved?.providerName ?? null,
+    };
+  }
+
   /** Clears the cached discovery result so the next login re-discovers against the new config. Call after any config change. */
   private resetDiscoveryCache(): void {
     this.cachedConfig = null;
@@ -125,6 +134,7 @@ export class OidcService {
     const stored = await this.loadStored();
     const resolved = resolveOidcConfig(stored);
     return {
+      providerName: stored.providerName,
       issuer: stored.issuer,
       clientId: stored.clientId,
       redirectUri: stored.redirectUri,
@@ -149,6 +159,7 @@ export class OidcService {
     const stored = await this.loadStored();
     const next: StoredOidcConfig = { ...stored };
     const textFields: (keyof StoredOidcConfig)[] = [
+      'providerName',
       'issuer',
       'clientId',
       'redirectUri',
