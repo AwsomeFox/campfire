@@ -13,29 +13,42 @@
  *  - Advantage/disadvantage submit a real keep/drop expression — "2d20kh1" / "2d20kl1"
  *    (issue #130) — so the server rolls both d20s AND computes the kept total that
  *    everyone in the shared feed sees; the tray just surfaces the same kept die.
+ *
+ * Saved-roll safety (issue #690): naming uses an inline modal (never native
+ * `prompt()`), the 12-preset limit is disclosed before save, duplicates ask
+ * before replacing, deletion offers Undo, and storage failures surface as a
+ * memory-only badge rather than a silently-dropped persist. The pure decision
+ * tree lives in `savedRollsState.ts`; this component owns the side-effectful
+ * bits (dialog markup, real localStorage, Undo bar).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { DiceRoll } from '@campfire/schema';
-import { Btn } from '../../components/ui';
+import { Btn, TextInput } from '../../components/ui';
+import { useDialog } from '../../components/useDialog';
+import { useAnnounce } from '../../components/Announcer';
 import { RolledDice } from './RolledDice';
+import {
+  MAX_PRESETS,
+  applySave,
+  classifySave,
+  isDuplicate,
+  markMemoryOnly,
+  normalizePresets,
+  removePreset,
+  type AdvMode,
+  type Pool,
+  type SavedPreset,
+} from './savedRollsState';
 
 // Standard polyhedral faces the server accepts (see apps/server/src/common/dice.ts).
 const DICE_FACES = [4, 6, 8, 10, 12, 20, 100] as const;
 const MAX_COUNT = 20; // server's per-group cap
 const MAX_MOD = 99; // tray-side clamp; server allows up to 999 via the advanced box
 
-type AdvMode = 'flat' | 'adv' | 'dis';
-
-/** sides -> count, e.g. { 6: 2, 8: 1 } === "2d6 + 1d8" */
-type Pool = Record<number, number>;
-
-interface SavedPreset {
-  label: string;
-  pool: Pool;
-  modifier: number;
-  advMode: AdvMode;
-}
+// Undo window for a deleted preset (issue #690). The preset is staged for this
+// long before the delete is considered committed; Undo restores it.
+const DELETE_UNDO_MS = 7000;
 
 interface DiceTrayProps {
   /** Submit one built expression; returns the persisted roll (or null on failure). */
@@ -94,15 +107,29 @@ function loadPresets(campaignId: number): SavedPreset[] {
   try {
     const raw = localStorage.getItem(storageKey(campaignId));
     if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as SavedPreset[]) : [];
+    return normalizePresets(JSON.parse(raw));
   } catch {
     return [];
   }
 }
 
+/** Modal-phase state machine for the save flow (issue #690). */
+type SavePhase =
+  | { kind: 'closed' }
+  | { kind: 'naming' }
+  | { kind: 'confirm-duplicate'; label: string }
+  | { kind: 'limit' };
+
+/** A preset staged for deletion, restorable until the Undo window elapses. */
+interface PendingDelete {
+  preset: SavedPreset;
+  /** Snapshot of the full list BEFORE the removal, so Undo restores order too. */
+  previousList: SavedPreset[];
+}
+
 export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }: DiceTrayProps) {
   const { t } = useTranslation();
+  const announce = useAnnounce();
   const [pool, setPool] = useState<Pool>({});
   const [modifier, setModifier] = useState(0);
   const [advMode, setAdvMode] = useState<AdvMode>('flat');
@@ -113,9 +140,32 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
     null,
   );
 
+  // --- Save-flow modal state (issue #690) ---------------------------------
+  const [savePhase, setSavePhase] = useState<SavePhase>({ kind: 'closed' });
+  const [draftLabel, setDraftLabel] = useState('');
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+
+  // --- Deletion Undo state ------------------------------------------------
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // --- Storage-failure notice (private mode / quota) ----------------------
+  // `storageBlocked` is a sticky flag (true once a write has failed) used to
+  // badge in-memory presets. `storageNotice` is the one-shot modal: shown once
+  // right after a failed save, then dismissed so it doesn't nag on every render.
+  const [storageBlocked, setStorageBlocked] = useState(false);
+  const [storageNotice, setStorageNotice] = useState(false);
+
   useEffect(() => {
     setSavedPresets(loadPresets(campaignId));
   }, [campaignId]);
+
+  // Cancel any pending delete timer on unmount so it never fires into a stale closure.
+  useEffect(() => {
+    return () => {
+      if (deleteTimerRef.current != null) clearTimeout(deleteTimerRef.current);
+    };
+  }, []);
 
   const entries = poolEntries(pool);
   const isLoneD20 = entries.length === 1 && entries[0][0] === 20 && entries[0][1] === 1;
@@ -172,32 +222,124 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
     setAdvMode(p.advMode ?? 'flat');
   }, []);
 
+  /**
+   * Persist the next preset list to localStorage and update React state. Returns
+   * true if the write landed, false if storage was unavailable (private mode /
+   * quota) — in which case the presets stay in-memory only and are badged
+   * accordingly so a "saved" roll is never presented as persisted (issue #690).
+   */
   const persistPresets = useCallback(
-    (next: SavedPreset[]) => {
-      setSavedPresets(next);
+    (next: SavedPreset[]): boolean => {
+      let ok = true;
       try {
         localStorage.setItem(storageKey(campaignId), JSON.stringify(next));
+        // A successful write clears the sticky memory-only badge — storage is
+        // healthy again (e.g. the user left private mode).
+        setStorageBlocked(false);
       } catch {
-        /* localStorage unavailable (private mode / quota) — presets stay in-memory */
+        // localStorage unavailable (private mode / quota) — presets stay in-memory.
+        // Mark every preset memory-only so the badge distinguishes them from disk.
+        ok = false;
+        setStorageBlocked(true);
+        next = markMemoryOnly(next);
       }
+      setSavedPresets(next);
+      return ok;
     },
     [campaignId],
   );
 
-  const saveCurrentPreset = useCallback(() => {
-    if (exprs.length === 0) return;
-    const label = window.prompt(t('dice.namePrompt'))?.trim();
-    if (!label) return;
-    const preset: SavedPreset = { label, pool: { ...pool }, modifier, advMode };
-    persistPresets([...savedPresets.filter((p) => p.label !== label), preset].slice(-12));
-  }, [exprs.length, pool, modifier, advMode, savedPresets, persistPresets]);
+  // --- Commit a save (shared by the naming + duplicate-confirm paths) -----
+  const commitSave = useCallback(
+    (label: string) => {
+      const preset: SavedPreset = {
+        label,
+        pool: { ...pool },
+        modifier,
+        advMode,
+        persisted: true,
+      };
+      const decision = classifySave(savedPresets, label);
+      // Reaching the commit with an at-limit list + a NEW name would silently
+      // evict — block instead (the limit dialog already told the user to free a
+      // slot). Only a duplicate-replace (handled by applySave) reaches the write.
+      if (decision.kind === 'at-limit' && !isDuplicate(savedPresets, label)) {
+        setSavePhase({ kind: 'limit' });
+        return;
+      }
+      const next = applySave(savedPresets, preset);
+      const stored = persistPresets(next);
+      setSavePhase({ kind: 'closed' });
+      setDraftLabel('');
+      if (stored) {
+        announce(t('dice.savedAnnounce', { label }));
+      } else {
+        // Surface the memory-only state ONCE: the preset is usable for the
+        // session but will not survive reload. The sticky `storageBlocked` flag
+        // keeps the in-list badge accurate without re-popping this modal.
+        setStorageNotice(true);
+      }
+    },
+    [pool, modifier, advMode, savedPresets, persistPresets, announce, t],
+  );
 
+  // --- Open the naming modal ---------------------------------------------
+  const openSave = useCallback(() => {
+    if (exprs.length === 0) return;
+    setDraftLabel('');
+    setSavePhase({ kind: 'naming' });
+  }, [exprs.length]);
+
+  // Confirm from the naming modal: classify and route.
+  const submitName = useCallback(() => {
+    const label = draftLabel.trim();
+    if (!label) return;
+    const decision = classifySave(savedPresets, label);
+    if (decision.kind === 'duplicate') {
+      // Ask before replacing — no silent overwrite (issue #690).
+      setSavePhase({ kind: 'confirm-duplicate', label });
+      return;
+    }
+    if (decision.kind === 'at-limit') {
+      // Disclose the limit before any eviction.
+      setSavePhase({ kind: 'limit' });
+      return;
+    }
+    commitSave(label);
+  }, [draftLabel, savedPresets, commitSave]);
+
+  // --- Deletion with Undo -------------------------------------------------
   const deletePreset = useCallback(
     (label: string) => {
-      persistPresets(savedPresets.filter((p) => p.label !== label));
+      const target = savedPresets.find((p) => p.label.toLowerCase() === label.toLowerCase());
+      if (!target) return;
+      // Stage the removal: snapshot the current list so Undo restores order, then
+      // apply a removable list to memory/disk. The delete is NOT permanent until
+      // the Undo window elapses.
+      const previousList = savedPresets;
+      const next = removePreset(savedPresets, label);
+      persistPresets(next);
+      setPendingDelete({ preset: target, previousList });
+      if (deleteTimerRef.current != null) clearTimeout(deleteTimerRef.current);
+      deleteTimerRef.current = setTimeout(() => {
+        setPendingDelete(null);
+        deleteTimerRef.current = null;
+      }, DELETE_UNDO_MS);
     },
     [savedPresets, persistPresets],
   );
+
+  const undoDelete = useCallback(async () => {
+    if (!pendingDelete) return;
+    if (deleteTimerRef.current != null) {
+      clearTimeout(deleteTimerRef.current);
+      deleteTimerRef.current = null;
+    }
+    // Restore the full original snapshot (preserves slot order + persisted flag).
+    persistPresets(pendingDelete.previousList);
+    setPendingDelete(null);
+    announce(t('dice.savedAnnounce', { label: pendingDelete.preset.label }));
+  }, [pendingDelete, persistPresets, announce, t]);
 
   const doRoll = useCallback(async () => {
     const toSubmit = buildExprs(pool, modifier, advMode);
@@ -224,6 +366,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
   }, [pool, modifier, advMode, onSubmitExpr]);
 
   const dieBtnSize = compact ? 40 : 48;
+  const nameValid = draftLabel.trim().length > 0;
 
   return (
     <div className="space-y-2.5">
@@ -414,7 +557,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
       </div>
 
       {/* Presets */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
         {STATIC_PRESETS.map((p) => (
           <button
             key={p.labelKey}
@@ -428,7 +571,6 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
         ))}
         {savedPresets.map((p) => (
           <span
-            key={p.label}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -443,6 +585,14 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
               style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11.5, padding: '6px 4px 6px 10px' }}
             >
               {p.label}
+              {!p.persisted && (
+                <span
+                  title={t('dice.memoryOnlyBadge')}
+                  style={{ marginLeft: 6, fontSize: 9.5, opacity: 0.7, fontStyle: 'italic' }}
+                >
+                  {t('dice.memoryOnlyBadge')}
+                </span>
+              )}
             </button>
             <button
               type="button"
@@ -458,13 +608,290 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
         {exprs.length > 0 && (
           <button
             type="button"
-            onClick={saveCurrentPreset}
+            onClick={openSave}
             className="text-muted"
             style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11.5, padding: '0 6px', marginLeft: 'auto' }}
           >
             {t('dice.saveRoll')}
           </button>
         )}
+      </div>
+
+      {/* Save-roll naming modal (issue #690 — replaces native prompt()) */}
+      {savePhase.kind === 'naming' && (
+        <div className="dialog-backdrop" onClick={() => setSavePhase({ kind: 'closed' })}>
+          <NamingDialog
+            title={t('dice.saveRollTitle')}
+            nameLabel={t('dice.saveRollNameLabel')}
+            placeholder={t('dice.saveRollNamePlaceholder')}
+            cancelLabel={t('dice.saveRollCancel')}
+            confirmLabel={t('dice.saveRollConfirm')}
+            onCancel={() => setSavePhase({ kind: 'closed' })}
+            onSubmit={submitName}
+            value={draftLabel}
+            onChange={setDraftLabel}
+            valid={nameValid}
+            nameInputRef={nameInputRef}
+            hint={savedPresets.length >= MAX_PRESETS ? t('dice.limitBody', { max: MAX_PRESETS }) : undefined}
+          />
+        </div>
+      )}
+
+      {/* Duplicate-replace confirmation (issue #690 — no silent overwrite) */}
+      {savePhase.kind === 'confirm-duplicate' && (
+        <div className="dialog-backdrop" onClick={() => setSavePhase({ kind: 'naming' })}>
+          <ConfirmInline
+            title={t('dice.duplicateTitle')}
+            body={t('dice.duplicateBody', { label: savePhase.label })}
+            confirmLabel={t('dice.duplicateConfirm')}
+            cancelLabel={t('dice.saveRollCancel')}
+            danger={false}
+            onCancel={() => setSavePhase({ kind: 'naming' })}
+            onConfirm={() => commitSave(savePhase.label)}
+          />
+        </div>
+      )}
+
+      {/* 12-preset limit disclosure (issue #690 — no silent eviction) */}
+      {savePhase.kind === 'limit' && (
+        <div className="dialog-backdrop" onClick={() => setSavePhase({ kind: 'closed' })}>
+          <ConfirmInline
+            title={t('dice.limitTitle')}
+            body={t('dice.limitBody', { max: MAX_PRESETS })}
+            confirmLabel={t('dice.limitConfirm')}
+            cancelLabel={t('dice.saveRollCancel')}
+            danger={false}
+            cancelHidden
+            onCancel={() => setSavePhase({ kind: 'closed' })}
+            onConfirm={() => setSavePhase({ kind: 'closed' })}
+          />
+        </div>
+      )}
+
+      {/* Storage-failure notice (private mode / quota — issue #690).
+          One-shot: shown once right after a save that couldn't persist, then
+          dismissed. The sticky `storageBlocked` flag keeps the per-preset
+          memory-only badge accurate without re-popping this modal. */}
+      {storageNotice && savePhase.kind === 'closed' && !pendingDelete && (
+        <div className="dialog-backdrop" onClick={() => setStorageNotice(false)}>
+          <ConfirmInline
+            title={t('dice.memoryOnlyTitle')}
+            body={t('dice.memoryOnlyBody')}
+            confirmLabel={t('dice.memoryOnlyConfirm')}
+            cancelLabel={t('dice.saveRollCancel')}
+            danger={false}
+            cancelHidden
+            onCancel={() => setStorageNotice(false)}
+            onConfirm={() => setStorageNotice(false)}
+          />
+        </div>
+      )}
+
+      {/* Deletion Undo (issue #690 — recoverable, not immediate) */}
+      {pendingDelete && (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          style={{
+            position: 'fixed',
+            left: '50%',
+            bottom: 24,
+            transform: 'translateX(-50%)',
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+            maxWidth: 'calc(100vw - 32px)',
+            padding: '10px 12px 10px 16px',
+            borderRadius: 'var(--radius-md, 10px)',
+            background: 'var(--color-neutral-800, #1c1c22)',
+            color: 'var(--color-neutral-100, #f2f2f5)',
+            border: '1px solid var(--color-neutral-700, #333)',
+            boxShadow: '0 8px 28px rgba(0,0,0,0.4)',
+            fontSize: 13,
+          }}
+        >
+          <span aria-hidden>{t('dice.deleteUndo', { label: pendingDelete.preset.label })}</span>
+          <button
+            type="button"
+            style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
+            className="cf-btn cf-btn-ghost"
+            onClick={() => void undoDelete()}
+          >
+            {t('dice.undo')}
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => {
+              if (deleteTimerRef.current != null) {
+                clearTimeout(deleteTimerRef.current);
+                deleteTimerRef.current = null;
+              }
+              setPendingDelete(null);
+            }}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--color-neutral-400, #999)',
+              cursor: 'pointer',
+              fontSize: 16,
+              lineHeight: 1,
+              padding: '2px 4px',
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Naming modal — the `.dialog` / `.dialog-backdrop` pattern (see nocturne.css)
+ * with accessible focus management via `useDialog`. Replaces the native
+ * `prompt()` for naming a saved roll (issue #690).
+ */
+function NamingDialog({
+  title,
+  nameLabel,
+  placeholder,
+  cancelLabel,
+  confirmLabel,
+  onCancel,
+  onSubmit,
+  value,
+  onChange,
+  valid,
+  nameInputRef,
+  hint,
+}: {
+  title: string;
+  nameLabel: string;
+  placeholder: string;
+  cancelLabel: string;
+  confirmLabel: string;
+  onCancel: () => void;
+  onSubmit: () => void;
+  value: string;
+  onChange: (v: string) => void;
+  valid: boolean;
+  nameInputRef: React.RefObject<HTMLInputElement | null>;
+  hint?: string;
+}) {
+  const dialogRef = useDialog<HTMLDivElement>({ onClose: onCancel, initialFocusRef: nameInputRef });
+  const titleId = useRef(`dice-save-title-${Math.random().toString(36).slice(2)}`).current;
+  // TextInput is a forwardRef<HTMLInputElement>; the input ref is shared with
+  // useDialog's initial-focus target. A callback ref bridges the (nullable)
+  // MutableRefObject the dialog expects with the (non-null) RefObject the
+  // forwardRef component is typed for.
+  const setInputRef = useCallback((node: HTMLInputElement | null) => {
+    (nameInputRef as React.MutableRefObject<HTMLInputElement | null>).current = node;
+  }, [nameInputRef]);
+
+  function onKey(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (valid) onSubmit();
+    }
+  }
+
+  return (
+    <div
+      ref={dialogRef}
+      className="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <p className="dialog-title" id={titleId}>
+        {title}
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <label style={{ fontSize: 12, opacity: 0.7 }} htmlFor="dice-save-name">
+          {nameLabel}
+        </label>
+        <TextInput
+          id="dice-save-name"
+          ref={setInputRef}
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKey}
+          autoComplete="off"
+          maxLength={40}
+          style={{ width: '100%' }}
+        />
+        {hint && (
+          <p role="note" style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>
+            {hint}
+          </p>
+        )}
+      </div>
+      <div className="dialog-actions">
+        <Btn ghost onClick={onCancel}>
+          {cancelLabel}
+        </Btn>
+        <Btn onClick={onSubmit} disabled={!valid}>
+          {confirmLabel}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Inline confirm notice for the duplicate / limit / memory-only flows. Same
+ * accessible `.dialog` pattern as ConfirmDialog but rendered inline here so the
+ * save modal's local state machine owns open/close. `cancelHidden` collapses
+ * the cancel button for pure acknowledgements (limit disclosure, memory notice).
+ */
+function ConfirmInline({
+  title,
+  body,
+  confirmLabel,
+  cancelLabel,
+  danger = false,
+  cancelHidden = false,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  danger?: boolean;
+  cancelHidden?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useDialog<HTMLDivElement>({ onClose: onCancel });
+  const titleId = useRef(`dice-confirm-title-${Math.random().toString(36).slice(2)}`).current;
+  return (
+    <div
+      ref={dialogRef}
+      className="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <p className="dialog-title" id={titleId}>
+        {title}
+      </p>
+      <div className="dialog-body">{body}</div>
+      <div className="dialog-actions">
+        {!cancelHidden && (
+          <Btn ghost onClick={onCancel}>
+            {cancelLabel}
+          </Btn>
+        )}
+        <Btn danger={danger} onClick={onConfirm}>
+          {confirmLabel}
+        </Btn>
       </div>
     </div>
   );
