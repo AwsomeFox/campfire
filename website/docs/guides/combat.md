@@ -16,7 +16,10 @@ initiative modifiers derived from their DEX. The encounter starts in the
 On the run-session screen, **Add combatant** offers three tabs:
 
 - **Compendium** — search the installed rule pack (e.g. a Goblin); its HP and
-  initiative modifier come straight from the statblock.
+  initiative modifier come straight from the statblock. A linked monster also has
+  an expandable **Statblock** on its combat card. Open5e entries include traits,
+  actions, reactions, legendary actions, and structured recharge/attack/save details
+  alongside their complete source descriptions.
 - **Manual** — type a name, HP, and init mod for a homebrew creature.
 - **Party** — add a late-joining character.
 

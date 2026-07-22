@@ -760,25 +760,25 @@ doesn't depend on any campaign having picked it.
 **Tables** (`db/bootstrap.sql.ts`): `rule_packs` (`id, slug UNIQUE, name,
 version, license, sourceUrl, installedAt, entryCount`), `rule_entries` (`id,
 packId, slug, name, type, summary, body, dataJson NULL, createdAt,
-updatedAt`). `type` is one of `spell | monster | item | class | race |
-condition | section | other` (`RuleEntryType` in `@campfire/schema`) — the
-Open5e importer currently populates `spell`/`monster`/`item`/`condition`;
-`class`/`race`/`section`/`other` are reserved for future sources (e.g. a
-class/species import, or homebrew sections) and are additive, not invented
-speculatively into the importer itself.
+updatedAt`). `type` is one of `spell | monster | item | class | race | feat |
+condition | section | other` (`RuleEntryType` in `@campfire/schema`). The
+Open5e importer populates `spell`/`monster`/`item`/`condition`/`class`/
+`race`/`feat`; `section`/`other` remain available to uploaded and other-system
+packs.
 
 ### Endpoints
 
 - `GET /rules/packs` — any authenticated user.
-- `POST /rules/packs/install` — **server admin only**
-  (`@ServerRoles('admin')`, same guard as `/settings` and `/users`).
+- `POST /rules/packs/install` — **server admin or DM of any campaign**.
   Body: `{source: 'open5e', url?, sections?}` (`RulePackInstall`). `url`
   overrides the Open5e API base (used by tests against a local fake server;
   omit it in production to hit `https://api.open5e.com/v2`). `sections`
-  defaults to all four (`spells`, `monsters`, `items`, `conditions`); pass a
-  subset to import only some. Installing when a pack with the same slug
-  (`open5e-srd` — see "One pack per source" below) already exists is a 409;
-  uninstall first to reimport/refresh.
+  defaults to all seven (`spells`, `monsters`, `items`, `conditions`, `classes`,
+  `races`, `feats`); pass a
+  subset to import only some. Installing when the `open5e-srd` pack already
+  exists refreshes matching entries from the requested sections in place and
+  incrementally adds entries that are not already present. Entry ids and manual
+  icon overrides survive the refresh.
 - `DELETE /rules/packs/:id` — server admin only. Deletes the pack and all its
   entries in one transaction; any encounter combatant whose `ruleEntryId`
   pointed at one of those entries (set via `POST /encounters/:id/combatants`
@@ -797,7 +797,7 @@ speculatively into the importer itself.
 ### Open5e importer (`modules/rules/open5e-importer.ts`)
 
 Targets the **v2** API (`https://api.open5e.com/v2/`) — verified against the
-**live** endpoints during development (2026-07-18), not assumed from docs,
+**live** endpoints during development (2026-07-22), not assumed from docs,
 because v1 and v2 disagree in ways that would silently break a mapper written
 against stale documentation:
 
@@ -812,6 +812,14 @@ against stale documentation:
   `category.name`/`rarity.name`. The mapper reads `.name` with `?? ''`
   fallbacks throughout, since Open5e's community-maintained data isn't
   perfectly uniform entry-to-entry.
+- Creature passives arrive in v2 as `traits[]`. Regular actions, reactions and
+  legendary actions all arrive in one `actions[]` collection, distinguished by
+  `action_type`; attack details are nested in `attacks[]`, and recharge/per-day
+  limits in `usage_limits`. The importer partitions those into stable
+  `specialAbilities`, `actions`, `reactions`, and `legendaryActions` arrays in
+  `dataJson`. It adds camelCase attack bonus, damage, save, usage, and legendary
+  cost fields where the source provides (or, for saves, states) them, while
+  retaining the original `desc` and nested source fields unchanged.
 - License isn't a per-entry field; it's read from each row's own
   `document.licenses[].name` (falls back to `'OGL/CC'` if a section returns
   entries with no license info at all — this has not been observed in
@@ -819,7 +827,7 @@ against stale documentation:
 
 **Resilience & caps:**
 
-- Each section fetch has a 10s timeout (`AbortController`); a timeout,
+- Each section fetch has a 30s timeout (`AbortController`); a timeout,
   non-2xx response, or unparseable JSON becomes a `BadRequestException`
   (clean 400) rather than an unhandled fetch error.
   A single malformed row within an otherwise-good page is skipped, not fatal
@@ -1233,16 +1241,12 @@ SQLite file — safe to parallelize later if it becomes a bottleneck.
   block does explicitly).
 - **Open5e importer always installs under one fixed slug (`open5e-srd`)
   regardless of `sections` requested** — see "One pack per source" in the
-  Rule packs section above. Incremental per-section installs/uninstalls
-  (e.g. "add monsters to an existing spells-only pack") are out of scope;
-  uninstall and reinstall with the desired section set instead.
+  Rule packs section above. Installing another section adds its missing entries;
+  reinstalling a previously selected section refreshes its imported content.
+  There is no per-section uninstall; removing the pack removes every section.
 - **`RuleEntryType` includes `class`/`race`/`section`/`other` even though the
-  Open5e importer only ever produces `spell`/`monster`/`item`/`condition`.**
-  These extra variants are additive schema surface for future importers
-  (class/species data, homebrew "section" entries) per the task's own type
-  list — not wired to anything yet, so `GET /rules/search?type=class` simply
-  returns an empty array today, correctly (no entries have that type, no
-  error).
+  Open5e importer produces `spell`/`monster`/`item`/`condition`/`class`/`race`/
+  `feat`.** `section` and `other` remain available to uploads and other systems.
 - **MCP's `update_campaign_status` does not accept a `sessionNumber` field.**
   `campaigns.sessionCount` is a denormalized `COUNT(*)` that
   `SessionsService` recomputes on every session create/delete (see
