@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -34,37 +35,42 @@ export default function MembersPage() {
   const role = roleIn(id);
   const myUserId = me?.user?.id ?? null;
 
+  // Core content is the member roster — it drives the page. The character list
+  // (for linking characters to members) and the audit log are AUXILIARY panels
+  // (issue #697): each loads on its own, so a character or audit outage degrades
+  // only its own card and never blanks the roster or maps to a page-level error.
   const [members, setMembers] = useState<CampaignMember[] | null>(null);
-  const [characters, setCharacters] = useState<Character[]>([]);
-  const [audit, setAudit] = useState<AuditEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const isDm = role === 'dm';
 
+  // Auxiliary panels load independently with panel-scoped error/retry. A failure
+  // here sets only `charactersPanel.error` / `auditPanel.error` — never the
+  // page-level `error` above, and never a not-found state.
+  const charactersPanel = usePanelData<Character[]>(
+    useCallback(() => api.get<Character[]>(`${API}/campaigns/${id}/characters`), [id]),
+    isDm,
+    "Couldn't load characters for linking.",
+  );
+  const auditPanel = usePanelData<AuditEntry[]>(
+    useCallback(() => api.get<AuditEntry[]>(`${API}/campaigns/${id}/audit`), [id]),
+    isDm,
+    "Couldn't load the audit log.",
+  );
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      if (isDm) {
-        const [m, c, a] = await Promise.all([
-          api.get<CampaignMember[]>(`${API}/campaigns/${id}/members`),
-          api.get<Character[]>(`${API}/campaigns/${id}/characters`),
-          api.get<AuditEntry[]>(`${API}/campaigns/${id}/audit`),
-        ]);
-        setMembers(m);
-        setCharacters(c);
-        setAudit(a);
-      } else {
-        const m = await api.get<CampaignMember[]>(`${API}/campaigns/${id}/members`);
-        setMembers(m);
-      }
+      const m = await api.get<CampaignMember[]>(`${API}/campaigns/${id}/members`);
+      setMembers(m);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load members.");
     } finally {
       setLoading(false);
     }
-  }, [id, isDm]);
+  }, [id]);
 
   useEffect(() => {
     if (Number.isFinite(id) && role) void load();
@@ -128,11 +134,24 @@ export default function MembersPage() {
 
       <InviteCard campaignId={id} />
 
-      <MembersCard campaignId={id} members={members ?? []} characters={characters} onChange={load} />
+      <MembersCard
+        campaignId={id}
+        members={members ?? []}
+        characters={charactersPanel.data ?? []}
+        charactersLoading={charactersPanel.loading}
+        charactersError={charactersPanel.error}
+        onRetryCharacters={charactersPanel.retry}
+        onChange={load}
+      />
 
       <Card className="space-y-3">
         <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Audit log</h2>
-        <AuditList entries={audit ?? []} members={members ?? []} />
+        {auditPanel.loading && !auditPanel.data && <Skeleton lines={3} />}
+        {auditPanel.error && !auditPanel.data ? (
+          <ErrorNote message={auditPanel.error} onRetry={auditPanel.retry} />
+        ) : (
+          <AuditList entries={auditPanel.data ?? []} members={members ?? []} />
+        )}
       </Card>
     </div>
   );
@@ -372,11 +391,17 @@ function MembersCard({
   campaignId,
   members,
   characters,
+  charactersLoading,
+  charactersError,
+  onRetryCharacters,
   onChange,
 }: {
   campaignId: number;
   members: CampaignMember[];
   characters: Character[];
+  charactersLoading: boolean;
+  charactersError: string | null;
+  onRetryCharacters: () => void;
   onChange: () => void;
 }) {
   const [showAdd, setShowAdd] = useState(false);
@@ -406,12 +431,18 @@ function MembersCard({
         />
       )}
 
+      {/* Character roster is auxiliary (#697): if it fails to load, the roster still
+          renders; linking is just unavailable until retry succeeds. */}
+      {charactersError && (
+        <ErrorNote message={charactersError} onRetry={onRetryCharacters} />
+      )}
+
       {members.length === 0 ? (
         <EmptyState icon="shield" title="No members yet" hint="Add one above." />
       ) : (
         <div className="flex flex-col">
           {members.map((m) => (
-            <MemberRow key={m.id} campaignId={campaignId} member={m} characters={characters} onChange={onChange} onError={setError} />
+            <MemberRow key={m.id} campaignId={campaignId} member={m} characters={characters} charactersLoading={charactersLoading} onChange={onChange} onError={setError} />
           ))}
         </div>
       )}
@@ -427,12 +458,14 @@ function MemberRow({
   campaignId,
   member,
   characters,
+  charactersLoading,
   onChange,
   onError,
 }: {
   campaignId: number;
   member: CampaignMember;
   characters: Character[];
+  charactersLoading: boolean;
   onChange: () => void;
   onError: (msg: string | null) => void;
 }) {
@@ -523,7 +556,7 @@ function MemberRow({
         className="cf-select !min-h-0 !py-1 text-xs"
         style={{ width: 130 }}
         value={character?.id ?? ''}
-        disabled={savingChar}
+        disabled={savingChar || charactersLoading}
         onChange={(e) => changeCharacter(e.target.value ? Number(e.target.value) : null)}
       >
         <option value="">— unlinked —</option>
