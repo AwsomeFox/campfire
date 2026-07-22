@@ -412,7 +412,10 @@ body {
    way browser zoom does, which is what "Large" means here. AuthProvider sets
    data-text-size on <html> from the logged-in user's preference. */
 :root[data-text-size='large'] body {
-  zoom: 1.15;/* Reading preferences alter semantic reading variables only. They do not
+  zoom: 1.15;
+}
+
+/* Reading preferences alter semantic reading variables only. They do not
    change root/body scale, CSS zoom, controls, VTT canvases, maps, or tokens. */
 :root[data-reading-mode='comfortable'] {
   --type-reading: 1rem;
