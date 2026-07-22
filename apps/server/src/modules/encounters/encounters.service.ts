@@ -2,15 +2,16 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
+import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
+import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, FogState, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
@@ -20,6 +21,7 @@ import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { advanceTurn, applyCombatantHp, computeEncounterDifficulty, crToXp, generateEncounterGroup, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
 import type { CombatantHpState, GeneratorCandidate } from './encounters.logic';
+import { AttachmentsService } from '../attachments/attachments.service';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
 type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
@@ -55,9 +57,7 @@ function clampPercent(value: number): number {
  * fog is a display aid, never a reason to fail a whole encounter read.
  */
 function parseFog(text: string | null): FogState | null {
-  if (text == null) return null;
-  const parsed = FogState.safeParse(fromJsonText<unknown>(text, null));
-  return parsed.success ? parsed.data : null;
+  return parseFogState(text);
 }
 
 /**
@@ -190,6 +190,7 @@ export class EncountersService {
     private readonly events: CampaignEventsService,
     private readonly rolls: RollsService,
     private readonly revisions: RevisionsService,
+    private readonly attachmentsService: AttachmentsService,
   ) {}
 
   /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
@@ -677,9 +678,18 @@ export class EncountersService {
           );
         }
       }
-      // Fog of war (issue #40): withhold the position of any token in an unrevealed region.
+      // Fog of war (issue #40 / #463): withhold the position of any token in an
+      // unrevealed region. Encounter JSON still degrades invalid fog to `null` for
+      // the fog field itself, but token coordinates must fail closed the same way
+      // the map-byte path does — otherwise a corrupt fog row would leak monster
+      // positions while the image stayed fully masked.
       const fog = parseFog(row.fog);
-      if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
+      if (row.fog !== null && fog === null) {
+        const concealAll: FogState = { enabled: true, revealed: [] };
+        list = list.map((c) => redactTokenInFog(c, concealAll));
+      } else if (fog?.enabled) {
+        list = list.map((c) => redactTokenInFog(c, fog));
+      }
     }
     const domain = encounterToDomain(row);
     const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
@@ -834,6 +844,17 @@ export class EncountersService {
     const rowsChanged = (result as unknown as { changes?: number }).changes ?? 0;
     if (rowsChanged === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
+    }
+
+    // If this update activates fog over a map that had previously been revealed as
+    // a handout, restage the raw attachment immediately. The raw-file route also
+    // checks fog dynamically (defense in depth), so even a failure here cannot leak
+    // source pixels; this keeps the attachment metadata/UI consistent as well.
+    const effectiveMapId = input.mapAttachmentId !== undefined ? input.mapAttachmentId : encounterRow.mapAttachmentId;
+    const effectiveFog = input.fog !== undefined ? input.fog : parseFog(encounterRow.fog);
+    if (effectiveMapId != null && fogConcealsPixels(effectiveFog)) {
+      const attachment = await this.attachmentsService.getRowOrThrow(effectiveMapId);
+      if (!attachment.hidden) await this.attachmentsService.setHidden(effectiveMapId, true, user, role);
     }
 
     await this.audit.log({

@@ -44,7 +44,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
-import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
+import { ImageUpload, MapUploadButton, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -1482,7 +1482,10 @@ function BattleMap({
     };
   }, [cancelActiveGesture]);
 
-  const mapImageUrl = encounter.mapAttachmentId != null ? attachmentFileUrl(encounter.mapAttachmentId) : null;
+  // The encounter-scoped route is the VTT secrecy boundary (issue #463): DMs receive
+  // the source, while players receive a server-rendered image containing only revealed
+  // pixels. mapAttachmentId is used only as the presence bit, never as a player image URL.
+  const mapImageUrl = encounter.mapAttachmentId != null ? encounterMapUrl(encounter.id, encounter.updatedAt) : null;
   const placed = encounter.combatants.filter((c) => c.tokenX != null && c.tokenY != null);
   const unplaced = encounter.combatants.filter((c) => c.tokenX == null || c.tokenY == null);
 

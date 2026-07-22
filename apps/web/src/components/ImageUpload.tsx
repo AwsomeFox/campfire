@@ -98,6 +98,16 @@ export function attachmentFileUrl(
   return qs ? `${base}?${qs}` : base;
 }
 
+/**
+ * Role-safe VTT map endpoint (issue #463). Never use attachmentFileUrl for an
+ * encounter canvas: non-DMs must receive the server-rendered fog revision rather
+ * than the underlying attachment. `revision` changes with fog/map updates so an
+ * existing <img> is replaced immediately; the server still sends no-store.
+ */
+export function encounterMapUrl(encounterId: number, revision: string): string {
+  return `${API}/encounters/${encounterId}/map?revision=${encodeURIComponent(revision)}`;
+}
+
 /** Dev-auth headers (mirrors the JSON api client) for the multipart helpers below. */
 function devAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};

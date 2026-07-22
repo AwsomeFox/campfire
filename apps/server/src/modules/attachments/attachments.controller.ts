@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   Delete,
   Get,
@@ -112,7 +113,12 @@ export class CampaignAttachmentsController {
   ) {
     const role = await this.access.requireMember(user, campaignId);
     const all = await this.attachmentsService.listForCampaign(campaignId);
-    return filterHidden(all, role);
+    if (role === 'dm') return all;
+    // A map already revealed as a handout may later be attached to a fogged
+    // encounter. Hide it dynamically as well as honoring row.hidden so legacy or
+    // reused attachments cannot disclose the raw board through this list.
+    const protectedIds = await this.attachmentsService.fogProtectedMapIdsForCampaign(campaignId);
+    return filterHidden(all.filter((attachment) => !protectedIds.has(attachment.id)), role);
   }
 }
 
@@ -127,41 +133,21 @@ export class AttachmentsController {
   /**
    * Streams the file bytes. Requires campaign membership — never a public URL.
    *
-   * Cache policy (issue #498): attachment bytes are immutable for a given id
-   * (write-once, deleted with the row), so responses carry a strong content-hash
-   * `ETag` and a long-lived `Cache-Control: private, max-age=...`. BUT this is a
-   * permission-dependent resource — the same id can be readable by one user and
-   * 403/404 for another (membership removed, hidden toggled, login-as-other-user
-   * in the same browser). A plain immutable cache would serve the previously-fetched
-   * bytes straight from the browser HTTP cache without the membership check ever
-   * running, leaking them across authorization states. Two guards make the cache
-   * honest instead:
-   *
-   *   1. No `immutable` directive. The browser may still reuse a fresh (in-window)
-   *      cached response without revalidation, but without `immutable` it will
-   *      revalidate once the entry is stale (or on reload/force-reload) rather than
-   *      serving it indefinitely — so the membership/hidden check on this handler
-   *      runs at stale boundaries and on any reload. The durable authorization
-   *      guarantee comes from guard (2): the URL itself changes when authorization
-   *      state changes, so the browser cache misses and the request hits the server.
-   *      A matching ETag still short-circuits to 304, so an unchanged multi-MB map
-   *      isn't re-downloaded.
-   *   2. Content-versioned URLs. The web client appends `?v=<versionToken>` (see
-   *      AttachmentsService.versionToken), a deterministic hash over
-   *      `(id | hidden | updatedAt)`. When the authorization state changes (hidden
-   *      toggled, id restored/reused with a new updatedAt) the URL itself changes,
-   *      the browser cache misses, and the request hits the server — where the
-   *      membership/hidden check runs and a now-unauthorized caller gets 403/404
-   *      instead of stale bytes. `Vary: Cookie` is a belt-and-suspenders
-   *      hint so shared/proxy caches key on the session too (browsers mostly ignore
-   *      Vary for the HTTP cache, which is exactly why the versioned URL is the
-   *      real fix).
+   * Attachment bytes are write-once, but authorization is mutable: a handout can
+   * be hidden again or become a fog-protected encounter map (issue #463 / #498).
+   * Responses therefore carry a strong content-hash `ETag` with mandatory
+   * revalidation (`Cache-Control: private, no-cache, must-revalidate`), never a
+   * long-lived immutable grant. A matching authorized `If-None-Match` still
+   * short-circuits to 304 without re-downloading an unchanged multi-MB image.
+   * `Vary: Cookie` is a defensive keying hint for shared/proxy caches; clients
+   * should also append `?v=<versionToken>` so an authorization change yields a
+   * new URL and the browser cache misses.
    *
    * `?size=thumb` serves a downscaled PNG preview for list/dashboard use (see
    * AttachmentsService.resolveFile / thumbnail.ts).
    */
   @Get(':id/file')
-  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Hidden (DM-only) attachments return 404 for non-DM roles, except encounter maps when fog is fully revealed (fog === null). Responses are privately cacheable (strong ETag + long-lived Cache-Control, no `immutable` so revalidation still runs the auth check); a matching If-None-Match returns 304. Clients should append `?v=<versionToken>` (from the attachment row) so an authorization change yields a new URL. `?size=thumb` serves a downscaled PNG preview.' })
+  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses carry a strong ETag but must revalidate authorization and visibility before reuse; a matching authorized If-None-Match returns 304. `?size=thumb` serves a downscaled PNG preview.' })
   @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for the full-size original; `thumb` for a downscaled PNG preview.' })
   @ApiQuery({ name: 'v', required: false, type: String, description: 'Authorization-aware version token (see AttachmentsService.versionToken). Optional but recommended — clients should append it so a content/hidden change produces a new URL.' })
   @ApiResponse({ status: 200, description: 'Raw file bytes, with Content-Type/Content-Disposition/ETag set from the stored attachment.' })
@@ -181,18 +167,18 @@ export class AttachmentsController {
     const row = await this.attachmentsService.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
 
-    // Issue #97 / #523: a hidden (DM-only, unrevealed) attachment must be indistinguishable
+    // Issue #97/#463: a hidden (DM-only, unrevealed) attachment must be indistinguishable
     // from a nonexistent one for non-DM members — otherwise sequential integer ids
     // let a player enumerate & fetch every staged handout. 404 (not 403) so the
     // response leaks nothing about whether the id exists, matching how hidden
     // quests/npcs are treated (#42). The DM reveals it (POST :id/reveal) to share.
-    // Encounter map attachments are gated on role === 'dm' OR fog === null (fully revealed map);
-    // non-DM GET on a hidden encounter map with active fog (fog !== null) returns 404.
-    if (row.hidden && role !== 'dm') {
-      const mapFog = await this.attachmentsService.getEncounterMapFog(id, row.campaignId);
-      if (!mapFog.isMap || mapFog.fog !== null) {
-        throw new NotFoundException(`Attachment ${id} not found`);
-      }
+    if (role !== 'dm') {
+      // There is deliberately NO encounter-map exception here. A player obtains a
+      // role-specific image through GET /encounters/:id/map; direct originals,
+      // thumbnails, conditional requests, and Range probes all fail before bytes or
+      // validators are exposed. The dynamic fog check also protects legacy visible rows.
+      const fogProtected = await this.attachmentsService.isFogProtectedEncounterMap(id, row.campaignId);
+      if (row.hidden || fogProtected) throw new NotFoundException(`Attachment ${id} not found`);
     }
 
     // Issue #84: the DB row can outlive its bytes on disk — an orphaned row from a
@@ -213,7 +199,7 @@ export class AttachmentsController {
     // as a defensive keying hint. The versioned URL (?v=) the client appends is what
     // actually defeats cross-authorization-state cache hits.
     res.set({
-      'Cache-Control': 'private, max-age=31536000',
+      'Cache-Control': 'private, no-cache, must-revalidate',
       Vary: 'Cookie',
       ETag: file.etag,
     });
@@ -270,6 +256,9 @@ export class AttachmentsController {
   async reveal(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.attachmentsService.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    if (await this.attachmentsService.isFogProtectedEncounterMap(id, row.campaignId)) {
+      throw new ConflictException('This attachment is protecting a fogged encounter map — reveal the full board or disable fog first');
+    }
     return this.attachmentsService.setHidden(id, false, user, role);
   }
 

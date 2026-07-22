@@ -77,6 +77,10 @@ export default defineConfig({
             // The last-known identity is persisted separately by lib/swCache.ts
             // so an offline reload can still render the authed UI, clearly marked
             // as stale, without ever confusing a cached body with a live one.
+            //
+            // Attachment bytes and role/fog-specific VTT renders must never enter
+            // the shared offline API cache. A previously revealed map served while
+            // offline after the DM re-hid it would be a secrecy leak (#463).
             urlPattern: ({ url, request }) => {
               if (request.method !== "GET") return false;
               if (!url.pathname.startsWith("/api/")) return false;
@@ -86,6 +90,8 @@ export default defineConfig({
               ) {
                 return false;
               }
+              if (/^\/api\/v1\/attachments\/\d+\/file$/.test(url.pathname)) return false;
+              if (/^\/api\/v1\/encounters\/\d+\/map$/.test(url.pathname)) return false;
               return true;
             },
             handler: "NetworkFirst",

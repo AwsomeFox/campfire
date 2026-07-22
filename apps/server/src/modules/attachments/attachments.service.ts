@@ -24,6 +24,7 @@ import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { persistedFogConcealsPixels } from '../../common/fog';
 import { generatePngThumbnail } from './thumbnail';
 
 /** image/png|jpeg|webp only — matches the multer fileFilter in attachments.controller.ts. */
@@ -240,33 +241,30 @@ export class AttachmentsService {
   }
 
   /**
-   * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
-   * `campaignId` (issue #259). A fogged encounter map stays hidden (DM-only) as a handout
-   * so it never appears raw on the player Handouts card, but the fogged encounter canvas
-   * Returns encounter map fog information for `attachmentId` in `campaignId` (issue #259, #523).
-   * If `attachmentId` is an encounter's battle map, returns `{ isMap: true, fog: string | null }`.
-   * Otherwise returns `{ isMap: false, fog: null }`.
+   * Whether an attachment backs an encounter whose active fog still conceals source
+   * pixels. This is independent of attachment.hidden: a legacy/reused map may already
+   * be a revealed handout, but enabling fog must close every raw-byte shortcut.
    */
-  async getEncounterMapFog(
-    attachmentId: number,
-    campaignId: number,
-  ): Promise<{ isMap: boolean; fog: string | null }> {
-    const [row] = await this.db
+  async isFogProtectedEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
+    const rows = await this.db
       .select({ fog: encounters.fog })
       .from(encounters)
-      .where(and(eq(encounters.mapAttachmentId, attachmentId), eq(encounters.campaignId, campaignId)))
-      .limit(1);
-    if (!row) return { isMap: false, fog: null };
-    return { isMap: true, fog: row.fog };
+      .where(and(eq(encounters.mapAttachmentId, attachmentId), eq(encounters.campaignId, campaignId)));
+    return rows.some((row) => persistedFogConcealsPixels(row.fog));
   }
 
-  /**
-   * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
-   * `campaignId` (issue #259).
-   */
-  async isEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
-    const { isMap } = await this.getEncounterMapFog(attachmentId, campaignId);
-    return isMap;
+  /** Set of raw attachments currently protected by at least one fogged encounter. */
+  async fogProtectedMapIdsForCampaign(campaignId: number): Promise<Set<number>> {
+    const rows = await this.db
+      .select({ mapAttachmentId: encounters.mapAttachmentId, fog: encounters.fog })
+      .from(encounters)
+      .where(eq(encounters.campaignId, campaignId));
+    const ids = new Set<number>();
+    for (const row of rows) {
+      if (row.mapAttachmentId == null) continue;
+      if (persistedFogConcealsPixels(row.fog)) ids.add(row.mapAttachmentId);
+    }
+    return ids;
   }
 
   /**

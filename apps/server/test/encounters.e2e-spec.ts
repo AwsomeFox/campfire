@@ -2346,14 +2346,18 @@ describe('encounters — issue #39: per-encounter battle map + combatant tokens 
     expect(getRes.body.mapAttachmentId).toBe(mapAttachmentId);
   });
 
-  // Issue #259: the battle map stays hidden (DM-only) as a handout — attaching it does NOT
-  // reveal it — but the fogged encounter canvas can still load it (the file route's
-  // encounter-map exception). (Dev-auth `player` resolves to admin/dm, so it always gets
-  // 200 here; the real non-DM-member secrecy is exercised in attachments.e2e-spec.ts.)
-  it('attaching a map keeps it hidden but the encounter canvas can still load it', async () => {
+  // Issue #259/#463: attaching does not reveal a hidden map as a raw handout. The
+  // canvas loads it only through the role-aware encounter endpoint; with fog off,
+  // that endpoint may return the complete image without making its source URL public.
+  it('attaching a map keeps its raw URL hidden while the scoped encounter canvas can load it', async () => {
     const server = ctx.app.getHttpServer();
-    const res = await request(server).get(`/api/v1/attachments/${mapAttachmentId}/file`).set(player);
-    expect(res.status).toBe(200);
+    const raw = await request(server).get(`/api/v1/attachments/${mapAttachmentId}/file`).set(player);
+    expect(raw.status).toBe(404);
+
+    const safe = await request(server).get(`/api/v1/encounters/${encounterId}/map`).set(player);
+    expect(safe.status).toBe(200);
+    expect(safe.headers['x-campfire-map-view']).toBe('fully-revealed');
+    expect(Buffer.compare(safe.body, BATTLE_MAP_PNG)).toBe(0);
   });
 
   it('rejects an attachment id that does not exist in this campaign (400)', async () => {

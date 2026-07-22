@@ -79,6 +79,8 @@ export interface SeedData {
   baseURL: string;
   campaignId: number;
   encounterId: number;
+  /** Hidden source map for the Ambush encounter; fog-protected (#463). */
+  mapAttachmentId: number;
   /** A second encounter that was started and then ended — must render read-only (#368). */
   endedEncounterId: number;
   /** An ended encounter attached to navigation.sessionId for post-encounter hand-off coverage (#663). */
@@ -489,6 +491,30 @@ export default async function globalSetup(config: FullConfig) {
   });
   const encounterId: number = encounter.id;
 
+  // Issue #463 fixture: the encounter uses a hidden source map with active fog.
+  // Browser specs assert the canvas loads the role-safe encounter route and that a
+  // real player session cannot fetch this attachment directly.
+  const mapUpload = await dm.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+    multipart: {
+      kind: 'map',
+      file: {
+        name: 'fog-security-map.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from(
+          '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+            '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+          'hex',
+        ),
+      },
+    },
+  });
+  if (!mapUpload.ok()) throw new Error(`POST map fixture -> ${mapUpload.status()}: ${await mapUpload.text()}`);
+  const mapAttachmentId: number = (await mapUpload.json()).id;
+  const mapPatch = await dm.patch(`/api/v1/encounters/${encounterId}`, {
+    data: { mapAttachmentId, fog: { enabled: true, revealed: [] } },
+  });
+  if (!mapPatch.ok()) throw new Error(`PATCH encounter map -> ${mapPatch.status()}: ${await mapPatch.text()}`);
+
   for (const m of MONSTERS) {
     const c = await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/combatants`, {
       kind: 'monster',
@@ -594,6 +620,7 @@ export default async function globalSetup(config: FullConfig) {
     baseURL,
     campaignId,
     encounterId,
+    mapAttachmentId,
     endedEncounterId,
     linkedEndedEncounterId,
     statblockEntryId,
