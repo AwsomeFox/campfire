@@ -139,8 +139,13 @@ export class NotesController {
   }
 
   @Post(':id/resolve')
-  @ApiOperation({ summary: 'Resolve an inbox item', description: 'dm role required. Optionally link the entity the item became (entityType + entityId, provided together) — surfaced in the resolved history.' })
-  @ApiResponse({ status: 201, description: 'Resolved inbox item.' })
+  @ApiOperation({
+    summary: 'Resolve an inbox item',
+    description:
+      'dm role required. Optionally link the entity the item became (entityType + entityId, provided together) — surfaced in the resolved history. The terminal payload (resolvedNote, entityType, entityId) is idempotent: an identical retry returns the existing result; a different terminal payload conflicts.',
+  })
+  @ApiResponse({ status: 201, description: 'Resolved inbox item, or the existing identical terminal result.' })
+  @ApiResponse({ status: 409, description: 'The inbox item already has a different terminal result.' })
   async resolve(@Param('id', ParseIntPipe) id: number, @Body() body: InboxResolveDto, @CurrentUser() user: RequestUser) {
     const row = await this.notes.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
