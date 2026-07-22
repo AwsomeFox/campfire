@@ -81,7 +81,7 @@ test.describe('ended encounter next steps (issue #663)', () => {
       await page.keyboard.press('Enter');
       await expect(page).toHaveURL(`/c/${campaignId}/sessions?action=new-recap`);
       await expect(page.getByRole('heading', { name: /Add recap/ })).toBeVisible();
-      await expect(page.getByRole('textbox', { name: 'Session title' })).toBeFocused();
+      await expect(page.getByRole('textbox', { name: 'Title' })).toBeFocused();
 
       await page.goBack();
       await expect(page.getByRole('heading', { name: 'Aftermath at the Ember Hearth' })).toBeVisible();

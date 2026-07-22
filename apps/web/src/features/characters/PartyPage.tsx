@@ -5,7 +5,7 @@
  * character (backup PC, familiar, companion) — the API allows it, so the UI no longer
  * silently caps a player at a single owned character (issue #129).
  */
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import type { Character, CampaignMember } from '@campfire/schema';
 import { levelForXp } from '@campfire/schema';
@@ -284,6 +284,7 @@ function AwardXpForm({
   onCancel: () => void;
   onAwarded: () => void;
 }) {
+  const amountInputRef = useRef<HTMLInputElement>(null);
   const [amount, setAmount] = useState('');
   const [includeNonActive, setIncludeNonActive] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(
@@ -291,6 +292,13 @@ function AwardXpForm({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Route-driven hand-offs should land keyboard users directly in the task.
+  // A frame delay wins over route/layout focus restoration after navigation.
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => amountInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   // Polling can refresh XP/status while this form is open. Keep the preview live,
   // drop removed characters, and never retain a newly non-active recipient unless
@@ -348,6 +356,7 @@ function AwardXpForm({
       <form id="party-xp-form" onSubmit={submit} className="space-y-4">
         <div className="w-40">
           <TextInput
+            ref={amountInputRef}
             type="number"
             min={1}
             max={1_000_000}
