@@ -1,10 +1,10 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, characters, combatants, encounters } from '../../db/schema';
+import { auditLog, campaigns, characters, combatants, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
@@ -417,40 +417,86 @@ export class CharactersService {
     return toDomain(row);
   }
 
-  /** DM party award: add `amount` XP to every campaign character (or just `characterIds`). Role gate (dm) enforced at controller. */
+  /**
+   * DM party award. With no explicit ids, only active characters are recipients.
+   * Non-active recipients require both an explicit selection and the
+   * includeNonActive opt-in so an archived career cannot be changed accidentally.
+   *
+   * Target resolution, status validation, XP increments, and the audit snapshot all
+   * run in one synchronous better-sqlite3 transaction. Reading each current XP value
+   * inside that transaction prevents concurrent awards from losing an increment, and
+   * a failed audit insert rolls the character updates back with it.
+   */
   async awardXp(campaignId: number, award: XpAwardInput, user: RequestUser, role: Role): Promise<Character[]> {
-    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
-    let targets = rows;
-    if (award.characterIds) {
-      const wanted = new Set(award.characterIds);
-      targets = rows.filter((r) => wanted.has(r.id));
-      const foundIds = new Set(targets.map((r) => r.id));
-      const missing = award.characterIds.filter((cid) => !foundIds.has(cid));
-      if (missing.length > 0) {
-        throw new BadRequestException(`Characters not in campaign ${campaignId}: ${missing.join(', ')}`);
-      }
-    }
-    if (targets.length === 0) throw new BadRequestException('No characters to award XP to');
-
     const ts = nowIso();
-    const updated: Character[] = [];
-    for (const target of targets) {
-      const [row] = await this.db
-        .update(characters)
-        .set({ xp: Math.max(0, target.xp + award.amount), updatedAt: ts })
-        .where(eq(characters.id, target.id))
-        .returning();
-      updated.push(toDomain(row));
-    }
+    const updated = this.db.transaction((tx) => {
+      if (award.includeNonActive && !award.characterIds) {
+        throw new BadRequestException('includeNonActive requires explicit characterIds');
+      }
+      const roster = tx
+        .select()
+        .from(characters)
+        .where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)))
+        .all();
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'character.xp_award',
-      entityType: 'character',
-      entityId: targets[0].id,
-      campaignId,
-      detail: JSON.stringify({ amount: award.amount, characterIds: targets.map((t) => t.id) }),
+      let targets: typeof roster;
+      if (award.characterIds) {
+        const byId = new Map(roster.map((row) => [row.id, row]));
+        const missing = award.characterIds.filter((id) => !byId.has(id));
+        if (missing.length > 0) {
+          throw new BadRequestException(`Characters not in campaign ${campaignId}: ${missing.join(', ')}`);
+        }
+        // Preserve the caller's explicit order in the response and audit snapshot.
+        targets = award.characterIds.map((id) => byId.get(id)!);
+      } else {
+        targets = roster.filter((row) => row.status === 'active');
+      }
+
+      const nonActive = targets.filter((row) => row.status !== 'active');
+      if (nonActive.length > 0 && !award.includeNonActive) {
+        throw new BadRequestException(
+          `Explicit includeNonActive opt-in required for: ${nonActive.map((row) => `${row.id} (${row.status})`).join(', ')}`,
+        );
+      }
+      if (targets.length === 0) {
+        throw new BadRequestException(
+          award.characterIds ? 'No characters to award XP to' : 'No active characters to award XP to',
+        );
+      }
+
+      const changed = targets.map((target) => {
+        const [row] = tx
+          .update(characters)
+          .set({ xp: sql`${characters.xp} + ${award.amount}`, updatedAt: ts })
+          .where(eq(characters.id, target.id))
+          .returning()
+          .all();
+        return row;
+      });
+
+      tx.insert(auditLog)
+        .values({
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'character.xp_award',
+          entityType: 'character',
+          entityId: targets[0].id,
+          campaignId,
+          detail: JSON.stringify({
+            amount: award.amount,
+            recipients: targets.map((target, index) => ({
+              characterId: target.id,
+              name: target.name,
+              status: target.status,
+              xpBefore: target.xp,
+              xpAfter: changed[index].xp,
+            })),
+          }),
+          createdAt: ts,
+        })
+        .run();
+
+      return changed.map(toDomain);
     });
     return updated;
   }

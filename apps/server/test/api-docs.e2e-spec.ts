@@ -58,6 +58,22 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
     expect(res.body.openapi).toEqual(expect.any(String));
     expect(res.body.info?.title).toBe('Campfire API');
   });
+
+  it('documents exact XP recipients and the explicit non-active opt-in (issue #814)', async () => {
+    const res = await request(app.getHttpServer()).get('/api/openapi.json');
+    const operation = res.body.paths?.['/api/v1/campaigns/{campaignId}/characters/xp']?.post;
+    expect(operation?.description).toContain('active characters only');
+
+    const requestSchema = operation?.requestBody?.content?.['application/json']?.schema as { $ref?: string } | undefined;
+    const schemaName = requestSchema?.$ref?.split('/').pop();
+    expect(schemaName).toBeTruthy();
+    const properties = res.body.components?.schemas?.[schemaName!]?.properties;
+    expect(properties).toHaveProperty('characterIds');
+    expect(properties?.includeNonActive).toMatchObject({
+      type: 'boolean',
+      default: false,
+    });
+  });
 });
 
 describe('api docs exposure: API_DOCS=0 disables the docs (e2e)', () => {

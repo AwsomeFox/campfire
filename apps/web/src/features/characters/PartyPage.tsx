@@ -14,7 +14,7 @@ import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { avatarTone, initials } from './avatar';
-import { StatusTag } from './status';
+import { STATUS_LABEL, StatusTag } from './status';
 
 export default function PartyPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -93,7 +93,14 @@ export default function PartyPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && awarding && <AwardXpForm campaignId={id} onCancel={() => setAwarding(false)} onAwarded={() => { setAwarding(false); void load(); }} />}
+      {isDm && awarding && (
+        <AwardXpForm
+          campaignId={id}
+          characters={characters}
+          onCancel={() => setAwarding(false)}
+          onAwarded={() => { setAwarding(false); void load(); }}
+        />
+      )}
 
       {loading ? (
         <Card>
@@ -241,28 +248,69 @@ function QuickHp({ character, onChange }: { character: Character; onChange: () =
   );
 }
 
-/** DM-only party XP award (issue #14) — one amount, everyone gets it. Per-character awards live on the sheet. */
+/**
+ * DM-only party XP award (#14/#814). Active characters are selected by default;
+ * every recipient is named with lifecycle status and before/after XP. Archived
+ * careers stay disabled until the DM explicitly opts in, then must still be
+ * individually selected.
+ */
 function AwardXpForm({
   campaignId,
+  characters,
   onCancel,
   onAwarded,
 }: {
   campaignId: number;
+  characters: Character[];
   onCancel: () => void;
   onAwarded: () => void;
 }) {
   const [amount, setAmount] = useState('');
+  const [includeNonActive, setIncludeNonActive] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(
+    () => new Set(characters.filter((character) => character.status === 'active').map((character) => character.id)),
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Polling can refresh XP/status while this form is open. Keep the preview live,
+  // drop removed characters, and never retain a newly non-active recipient unless
+  // the explicit opt-in is still enabled. Do not auto-add new roster entries: the
+  // visible selection is the exact request scope the DM will commit.
+  useEffect(() => {
+    const selectable = new Set(
+      characters
+        .filter((character) => includeNonActive || character.status === 'active')
+        .map((character) => character.id),
+    );
+    setSelectedIds((current) => new Set([...current].filter((id) => selectable.has(id))));
+  }, [characters, includeNonActive]);
+
+  const amountNum = Number(amount);
+  const validAmount = Number.isInteger(amountNum) && amountNum >= 1 && amountNum <= 1_000_000;
+  const recipients = characters.filter((character) => selectedIds.has(character.id));
+
+  function selectRecipient(character: Character, selected: boolean) {
+    if (character.status !== 'active' && !includeNonActive) return;
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(character.id);
+      else next.delete(character.id);
+      return next;
+    });
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const amountNum = Number(amount);
-    if (!Number.isInteger(amountNum) || amountNum < 1) return;
+    if (!validAmount || recipients.length === 0) return;
     setSaving(true);
     setError(null);
     try {
-      await api.post(`${API}/campaigns/${campaignId}/characters/xp`, { amount: amountNum });
+      await api.post(`${API}/campaigns/${campaignId}/characters/xp`, {
+        amount: amountNum,
+        characterIds: recipients.map((character) => character.id),
+        ...(includeNonActive ? { includeNonActive: true } : {}),
+      });
       onAwarded();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't award XP.");
@@ -272,14 +320,18 @@ function AwardXpForm({
   }
 
   return (
-    <Card className="space-y-3">
-      <h2 className="font-bold text-white text-sm">Award XP to the whole party</h2>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
-      <form onSubmit={submit} className="flex gap-2 items-center flex-wrap">
-        <div className="w-32">
+    <Card className="party-xp-card space-y-3">
+      <div className="space-y-1">
+        <h2 className="font-bold text-white text-sm">Award party XP</h2>
+        <p className="text-xs text-slate-400">Active characters are selected by default. Review the exact recipients and resulting XP before awarding.</p>
+      </div>
+      {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
+      <form id="party-xp-form" onSubmit={submit} className="space-y-4">
+        <div className="w-40">
           <TextInput
             type="number"
             min={1}
+            max={1_000_000}
             aria-label="XP to award each character"
             placeholder="XP each"
             value={amount}
@@ -287,14 +339,76 @@ function AwardXpForm({
             autoFocus
           />
         </div>
-        <span className="text-xs text-slate-500">Every character gets this amount. Award individuals from their sheet.</span>
-        <div className="flex-1" />
-        <Btn ghost type="button" onClick={onCancel} disabled={saving}>
-          Cancel
-        </Btn>
-        <Btn type="submit" disabled={saving || !Number.isInteger(Number(amount)) || Number(amount) < 1}>
-          {saving ? 'Awarding…' : 'Award'}
-        </Btn>
+
+        <fieldset className="space-y-3">
+          <legend className="text-xs font-bold uppercase tracking-wide text-slate-400">Recipients</legend>
+          <label className="flex items-start gap-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={includeNonActive}
+              onChange={(event) => setIncludeNonActive(event.target.checked)}
+              disabled={saving}
+            />
+            <span>
+              Include inactive, retired, or dead characters
+              <span className="block text-xs text-slate-400">Required for deliberate historical corrections; each must still be selected below.</span>
+            </span>
+          </label>
+
+          <div className="overflow-x-auto rounded-md border border-slate-700/60">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-900/40 text-left text-xs uppercase tracking-wide text-slate-400">
+                <tr>
+                  <th scope="col" className="px-3 py-2">Recipient</th>
+                  <th scope="col" className="px-3 py-2">Status</th>
+                  <th scope="col" className="px-3 py-2 text-right">Current XP</th>
+                  <th scope="col" className="px-3 py-2 text-right">Result</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {characters.map((character) => {
+                  const selected = selectedIds.has(character.id);
+                  const nonActiveLocked = character.status !== 'active' && !includeNonActive;
+                  return (
+                    <tr key={character.id} className={!selected ? 'text-slate-400' : 'text-slate-200'}>
+                      <td className="px-3 py-2">
+                        <label className="flex items-center gap-2 font-semibold">
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            disabled={saving || nonActiveLocked}
+                            onChange={(event) => selectRecipient(character, event.target.checked)}
+                            aria-label={`Select ${character.name} (${STATUS_LABEL[character.status]}) for XP award`}
+                          />
+                          <span>{character.name}</span>
+                        </label>
+                      </td>
+                      <td className="px-3 py-2">{STATUS_LABEL[character.status]}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{character.xp.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right tabular-nums font-semibold">
+                        {selected && validAmount ? (character.xp + amountNum).toLocaleString() : '—'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </fieldset>
+
+        <div className="flex gap-2 items-center flex-wrap">
+          <p aria-live="polite" className="text-xs text-slate-400">
+            {recipients.length === 0
+              ? 'Select at least one recipient.'
+              : `${recipients.length} recipient${recipients.length === 1 ? '' : 's'} selected.`}
+          </p>
+          <div className="flex-1" />
+          <Btn ghost type="button" onClick={onCancel} disabled={saving}>Cancel</Btn>
+          <Btn type="submit" disabled={saving || !validAmount || recipients.length === 0}>
+            {saving ? 'Awarding…' : `Award XP to ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}`}
+          </Btn>
+        </div>
       </form>
     </Card>
   );

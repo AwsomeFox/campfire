@@ -49,6 +49,7 @@ export interface SeedData {
   /** A second encounter that was started and then ended — must render read-only (#368). */
   endedEncounterId: number;
   npcId: number;
+  xpRecipients: Record<'active' | 'retired' | 'dead' | 'inactive', { id: number; name: string; xp: number }>;
   navigation: {
     questId: number;
     npcId: number;
@@ -66,7 +67,7 @@ export interface SeedData {
   };
 }
 
-async function okJson(ctx: APIRequestContext, method: 'post' | 'get', path: string, data?: unknown) {
+async function okJson(ctx: APIRequestContext, method: 'post' | 'get' | 'put', path: string, data?: unknown) {
   const res = await ctx[method](path, data === undefined ? undefined : { data });
   if (!res.ok()) {
     const body = await res.text();
@@ -120,6 +121,14 @@ export default async function globalSetup(config: FullConfig) {
   const dm = await loginContext(baseURL, 'dm');
   const campaign = await okJson(dm, 'post', '/api/v1/campaigns', { name: 'E2E — Cinderhaven' });
   const campaignId: number = campaign.id;
+
+  // Accessibility fixtures for the AI drafting dialog + mode disclosure (#812).
+  // Co-DM mode needs no provider and keeps the rest of the suite away from live-driver flows.
+  await okJson(admin, 'post', '/api/v1/settings/ai/kill', { enabled: true });
+  await okJson(dm, 'put', `/api/v1/campaigns/${campaignId}/ai-dm`, {
+    mode: 'co_dm',
+    tokenBudget: 10_000,
+  });
 
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.player, role: 'player' });
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
@@ -261,6 +270,19 @@ export default async function globalSetup(config: FullConfig) {
   await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/start`);
   await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/end`);
 
+  // Party-XP fixtures (#814) are created after encounter setup so the active PC
+  // does not alter the combat-trackers' already-pinned rosters.
+  const xpRecipients = {} as SeedData['xpRecipients'];
+  for (const fixture of [
+    { status: 'active', name: 'XP Aria Active', xp: 100 },
+    { status: 'retired', name: 'XP Borin Retired', xp: 200 },
+    { status: 'dead', name: 'XP Cora Dead', xp: 300 },
+    { status: 'inactive', name: 'XP Dain Inactive', xp: 400 },
+  ] as const) {
+    const character = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/characters`, fixture);
+    xpRecipients[fixture.status] = { id: character.id, name: fixture.name, xp: fixture.xp };
+  }
+
   // --- capture a real session storageState per role ----------------------------
   await admin.storageState({ path: resolve(AUTH_DIR, 'admin.json') });
   await dm.storageState({ path: resolve(AUTH_DIR, 'dm.json') });
@@ -277,6 +299,7 @@ export default async function globalSetup(config: FullConfig) {
     encounterId,
     endedEncounterId,
     npcId,
+    xpRecipients,
     navigation: {
       questId: navQuest.id,
       npcId: navNpc.id,

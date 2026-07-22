@@ -4,6 +4,7 @@ import {
   XP_THRESHOLDS,
   normalizeStats,
   DiceExprPattern,
+  XpAward,
 } from '@campfire/schema';
 
 /**
@@ -52,6 +53,25 @@ describe('schema — XP thresholds', () => {
     for (let level = 1; level <= 20; level++) {
       expect(levelForXp(xpForLevel(level))).toBe(level);
     }
+  });
+});
+
+describe('schema — party XP recipients (issue #814)', () => {
+  it('defaults the non-active opt-in to false', () => {
+    expect(XpAward.parse({ amount: 250, characterIds: [1, 2] })).toEqual({
+      amount: 250,
+      characterIds: [1, 2],
+      includeNonActive: false,
+    });
+  });
+
+  it('accepts an explicit non-active opt-in for historical corrections', () => {
+    expect(XpAward.parse({ amount: 250, characterIds: [3], includeNonActive: true }).includeNonActive).toBe(true);
+  });
+
+  it('rejects empty or duplicate recipient selections', () => {
+    expect(XpAward.safeParse({ amount: 250, characterIds: [] }).success).toBe(false);
+    expect(XpAward.safeParse({ amount: 250, characterIds: [1, 1] }).success).toBe(false);
   });
 });
 

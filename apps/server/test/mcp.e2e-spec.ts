@@ -239,6 +239,12 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const summary = tools.find((t) => t.name === 'get_campaign_summary');
     expect(summary?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
     expect((summary?.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty('campaignId');
+
+    const awardXp = tools.find((t) => t.name === 'award_xp');
+    const awardProps = awardXp?.inputSchema.properties as Record<string, { type?: string; description?: string }>;
+    expect(awardProps.characterIds.type).toBe('array');
+    expect(awardProps.includeNonActive.type).toBe('boolean');
+    expect(awardProps.includeNonActive.description).toContain('explicit opt-in');
   });
 
   it('tools/list input schemas inline every property — no sibling $refs (issue #31: add_combatant.ruleEntryId)', async () => {
@@ -319,6 +325,40 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(summary.campaign.id).toBe(campaignId);
     expect(summary.campaign.name).toBe('MCP Campaign');
     expect(summary.openInboxCount).toBe(0);
+  });
+
+  it('award_xp has REST parity for active defaults, exact recipients, and legacy opt-in (issue #814)', async () => {
+    const activeRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'MCP Active XP', status: 'active', xp: 10 });
+    const retiredRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'MCP Retired XP', status: 'retired', xp: 20 });
+    expect(activeRes.status).toBe(201);
+    expect(retiredRes.status).toBe(201);
+
+    const client = await mcpClient(dmToken);
+    const defaultAward = await client.callTool({ name: 'award_xp', arguments: { campaignId, amount: 5 } });
+    expect(defaultAward.isError).toBeFalsy();
+    const defaultRecipients = parseResult(defaultAward) as Array<{ id: number; xp: number }>;
+    expect(defaultRecipients.map((character) => character.id)).toContain(activeRes.body.id);
+    expect(defaultRecipients.map((character) => character.id)).not.toContain(retiredRes.body.id);
+
+    const refused = await client.callTool({
+      name: 'award_xp',
+      arguments: { campaignId, amount: 7, characterIds: [retiredRes.body.id] },
+    });
+    expect(refused.isError).toBe(true);
+    expect((parseResult(refused) as { error: { message: string } }).error.message).toContain('includeNonActive');
+
+    const correction = await client.callTool({
+      name: 'award_xp',
+      arguments: { campaignId, amount: 7, characterIds: [retiredRes.body.id], includeNonActive: true },
+    });
+    expect(correction.isError).toBeFalsy();
+    expect(parseResult(correction)).toEqual([
+      expect.objectContaining({ id: retiredRes.body.id, status: 'retired', xp: 27 }),
+    ]);
   });
 
   it('create_quest via dm PAT creates a quest (verified via REST) and audits token actor', async () => {
@@ -1314,6 +1354,27 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(resolved.resolved).toBe(true);
     expect(resolved.entityType).toBe('campaign');
     expect(resolved.entityId).toBe(campaignId);
+
+    // Terminal idempotency is shared with REST: the same canonical payload
+    // returns the stored Note, while a different terminal payload is a 409.
+    const identicalRetry = await dmClient.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: item.id, resolvedNote: 'handled', entityType: 'campaign', entityId: campaignId },
+    });
+    expect(identicalRetry.isError).toBeFalsy();
+    expect(parseResult(identicalRetry)).toEqual(parseResult(resolveResult));
+
+    const conflictingRetry = await dmClient.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: item.id, resolvedNote: 'dismissed' },
+    });
+    expect(conflictingRetry.isError).toBe(true);
+    expect(parseResult(conflictingRetry)).toMatchObject({
+      error: {
+        status: 409,
+        message: `Inbox item ${item.id} already has a different terminal result`,
+      },
+    });
 
     // resolved history via read_inbox { resolved: true }; open list no longer has it
     const openAfter = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId } });

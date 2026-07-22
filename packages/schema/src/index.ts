@@ -318,10 +318,22 @@ export const XpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
 ]);
-/** DM party-wide XP award: amount to every character in the campaign, or just `characterIds`. */
+/**
+ * DM party XP award. Omitting `characterIds` targets active characters only.
+ * A non-active (inactive, retired, or dead) recipient is accepted only when the
+ * caller explicitly opts in with `includeNonActive: true`; this keeps archived
+ * careers safe while preserving deliberate historical corrections.
+ */
 export const XpAward = z.object({
   amount: z.number().int().min(1).max(1_000_000),
-  characterIds: z.array(Id).min(1).optional(),
+  characterIds: z
+    .array(Id)
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length, { message: 'Recipient characterIds must be unique' })
+    .optional(),
+  includeNonActive: z.boolean().optional().default(false).describe(
+    'Explicit opt-in required to award XP to inactive, retired, or dead characters.',
+  ),
 });
 /**
  * Guided level-up: +1 level, optionally raising hpMax (hpCurrent grows by the
@@ -628,7 +640,8 @@ export const RECAP_TEMPLATE = RECAP_HEADINGS.map((h) => `## ${h}\n\n`).join('').
 // up each outing) need a per-session "who was there" record so recaps, per-attendee
 // context and "you weren't there" all become possible. One row per (session,
 // character); the set is REPLACED on write (PUT /sessions/:id/attendance), not
-// accumulated. characterName is denormalized for display.
+// accumulated. characterName is the current character name when the character row
+// is available, with the stored write-time snapshot used as a graceful fallback.
 export const SessionAttendee = z.object({
   id: Id,
   sessionId: Id,
@@ -2155,7 +2168,10 @@ export const AuthStatus = z.object({
   setupRequired: z.boolean(), // true until the first (admin) user exists
   localLoginEnabled: z.boolean(), // for non-admin users (admins can always log in locally)
   signupEnabled: z.boolean(), // effective: allowSignup && allowLocalLogin && !setupRequired
-  oidcEnabled: z.boolean(), // future
+  oidcEnabled: z.boolean(),
+  // Optional operator-authored branding for the public login button. Null means
+  // the UI must use neutral "SSO" copy; no issuer/client/group details belong here.
+  oidcProviderName: z.string().max(80).nullable(),
   version: z.string(),
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
@@ -2185,9 +2201,11 @@ export const SettingsUpdate = ServerSettings.partial();
 // the stored value for that field (see server oidc.config.ts). The client
 // secret is WRITE-ONLY — it is accepted on update but never returned.
 const OidcField = z.string().trim().max(2048);
+const OidcProviderNameField = z.string().trim().max(80);
 
 /** OIDC settings as returned to admins (GET). Never includes the client secret. */
 export const OidcSettings = z.object({
+  providerName: z.string(),
   issuer: z.string(),
   clientId: z.string(),
   redirectUri: z.string(),
@@ -2205,6 +2223,7 @@ export type OidcSettings = z.infer<typeof OidcSettings>;
 
 /** Admin update payload. All fields optional. clientSecret is write-only: omit to keep the current secret, pass '' to clear it. */
 export const OidcSettingsUpdate = z.object({
+  providerName: OidcProviderNameField.optional(),
   issuer: OidcField.optional(),
   clientId: OidcField.optional(),
   clientSecret: z.string().max(2048).optional(),
