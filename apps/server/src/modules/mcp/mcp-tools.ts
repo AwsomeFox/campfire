@@ -1225,11 +1225,12 @@ export class McpToolsService {
     this.tool(
       server,
       'get_comment',
-      'Get one discussion comment by id. Ids come from list_comments. 404s (not 403) for a comment on an entity the ' +
-        'caller cannot see (issue #230).',
+      'Get one discussion comment by id. Ids come from list_comments. A tombstoned comment (issue #503) is ' +
+        'returned as a redacted "[deleted]" placeholder rather than 404 — replies keep their parent. ' +
+        '404s (not 403) for a comment on an entity the caller cannot see (issue #230).',
       { commentId: Id.describe('Comment id — from list_comments') },
       async ({ commentId }) => {
-        const row = await this.comments.getRowOrThrow(commentId as number);
+        const row = await this.comments.getRowOrThrow(commentId as number, true);
         const role = await this.access.requireMember(user, row.campaignId);
         return this.comments.getOrThrow(commentId as number, role);
       },
@@ -2962,13 +2963,30 @@ export class McpToolsService {
       server,
       user,
       'delete_comment',
-      'Delete a discussion comment. Author or DM only. Deleting a top-level comment cascades to its direct replies.',
+      'Delete a discussion comment (tombstone). Author or DM only. Soft-deletes the comment — its body is ' +
+        'redacted to "[deleted]" but the row remains so replies keep their parent (issue #503: a root author ' +
+        'must not destroy other members\' replies). Reversible via restore_comment.',
       { commentId: Id.describe('Comment id — from list_comments') },
       async ({ commentId }) => {
-        const row = await this.comments.getRowOrThrow(commentId as number);
+        const row = await this.comments.getRowOrThrow(commentId as number, true);
         const role = await this.access.requireMember(user, row.campaignId, { write: true });
         await this.comments.remove(commentId as number, user, role);
         return { ok: true, commentId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'restore_comment',
+      'Restore a tombstoned discussion comment. Author or DM only. Undoes a soft-delete (issue #503): clears ' +
+        'deletedAt/deletedBy and returns the comment with its original body. 404 if the comment is not currently ' +
+        'tombstoned.',
+      { commentId: Id.describe('Comment id — from list_comments') },
+      async ({ commentId }) => {
+        const row = await this.comments.getRowOrThrow(commentId as number, true);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        return this.comments.restore(commentId as number, user, role);
       },
     );
 

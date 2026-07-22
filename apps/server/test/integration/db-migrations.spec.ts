@@ -52,6 +52,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(columnNames(sqlite, 'attachments')).toContain('hidden');
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
+      // 0045 (issue #503): comments gain the tombstone columns — soft delete without
+      // destroying other members' replies (deleted_at) + who pulled the trigger (deleted_by).
+      expect(columnNames(sqlite, 'comments')).toEqual(expect.arrayContaining(['deleted_at', 'deleted_by']));
 
       // 0040 (issue #310): the ai_provider_configs table is created as a NEW table
       // by the migration, with the encrypted-key + scope columns present.
@@ -129,6 +132,20 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       for (const table of ['users', 'campaigns', 'characters', 'quests', 'npcs', 'sessions', 'api_tokens', 'proposals', 'encounters', 'combatants', 'attachments', 'rule_entries', 'inventory_items']) {
         expect(countRows(sqlite, table)).toBe(1);
       }
+      // 0045 (issue #503): both seeded comments survived the upgrade, and the
+      // reply's parent_id threading is intact (reply still points at the root).
+      // The new tombstone columns backfill to NULL on the pre-existing rows.
+      expect(countRows(sqlite, 'comments')).toBe(2);
+      const legacyRoot = sqlite
+        .prepare("SELECT body, parent_id, deleted_at, deleted_by FROM comments WHERE parent_id IS NULL")
+        .get() as { body: string; parent_id: number | null; deleted_at: string | null; deleted_by: string | null };
+      expect(legacyRoot.body).toBe('Legacy root comment');
+      expect(legacyRoot.deleted_at).toBeNull();
+      expect(legacyRoot.deleted_by).toBeNull();
+      const legacyReply = sqlite
+        .prepare("SELECT body, parent_id FROM comments WHERE body = 'Legacy reply that must survive'")
+        .get() as { body: string; parent_id: number };
+      expect(legacyReply.parent_id).toBe(1);
     } finally {
       sqlite.close();
     }

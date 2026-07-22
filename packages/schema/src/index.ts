@@ -919,6 +919,14 @@ export type EntityRevision = z.infer<typeof EntityRevision>;
 // discussion is inherently shared. `parentId` gives one level of threading (a reply
 // to a comment). `inCharacter` flags an in-character post (a play-by-post scene) vs
 // out-of-character table chatter. Author-or-DM may edit/delete.
+//
+// Soft delete / tombstone (issue #503): a top-level comment that has other members'
+// replies is NOT hard-deleted (that would destroy their content). Instead it is
+// tombstoned: deletedAt is set, body is redacted to a neutral placeholder in API
+// responses, and the row stays so replies keep their parent pointer. A tombstoned
+// root is still returned by list/get (as a placeholder) — it is NOT filtered out of
+// normal reads the way a trashed note is, precisely because replies anchor to it.
+// deletedBy records who pulled the trigger (author or DM moderating).
 export const Comment = z.object({
   id: Id,
   campaignId: Id,
@@ -932,8 +940,17 @@ export const Comment = z.object({
   parentId: Id.nullable().default(null),
   authorUserId: z.string().max(120), // String(users.id) or dev:<name>
   authorName: z.string().max(120).default(''),
-  body: z.string().min(1).max(20_000), // markdown
+  body: z.string().min(1).max(20_000), // markdown (redacted to a placeholder when tombstoned)
   inCharacter: z.boolean().default(false),
+  // Tombstone (issue #503). null = live; an ISO timestamp means the comment was
+  // deleted by its author / a DM and its body has been redacted. The row remains so
+  // replies keep their parent. Cleared on restore.
+  deletedAt: IsoDate.nullable().default(null),
+  // Who tombstoned the comment (String(users.id), 'dev:<name>', or 'token:<name>');
+  // null on a live row. While tombstoned, this lets the UI distinguish "[deleted
+  // by author]" from a DM removal. It is cleared on restore, so durable
+  // provenance of a past tombstone (who/when) lives in the AUDIT LOG, not here.
+  deletedBy: z.string().max(120).nullable().default(null),
   ...timestamps,
 });
 export type Comment = z.infer<typeof Comment>;
@@ -942,6 +959,8 @@ export const CommentCreate = Comment.omit({
   campaignId: true,
   authorUserId: true,
   authorName: true,
+  deletedAt: true,
+  deletedBy: true,
   createdAt: true,
   updatedAt: true,
 })
