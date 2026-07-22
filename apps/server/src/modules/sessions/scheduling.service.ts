@@ -7,12 +7,26 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
+import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { buildCampaignIcs } from './ics.util';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Absolute expiry ISO for a feed token minted right now (issue #554). */
+function icsFeedTokenExpiryFromNow(): string {
+  return new Date(Date.now() + resolveIcsFeedTokenTtlDays() * DAY_MS).toISOString();
+}
+
+/** True iff `expiresAt` (ISO UTC) is in the past. Null = never expires (legacy rows). */
+function icsTokenIsExpired(expiresAt: string | null): boolean {
+  if (!expiresAt) return false;
+  return new Date(expiresAt).getTime() < Date.now();
+}
 
 type ScheduledSessionCreateInput = z.infer<typeof ScheduledSessionCreate>;
 type ScheduledSessionUpdateInput = z.infer<typeof ScheduledSessionUpdate>;
@@ -271,14 +285,24 @@ export class SchedulingService {
     return {
       token: campaign.icsToken,
       url: campaign.icsToken ? icsFeedUrl(campaign.icsToken) : null,
+      expiresAt: campaign.icsToken ? campaign.icsTokenExpiresAt : null,
     };
   }
 
-  /** Enable the feed, or rotate its token (invalidating the old URL) if already enabled. */
+  /**
+   * Enable the feed, or rotate its token (invalidating the old URL) if already
+   * enabled. Issue #554: each (re)issue stamps a fresh `icsTokenExpiresAt` so a
+   * leaked URL self-destructs after the configured window; rotating before or
+   * after expiry mints a brand-new token + expiry, leaving the old URL dead.
+   */
   async rotateFeed(campaignId: number, user: RequestUser, role: Role): Promise<CalendarFeed> {
     await this.getCampaignRowOrThrow(campaignId);
     const token = generateIcsFeedToken();
-    await this.db.update(campaigns).set({ icsToken: token, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
+    const expiresAt = icsFeedTokenExpiryFromNow();
+    await this.db
+      .update(campaigns)
+      .set({ icsToken: token, icsTokenExpiresAt: expiresAt, updatedAt: nowIso() })
+      .where(eq(campaigns.id, campaignId));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -286,13 +310,17 @@ export class SchedulingService {
       entityType: 'campaign',
       entityId: campaignId,
       campaignId,
+      detail: `expires=${expiresAt}`,
     });
-    return { token, url: icsFeedUrl(token) };
+    return { token, url: icsFeedUrl(token), expiresAt };
   }
 
   async disableFeed(campaignId: number, user: RequestUser, role: Role): Promise<CalendarFeed> {
     await this.getCampaignRowOrThrow(campaignId);
-    await this.db.update(campaigns).set({ icsToken: null, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
+    await this.db
+      .update(campaigns)
+      .set({ icsToken: null, icsTokenExpiresAt: null, updatedAt: nowIso() })
+      .where(eq(campaigns.id, campaignId));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -301,13 +329,19 @@ export class SchedulingService {
       entityId: campaignId,
       campaignId,
     });
-    return { token: null, url: null };
+    return { token: null, url: null, expiresAt: null };
   }
 
   /**
    * Resolve a public feed token to its ICS document, or throw 404. The token
    * IS the authorization (unguessable capability secret) — no user identity
    * involved, and nothing DM-only (dmSecret etc) is anywhere near this data.
+   *
+   * Issue #554: an expired token (ics_token_expires_at in the past) is rejected
+   * with the same 404 as an unknown/rotated/disabled one — calendar apps see a
+   * dead URL and stop fetching, while a probing caller learns nothing about
+   * WHY. Null expiry (legacy rows written before #554) keeps the original
+   * "valid until rotated" behavior so existing subscribers aren't broken.
    */
   async buildFeedByToken(token: string): Promise<string> {
     // Shape check first: skips a DB roundtrip for junk and guarantees the
@@ -315,6 +349,7 @@ export class SchedulingService {
     if (!looksLikeIcsFeedToken(token)) throw new NotFoundException('Unknown calendar feed');
     const [campaign] = await this.db.select().from(campaigns).where(eq(campaigns.icsToken, token)).limit(1);
     if (!campaign) throw new NotFoundException('Unknown calendar feed');
+    if (icsTokenIsExpired(campaign.icsTokenExpiresAt)) throw new NotFoundException('Unknown calendar feed');
     const schedules = await this.listForCampaign(campaign.id);
     return buildCampaignIcs({ id: campaign.id, name: campaign.name }, schedules);
   }

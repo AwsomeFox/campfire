@@ -238,3 +238,119 @@ describe('password reset — request/approve/confirm (e2e)', () => {
     expect(res.status).toBe(400);
   });
 });
+
+/**
+ * Issue #696: the code consumption + password change + session/PAT revocation
+ * must run in ONE synchronous better-sqlite3 transaction so two concurrent
+ * redemptions of the SAME one-time code cannot both succeed. Before the fix the
+ * service read the code, then ran the mutations as separate statements — a
+ * TOCTOU window where both in-flight confirm() calls saw the row as still-valid
+ * and both committed a password change.
+ *
+ * These specs fire two simultaneous HTTP redemptions of a just-approved code.
+ * The server (real SQLite, BEGIN IMMEDIATE) serializes them: exactly one wins
+ * (204 + password changed + sessions killed), the other gets a clear 409
+ * conflict and must NOT have changed the password a second time.
+ */
+describe('password reset — concurrent redemption is single-use (issue #696)', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    adminAgent = request.agent(ctx.app.getHttpServer());
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'admin', password: 'admin-password-1' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  /** Approve a fresh reset for `username` and return the one-time code. */
+  async function approveFreshCode(username: string): Promise<string> {
+    const server = ctx.app.getHttpServer();
+    await request(server).post('/api/v1/auth/reset-request').send({ username });
+    const listRes = await adminAgent.get('/api/v1/users/reset-requests');
+    const row = listRes.body.find((r: { username: string }) => r.username === username);
+    const approveRes = await adminAgent.post(`/api/v1/users/reset-requests/${row.id}/approve`);
+    expect(approveRes.status).toBe(201);
+    return approveRes.body.code as string;
+  }
+
+  it('two simultaneous redemptions of the same code: exactly one succeeds, no double-consume', async () => {
+    const server = ctx.app.getHttpServer();
+    await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'race-user', password: 'race-old-password-1', serverRole: 'user' });
+
+    const code = await approveFreshCode('race-user');
+
+    // Fire BOTH redemptions at once. This is the #696 regression scenario: before
+    // the fix, the service read the code then ran the mutations separately, so
+    // both in-flight confirm() calls saw the row valid and BOTH returned 204
+    // (double-redemption). The transactional consume must guarantee exactly one
+    // winner.
+    const newPassword = 'race-concurrent-winner-1';
+    const [a, b] = await Promise.all([
+      request(server).post('/api/v1/auth/reset-confirm').send({ code, newPassword }),
+      request(server).post('/api/v1/auth/reset-confirm').send({ code, newPassword }),
+    ]);
+
+    const statuses = [a.status, b.status].sort();
+    // Exactly one success (204). The loser gets a clear non-success — either 409
+    // (genuine lock contention, the multi-process case) or 400 (single-process:
+    // better-sqlite3 is synchronous, so the loser's whole confirm() runs after
+    // the winner's committed and its pre-flight sees the code gone). The load-
+    // bearing #696 invariant is: NOT two 204s.
+    expect(statuses.filter((s) => s === 204)).toHaveLength(1);
+    expect(statuses).not.toContain(200);
+    expect(statuses[0]).toBeLessThan(300);
+    expect(statuses[1]).toBeGreaterThanOrEqual(400);
+
+    // The code is fully consumed regardless of which path the loser took.
+    const listRes = await adminAgent.get('/api/v1/users/reset-requests');
+    expect(listRes.body).toHaveLength(0);
+
+    // Winner's password is in effect; the OLD one no longer works — proving the
+    // reset happened exactly once and the loser didn't revert or double-apply it.
+    const newPasswordLogin = await request(server)
+      .post('/api/v1/auth/login')
+      .send({ username: 'race-user', password: newPassword });
+    expect(newPasswordLogin.status).toBe(201);
+    const oldPasswordLogin = await request(server)
+      .post('/api/v1/auth/login')
+      .send({ username: 'race-user', password: 'race-old-password-1' });
+    expect(oldPasswordLogin.status).toBe(401);
+  });
+
+  it('a failing transaction (e.g. code already consumed) leaves the old password intact', async () => {
+    const server = ctx.app.getHttpServer();
+    await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'rollback-user', password: 'rollback-old-1', serverRole: 'user' });
+
+    const code = await approveFreshCode('rollback-user');
+
+    // First redemption fully succeeds and sets the new password.
+    const winner = await request(server)
+      .post('/api/v1/auth/reset-confirm')
+      .send({ code, newPassword: 'rollback-new-1' });
+    expect(winner.status).toBe(204);
+
+    // A concurrent/late loser targets the same now-dead code. It must NOT change
+    // the password again (and crucially the prior winner's password survives).
+    const loser = await request(server)
+      .post('/api/v1/auth/reset-confirm')
+      .send({ code, newPassword: 'rollback-hijack-1' });
+    expect(loser.status).toBe(400); // row already gone -> generic invalid, no double-consume
+
+    const oldPassStillWorks = await request(server)
+      .post('/api/v1/auth/login')
+      .send({ username: 'rollback-user', password: 'rollback-new-1' });
+    expect(oldPassStillWorks.status).toBe(201);
+    const hijackRejected = await request(server)
+      .post('/api/v1/auth/login')
+      .send({ username: 'rollback-user', password: 'rollback-hijack-1' });
+    expect(hijackRejected.status).toBe(401);
+  });
+});

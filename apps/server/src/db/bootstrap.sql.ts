@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,
+  ics_token_expires_at TEXT,
   storage_quota_bytes INTEGER,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
