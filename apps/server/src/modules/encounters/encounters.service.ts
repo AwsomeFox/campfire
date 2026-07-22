@@ -15,6 +15,7 @@ import { rollDice, rollInitiative } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { advanceTurn, applyCombatantHp, computeEncounterDifficulty, crToXp, generateEncounterGroup, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
@@ -163,6 +164,7 @@ export class EncountersService {
     private readonly audit: AuditService,
     private readonly events: CampaignEventsService,
     private readonly rolls: RollsService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
@@ -349,9 +351,25 @@ export class EncountersService {
    * Handouts card, defeating fog-of-war. The fogged encounter canvas still renders it for
    * players — the file route (GET /attachments/:id/file) serves an encounter's map to non-DM
    * even while hidden (see AttachmentsService.isEncounterMap).
+   *
+   * Optimistic concurrency (issue #532): live combat is the highest-contention entity (the
+   * same encounter open across multiple DM devices — a laptop + a tablet at the table), so it
+   * enforces the same `expectedUpdatedAt` CAS invariant as quests/npcs/locations/sessions. A
+   * stale tab's save (its `expectedUpdatedAt` no longer matches the row's current `updatedAt`)
+   * 409s before any write rather than silently clobbering the fresher edit — the classic
+   * "lost fog/grid edit looks like the map reverted" failure. Omitted => unconditional write
+   * (unchanged back-compat for any client that hasn't opted in).
    */
-  async updateEncounter(encounterId: number, input: EncounterUpdateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+  async updateEncounter(
+    encounterId: number,
+    input: EncounterUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    // Optimistic concurrency (#532): 409 on a stale expectedUpdatedAt before any write.
+    this.revisions.assertNotStale(encounterRow, opts?.expectedUpdatedAt);
 
     const set: Partial<typeof encounters.$inferInsert> = {};
     const changedPredicates: SQL[] = [];
