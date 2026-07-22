@@ -309,7 +309,10 @@ export default function PlayerDisplayPage() {
         // (or test double) processes its own Escape behavior. This guarantees
         // the same keypress cannot both leave fullscreen and navigate away.
         try {
-          void document.exitFullscreen().then(syncFullscreen).catch(reportFullscreenExitFailure);
+          // fullscreenchange is the authoritative state transition. Avoid a
+          // promise continuation that can outlive this route after a second
+          // Escape navigates away.
+          void document.exitFullscreen().catch(reportFullscreenExitFailure);
         } catch (fullscreenError) {
           reportFullscreenExitFailure(fullscreenError);
         }
