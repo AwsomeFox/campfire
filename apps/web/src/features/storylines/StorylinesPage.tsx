@@ -34,8 +34,29 @@ type NamedRow = { id: number; name?: string; title?: string; number?: number };
 type LinkOptions = { sessions: NamedRow[]; quests: NamedRow[]; encounters: NamedRow[] };
 const EMPTY_LINK_OPTIONS: LinkOptions = { sessions: [], quests: [], encounters: [] };
 
+/**
+ * Issue #688: the link-options set, plus per-list load failure flags. Components read
+ * each flag to swap that picker's "— none —" placeholder for "— couldn't load —" and to
+ * know a retry is available; the form stays usable either way (the author can still
+ * save a beat with no link or retry the load). Granular per-list tracking means a
+ * sessions-only outage degrades only the sessions picker, not the quest/encounter ones.
+ */
+type LinkOptionFailures = { sessions: boolean; quests: boolean; encounters: boolean };
+const NO_LINK_FAILURES: LinkOptionFailures = { sessions: false, quests: false, encounters: false };
+type LinkOptionState = {
+  options: LinkOptions;
+  failed: LinkOptionFailures;
+  loading: boolean;
+  onRetry: () => void;
+};
+
 function sessionLabel(s: NamedRow): string {
   return s.title || `Session ${s.number ?? s.id}`;
+}
+
+/** Issue #688: true when any link-options list failed to load (so a degraded note should show). */
+function anyLinkOptionFailed(failures: LinkOptionFailures): boolean {
+  return failures.sessions || failures.quests || failures.encounters;
 }
 
 function branchDomId(id: number): string {
@@ -80,6 +101,12 @@ export default function StorylinesPage() {
   // Play-record link options (issue #264) — the sessions/quests/encounters a beat can
   // link to. Fetched once; empty lists just leave the pickers showing "— none —".
   const [linkOptions, setLinkOptions] = useState<LinkOptions>(EMPTY_LINK_OPTIONS);
+  // Issue #688: distinguish "couldn't load options" from "no options exist." A failed
+  // load degrades the affected beat link-picker (each shows a couldn't-load placeholder
+  // and the form stays usable) instead of silently collapsing into empty lists. Tracked
+  // per-list so a sessions outage doesn't disable the quest/encounter pickers.
+  const [linkOptionsError, setLinkOptionsError] = useState<LinkOptionFailures>(NO_LINK_FAILURES);
+  const [linkOptionsLoading, setLinkOptionsLoading] = useState(false);
 
   const load = useCallback(async (focusId?: string) => {
     setLoading(true);
@@ -117,23 +144,39 @@ export default function StorylinesPage() {
   }, [arcs]);
 
   // Load the play-record link options once the campaign is known (issue #264). The whole
-  // page is DM-only, so these DM-scoped lists are always available here. Failures degrade
-  // gracefully to empty pickers rather than blocking the arc/beat view.
-  useEffect(() => {
+  // page is DM-only, so these DM-scoped lists are always available here. Issue #688: a
+  // failure no longer collapses into silent empty lists — we flag it so the beat link-
+  // pickers can render a "couldn't load" placeholder (the form stays fully usable), and
+  // we offer an explicit retry. No-options vs. could-not-load is now distinguishable.
+  const loadLinkOptions = useCallback(async () => {
     if (!Number.isFinite(cid)) return;
-    let cancelled = false;
-    void Promise.all([
-      api.get<NamedRow[]>(`${API}/campaigns/${cid}/sessions`).catch(() => [] as NamedRow[]),
-      api.get<NamedRow[]>(`${API}/campaigns/${cid}/quests`).catch(() => [] as NamedRow[]),
-      api.get<NamedRow[]>(`${API}/campaigns/${cid}/encounters`).catch(() => [] as NamedRow[]),
-    ]).then(([sessions, quests, encounters]) => {
-      if (cancelled) return;
-      setLinkOptions({ sessions, quests, encounters });
-    });
-    return () => {
-      cancelled = true;
+    setLinkOptionsLoading(true);
+    // Resolve each list independently; a rejection degrades only that list's picker and
+    // never rejects the whole promise, so the page never hard-fails.
+    const [sessionsR, questsR, encountersR] = await Promise.allSettled([
+      api.get<NamedRow[]>(`${API}/campaigns/${cid}/sessions`),
+      api.get<NamedRow[]>(`${API}/campaigns/${cid}/quests`),
+      api.get<NamedRow[]>(`${API}/campaigns/${cid}/encounters`),
+    ]);
+    const failures: LinkOptionFailures = {
+      sessions: sessionsR.status === 'rejected',
+      quests: questsR.status === 'rejected',
+      encounters: encountersR.status === 'rejected',
     };
+    setLinkOptionsError(failures);
+    // For each list that resolved, refresh it; for each that failed, keep the prior value
+    // (empty on first load) so a transient outage doesn't wipe a working picker.
+    setLinkOptions((prev) => ({
+      sessions: sessionsR.status === 'fulfilled' ? sessionsR.value : prev.sessions,
+      quests: questsR.status === 'fulfilled' ? questsR.value : prev.quests,
+      encounters: encountersR.status === 'fulfilled' ? encountersR.value : prev.encounters,
+    }));
+    setLinkOptionsLoading(false);
   }, [cid]);
+
+  useEffect(() => {
+    void loadLinkOptions();
+  }, [loadLinkOptions]);
 
   // Every beat across all arcs, so a branch's target (which may live in another arc)
   // can be shown by title and offered in the "link to beat" picker.
@@ -242,7 +285,16 @@ export default function StorylinesPage() {
         <EmptyState icon="oak-leaf" title="No storylines yet" hint={isDm ? 'Create an arc to start planning.' : undefined} />
       ) : (
         arcs.map((arc) => (
-          <ArcCard key={arc.id} arc={arc} cid={cid} isDm={isDm} allBeats={allBeats} linkOptions={linkOptions} onChange={load} />
+          <ArcCard
+            key={arc.id}
+            arc={arc}
+            cid={cid}
+            isDm={isDm}
+            allBeats={allBeats}
+            linkOptions={linkOptions}
+            linkOptionState={{ options: linkOptions, failed: linkOptionsError, loading: linkOptionsLoading, onRetry: () => void loadLinkOptions() }}
+            onChange={load}
+          />
         ))
       )}
     </div>
@@ -255,6 +307,7 @@ function ArcCard({
   isDm,
   allBeats,
   linkOptions,
+  linkOptionState,
   onChange,
 }: {
   arc: StoryArcWithBeats;
@@ -262,23 +315,40 @@ function ArcCard({
   isDm: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
+  linkOptionState: LinkOptionState;
   onChange: RefreshStorylines;
 }) {
   const [newBeatTitle, setNewBeatTitle] = useState('');
   const [beatCreateError, setBeatCreateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Issue #688: surface a failed status/delete inline next to the arc's controls so the
+  // author knows their change didn't save — without resetting the select to a value that
+  // hides the failure. The select's displayed value reflects server truth (refreshed on
+  // success); on failure it snaps back to the last-known server value via `arc.status`.
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const newBeatTitleRef = useRef<HTMLInputElement>(null);
   const announce = useAnnounce();
   const arcTitleId = `storyline-arc-${arc.id}-title`;
   const arcStatusId = `storyline-arc-${arc.id}-status`;
   const newBeatTitleId = `storyline-new-beat-${arc.id}-title`;
   const newBeatErrorId = `storyline-new-beat-${arc.id}-error`;
+  const arcStatusErrorId = `storyline-arc-${arc.id}-status-error`;
+  const arcDeleteErrorId = `storyline-arc-${arc.id}-delete-error`;
 
   const setArcStatus = async (status: ArcStatus) => {
+    if (busy) return;
+    setStatusError(null);
     setBusy(true);
     try {
       await api.post(`${API}/arcs/${arc.id}/status`, { status });
       await onChange();
+    } catch {
+      // The select is controlled by `arc.status` (server truth). On failure we skip the
+      // refresh, so React re-renders the select at its prior value — the author sees their
+      // pick snap back and this inline note explains why. There's no pending value to retry
+      // from, so the author simply re-selects to retry; we never discard any other input.
+      setStatusError("Couldn't save the arc status. It wasn't changed — please try again.");
     } finally {
       setBusy(false);
     }
@@ -303,11 +373,21 @@ function ArcCard({
   };
 
   const removeArc = async () => {
-    if (!window.confirm(`Delete arc "${arc.title}" and all of its beats? This cannot be undone.`)) return;
+    if (deleteError) {
+      // The arc is still here (the prior delete failed), so the confirm is moot on retry.
+      // Fall through to re-attempt the same idempotent DELETE.
+    } else if (!window.confirm(`Delete arc "${arc.title}" and all of its beats? This cannot be undone.`)) {
+      return;
+    }
+    setDeleteError(null);
     setBusy(true);
     try {
       await api.delete(`${API}/arcs/${arc.id}`);
       await onChange();
+    } catch {
+      // Issue #688: the arc wasn't deleted. Keep it on the page and surface a targeted
+      // retry so the author isn't left to guess whether the confirm "took."
+      setDeleteError("Couldn't delete the arc. It's still here — try again.");
     } finally {
       setBusy(false);
     }
@@ -337,13 +417,15 @@ function ArcCard({
           {arc.title}
         </h4>
         {isDm ? (
-          <div className="field">
+          <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={arcStatusId}>Status for arc {arc.title}</label>
             <select
               id={arcStatusId}
               className="input"
               value={arc.status}
               disabled={busy}
+              aria-invalid={statusError ? true : undefined}
+              aria-describedby={statusError ? arcStatusErrorId : undefined}
               onChange={(e) => void setArcStatus(e.target.value as ArcStatus)}
               style={{ fontSize: 11, padding: '2px 6px', width: 'auto', maxWidth: '100%' }}
             >
@@ -373,6 +455,17 @@ function ArcCard({
         )}
       </div>
 
+      {statusError && (
+        <div id={arcStatusErrorId} style={{ marginTop: -2 }}>
+          <ErrorNote message={statusError} />
+        </div>
+      )}
+      {deleteError && (
+        <div id={arcDeleteErrorId} style={{ marginTop: -2 }}>
+          <ErrorNote message={deleteError} onRetry={() => void removeArc()} />
+        </div>
+      )}
+
       {arc.summary && <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>{arc.summary}</p>}
 
       {arc.beats.length === 0 ? (
@@ -380,7 +473,16 @@ function ArcCard({
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {arc.beats.map((beat) => (
-            <BeatRow key={beat.id} beat={beat} cid={cid} isDm={isDm} allBeats={allBeats} linkOptions={linkOptions} onChange={onChange} />
+            <BeatRow
+              key={beat.id}
+              beat={beat}
+              cid={cid}
+              isDm={isDm}
+              allBeats={allBeats}
+              linkOptions={linkOptions}
+              linkOptionState={linkOptionState}
+              onChange={onChange}
+            />
           ))}
         </div>
       )}
@@ -432,6 +534,7 @@ function BeatRow({
   isDm,
   allBeats,
   linkOptions,
+  linkOptionState,
   onChange,
 }: {
   beat: StoryBeatWithBranches;
@@ -439,6 +542,7 @@ function BeatRow({
   isDm: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
+  linkOptionState: LinkOptionState;
   onChange: RefreshStorylines;
 }) {
   const [addingBranch, setAddingBranch] = useState(false);
@@ -447,6 +551,19 @@ function BeatRow({
   const [branchCreateError, setBranchCreateError] = useState<string | null>(null);
   const [editingLinks, setEditingLinks] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Issue #688: per-mutation error surfaces. Each keeps the beat on the page with its
+  // data intact and offers a targeted retry; nothing is silently discarded.
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  // The pending link patch from a failed save — preserved so Retry re-sends exactly what
+  // the author picked (the select snaps back to server truth, but the intent is held here).
+  const [pendingLinkPatch, setPendingLinkPatch] = useState<{
+    sessionId?: number | null;
+    questId?: number | null;
+    encounterId?: number | null;
+  } | null>(null);
+  const [branchDeleteError, setBranchDeleteError] = useState<{ id: number; message: string } | null>(null);
   const branchLabelRef = useRef<HTMLInputElement>(null);
   const branchTriggerRef = useRef<HTMLButtonElement>(null);
   const announce = useAnnounce();
@@ -456,6 +573,9 @@ function BeatRow({
   const branchTriggerId = `${branchFormId}-trigger`;
   const branchTargetId = `${branchFormId}-target`;
   const branchErrorId = `${branchFormId}-error`;
+  const beatStatusErrorId = `storyline-beat-${beat.id}-status-error`;
+  const beatDeleteErrorId = `storyline-beat-${beat.id}-delete-error`;
+  const beatLinkErrorId = `storyline-beat-${beat.id}-link-error`;
 
   // The play-record this beat corresponds to (issue #264): resolve each linked id to a
   // display label + deep-link, so a done beat shows where it landed.
@@ -465,31 +585,59 @@ function BeatRow({
   const hasLinks = beat.sessionId != null || beat.questId != null || beat.encounterId != null;
 
   const saveLinks = async (patch: { sessionId?: number | null; questId?: number | null; encounterId?: number | null }) => {
+    if (busy) return;
+    setLinkError(null);
+    setPendingLinkPatch(null);
     setBusy(true);
     try {
       await api.patch(`${API}/beats/${beat.id}`, patch);
       await onChange();
+    } catch {
+      // Issue #688: the link didn't save. The beat keeps its server-known links (the select
+      // is controlled by beat.<field>, which only changes on a successful refresh), and we
+      // hold the attempted patch so Retry re-sends exactly the author's intent.
+      setPendingLinkPatch(patch);
+      setLinkError("Couldn't save that link. The beat's links are unchanged — try again.");
     } finally {
       setBusy(false);
     }
   };
 
+  const retrySaveLinks = () => {
+    if (!pendingLinkPatch) return;
+    void saveLinks(pendingLinkPatch);
+  };
+
   const setStatus = async (status: BeatStatus) => {
+    if (busy) return;
+    setStatusError(null);
     setBusy(true);
     try {
       await api.post(`${API}/beats/${beat.id}/status`, { status });
       await onChange();
+    } catch {
+      // See ArcCard.setArcStatus: the select reverts to server truth (beat.status), and
+      // this note tells the author the change didn't take. Re-selecting is the retry.
+      setStatusError("Couldn't save the beat status. It wasn't changed — please try again.");
     } finally {
       setBusy(false);
     }
   };
 
   const removeBeat = async () => {
-    if (!window.confirm(`Delete beat "${beat.title}"?`)) return;
+    if (deleteError) {
+      // Retry path: the beat is still on the page from the failed delete, so skip the
+      // confirm and re-attempt the idempotent DELETE.
+    } else if (!window.confirm(`Delete beat "${beat.title}"?`)) {
+      return;
+    }
+    setDeleteError(null);
     setBusy(true);
     try {
       await api.delete(`${API}/beats/${beat.id}`);
       await onChange();
+    } catch {
+      setDeleteError("Couldn't delete the beat. It's still here — try again.");
     } finally {
       setBusy(false);
     }
@@ -519,10 +667,16 @@ function BeatRow({
   };
 
   const removeBranch = async (branch: StoryBranch) => {
+    if (busy) return;
+    setBranchDeleteError(null);
     setBusy(true);
     try {
       await api.delete(`${API}/beats/${beat.id}/branches/${branch.id}`);
       await onChange();
+    } catch {
+      // Issue #688: keep the branch on the page with a targeted retry so the author
+      // isn't left wondering if the click registered.
+      setBranchDeleteError({ id: branch.id, message: "Couldn't delete that branch. It's still here — try again." });
     } finally {
       setBusy(false);
     }
@@ -543,13 +697,15 @@ function BeatRow({
           {beat.title}
         </h5>
         {isDm ? (
-          <div className="field">
+          <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={beatStatusId}>Status for beat {beat.title}</label>
             <select
               id={beatStatusId}
               className="input"
               value={beat.status}
               disabled={busy}
+              aria-invalid={statusError ? true : undefined}
+              aria-describedby={statusError ? beatStatusErrorId : undefined}
               onChange={(e) => void setStatus(e.target.value as BeatStatus)}
               style={{ fontSize: 11, padding: '1px 5px', width: 'auto', maxWidth: '100%' }}
             >
@@ -578,6 +734,17 @@ function BeatRow({
           </button>
         )}
       </div>
+
+      {statusError && (
+        <div id={beatStatusErrorId} style={{ marginLeft: 22 }}>
+          <ErrorNote message={statusError} />
+        </div>
+      )}
+      {deleteError && (
+        <div id={beatDeleteErrorId} style={{ marginLeft: 22 }}>
+          <ErrorNote message={deleteError} onRetry={() => void removeBeat()} />
+        </div>
+      )}
 
       {beat.body && (
         <div style={{ marginLeft: 22 }}>
@@ -608,55 +775,68 @@ function BeatRow({
 
       {isDm &&
         (editingLinks ? (
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginLeft: 22, flexWrap: 'wrap' }}>
-            <select
-              className="input"
-              value={beat.sessionId != null ? String(beat.sessionId) : ''}
-              disabled={busy}
-              onChange={(e) => void saveLinks({ sessionId: e.target.value ? Number(e.target.value) : null })}
-              style={{ fontSize: 12, width: 'auto' }}
-              aria-label={`Linked session for ${beat.title}`}
-            >
-              <option value="">— no session —</option>
-              {linkOptions.sessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {sessionLabel(s)}
-                </option>
-              ))}
-            </select>
-            <select
-              className="input"
-              value={beat.questId != null ? String(beat.questId) : ''}
-              disabled={busy}
-              onChange={(e) => void saveLinks({ questId: e.target.value ? Number(e.target.value) : null })}
-              style={{ fontSize: 12, width: 'auto' }}
-              aria-label={`Linked quest for ${beat.title}`}
-            >
-              <option value="">— no quest —</option>
-              {linkOptions.quests.map((q) => (
-                <option key={q.id} value={q.id}>
-                  {q.title ?? `#${q.id}`}
-                </option>
-              ))}
-            </select>
-            <select
-              className="input"
-              value={beat.encounterId != null ? String(beat.encounterId) : ''}
-              disabled={busy}
-              onChange={(e) => void saveLinks({ encounterId: e.target.value ? Number(e.target.value) : null })}
-              style={{ fontSize: 12, width: 'auto' }}
-              aria-label={`Linked encounter for ${beat.title}`}
-            >
-              <option value="">— no encounter —</option>
-              {linkOptions.encounters.map((en) => (
-                <option key={en.id} value={en.id}>
-                  {en.name ?? `#${en.id}`}
-                </option>
-              ))}
-            </select>
-            <button type="button" className="btn btn-ghost" style={{ fontSize: 11 }} disabled={busy} onClick={() => setEditingLinks(false)}>
-              Done
-            </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginLeft: 22, minWidth: 0 }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select
+                className="input"
+                value={beat.sessionId != null ? String(beat.sessionId) : ''}
+                disabled={busy || linkOptionState.failed.sessions}
+                onChange={(e) => void saveLinks({ sessionId: e.target.value ? Number(e.target.value) : null })}
+                style={{ fontSize: 12, width: 'auto' }}
+                aria-label={`Linked session for ${beat.title}`}
+              >
+                <option value="">{linkOptionState.failed.sessions ? "— couldn't load sessions —" : '— no session —'}</option>
+                {linkOptions.sessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {sessionLabel(s)}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="input"
+                value={beat.questId != null ? String(beat.questId) : ''}
+                disabled={busy || linkOptionState.failed.quests}
+                onChange={(e) => void saveLinks({ questId: e.target.value ? Number(e.target.value) : null })}
+                style={{ fontSize: 12, width: 'auto' }}
+                aria-label={`Linked quest for ${beat.title}`}
+              >
+                <option value="">{linkOptionState.failed.quests ? "— couldn't load quests —" : '— no quest —'}</option>
+                {linkOptions.quests.map((q) => (
+                  <option key={q.id} value={q.id}>
+                    {q.title ?? `#${q.id}`}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="input"
+                value={beat.encounterId != null ? String(beat.encounterId) : ''}
+                disabled={busy || linkOptionState.failed.encounters}
+                onChange={(e) => void saveLinks({ encounterId: e.target.value ? Number(e.target.value) : null })}
+                style={{ fontSize: 12, width: 'auto' }}
+                aria-label={`Linked encounter for ${beat.title}`}
+              >
+                <option value="">{linkOptionState.failed.encounters ? "— couldn't load encounters —" : '— no encounter —'}</option>
+                {linkOptions.encounters.map((en) => (
+                  <option key={en.id} value={en.id}>
+                    {en.name ?? `#${en.id}`}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn btn-ghost" style={{ fontSize: 11 }} disabled={busy} onClick={() => setEditingLinks(false)}>
+                Done
+              </button>
+            </div>
+            {anyLinkOptionFailed(linkOptionState.failed) && (
+              <ErrorNote
+                message={linkOptionState.loading ? 'Retrying linking options…' : "Couldn't load some linking options — you can still save without a link."}
+                onRetry={linkOptionState.loading ? undefined : linkOptionState.onRetry}
+              />
+            )}
+            {linkError && (
+              <div id={beatLinkErrorId}>
+                <ErrorNote message={linkError} onRetry={retrySaveLinks} />
+              </div>
+            )}
           </div>
         ) : (
           <button
@@ -672,6 +852,7 @@ function BeatRow({
 
       {beat.branches.map((branch) => {
         const target = branch.toBeatId != null ? allBeats.get(branch.toBeatId) : undefined;
+        const branchErr = branchDeleteError && branchDeleteError.id === branch.id ? branchDeleteError : null;
         return (
           <div
             key={branch.id}
@@ -697,6 +878,9 @@ function BeatRow({
               >
                 ✕
               </button>
+            )}
+            {branchErr && (
+              <ErrorNote message={branchErr.message} onRetry={() => void removeBranch(branch)} />
             )}
           </div>
         );
