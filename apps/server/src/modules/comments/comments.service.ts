@@ -48,6 +48,11 @@ function toDomain(row: typeof comments.$inferSelect): Comment {
     inCharacter: row.inCharacter,
     deletedAt: row.deletedAt,
     deletedBy: row.deletedBy,
+    // Editor provenance (issue #783): null on a comment only ever self-edited;
+    // stamped ONLY when a non-author (a DM moderating) rewrote the body, so the
+    // UI can honestly render "edited by DM Y" without overwriting the author.
+    editedAt: row.editedAt,
+    editedBy: row.editedBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -344,7 +349,15 @@ export class CommentsService {
     return toDomain(row);
   }
 
-  /** author-or-DM */
+  /**
+   * author-or-DM. A DM editing another member's comment is a moderation path we
+   * still allow (issue #783), but it must NOT silently rewrite the body under the
+   * original author's identity — that would forge text the player never wrote. So
+   * when the editor is NOT the original author we stamp edited_at/edited_by
+   * (distinct from the author of record) and record a moderator-edit audit row,
+   * leaving author_user_id / author_name untouched. The UI then renders "Author: X
+   * (edited by DM Y)"; a self-edit just bumps updated_at like before.
+   */
   async update(id: number, input: CommentUpdateInput, user: RequestUser, role: Role): Promise<Comment> {
     const existing = await this.getRowOrThrow(id);
     // A comment on an entity the caller can no longer see is, to them, nonexistent (issue #230).
@@ -352,9 +365,19 @@ export class CommentsService {
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may edit this comment');
     }
-    const patch: Partial<typeof comments.$inferInsert> = { updatedAt: nowIso() };
+    // editor !== author is the trust-relevant case (a DM rewording a player's
+    // prose). A self-edit is just an ordinary content edit — it leaves the editor
+    // provenance columns untouched, the way updated_at already drives the UI's
+    // generic "edited" badge.
+    const moderatorEdit = existing.authorUserId !== user.id;
+    const ts = nowIso();
+    const patch: Partial<typeof comments.$inferInsert> = { updatedAt: ts };
     if (input.body !== undefined) patch.body = input.body;
     if (input.inCharacter !== undefined) patch.inCharacter = input.inCharacter;
+    if (moderatorEdit) {
+      patch.editedAt = ts;
+      patch.editedBy = auditActor(user);
+    }
 
     const [row] = await this.db.update(comments).set(patch).where(eq(comments.id, id)).returning();
     await this.audit.log({
@@ -364,6 +387,10 @@ export class CommentsService {
       entityType: 'comment',
       entityId: id,
       campaignId: existing.campaignId,
+      // Lets an incident reviewer tell a self-edit from a DM-moderated rewrite:
+      // the audit actor/role already show WHO, but this makes the moderator-edit
+      // case greppable alongside the edited_by row provenance.
+      detail: moderatorEdit ? 'moderator edit (author preserved, editor recorded)' : '',
     });
     return toDomain(row);
   }

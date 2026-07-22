@@ -369,6 +369,17 @@ export const comments = sqliteTable('comments', {
   // Who tombstoned it: String(users.id), 'dev:<name>', or 'token:<name>' — same
   // identity space as author_user_id. Null on a live row. Cleared on restore.
   deletedBy: text('deleted_by'),
+  // Editor provenance for the TRUST case (issue #783): a DM editing another
+  // member's comment must NOT leave the original author as the apparent writer of
+  // text they didn't write. edited_at is stamped (alongside the usual updated_at
+  // bump) ONLY when the editor is not the original author, and edited_by records
+  // that editor in the same identity space as author_user_id / deleted_by. A
+  // self-edit leaves both NULL — the author editing their own prose is not a
+  // provenance event, and updated_at already drives the UI's "edited" badge.
+  // The original author_user_id / author_name are NEVER overwritten by an edit,
+  // so the player who wrote the comment stays its author of record.
+  editedAt: text('edited_at'),
+  editedBy: text('edited_by'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
