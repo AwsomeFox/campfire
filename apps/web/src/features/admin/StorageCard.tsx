@@ -127,6 +127,7 @@ export function StorageCard() {
   /** Open confirm dialog + the freshly-revalidated dry-run it shows (issue #703). */
   const [confirming, setConfirming] = useState(false);
   const [confirmDry, setConfirmDry] = useState<StorageCleanupResult | null>(null);
+  const [confirmStats, setConfirmStats] = useState<StorageStats | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
 
   // Any storage mutation invalidates the bound preview (issue #703): a stale
@@ -195,11 +196,13 @@ export function StorageCard() {
     setConfirming(true);
     setConfirmError(null);
     setConfirmDry(null);
+    setConfirmStats(null);
     setBusy(true);
     try {
       const fresh = await api.post<StorageCleanupResult>(`${API}/admin/storage/cleanup?dryRun=true`);
       const snap = await api.get<StorageStats>(`${API}/admin/storage`);
       setConfirmDry(fresh);
+      setConfirmStats(snap);
       setStats(snap);
     } catch (err) {
       setConfirmError(err instanceof ApiError ? err.message : "Couldn't re-check the orphan set.");
@@ -216,7 +219,7 @@ export function StorageCard() {
     const bound = binding;
     const fresh = confirmDry;
     if (!bound || !fresh) return;
-    const statsSnapshot = stats;
+    const statsSnapshot = confirmStats;
     if (!statsSnapshot) return;
 
     if (previewSignature(fresh, statsSnapshot) !== bound.signature) {
@@ -241,11 +244,17 @@ export function StorageCard() {
       setBinding(null);
       setConfirming(false);
       setConfirmDry(null);
+      setConfirmStats(null);
+
+      // Refresh the figures without routing through load(): load() intentionally
+      // invalidates transient preview state, including the outcome banner. A
+      // completed cleanup must keep its honest success/partial-failure result
+      // visible while still replacing the stale storage snapshot.
+      previewGeneration.current += 1;
       try {
         setStats(await api.get<StorageStats>(`${API}/admin/storage`));
-      } catch {
-        // Stats refresh is best-effort here; the outcome banner is the primary
-        // post-execute signal and must not be masked by a stats fetch failure.
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : "Cleanup finished, but storage stats couldn't be refreshed.");
       }
     } catch (err) {
       setConfirmError(err instanceof ApiError ? err.message : "Couldn't run cleanup.");
@@ -258,6 +267,7 @@ export function StorageCard() {
     if (busy) return;
     setConfirming(false);
     setConfirmDry(null);
+    setConfirmStats(null);
     setConfirmError(null);
   }
 
@@ -278,6 +288,11 @@ export function StorageCard() {
   }
 
   const orphanCount = stats.orphans.rowsWithoutFile + stats.orphans.filesWithoutRow;
+  const confirmMatchesBinding =
+    binding !== null &&
+    confirmDry !== null &&
+    confirmStats !== null &&
+    previewSignature(confirmDry, confirmStats) === binding.signature;
 
   return (
     <Card className="space-y-4">
@@ -378,20 +393,10 @@ export function StorageCard() {
           confirmLabel="Delete orphans"
           cancelLabel="Cancel"
           busy={busy}
-          confirmDisabled={
-            !confirmDry ||
-            !binding ||
-            confirmError !== null ||
-            // Drift between the bound preview and the fresh confirm-time dry-run
-            // (issue #703): the admin must re-preview before the destructive call
-            // can fire. Without this, a stale preview could drive a wrong delete set.
-            (confirmDry !== null &&
-              (confirmDry.rowsWithoutFile !== binding.rowsWithoutFile ||
-                confirmDry.filesWithoutRow !== binding.filesWithoutRow))
-          }
+          confirmDisabled={!confirmMatchesBinding || confirmError !== null}
           onCancel={cancelConfirm}
           onConfirm={() => void executeCleanup()}
-          body={<ConfirmBody binding={binding} fresh={confirmDry} error={confirmError} />}
+          body={<ConfirmBody binding={binding} fresh={confirmDry} freshStats={confirmStats} error={confirmError} />}
         />
       )}
     </Card>
@@ -402,22 +407,22 @@ export function StorageCard() {
 function ConfirmBody({
   binding,
   fresh,
+  freshStats,
   error,
 }: {
   binding: PreviewBinding | null;
   fresh: StorageCleanupResult | null;
+  freshStats: StorageStats | null;
   error: string | null;
 }) {
   if (error) {
     return <p className="text-xs text-rose-400">{error}</p>;
   }
-  if (!fresh) {
+  if (!fresh || !freshStats) {
     return <p className="text-xs text-slate-400">Re-checking the orphan set…</p>;
   }
-  const drifted =
-    binding !== null &&
-    (fresh.rowsWithoutFile !== binding.rowsWithoutFile || fresh.filesWithoutRow !== binding.filesWithoutRow);
-  const orphanBytes = drifted ? 0 : binding?.orphanBytes ?? 0;
+  const drifted = binding === null || previewSignature(fresh, freshStats) !== binding.signature;
+  const orphanBytes = freshStats.orphans.orphanBytes;
   return (
     <div className="space-y-2 text-xs text-slate-300">
       <p>This will permanently delete:</p>
@@ -432,7 +437,9 @@ function ConfirmBody({
       </ul>
       {drifted ? (
         <p className="text-amber-400" data-testid="storage-confirm-drift">
-          The set changed since the preview — re-run Preview to bind the current counts before cleaning.
+          {binding === null
+            ? 'The bound preview is no longer valid — close this dialog and run Preview again before cleaning.'
+            : 'The set changed since the preview — re-run Preview to bind the current counts before cleaning.'}
         </p>
       ) : (
         <p className="text-slate-500">Counts match the bound preview.</p>
