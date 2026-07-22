@@ -187,7 +187,10 @@ export function findMentionMatches(
   candidates: ReadonlyArray<MentionCandidate>,
   options: MentionSegmentationOptions = {},
 ): MentionMatch[] {
-  if (!text || candidates.length === 0) return [];
+  // `findMentionMatches` is exported and may be called with caller-constructed
+  // candidates, bypassing buildMentionCandidates. Preserve the module's
+  // fail-closed compatibility contract in runtimes without property escapes.
+  if (!UNICODE_MENTION_MATCHING_SUPPORTED || !text || candidates.length === 0) return [];
   const forceFallback = options.forceFallback === true;
   const source = normalizedSource(text, forceFallback);
   const isBoundary = boundaryPredicate(source.normalized, forceFallback);
