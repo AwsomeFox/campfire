@@ -54,8 +54,13 @@ export class CampaignsController {
   })
   @ApiResponse({ status: 201, description: 'The newly created campaign.' })
   @ApiResponse({ status: 400, description: 'Body is not a valid Campfire export document.' })
-  importCampaign(@Body() body: CampaignImportDto, @CurrentUser() user: RequestUser) {
-    return this.campaigns.importCampaign(body, user);
+  async importCampaign(@Body() body: CampaignImportDto, @CurrentUser() user: RequestUser) {
+    // Issue #725: the service returns an ImportResult (campaign + imported/skipped/
+    // failed counts); the HTTP contract stays "the newly created campaign" so the
+    // documented API (and existing clients) are unchanged. The counts are available
+    // to internal callers (MCP) via the service method directly.
+    const result = await this.campaigns.importCampaign(body, user);
+    return result.campaign;
   }
 
   @Post('import/archive')
@@ -69,9 +74,12 @@ export class CampaignsController {
   @ApiResponse({ status: 400, description: 'Missing file, or the archive is not a valid Campfire zip export.' })
   @ApiResponse({ status: 413, description: 'Uploaded archive exceeds the max size.' })
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_IMPORT_ARCHIVE_BYTES } }))
-  importArchive(@UploadedFile() file: MulterFile | undefined, @CurrentUser() user: RequestUser) {
+  async importArchive(@UploadedFile() file: MulterFile | undefined, @CurrentUser() user: RequestUser) {
     if (!file) throw new BadRequestException('Missing file (multipart field "file")');
-    return this.campaigns.importArchive(file.buffer, user);
+    // Issue #725: the service returns an ImportResult (campaign + imported/skipped/
+    // failed counts); the HTTP contract stays "the newly created campaign".
+    const result = await this.campaigns.importArchive(file.buffer, user);
+    return result.campaign;
   }
 
   @Get('trash')
