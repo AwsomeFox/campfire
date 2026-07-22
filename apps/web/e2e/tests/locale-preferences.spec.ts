@@ -53,6 +53,24 @@ test('Preferences keeps catalog language separate from System formatting across 
   await page.goto(`/c/${seed().campaignId}/sessions`);
   await expect(page.getByText('Jul 21, 2026', { exact: true }).first()).toBeVisible();
 
+  // Dashboard schedule banners use the explicit formatting preference too.
+  const scheduledAt = '2026-07-21T17:05:00.000Z';
+  await page.route(`**/api/v1/campaigns/${seed().campaignId}/schedule/next`, async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ id: 99_001, scheduledAt }),
+    });
+  });
+  const expectedEnglishSchedule = await page.evaluate((value) => new Date(value).toLocaleString('en', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }), scheduledAt);
+  await page.goto(`/c/${seed().campaignId}`);
+  await expect(page.getByText(expectedEnglishSchedule, { exact: true })).toBeVisible();
+
   // System is itself explicit, survives reload, and does not change the rendered catalog.
   await page.goto('/preferences');
   await language.selectOption(SYSTEM_LOCALE);
