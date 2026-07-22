@@ -243,7 +243,7 @@ export function AiTransparencyNote({ className = '' }: { className?: string }) {
   const { t } = useTranslation();
   return (
     <div className={`cf-inset p-3 ${className}`}>
-      <p className="text-[11px] font-bold uppercase tracking-widest text-[var(--color-neutral-600)]">
+      <p className="text-[11px] font-bold uppercase tracking-widest text-[var(--color-neutral-400)]">
         {t('aiOnboarding.transparency.title')}
       </p>
       <p className="text-xs text-[var(--color-neutral-400)] mt-1">{t('aiOnboarding.transparency.body')}</p>

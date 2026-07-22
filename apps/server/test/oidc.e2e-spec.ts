@@ -327,13 +327,50 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       const res = await fetch(`${app.baseUrl}/api/v1/auth/status`);
       const body = await res.json();
       expect(body.oidcEnabled).toBe(false);
+      expect(body.oidcProviderName).toBeNull();
     });
 
-    it('is true when all three core OIDC env vars are set', async () => {
-      const app = await bootApp(oidcEnvFor(idp));
+    it('uses neutral provider branding when the core OIDC config has no display name', async () => {
+      const app = await bootApp(oidcEnvFor(idp, { OIDC_PROVIDER_NAME: undefined }));
       const res = await fetch(`${app.baseUrl}/api/v1/auth/status`);
       const body = await res.json();
       expect(body.oidcEnabled).toBe(true);
+      expect(body.oidcProviderName).toBeNull();
+      expect(Object.keys(body).sort()).toEqual([
+        'localLoginEnabled',
+        'oidcEnabled',
+        'oidcProviderName',
+        'setupRequired',
+        'signupEnabled',
+        'version',
+      ]);
+    });
+
+    it('exposes only a configured provider display name, not admin/allowlist groups or OIDC secrets', async () => {
+      const app = await bootApp(oidcEnvFor(idp, {
+        OIDC_PROVIDER_NAME: 'Keycloak',
+        OIDC_ADMIN_GROUP: 'secret-admin-group',
+        OIDC_ALLOWED_GROUP: 'secret-allowlist-group',
+      }));
+      const res = await fetch(`${app.baseUrl}/api/v1/auth/status`);
+      const body = await res.json();
+      const serialized = JSON.stringify(body);
+
+      expect(body.oidcEnabled).toBe(true);
+      expect(body.oidcProviderName).toBe('Keycloak');
+      expect(serialized).not.toContain(idp.issuer);
+      expect(serialized).not.toContain('test-client');
+      expect(serialized).not.toContain('test-secret');
+      expect(serialized).not.toContain('secret-admin-group');
+      expect(serialized).not.toContain('secret-allowlist-group');
+      expect(Object.keys(body).sort()).toEqual([
+        'localLoginEnabled',
+        'oidcEnabled',
+        'oidcProviderName',
+        'setupRequired',
+        'signupEnabled',
+        'version',
+      ]);
     });
 
     it('is false when only some vars are set (partial config does not count)', async () => {
@@ -346,6 +383,7 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       const res = await fetch(`${app.baseUrl}/api/v1/auth/status`);
       const body = await res.json();
       expect(body.oidcEnabled).toBe(false);
+      expect(body.oidcProviderName).toBeNull();
     });
   });
 
@@ -680,6 +718,7 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       OIDC_CLIENT_ID: undefined,
       OIDC_CLIENT_SECRET: undefined,
       OIDC_REDIRECT_URI: undefined,
+      OIDC_PROVIDER_NAME: undefined,
       OIDC_ADMIN_GROUP: undefined,
       OIDC_ALLOWED_GROUP: undefined,
       OIDC_GROUPS_CLAIM: undefined,
@@ -722,6 +761,7 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       expect(okRes.status).toBe(200);
       const body = await okRes.json();
       expect(body.enabled).toBe(false);
+      expect(body.providerName).toBe('');
       expect(body.clientSecretSet).toBe(false);
       expect(body.envKeys).toEqual([]); // no OIDC_* env vars set
       expect(body).not.toHaveProperty('clientSecret');
@@ -736,12 +776,14 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
         clientId: 'test-client',
         clientSecret: 'test-secret',
         redirectUri,
+        providerName: 'Keycloak',
         adminGroup: 'campfire-admins',
       });
       expect(patch.status).toBe(200);
       const patched = await patch.json();
       expect(patched.enabled).toBe(true);
       expect(patched.clientSecretSet).toBe(true);
+      expect(patched.providerName).toBe('Keycloak');
       expect(patched.issuer).toBe(idp.issuer);
       expect(patched.adminGroup).toBe('campfire-admins');
       expect(patched).not.toHaveProperty('clientSecret');
@@ -749,12 +791,16 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       // GET reflects persistence, still no secret.
       const got = await (await admin.get('/api/v1/settings/oidc')).json();
       expect(got.clientId).toBe('test-client');
+      expect(got.providerName).toBe('Keycloak');
       expect(got.clientSecretSet).toBe(true);
       expect(got).not.toHaveProperty('clientSecret');
 
       // AuthStatus now advertises OIDC — driven by stored config, not env vars.
       const status = await (await fetch(`${app.baseUrl}/api/v1/auth/status`)).json();
       expect(status.oidcEnabled).toBe(true);
+      expect(status.oidcProviderName).toBe('Keycloak');
+      expect(JSON.stringify(status)).not.toContain('test-secret');
+      expect(JSON.stringify(status)).not.toContain('campfire-admins');
 
       // Omitting clientSecret keeps the stored secret (write-only semantics).
       const patch2 = await admin.patchJson('/api/v1/settings/oidc', { scope: 'openid profile email groups' });
