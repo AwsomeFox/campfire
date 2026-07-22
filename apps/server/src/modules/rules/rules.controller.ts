@@ -1,10 +1,9 @@
-import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { listRulePackSources, type RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
-import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
-import { RoleResolver } from '../membership/role-resolver.service';
+import { type RequestUser } from '../../common/user.types';
 import { RulesService } from './rules.service';
 import { RulePackInstallDto, RulePackUploadDto, RuleEntryUpdateDto } from './rules.dto';
 
@@ -13,21 +12,21 @@ import { RulePackInstallDto, RulePackUploadDto, RuleEntryUpdateDto } from './rul
  * status) are open to any authenticated user — the Compendium screen is available to
  * players and DMs alike.
  *
- * Install (Open5e import or generic upload) is allowed for a server admin OR a DM of any
- * campaign (issue #20): packs are server-wide, and a DM setting up their table needs to be
- * able to add content without a server-admin round-trip. Install runs as a non-blocking
- * background job — POST returns 202 with a job the UI polls (issue #20).
+ * Every mutation (install, upload, entry icon override, uninstall) is server-admin only
+ * (issue #736): rule packs are SERVER-WIDE, so installing, uploading, or uninstalling one
+ * affects every campaign on the server — not just the caller's. Previously a DM of any
+ * campaign could mutate these global packs (issue #20); that let one campaign's DM change
+ * content every other campaign sees. Mutations are now gated on real server-admin power
+ * via @ServerRoles('admin') (the same check uninstall already used), so a scope-capped PAT
+ * owned by an admin cannot inherit that power either.
  *
- * Uninstall stays server-admin only: removing a server-wide pack affects every campaign
- * that selected it, so it remains an operator action rather than something one DM can do.
+ * Install runs as a non-blocking background job — POST returns 202 with a job the UI polls
+ * (issue #20); the gate is enforced before the job is enqueued.
  */
 @ApiTags('rules')
 @Controller('rules')
 export class RulesController {
-  constructor(
-    private readonly rules: RulesService,
-    private readonly roles: RoleResolver,
-  ) {}
+  constructor(private readonly rules: RulesService) {}
 
   @Get('packs')
   @ApiOperation({ summary: 'List installed rule packs', description: 'Any authenticated user.' })
@@ -60,11 +59,12 @@ export class RulesController {
    * add, with `added`/`skippedExisting` counts).
    */
   @Post('packs/install')
+  @ServerRoles('admin')
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'Install a rule pack from an open source (background job)',
     description:
-      "Server admin or DM of any campaign. `source` selects the importer: 'open5e' (D&D 5e, default), " +
+      "Server admin only (packs are server-wide). `source` selects the importer: 'open5e' (D&D 5e, default), " +
       "'pf2e' (Pathfinder 2e), 'sf2e' (Starfinder 2e), 'pf1e' (Pathfinder 1e), 'starfinder', 'archmage' (13th Age), 'open-legend', " +
       "or 'osr' (retroclones — pass `system` to pick the variant, e.g. 'basic-fantasy'). Sections are " +
       'validated per-source (a foreign section is rejected 400). open5e/pf2e/sf2e/open-legend have a wired live ' +
@@ -74,7 +74,6 @@ export class RulesController {
   @ApiResponse({ status: 202, description: 'Install job accepted; poll packs/install-jobs/:id.' })
   @ApiResponse({ status: 400, description: 'Rejected — a section invalid for the source, or a required `url` was missing.' })
   async install(@Body() body: RulePackInstallDto, @CurrentUser() user: RequestUser) {
-    await this.assertCanInstall(user);
     // Dispatch by source (issues #295, #296-300, #345): each system routes to its own
     // importer + enqueue path; per-source section/URL validation happens synchronously
     // inside enqueueInstall (400 before a job is created).
@@ -87,12 +86,12 @@ export class RulesController {
    * A non-open license is rejected synchronously with 400 before the job is enqueued.
    */
   @Post('packs/upload')
+  @ServerRoles('admin')
   @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: 'Upload a generic open-licensed rule pack (background job)', description: 'Server admin or DM of any campaign. The pack must carry an open license (OGL/ORC/CC/public domain). Returns 202 with an install job to poll.' })
+  @ApiOperation({ summary: 'Upload a generic open-licensed rule pack (background job)', description: 'Server admin only (packs are server-wide). The pack must carry an open license (OGL/ORC/CC/public domain). Returns 202 with an install job to poll.' })
   @ApiResponse({ status: 202, description: 'Install job accepted; poll packs/install-jobs/:id.' })
   @ApiResponse({ status: 400, description: 'Rejected — not an open license, or malformed payload.' })
   async upload(@Body() body: RulePackUploadDto, @CurrentUser() user: RequestUser) {
-    await this.assertCanInstall(user);
     return this.rules.enqueueUploadInstall(body, user);
   }
 
@@ -135,31 +134,18 @@ export class RulesController {
   }
 
   /**
-   * Set the manual icon override on a rule entry (issue #305). Same gate as install
-   * (server-admin power OR DM of any campaign): compendium packs are server-wide, and a
-   * DM curating their table's icons shouldn't need a server-admin round-trip. Reads stay
-   * open to everyone; only this edit is gated.
+   * Set the manual icon override on a rule entry (issue #305). Server-admin only, same gate
+   * as install/uninstall (issue #736): compendium packs are server-wide, so editing an entry
+   * affects every campaign using the pack. Reads stay open to everyone; only this edit is gated.
    */
   @Patch('entries/:id')
-  @ApiOperation({ summary: 'Update a rule entry', description: 'Server admin, or the DM of any campaign. Sets the manual icon override.' })
+  @ServerRoles('admin')
+  @ApiOperation({ summary: 'Update a rule entry', description: 'Server admin only. Sets the manual icon override.' })
   @ApiResponse({ status: 200, description: 'Updated rule entry.' })
   async updateEntry(
-    @CurrentUser() user: RequestUser,
     @Param('id', ParseIntPipe) id: number,
     @Body() body: RuleEntryUpdateDto,
   ) {
-    await this.assertCanInstall(user);
     return this.rules.updateEntry(id, body);
-  }
-
-  /**
-   * Install/upload gate (issue #20): server-admin power OR DM of at least one campaign.
-   * hasServerAdminPower (not a raw serverRole check) so a scope-capped PAT can't inherit
-   * server-admin power; isDmOfAnyCampaign honours token scope/campaign binding too.
-   */
-  private async assertCanInstall(user: RequestUser): Promise<void> {
-    if (hasServerAdminPower(user)) return;
-    if (await this.roles.isDmOfAnyCampaign(user)) return;
-    throw new ForbiddenException('Installing rule packs requires server admin, or being the DM of a campaign.');
   }
 }
