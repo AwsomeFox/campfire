@@ -25,9 +25,26 @@ export type MentionSegmentationOptions = {
   forceFallback?: boolean;
 };
 
-const WORD_CHARACTER = /[\p{L}\p{M}\p{N}\p{Pc}]/u;
-const COMBINING_MARK = /\p{M}/u;
-const SCRIPT_WITHOUT_REQUIRED_SPACES = /(?:\p{Script_Extensions=Han}|\p{Script_Extensions=Hiragana}|\p{Script_Extensions=Katakana}|\p{Script_Extensions=Bopomofo}|\p{Script_Extensions=Hangul}|\p{Script_Extensions=Thai}|\p{Script_Extensions=Lao}|\p{Script_Extensions=Khmer}|\p{Script_Extensions=Myanmar})/u;
+function unicodePattern(source: string, flags = 'u'): RegExp | null {
+  try {
+    return new RegExp(source, flags);
+  } catch {
+    return null;
+  }
+}
+
+// Construct Unicode-property expressions at runtime. Older embedded browsers that
+// cannot parse one of these properties now disable auto-linking safely instead of
+// failing module evaluation and taking the whole Markdown renderer down.
+const WORD_CHARACTER = unicodePattern('[\\p{L}\\p{M}\\p{N}\\p{Pc}]');
+const COMBINING_MARK = unicodePattern('\\p{M}');
+const COMBINING_MARK_GLOBAL = unicodePattern('\\p{M}', 'gu');
+const SCRIPT_WITHOUT_REQUIRED_SPACES = unicodePattern(
+  '(?:\\p{Script_Extensions=Han}|\\p{Script_Extensions=Hiragana}|\\p{Script_Extensions=Katakana}|\\p{Script_Extensions=Bopomofo}|\\p{Script_Extensions=Hangul}|\\p{Script_Extensions=Thai}|\\p{Script_Extensions=Lao}|\\p{Script_Extensions=Khmer}|\\p{Script_Extensions=Myanmar})',
+);
+const UNICODE_MENTION_MATCHING_SUPPORTED = Boolean(
+  WORD_CHARACTER && COMBINING_MARK && COMBINING_MARK_GLOBAL && SCRIPT_WITHOUT_REQUIRED_SPACES,
+);
 
 /**
  * Canonical mention key strategy.
@@ -48,12 +65,13 @@ export function normalizeMentionName(value: string): string {
 
 /** Drop canonically equal/case-equal collisions, then sort deterministically. */
 export function buildMentionCandidates(targets: ReadonlyArray<MentionTarget>): MentionCandidate[] {
+  if (!UNICODE_MENTION_MATCHING_SUPPORTED) return [];
   const byKey = new Map<string, MentionTarget | null>();
   for (const target of targets) {
     const key = normalizeMentionName(target.name);
     if (!key) continue;
-    const baseCharacterCount = [...key.replace(/\p{M}/gu, '')].length;
-    if (baseCharacterCount < 2 && !SCRIPT_WITHOUT_REQUIRED_SPACES.test(key)) continue;
+    const baseCharacterCount = [...key.replace(COMBINING_MARK_GLOBAL!, '')].length;
+    if (baseCharacterCount < 2 && !SCRIPT_WITHOUT_REQUIRED_SPACES!.test(key)) continue;
     byKey.set(key, byKey.has(key) ? null : target);
   }
 
@@ -84,7 +102,7 @@ function fallbackGraphemes(input: string): Segment[] {
   let offset = 0;
   for (const point of input) {
     const previous = result[result.length - 1];
-    if (previous && COMBINING_MARK.test(point)) previous.segment += point;
+    if (previous && COMBINING_MARK!.test(point)) previous.segment += point;
     else result.push({ index: offset, segment: point });
     offset += point.length;
   }
@@ -138,12 +156,12 @@ function fallbackBoundary(input: string, index: number): boolean {
   if (index <= 0 || index >= input.length) return true;
   const left = codePointBefore(input, index);
   const right = codePointAt(input, index);
-  if (!WORD_CHARACTER.test(left) || !WORD_CHARACTER.test(right)) return true;
+  if (!WORD_CHARACTER!.test(left) || !WORD_CHARACTER!.test(right)) return true;
 
   // Scripts commonly written without spaces must remain matchable in running
   // prose. For whitespace-delimited scripts, adjacent word characters mean the
   // candidate is only a partial name and must not link.
-  return SCRIPT_WITHOUT_REQUIRED_SPACES.test(left) || SCRIPT_WITHOUT_REQUIRED_SPACES.test(right);
+  return SCRIPT_WITHOUT_REQUIRED_SPACES!.test(left) || SCRIPT_WITHOUT_REQUIRED_SPACES!.test(right);
 }
 
 function boundaryPredicate(input: string, forceFallback: boolean): (index: number) => boolean {
