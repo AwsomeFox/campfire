@@ -506,7 +506,8 @@ combat — over MCP alone.
 - **Write — notes & inbox:** `add_note`, `update_note`/`delete_note`
   (author only — dm may NOT edit/delete another member's note),
   `submit_inbox_item` (any member — the player -> DM message queue),
-  `resolve_inbox_item` (dm).
+  `resolve_inbox_item` (dm; terminal payload is idempotent — an identical retry
+  returns the stored result, while a different resolution conflicts).
 - **Write — proposals & membership:** `approve_proposal` (dm),
   `reject_proposal` (dm), `add_member`/`update_member`/`remove_member` (dm;
   refuses to demote/remove the campaign's last dm).

@@ -2269,7 +2269,9 @@ export class McpToolsService {
       user,
       'resolve_inbox_item',
       'DM only: resolve a player inbox item, optionally with a resolution note and/or a link to the entity it ' +
-        'became (entityType + entityId together) — shown in the resolved history (read_inbox with resolved=true).',
+        'became (entityType + entityId together) — shown in the resolved history (read_inbox with resolved=true). ' +
+        'Retrying the identical terminal payload returns the existing result; a different terminal payload after ' +
+        'resolution fails with conflict.',
       {
         noteId: Id.describe('Inbox note id'),
         resolvedNote: z.string().max(1000).optional().describe('Resolution note'),
