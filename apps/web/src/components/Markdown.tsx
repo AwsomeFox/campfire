@@ -108,7 +108,7 @@ function useAutoLink(
           if (SKIP.has(el.tagName)) return NodeFilter.FILTER_REJECT;
           el = el.parentElement;
         }
-        return node.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        return node.nodeValue?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       },
     });
 
