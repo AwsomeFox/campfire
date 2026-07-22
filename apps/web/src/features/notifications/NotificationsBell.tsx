@@ -1,21 +1,86 @@
 /**
- * Notification bell + dropdown panel (issue #11).
+ * Shared notification controller + responsive bell renderer (issues #11, #802).
  *
- * Polls GET /notifications/unread-count (60s + on route change) for the badge;
- * fetches the full list only when the panel opens. Clicking a notification
- * marks it read and deep-links to the relevant campaign page. Real-time push
- * (SSE, issue #4) can later call `refresh()` instead of the interval — the
- * fetch/store shape here doesn't care where the tick comes from.
+ * The provider owns the only poller, panel, and request state. Layout may move the
+ * passive bell renderer between desktop/mobile chrome without restarting polling
+ * or losing an open panel. Polling stops while this document is hidden/offline,
+ * and count snapshots/read mutations are shared with same-user tabs.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { Notification } from '@campfire/schema';
+import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
 import { Btn, EmptyState, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
 
 const POLL_MS = 60_000;
+
+type CountSnapshot = {
+  count: number;
+  refreshedAt: number;
+};
+
+type NotificationSyncMessage =
+  | { type: 'snapshot'; snapshot: CountSnapshot }
+  | { type: 'read'; id: number; readAt: string }
+  | { type: 'read-all'; readAt: string };
+
+type NotificationContextValue = {
+  count: number;
+  open: boolean;
+  items: Notification[] | null;
+  loadError: boolean;
+  togglePanel(): void;
+  closePanel(): void;
+  markRead(notification: Notification): Promise<void>;
+  markAllRead(): Promise<void>;
+};
+
+const NotificationContext = createContext<NotificationContextValue | null>(null);
+
+function useNotifications(): NotificationContextValue {
+  const value = useContext(NotificationContext);
+  if (!value) throw new Error('Notifications must be rendered inside NotificationsProvider');
+  return value;
+}
+
+function isDocumentActive(): boolean {
+  return !document.hidden && navigator.onLine;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function parseSnapshot(value: string | null): CountSnapshot | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<CountSnapshot>;
+    if (
+      typeof parsed.count === 'number'
+      && Number.isInteger(parsed.count)
+      && parsed.count >= 0
+      && typeof parsed.refreshedAt === 'number'
+      && Number.isFinite(parsed.refreshedAt)
+    ) {
+      return { count: parsed.count, refreshedAt: parsed.refreshedAt };
+    }
+  } catch {
+    /* malformed/blocked storage is just an empty cache */
+  }
+  return null;
+}
 
 function typeIcon(type: Notification['type']): string {
   switch (type) {
@@ -73,188 +138,519 @@ function BellIcon({ size = 17 }: { size?: number }) {
   );
 }
 
-export function NotificationsBell() {
+export function NotificationsProvider({ children }: { children: ReactNode }) {
+  const { me } = useAuth();
+  const userId = me?.user.id;
+  const location = useLocation();
+  const navigate = useNavigate();
   const [count, setCount] = useState(0);
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notification[] | null>(null);
   const [loadError, setLoadError] = useState(false);
-  const navigate = useNavigate();
-  const location = useLocation();
-  const panelRef = useRef<HTMLDivElement>(null);
 
-  const refreshCount = useCallback(async () => {
+  const mountedRef = useRef(false);
+  const initializedRef = useRef(false);
+  const openRef = useRef(false);
+  const countRef = useRef(0);
+  const latestSnapshotRef = useRef<CountSnapshot | null>(null);
+  const snapshotVersionRef = useRef(0);
+  const readAtByIdRef = useRef(new Map<number, string>());
+  const allReadAtRef = useRef<string | null>(null);
+  const channelRef = useRef<BroadcastChannel | null>(null);
+  const countGenerationRef = useRef(0);
+  const listGenerationRef = useRef(0);
+  const countRequestRef = useRef<{ controller: AbortController; promise: Promise<void>; generation: number } | null>(null);
+  const listRequestRef = useRef<{ controller: AbortController; generation: number } | null>(null);
+  const previousPathRef = useRef(location.pathname);
+
+  const storageKey = userId === undefined ? null : `campfire.notifications.count.${userId}`;
+  const lockName = userId === undefined ? null : `campfire.notifications.poll.${userId}`;
+  const channelName = userId === undefined ? null : `campfire.notifications.sync.${userId}`;
+
+  const applyCount = useCallback((next: number) => {
+    const safe = Math.max(0, Math.trunc(next));
+    countRef.current = safe;
+    if (mountedRef.current) setCount(safe);
+  }, []);
+
+  const readStoredSnapshot = useCallback((): CountSnapshot | null => {
+    if (!storageKey) return null;
     try {
-      const res = await api.get<{ count: number }>(`${API}/notifications/unread-count`);
-      setCount(res.count);
+      return parseSnapshot(localStorage.getItem(storageKey));
     } catch {
-      /* badge is best-effort */
+      return null;
+    }
+  }, [storageKey]);
+
+  const applySnapshot = useCallback((snapshot: CountSnapshot) => {
+    if ((latestSnapshotRef.current?.refreshedAt ?? 0) > snapshot.refreshedAt) return;
+    latestSnapshotRef.current = snapshot;
+    snapshotVersionRef.current += 1;
+    applyCount(snapshot.count);
+  }, [applyCount]);
+
+  const publishSnapshot = useCallback((snapshot: CountSnapshot) => {
+    latestSnapshotRef.current = snapshot;
+    snapshotVersionRef.current += 1;
+    applyCount(snapshot.count);
+    if (storageKey) {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(snapshot));
+      } catch {
+        /* storage may be unavailable; BroadcastChannel still handles live tabs */
+      }
+    }
+    channelRef.current?.postMessage({ type: 'snapshot', snapshot } satisfies NotificationSyncMessage);
+  }, [applyCount, storageKey]);
+
+  const cancelCountRequest = useCallback(() => {
+    countGenerationRef.current += 1;
+    countRequestRef.current?.controller.abort();
+    countRequestRef.current = null;
+  }, []);
+
+  const cancelListRequest = useCallback(() => {
+    listGenerationRef.current += 1;
+    listRequestRef.current?.controller.abort();
+    listRequestRef.current = null;
+  }, []);
+
+  const refreshCount = useCallback((force = false): Promise<void> => {
+    if (userId === undefined || !storageKey || !lockName || !isDocumentActive()) return Promise.resolve();
+    if (countRequestRef.current) return countRequestRef.current.promise;
+
+    const stored = readStoredSnapshot();
+    if (!force && stored && Date.now() - stored.refreshedAt < POLL_MS) {
+      applySnapshot(stored);
+      return Promise.resolve();
+    }
+
+    const controller = new AbortController();
+    const generation = ++countGenerationRef.current;
+
+    const load = async () => {
+      if (!isDocumentActive()) return;
+      const snapshotVersion = snapshotVersionRef.current;
+      const res = await api.get<{ count: number }>(`${API}/notifications/unread-count`, {
+        signal: controller.signal,
+      });
+      if (!mountedRef.current || controller.signal.aborted || generation !== countGenerationRef.current) return;
+      // A read mutation or a newer tab refresh completed while this request was
+      // in flight. Its snapshot is authoritative; do not resurrect an old count.
+      if (snapshotVersionRef.current !== snapshotVersion) return;
+      publishSnapshot({ count: res.count, refreshedAt: Date.now() });
+    };
+
+    const run = async () => {
+      try {
+        if (navigator.locks) {
+          await navigator.locks.request(lockName, { ifAvailable: true }, async (lock) => {
+            if (!lock) return;
+            // A tab may have refreshed between our first cache check and acquiring
+            // the origin-wide lock. Non-forced interval/initial reads can reuse it.
+            const newer = readStoredSnapshot();
+            if (!force && newer && Date.now() - newer.refreshedAt < POLL_MS) {
+              applySnapshot(newer);
+              return;
+            }
+            await load();
+          });
+        } else {
+          // Web Locks is an optimization for multiple tabs. The per-provider gate
+          // still guarantees no overlap in browsers that do not implement it.
+          await load();
+        }
+      } catch (error) {
+        if (!isAbortError(error)) {
+          /* badge is best-effort */
+        }
+      } finally {
+        if (countRequestRef.current?.generation === generation) countRequestRef.current = null;
+      }
+    };
+
+    const promise = run();
+    countRequestRef.current = { controller, promise, generation };
+    return promise;
+  }, [applySnapshot, lockName, publishSnapshot, readStoredSnapshot, storageKey, userId]);
+
+  const loadItems = useCallback(() => {
+    if (userId === undefined || !isDocumentActive()) return;
+    cancelListRequest();
+    const controller = new AbortController();
+    const generation = ++listGenerationRef.current;
+    listRequestRef.current = { controller, generation };
+    setItems(null);
+    setLoadError(false);
+    void api.get<Notification[]>(`${API}/notifications?limit=30`, { signal: controller.signal })
+      .then((nextItems) => {
+        if (
+          mountedRef.current
+          && openRef.current
+          && !controller.signal.aborted
+          && generation === listGenerationRef.current
+        ) {
+          setItems(nextItems.map((item) => {
+            if (item.readAt) return item;
+            const knownReadAt = readAtByIdRef.current.get(item.id) ?? allReadAtRef.current;
+            return knownReadAt ? { ...item, readAt: knownReadAt } : item;
+          }));
+        }
+      })
+      .catch((error: unknown) => {
+        if (
+          !isAbortError(error)
+          && mountedRef.current
+          && openRef.current
+          && generation === listGenerationRef.current
+        ) {
+          setLoadError(true);
+        }
+      })
+      .finally(() => {
+        if (listRequestRef.current?.generation === generation) listRequestRef.current = null;
+      });
+  }, [cancelListRequest, userId]);
+
+  const closePanel = useCallback(() => {
+    openRef.current = false;
+    setOpen(false);
+    cancelListRequest();
+  }, [cancelListRequest]);
+
+  const togglePanel = useCallback(() => {
+    if (openRef.current) {
+      closePanel();
+      return;
+    }
+    openRef.current = true;
+    setOpen(true);
+    loadItems();
+  }, [closePanel, loadItems]);
+
+  const syncReadMessage = useCallback((message: Extract<NotificationSyncMessage, { type: 'read' | 'read-all' }>) => {
+    if (!mountedRef.current) return;
+    if (message.type === 'read') {
+      readAtByIdRef.current.set(message.id, message.readAt);
+      setItems((previous) => previous?.map((item) => (
+        item.id === message.id && !item.readAt ? { ...item, readAt: message.readAt } : item
+      )) ?? previous);
+    } else {
+      allReadAtRef.current = message.readAt;
+      setItems((previous) => previous?.map((item) => (
+        item.readAt ? item : { ...item, readAt: message.readAt }
+      )) ?? previous);
     }
   }, []);
 
-  // Poll for the badge; also re-check on navigation so it stays fresh without SSE.
   useEffect(() => {
-    void refreshCount();
-    const t = setInterval(() => void refreshCount(), POLL_MS);
-    return () => clearInterval(t);
-  }, [refreshCount, location.pathname]);
-
-  async function openPanel() {
-    setOpen(true);
+    mountedRef.current = true;
+    initializedRef.current = false;
+    openRef.current = false;
+    setOpen(false);
     setItems(null);
     setLoadError(false);
-    try {
-      setItems(await api.get<Notification[]>(`${API}/notifications?limit=30`));
-    } catch {
-      setLoadError(true);
-    }
-  }
+    latestSnapshotRef.current = null;
+    snapshotVersionRef.current = 0;
+    readAtByIdRef.current.clear();
+    allReadAtRef.current = null;
+    applyCount(0);
 
-  async function onItemClick(n: Notification) {
-    setOpen(false);
-    if (!n.readAt) {
+    if (userId === undefined || !storageKey || !channelName) {
+      return () => {
+        mountedRef.current = false;
+      };
+    }
+
+    const stored = readStoredSnapshot();
+    if (stored) applySnapshot(stored);
+
+    const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(channelName);
+    channelRef.current = channel;
+    const onMessage = (event: MessageEvent<NotificationSyncMessage>) => {
+      const message = event.data;
+      if (message.type === 'snapshot') applySnapshot(message.snapshot);
+      else syncReadMessage(message);
+    };
+    channel?.addEventListener('message', onMessage);
+
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== storageKey) return;
+      const snapshot = parseSnapshot(event.newValue);
+      if (snapshot) applySnapshot(snapshot);
+    };
+    window.addEventListener('storage', onStorage);
+
+    let interval: number | null = null;
+    let active = isDocumentActive();
+    const stopInterval = () => {
+      if (interval !== null) window.clearInterval(interval);
+      interval = null;
+    };
+    const startInterval = () => {
+      stopInterval();
+      interval = window.setInterval(() => void refreshCount(), POLL_MS);
+    };
+
+    // Defer initial work one task so React StrictMode's development-only effect
+    // replay cancels the discarded mount before it can create network traffic.
+    const initialTimer = window.setTimeout(() => {
+      initializedRef.current = true;
+      active = isDocumentActive();
+      if (active) {
+        void refreshCount();
+        startInterval();
+      }
+    }, 0);
+
+    const onActivityChange = () => {
+      const nextActive = isDocumentActive();
+      if (nextActive === active) return;
+      active = nextActive;
+      if (!nextActive) {
+        stopInterval();
+        cancelCountRequest();
+        cancelListRequest();
+        return;
+      }
+      // A hidden+offline tab waits until both conditions recover, then does one
+      // refresh even if visibility and online events arrive back-to-back.
+      void refreshCount(true);
+      if (openRef.current) loadItems();
+      startInterval();
+    };
+
+    document.addEventListener('visibilitychange', onActivityChange);
+    window.addEventListener('online', onActivityChange);
+    window.addEventListener('offline', onActivityChange);
+
+    return () => {
+      mountedRef.current = false;
+      initializedRef.current = false;
+      window.clearTimeout(initialTimer);
+      stopInterval();
+      cancelCountRequest();
+      cancelListRequest();
+      document.removeEventListener('visibilitychange', onActivityChange);
+      window.removeEventListener('online', onActivityChange);
+      window.removeEventListener('offline', onActivityChange);
+      window.removeEventListener('storage', onStorage);
+      channel?.removeEventListener('message', onMessage);
+      channel?.close();
+      if (channelRef.current === channel) channelRef.current = null;
+    };
+  }, [
+    applyCount,
+    applySnapshot,
+    cancelCountRequest,
+    cancelListRequest,
+    channelName,
+    loadItems,
+    readStoredSnapshot,
+    refreshCount,
+    storageKey,
+    syncReadMessage,
+    userId,
+  ]);
+
+  // Route changes reconcile the badge without rebuilding the interval. The
+  // initial route is handled by the lifecycle effect above.
+  useEffect(() => {
+    if (previousPathRef.current === location.pathname) return;
+    previousPathRef.current = location.pathname;
+    if (initializedRef.current) void refreshCount(true);
+  }, [location.pathname, refreshCount]);
+
+  const markRead = useCallback(async (notification: Notification) => {
+    closePanel();
+    if (!notification.readAt) {
       try {
-        await api.post(`${API}/notifications/${n.id}/read`);
+        await api.post(`${API}/notifications/${notification.id}/read`);
+        cancelCountRequest();
+        const readAt = new Date().toISOString();
+        syncReadMessage({ type: 'read', id: notification.id, readAt });
+        channelRef.current?.postMessage({ type: 'read', id: notification.id, readAt } satisfies NotificationSyncMessage);
+        publishSnapshot({ count: Math.max(0, countRef.current - 1), refreshedAt: Date.now() });
       } catch {
         /* navigation still proceeds */
       }
-      void refreshCount();
+      // Reconcile even when the mutation failed, matching the old bell's
+      // best-effort mark-read behavior. A route refresh will join this request.
+      void refreshCount(true);
     }
-    navigate(notificationHref(n));
-  }
+    navigate(notificationHref(notification));
+  }, [cancelCountRequest, closePanel, navigate, publishSnapshot, refreshCount, syncReadMessage]);
 
-  async function onMarkAllRead() {
+  const markAllRead = useCallback(async () => {
     try {
       await api.post(`${API}/notifications/read-all`);
-      setItems((prev) => prev?.map((n) => (n.readAt ? n : { ...n, readAt: new Date().toISOString() })) ?? prev);
-      setCount(0);
+      cancelCountRequest();
+      const readAt = new Date().toISOString();
+      syncReadMessage({ type: 'read-all', readAt });
+      channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
+      publishSnapshot({ count: 0, refreshedAt: Date.now() });
     } catch {
       /* best-effort */
     }
-  }
+  }, [cancelCountRequest, publishSnapshot, syncReadMessage]);
+
+  const value: NotificationContextValue = {
+    count,
+    open,
+    items,
+    loadError,
+    togglePanel,
+    closePanel,
+    markRead,
+    markAllRead,
+  };
+
+  return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
+}
+
+/** Passive trigger. Layout renders exactly one at the active breakpoint. */
+export function NotificationsBell() {
+  const { count, togglePanel } = useNotifications();
+  return (
+    <button
+      type="button"
+      aria-label={count > 0 ? `Notifications (${count} unread)` : 'Notifications'}
+      onClick={togglePanel}
+      className="relative flex items-center justify-center h-8 w-8 rounded-full"
+      style={{ color: 'var(--color-neutral-300)', border: '1px solid var(--color-divider)' }}
+    >
+      <BellIcon />
+      {count > 0 && (
+        <span
+          className="absolute -top-1 -right-1 flex items-center justify-center rounded-full font-bold"
+          style={{
+            minWidth: 15,
+            height: 15,
+            padding: '0 3px',
+            fontSize: 9,
+            background: 'var(--color-accent)',
+            color: '#fff',
+          }}
+        >
+          {count > 99 ? '99+' : count}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** The single panel instance remains mounted in the shared layout controller. */
+export function NotificationsPanel() {
+  const notifications = useNotifications();
+  if (!notifications.open) return null;
+  return <OpenNotificationsPanel notifications={notifications} />;
+}
+
+function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
+  const { count, items, loadError, closePanel, markRead, markAllRead } = notifications;
+  const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
 
   return (
-    <>
-      <button
-        type="button"
-        aria-label={count > 0 ? `Notifications (${count} unread)` : 'Notifications'}
-        onClick={() => (open ? setOpen(false) : void openPanel())}
-        className="relative flex items-center justify-center h-8 w-8 rounded-full"
-        style={{ color: 'var(--color-neutral-300)', border: '1px solid var(--color-divider)' }}
+    <div
+      className="fixed inset-0 z-50"
+      style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 35%, transparent)' }}
+      onClick={closePanel}
+    >
+      <div
+        ref={dialogRef}
+        className="cf-card elev-lg fixed flex flex-col"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Notifications"
+        style={{
+          top: 12,
+          right: 12,
+          width: 'min(380px, calc(100vw - 24px))',
+          maxHeight: 'min(520px, calc(100vh - 24px))',
+          padding: 0,
+          overflow: 'hidden',
+        }}
+        onClick={(event) => event.stopPropagation()}
       >
-        <BellIcon />
-        {count > 0 && (
-          <span
-            className="absolute -top-1 -right-1 flex items-center justify-center rounded-full font-bold"
-            style={{
-              minWidth: 15,
-              height: 15,
-              padding: '0 3px',
-              fontSize: 9,
-              background: 'var(--color-accent)',
-              color: '#fff',
-            }}
-          >
-            {count > 99 ? '99+' : count}
-          </span>
-        )}
-      </button>
-
-      {open && (
         <div
-          className="fixed inset-0 z-50"
-          style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 35%, transparent)' }}
-          onClick={() => setOpen(false)}
+          className="flex items-center gap-2 px-4 py-3 border-b"
+          style={{ borderColor: 'var(--color-divider)' }}
         >
-          <div
-            ref={panelRef}
-            className="cf-card elev-lg fixed flex flex-col"
-            style={{
-              top: 12,
-              right: 12,
-              width: 'min(380px, calc(100vw - 24px))',
-              maxHeight: 'min(520px, calc(100vh - 24px))',
-              padding: 0,
-              overflow: 'hidden',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div
-              className="flex items-center gap-2 px-4 py-3 border-b"
-              style={{ borderColor: 'var(--color-divider)' }}
-            >
-              <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-heading)' }}>
-                Notifications
-              </span>
-              <div className="flex-1" />
-              {count > 0 && (
-                <Btn ghost style={{ fontSize: 11, minHeight: 26 }} onClick={() => void onMarkAllRead()}>
-                  Mark all read
-                </Btn>
-              )}
-            </div>
-            <div className="overflow-y-auto p-2" style={{ overscrollBehavior: 'contain' }}>
-              {items === null && !loadError && (
-                <div className="p-3">
-                  <Skeleton lines={4} />
-                </div>
-              )}
-              {loadError && (
-                <p className="text-sm p-3" style={{ color: 'var(--color-neutral-400)' }}>
-                  Couldn't load notifications.
-                </p>
-              )}
-              {items !== null && items.length === 0 && (
-                <EmptyState icon="ringing-bell" title="Nothing yet" hint="Recaps, replies, and session plans will land here." />
-              )}
-              {items?.map((n) => (
-                <button
-                  key={n.id}
-                  type="button"
-                  onClick={() => void onItemClick(n)}
-                  className="w-full text-left flex items-start gap-2.5 px-2.5 py-2.5 rounded-md"
-                  style={{
-                    background: n.readAt ? 'transparent' : 'color-mix(in srgb, var(--color-accent) 8%, transparent)',
-                  }}
-                >
-                  <span className="flex leading-none pt-0.5 text-[var(--color-neutral-300)]"><GameIcon slug={typeIcon(n.type)} size={16} /></span>
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5 flex-wrap">
-                      {n.type === 'ai_dm_alert' && (
-                        <span className="tag tag-accent" style={{ fontSize: 8.5 }}>
-                          AI DM
-                        </span>
-                      )}
-                      <span
-                        className="block text-[13px] leading-snug"
-                        style={{
-                          color: 'var(--color-text)',
-                          fontWeight: n.readAt ? 400 : 600,
-                        }}
-                      >
-                        {n.title}
-                      </span>
-                    </span>
-                    {n.body && (
-                      <span className="block text-xs truncate" style={{ color: 'var(--color-neutral-400)' }}>
-                        {n.body}
-                      </span>
-                    )}
-                    <span className="block text-[10.5px] mt-0.5" style={{ color: 'var(--color-neutral-600)' }}>
-                      {timeAgo(n.createdAt)}
-                    </span>
-                  </span>
-                  {!n.readAt && (
-                    <span
-                      className="w-[7px] h-[7px] rounded-full shrink-0 mt-1.5"
-                      style={{ background: 'var(--color-accent)' }}
-                    />
-                  )}
-                </button>
-              ))}
-            </div>
-          </div>
+          <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-heading)' }}>
+            Notifications
+          </span>
+          <div className="flex-1" />
+          {count > 0 && (
+            <Btn ghost style={{ fontSize: 11, minHeight: 26 }} onClick={() => void markAllRead()}>
+              Mark all read
+            </Btn>
+          )}
         </div>
-      )}
-    </>
+        <div className="overflow-y-auto p-2" style={{ overscrollBehavior: 'contain' }}>
+          {items === null && !loadError && (
+            <div className="p-3">
+              <Skeleton lines={4} />
+            </div>
+          )}
+          {loadError && (
+            <p className="text-sm p-3" style={{ color: 'var(--color-neutral-400)' }}>
+              Couldn't load notifications.
+            </p>
+          )}
+          {items !== null && items.length === 0 && (
+            <EmptyState icon="ringing-bell" title="Nothing yet" hint="Recaps, replies, and session plans will land here." />
+          )}
+          {items?.map((notification) => (
+            <button
+              key={notification.id}
+              type="button"
+              onClick={() => void markRead(notification)}
+              className="w-full text-left flex items-start gap-2.5 px-2.5 py-2.5 rounded-md"
+              style={{
+                background: notification.readAt
+                  ? 'transparent'
+                  : 'color-mix(in srgb, var(--color-accent) 8%, transparent)',
+              }}
+            >
+              <span className="flex leading-none pt-0.5 text-[var(--color-neutral-300)]">
+                <GameIcon slug={typeIcon(notification.type)} size={16} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1.5 flex-wrap">
+                  {notification.type === 'ai_dm_alert' && (
+                    <span className="tag tag-accent" style={{ fontSize: 8.5 }}>
+                      AI DM
+                    </span>
+                  )}
+                  <span
+                    className="block text-[13px] leading-snug"
+                    style={{
+                      color: 'var(--color-text)',
+                      fontWeight: notification.readAt ? 400 : 600,
+                    }}
+                  >
+                    {notification.title}
+                  </span>
+                </span>
+                {notification.body && (
+                  <span className="block text-xs truncate" style={{ color: 'var(--color-neutral-400)' }}>
+                    {notification.body}
+                  </span>
+                )}
+                <span className="block text-[10.5px] mt-0.5" style={{ color: 'var(--color-neutral-600)' }}>
+                  {timeAgo(notification.createdAt)}
+                </span>
+              </span>
+              {!notification.readAt && (
+                <span
+                  className="w-[7px] h-[7px] rounded-full shrink-0 mt-1.5"
+                  style={{ background: 'var(--color-accent)' }}
+                />
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
