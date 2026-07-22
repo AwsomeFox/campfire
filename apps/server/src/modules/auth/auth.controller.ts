@@ -84,9 +84,9 @@ export class AuthController {
   @Public()
   @AUTH_THROTTLE
   @Post('setup')
-  @ApiOperation({ summary: 'First-run setup', description: 'Creates the first (admin) user and starts a session. Only available while no users exist yet — 409 afterward.' })
+  @ApiOperation({ summary: 'First-run setup', description: 'Atomically claims first-run initialization, creates the first (admin) user, and starts a session. Only available while no users exist yet — concurrent callers and later attempts receive 409.' })
   @ApiResponse({ status: 201, description: 'Admin user created; session cookie set.' })
-  @ApiResponse({ status: 409, description: 'Setup already completed.' })
+  @ApiResponse({ status: 409, description: 'Setup already completed (including when another concurrent request won initialization).' })
   async setup(@Body() body: SetupRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
     const { token, me } = await this.auth.setup(body);
     res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
