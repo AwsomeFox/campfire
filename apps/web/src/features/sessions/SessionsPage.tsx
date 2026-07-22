@@ -12,7 +12,7 @@
  * Issue #13 adds a "Schedule" tab (?tab=schedule): planned sessions + availability + ICS
  * calendar feed — see SchedulePanel.tsx.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
@@ -23,6 +23,7 @@ import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from 
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { useAnnounce } from '../../components/Announcer';
 import { SchedulePanel } from './SchedulePanel';
 import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
@@ -40,10 +41,20 @@ export default function SessionsPage() {
   const { roleIn } = useAuth();
   const role = roleIn(cid);
   const isDm = role === 'dm';
+  const announce = useAnnounce();
 
   const selectedId = searchParams.get('session');
   const recapAction = searchParams.get('action');
   const tab: 'log' | 'schedule' = searchParams.get('tab') === 'schedule' ? 'schedule' : 'log';
+
+  // Roving-tabindex tablist — the selected tab holds tabindex 0, the rest -1, so
+  // a single Tab keystroke lands in the panel and arrow keys move between tabs
+  // (WAI-ARIA Tabs pattern). The refs back the focus() calls in onTabKeyDown.
+  const tabRefs = useRef<Record<'log' | 'schedule', HTMLButtonElement | null>>({
+    log: null,
+    schedule: null,
+  });
+  const TAB_ORDER: ReadonlyArray<'log' | 'schedule'> = ['log', 'schedule'];
 
   function setTab(next: 'log' | 'schedule') {
     setSearchParams((prev) => {
@@ -52,7 +63,52 @@ export default function SessionsPage() {
       else params.delete('tab');
       return params;
     });
+    announce(next === 'schedule' ? 'Schedule tab selected.' : 'Log tab selected.');
   }
+
+  function focusTab(which: 'log' | 'schedule') {
+    tabRefs.current[which]?.focus();
+  }
+
+  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    const idx = TAB_ORDER.indexOf(tab);
+    if (idx < 0) return;
+    let next: 'log' | 'schedule' | null = null;
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = TAB_ORDER[(idx + 1) % TAB_ORDER.length];
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = TAB_ORDER[(idx - 1 + TAB_ORDER.length) % TAB_ORDER.length];
+        break;
+      case 'Home':
+        next = TAB_ORDER[0];
+        break;
+      case 'End':
+        next = TAB_ORDER[TAB_ORDER.length - 1];
+        break;
+      default:
+        return;
+    }
+    if (next && next !== tab) {
+      event.preventDefault();
+      setTab(next);
+      // setTab re-renders with the new selection; focus moves once the ref is live.
+      requestAnimationFrame(() => focusTab(next));
+    } else if (next) {
+      event.preventDefault();
+      focusTab(next);
+    }
+  }
+
+  // Mobile list→detail focus management: when a recap is selected from the list
+  // (only on narrow viewports, where list and detail are mutually exclusive),
+  // move focus into the detail heading so a screen-reader user lands on the new
+  // content rather than being stranded above it. Desktop keeps both panes
+  // side-by-side, so focus is left where the user clicked.
+  const detailHeadingRef = useRef<HTMLHeadingElement>(null);
 
   // List-shape sessions (issue #71): each carries a `recapExcerpt`, not the full
   // recap body — SessionDetail fetches the full recap for the opened session.
@@ -128,6 +184,27 @@ export default function SessionsPage() {
     [sessions, selectedId],
   );
 
+  // Mobile focus management: on a narrow viewport, selecting a recap from the
+  // timeline swaps list for detail. Move focus to the detail heading so SR/keyboard
+  // users hear what they opened. Desktop keeps both panes visible, so focus is
+  // left on the row the user activated. Skipped on the very first render (deep
+  // link) so we don't yank focus away from the URL bar / screen-reader cursor.
+  const prevSelectedIdRef = useRef<string | null>(selectedId);
+  const bootedRef = useRef(false);
+  useEffect(() => {
+    const isFirstBoot = !bootedRef.current;
+    bootedRef.current = true;
+    const changed = prevSelectedIdRef.current !== selectedId;
+    prevSelectedIdRef.current = selectedId;
+    if (isFirstBoot || !changed || !selected) return;
+    if (isDesktop) return;
+    // The detail heading is the semantic "you are here" entry point for the pane.
+    const id = window.requestAnimationFrame(() => {
+      detailHeadingRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [selected, selectedId, isDesktop]);
+
   // Auto-open the latest recap when sessions exist but none is selected (or the
   // URL points at a session that's gone) — otherwise the detail pane sat on a
   // misleading "No sessions yet" empty state even with sessions in the list.
@@ -145,11 +222,17 @@ export default function SessionsPage() {
   }, [isDesktop, tab, recapAction, sessions, selected, setSearchParams]);
 
   function selectSession(id: number) {
+    const picked = sessions.find((s) => s.id === id);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.set('session', String(id));
       return next;
     });
+    if (picked) {
+      announce(
+        `Session ${picked.number}${picked.title ? `, ${picked.title},` : ''} selected.`,
+      );
+    }
   }
 
   function backToList() {
@@ -247,30 +330,73 @@ export default function SessionsPage() {
         )}
       </div>
 
-      <div className="seg self-start inline-flex">
-        {(['log', 'schedule'] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            style={{
-              padding: '8px 16px',
-              fontSize: 13,
-              border: 0,
-              background: 'transparent',
-              cursor: 'pointer',
-              color: tab === t ? 'var(--color-accent)' : 'var(--color-neutral-500)',
-              boxShadow: tab === t ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
-              minHeight: 40,
-            }}
-          >
-            {t === 'log' ? 'Log' : 'Schedule'}
-          </button>
-        ))}
+      {/*
+        Log/Schedule tablist (issue #706) — was a colour-only segmented control with
+        no tab semantics. It is now a WAI-ARIA Tabs pattern: role=tablist with two
+        role=tab children (aria-selected, aria-controls, roving tabindex) and a
+        matching role=tabpanel per tab. Arrow/Home/End move between tabs and the
+        selected tab is the only one in the tab order; the deep-link query param
+        (?tab=schedule) is still the source of truth so URLs keep working.
+      */}
+      <div className="seg self-start inline-flex" role="tablist" aria-label="Sessions view">
+        {TAB_ORDER.map((t) => {
+          const selectedTab = tab === t;
+          const label = t === 'log' ? 'Log' : 'Schedule';
+          return (
+            <button
+              key={t}
+              ref={(el) => {
+                tabRefs.current[t] = el;
+              }}
+              type="button"
+              role="tab"
+              id={`sessions-tab-${t}`}
+              aria-selected={selectedTab}
+              aria-controls={`sessions-panel-${t}`}
+              tabIndex={selectedTab ? 0 : -1}
+              onClick={() => setTab(t)}
+              onKeyDown={onTabKeyDown}
+              style={{
+                padding: '8px 16px',
+                fontSize: 13,
+                border: 0,
+                background: 'transparent',
+                cursor: 'pointer',
+                color: selectedTab ? 'var(--color-accent)' : 'var(--color-neutral-500)',
+                boxShadow: selectedTab ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
+                minHeight: 40,
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
 
-      {tab === 'schedule' ? (
+      {/*
+        Both panels are always mounted so aria-controls ↔ aria-labelledby resolve
+        (a tab must point at a real panel). The inactive panel is visually hidden
+        rather than unmounted, which also preserves SchedulePanel list/RSVP state
+        when the user flips to Log and back.
+      */}
+      <div
+        id="sessions-panel-schedule"
+        role="tabpanel"
+        aria-labelledby="sessions-tab-schedule"
+        tabIndex={0}
+        className={tab === 'schedule' ? '' : 'hidden'}
+        hidden={tab !== 'schedule'}
+      >
         <SchedulePanel campaignId={cid} isDm={isDm} />
-      ) : (
+      </div>
+      <div
+        id="sessions-panel-log"
+        role="tabpanel"
+        aria-labelledby="sessions-tab-log"
+        tabIndex={0}
+        className={tab === 'log' ? '' : 'hidden'}
+        hidden={tab !== 'log'}
+      >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Timeline list */}
         <aside className={`min-w-0 space-y-3 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
@@ -283,49 +409,60 @@ export default function SessionsPage() {
               <EmptyState title="No sessions yet — add your first recap" />
             </Card>
           ) : (
-            <div className="flex flex-col">
-              {sessions.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => selectSession(s.id)}
-                  className="text-left"
-                  style={{
-                    display: 'flex',
-                    gap: 14,
-                    border: 0,
-                    background: 'transparent',
-                    font: 'inherit',
-                    color: 'var(--color-text)',
-                    cursor: 'pointer',
-                    padding: '14px 0 14px 16px',
-                    borderLeft: `2px solid ${selected?.id === s.id ? 'var(--color-accent)' : 'var(--color-accent-800)'}`,
-                    position: 'relative',
-                  }}
-                >
-                  <span
-                    style={{
-                      position: 'absolute',
-                      left: -5,
-                      top: 20,
-                      width: 8,
-                      height: 8,
-                      borderRadius: '50%',
-                      background: selected?.id === s.id ? 'var(--color-accent)' : 'var(--color-accent-800)',
-                    }}
-                  />
-                  <span className="flex-1 min-w-0">
-                    <span className="flex gap-2.5 items-baseline flex-wrap">
-                      <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
-                        Session {s.number}
+            <ul className="flex flex-col" role="list" aria-label="Session recaps">
+              {sessions.map((s) => {
+                const isActive = selected?.id === s.id;
+                const title = s.title || 'Untitled session';
+                return (
+                  <li key={s.id}>
+                    <button
+                      type="button"
+                      onClick={() => selectSession(s.id)}
+                      aria-current={isActive ? 'true' : undefined}
+                      aria-label={`Session ${s.number}${s.title ? `, ${s.title},` : ''}, played ${formatDate(s.playedAt)}${isActive ? '. Selected.' : ''}`}
+                      className="text-left"
+                      style={{
+                        display: 'flex',
+                        gap: 14,
+                        border: 0,
+                        background: 'transparent',
+                        font: 'inherit',
+                        color: 'var(--color-text)',
+                        cursor: 'pointer',
+                        padding: '14px 0 14px 16px',
+                        borderLeft: `2px solid ${isActive ? 'var(--color-accent)' : 'var(--color-accent-800)'}`,
+                        position: 'relative',
+                      }}
+                    >
+                      <span
+                        style={{
+                          position: 'absolute',
+                          left: -5,
+                          top: 20,
+                          width: 8,
+                          height: 8,
+                          borderRadius: '50%',
+                          background: isActive ? 'var(--color-accent)' : 'var(--color-accent-800)',
+                        }}
+                      />
+                      <span className="flex-1 min-w-0">
+                        <span className="flex gap-2.5 items-baseline flex-wrap">
+                          <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
+                            Session {s.number}
+                          </span>
+                          <span className="font-heading text-[16px]">{title}</span>
+                          <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
+                        </span>
+                        <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
                       </span>
-                      <span className="font-heading text-[16px]">{s.title || 'Untitled session'}</span>
-                      <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
-                    </span>
-                    <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
+                      {/* sr-only "Selected" flag mirrors aria-current so screen readers
+                          that don't voice aria-current on a <button> still get the state. */}
+                      {isActive && <span className="sr-only">Selected</span>}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           )}
         </aside>
 
@@ -341,6 +478,7 @@ export default function SessionsPage() {
               onBack={backToList}
               onChange={load}
               onDeleted={handleDeleted}
+              detailHeadingRef={detailHeadingRef}
             />
           ) : (
             <Card>
@@ -381,7 +519,7 @@ export default function SessionsPage() {
           )}
         </main>
       </div>
-      )}
+      </div>
 
       {undoTarget && (
         <UndoSnackbar
@@ -405,6 +543,7 @@ function SessionDetail({
   onBack,
   onChange,
   onDeleted,
+  detailHeadingRef,
 }: {
   session: SessionListItem;
   campaignId: number;
@@ -417,6 +556,9 @@ function SessionDetail({
   onChange: () => void;
   /** Session was soft-deleted — the page refreshes the list + owns the Undo bar. */
   onDeleted: (id: number, number: number) => void | Promise<void>;
+  /** Mobile list→detail focus target (issue #706): heading receives focus when a
+   *  recap is opened from the list so SR users land on the new content. */
+  detailHeadingRef: RefObject<HTMLHeadingElement>;
 }) {
   const [editing, setEditing] = useState(isDm && startEditing);
   const [titleDraft, setTitleDraft] = useState(session.title);
@@ -539,7 +681,13 @@ function SessionDetail({
       {error && <ErrorNote message={error} />}
       <div className="flex items-baseline gap-2.5 flex-wrap">
         <span className="tag tag-accent">Session {session.number}</span>
-        <h2 className="text-xl font-extrabold text-white m-0">{session.title || 'Untitled session'}</h2>
+        <h2
+          ref={detailHeadingRef}
+          tabIndex={-1}
+          className="text-xl font-extrabold text-white m-0 focus:outline-none"
+        >
+          {session.title || 'Untitled session'}
+        </h2>
         <span className="text-muted text-xs">{formatDate(session.playedAt)}</span>
       </div>
 
