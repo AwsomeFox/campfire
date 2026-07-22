@@ -3,6 +3,7 @@ import {
   LANG_STORAGE_KEY,
   LocaleController,
   SYSTEM_LOCALE,
+  isSupportedLanguage,
   parseStoredLocalePreference,
   resolveLocales,
   serializeLocalePreference,
@@ -28,6 +29,13 @@ function environment(storage: LocaleStorage, getBrowserLocale: () => string): Lo
 }
 
 test.describe('locale preference resolution', () => {
+  test('accepts only translation catalogs the application actually ships', () => {
+    expect(isSupportedLanguage('en')).toBe(true);
+    expect(isSupportedLanguage('fr-FR')).toBe(false);
+    expect(isSupportedLanguage('system')).toBe(false);
+    expect(isSupportedLanguage(null)).toBe(false);
+  });
+
   test('first load follows the full browser locale without persisting detector output', () => {
     const storage = new MemoryStorage();
     const controller = new LocaleController(environment(storage, () => 'fr-FR'));

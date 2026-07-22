@@ -23,6 +23,7 @@ import { localeController, SUPPORTED_LANGUAGES } from './locale';
 
 export {
   LANG_STORAGE_KEY,
+  isSupportedLanguage,
   localeController,
   SUPPORTED_LANGUAGES,
   SYSTEM_LOCALE,

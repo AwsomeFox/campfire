@@ -48,7 +48,7 @@ interface StoredLanguagePreference {
 
 type StoredLocalePreference = StoredSystemPreference | StoredLanguagePreference;
 
-function isLanguageCode(value: unknown): value is LanguageCode {
+export function isSupportedLanguage(value: unknown): value is LanguageCode {
   return SUPPORTED_LANGUAGES.some(({ code }) => code === value);
 }
 
@@ -63,7 +63,7 @@ export function parseStoredLocalePreference(value: string | null): LocalePrefere
     const stored = JSON.parse(value) as Partial<StoredLocalePreference>;
     if (!stored || stored.version !== 1) return null;
     if (stored.mode === 'system') return SYSTEM_LOCALE;
-    if (stored.mode === 'language' && 'locale' in stored && isLanguageCode(stored.locale)) {
+    if (stored.mode === 'language' && 'locale' in stored && isSupportedLanguage(stored.locale)) {
       return stored.locale;
     }
   } catch {

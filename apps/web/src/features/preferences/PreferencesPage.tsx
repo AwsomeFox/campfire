@@ -17,9 +17,9 @@ import type { TextSize, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import {
   localeController,
+  isSupportedLanguage,
   SUPPORTED_LANGUAGES,
   SYSTEM_LOCALE,
-  type LanguageCode,
   type LocalePreference,
 } from '../../i18n';
 import { useAuth } from '../../app/auth';
@@ -49,8 +49,8 @@ export default function PreferencesPage() {
   useEffect(() => localeController.subscribe(() => setLang(localeController.preference)), []);
 
   function changeLanguage(next: string) {
-    const preference: LocalePreference =
-      next === SYSTEM_LOCALE ? SYSTEM_LOCALE : (next as LanguageCode);
+    if (next !== SYSTEM_LOCALE && !isSupportedLanguage(next)) return;
+    const preference: LocalePreference = next;
     setLang(preference);
     localeController.setPreference(preference);
   }

@@ -18,6 +18,17 @@ test('Preferences keeps catalog language separate from System formatting across 
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
   await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
 
+  // A tampered form value must not be persisted as a locale the app cannot render.
+  await language.evaluate((element) => {
+    const option = document.createElement('option');
+    option.value = 'fr-FR';
+    option.textContent = 'Unsupported';
+    element.append(option);
+    element.value = option.value;
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect(await page.evaluate((key) => localStorage.getItem(key), LANG_STORAGE_KEY)).toBeNull();
+
   // An unsupported French catalog falls back to English while dates stay French.
   await page.goto(`/c/${seed().campaignId}/sessions`);
   await expect(page.getByText('21 juil. 2026', { exact: true }).first()).toBeVisible();
