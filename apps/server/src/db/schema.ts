@@ -736,6 +736,10 @@ export const diceRolls = sqliteTable('dice_rolls', {
   rolls: text('rolls').notNull().default('[]'),
   // JSON array of the kept dice (issue #130) — null when no keep/drop clause applied.
   kept: text('kept'),
+  // Per-term breakdown JSON for compound expressions (issue #536) — null for a classic
+  // single-term roll. Each entry: {term, value, rolls?, kept?}. Same nullable-JSON
+  // convention as `kept`.
+  terms: text('terms'),
   total: integer('total').notNull(),
   // Optional check context (issue #130): label + difficulty class. success is derived.
   label: text('label'),

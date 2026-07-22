@@ -52,6 +52,40 @@ describe('shared dice log (e2e)', () => {
     expect(res.body.total).toBe(res.body.kept[0]);
   });
 
+  it('accepts a compound expression (issue #536): 1d20+1d4+3 rolls every die and sums', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/roll`).set(player).send({ expr: '1d20+1d4+3' });
+    expect(res.status).toBe(201);
+    expect(res.body.expr).toBe('1d20+1d4+3');
+    // Two dice terms => two dice recorded in flat rolls, in expression order.
+    expect(res.body.rolls).toHaveLength(2);
+    const [d20, d4] = res.body.rolls;
+    expect(d20).toBeGreaterThanOrEqual(1);
+    expect(d20).toBeLessThanOrEqual(20);
+    expect(d4).toBeGreaterThanOrEqual(1);
+    expect(d4).toBeLessThanOrEqual(4);
+    expect(res.body.total).toBe(d20 + d4 + 3);
+    // Compound => per-term breakdown is surfaced for the UI, one entry per term.
+    expect(res.body.terms).toEqual([
+      { term: '1d20', value: d20, rolls: [d20] },
+      { term: '1d4', value: d4, rolls: [d4] },
+      { term: '+3', value: 3 },
+    ]);
+    // No keep clause anywhere => flat kept is omitted (backward-compat shape).
+    expect(res.body.kept).toBeUndefined();
+
+    // The breakdown also survives the GET feed round-trip (persisted + re-read), so every
+    // member's UI can render the per-term breakdown, not just the roller's POST response.
+    const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=5`).set(player);
+    expect(feed.status).toBe(200);
+    const persisted = feed.body.find((r: { id: number }) => r.id === res.body.id);
+    expect(persisted.terms).toEqual([
+      { term: '1d20', value: d20, rolls: [d20] },
+      { term: '1d4', value: d4, rolls: [d4] },
+      { term: '+3', value: 3 },
+    ]);
+  });
+
   it('records a labelled check with a DC and computes success server-side', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)

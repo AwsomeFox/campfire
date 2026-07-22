@@ -2495,9 +2495,11 @@ export const ApiToken = z.object({
   name: z.string().min(1).max(80),
   scope: TokenScope,
   // Server-enforced write authority, independent of `scope` — see WriteScope.
-  // Defaults 'direct' (back-compat: existing tokens write exactly as before).
-  // Existing DBs get the column added defaulting to 'direct' via
-  // migrateApiTokensTableForWriteScope() (db.module.ts).
+  // DB ROW default 'direct' (back-compat: pre-existing rows write exactly as
+  // before). This is NOT the minting default — newly MINTED tokens omitting
+  // writeScope are defaulted to 'propose' server-side (issue #575, see
+  // TokensService). Existing DBs get the column added defaulting to 'direct'
+  // via migrateApiTokensTableForWriteScope() (db.module.ts).
   writeScope: WriteScope.default('direct'),
   campaignId: Id.nullable().default(null), // null = all campaigns the owner can access
   // Whether this token may exercise SERVER-admin powers (ServerRolesGuard-gated routes,
@@ -2520,10 +2522,12 @@ export const ApiTokenCreate = z.object({
   // token can only mint tokens bound to that same campaign — a scoped-down token can
   // never mint a broader sibling.
   scope: TokenScope,
-  // Server-enforced write authority (default 'direct'). When the caller is itself
+  // Server-enforced write authority (omitted → server defaults to 'propose',
+  // issue #575: newly-issued tokens funnel mutations through the DM proposal
+  // queue rather than writing canon directly). When the caller is itself
   // authenticated via a PAT, this is additionally capped to the calling token's
-  // writeScope (min in the direct>propose>none order) — a propose-only token can
-  // never mint a direct-write sibling. See WriteScope / TokensService.create.
+  // writeScope (min in the direct>propose>none order) — a propose-only token
+  // can never mint a direct-write sibling. See WriteScope / TokensService.create.
   writeScope: WriteScope.optional(),
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // requires the caller to currently hold real server-admin power; silently forced false otherwise
@@ -2538,7 +2542,7 @@ export const AuthTokenRequest = z.object({
   password: z.string().min(1).max(200), // same cap as LoginRequest.password — scrypt DoS guard on an unauthenticated path
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer' (least privilege) — see TokensService.mintFor
-  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
+  writeScope: WriteScope.optional(), // omitted → server defaults to 'propose' (issue #575); see WriteScope
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // caller (the just-authenticated user) must currently be a server admin — see TokensService.create
 });
@@ -2550,7 +2554,7 @@ export type AuthTokenRequest = z.infer<typeof AuthTokenRequest>;
 export const AdminTokenCreate = z.object({
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer'
-  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
+  writeScope: WriteScope.optional(), // omitted → server defaults to 'propose' (issue #575); see WriteScope
   campaignId: Id.nullable().optional(),
   // May only be set true when the TARGET user (owner of the minted token) is themself
   // a server admin, AND the calling admin currently holds real (non-token-capped)
@@ -3724,20 +3728,42 @@ export const TreasuryPatch = z.union([
 export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
 
 // ---------- dice rolling ----------
-// Safe, restricted dice expression: NdM, optionally followed by a keep/drop clause
-// (khN/klN/dhN/dlN) and then +K or -K. Keep/drop lets a single roll express D&D-style
-// advantage/disadvantage and stat-gen: "2d20kh1" (advantage), "2d20kl1" (disadvantage),
-// "4d6kh3" / "4d6dl1" (drop-lowest stat roll). Examples: "1d20+3", "2d6-1", "d20",
-// "4d6dl1+2". Capture groups: 1=count, 2=sides, 3=keep/drop clause, 4=modifier.
-export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*((?:kh|kl|dh|dl)\s*\d{1,2})?\s*([+-]\s*\d{1,3})?\s*$/i;
+// Safe, restricted dice expression. A SUM of terms joined by + / -, where each term is
+// either a die (NdM, optionally with a keep/drop clause khN/klN/dhN/dlN — advantage,
+// disadvantage, stat-gen) or a bare integer modifier K. Keep/drop lets a single die term
+// express D&D-style advantage/disadvantage and stat-gen: "2d20kh1" (advantage),
+// "2d20kl1" (disadvantage), "4d6kh3" / "4d6dl1" (drop-lowest stat roll). A leading sign
+// is allowed ("-1d4", "+5"). Examples: "1d20+3", "2d6-1", "d20", "4d6dl1+2",
+// "1d20+1d4+3", "2d6-1d4-2". The regex only fixes SHAPE — count/sides/modifier bounds
+// are enforced in apps/server/src/common/dice.ts (parseCompoundDiceExpr), so a shape
+// match is never sufficient on its own.
+export const DiceExprPattern =
+  /^\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))(?:\s*[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))*\s*$/i;
 export const RollRequest = z.object({
-  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected NdM(kh/kl/dh/dlN)(+/-K), e.g. "1d20+3" or "2d20kh1"'),
+  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected a sum of die terms (NdM) and modifiers, e.g. "1d20+3", "2d20kh1", or "1d20+1d4+3"'),
   // Optional check context (issue #130): a human label ("DEX save") and a difficulty
   // class. When dc is present the server computes success (total >= dc) into the result.
   label: z.string().max(120).optional(),
   dc: z.number().int().min(1).max(99).optional(),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
+// Per-term breakdown entry for a compound dice expression (issue #536). Named so the
+// roller, the persistence layer, and the web UI all share one shape. A die term carries
+// its rolls + the kept subset; a modifier term carries only its signed value.
+export const RollResultTerm = z.object({
+  // The original term text, e.g. "1d20", "1d4", "+3", "-2".
+  term: z.string(),
+  // Net contribution of this term to the total. For a die term, the sum of the KEPT dice;
+  // for a modifier, the signed value itself.
+  value: z.number().int(),
+  // Die terms only: every die rolled for this term, in roll order. Absent for a bare
+  // modifier term.
+  rolls: z.array(z.number().int()).optional(),
+  // Die terms only: the subset of this term's `rolls` that counted (present when a
+  // keep/drop clause applied to THIS term). Absent otherwise.
+  kept: z.array(z.number().int()).optional(),
+});
+export type RollResultTerm = z.infer<typeof RollResultTerm>;
 export const RollResult = z.object({
   expr: z.string(),
   rolls: z.array(z.number().int()), // every die rolled, in roll order — attestable
@@ -3745,6 +3771,10 @@ export const RollResult = z.object({
   // clause applied (e.g. advantage keeps 1 of 2 d20s). Absent == all dice counted.
   kept: z.array(z.number().int()).optional(),
   total: z.number().int(),
+  // Per-term breakdown for display (issue #536): present ONLY for a compound expression
+  // (more than one term) — each entry describes one evaluated term, so the UI can render
+  // "1d20: 14, 1d4: 2, +3 = 19". Absent for a single-term roll (backward compat).
+  terms: z.array(RollResultTerm).optional(),
   // Echoed check context (issue #130). success is server-computed (total >= dc).
   label: z.string().max(120).optional(),
   dc: z.number().int().optional(),

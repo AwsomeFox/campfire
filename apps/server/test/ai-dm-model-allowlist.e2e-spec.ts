@@ -218,7 +218,9 @@ describe('ai-dm model allowlist — MCP ai_dm_narrate tool cannot bypass policy 
     // The setup user is the server admin — turn the experimental flag on.
     await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: true });
 
-    const tokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'aml-mcp-dm-token', scope: 'dm' });
+    // writeScope: 'direct' explicit (issue #575 default is 'propose') — this
+    // token drives ai_dm_narrate, which writes an ai-dm.turn audit row directly.
+    const tokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'aml-mcp-dm-token', scope: 'dm', writeScope: 'direct' });
     expect(tokenRes.status).toBe(201);
     dmToken = tokenRes.body.token;
   });

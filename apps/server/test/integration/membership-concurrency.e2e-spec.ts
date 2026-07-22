@@ -78,8 +78,8 @@ describe('membership usable-DM concurrency (real SQLite, REST + MCP)', () => {
     expect((await dmBAgent.post('/api/v1/auth/login').send({ username: 'race-dm-b', password: 'race-dm-b-password' })).status).toBe(201);
 
     await createTwoDmCampaign('PAT bootstrap campaign');
-    const tokenA = await dmAAgent.post('/api/v1/tokens').send({ name: 'race-a', scope: 'dm' });
-    const tokenB = await dmBAgent.post('/api/v1/tokens').send({ name: 'race-b', scope: 'dm' });
+    const tokenA = await dmAAgent.post('/api/v1/tokens').send({ name: 'race-a', scope: 'dm', writeScope: 'direct' });
+    const tokenB = await dmBAgent.post('/api/v1/tokens').send({ name: 'race-b', scope: 'dm', writeScope: 'direct' });
     dmAToken = tokenA.body.token;
     dmBToken = tokenB.body.token;
     dmAClient = new Client({ name: 'campfire-membership-race-e2e', version: '0.0.1' });
