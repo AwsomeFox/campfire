@@ -12,10 +12,13 @@ import {
   THROTTLE_DEFAULT,
   THROTTLE_AUTH,
   THROTTLE_SHARE,
+  THROTTLE_AI,
   DEFAULT_THROTTLE_LIMIT,
   DEFAULT_THROTTLE_TTL_MS,
   AUTH_THROTTLE_LIMIT,
   AUTH_THROTTLE_TTL_MS,
+  AI_THROTTLE_LIMIT,
+  AI_THROTTLE_TTL_MS,
   isThrottleDisabled,
 } from './common/throttle.constants';
 import { HealthModule } from './modules/health/health.module';
@@ -129,6 +132,9 @@ function serveStaticImports(): DynamicModule[] {
         // ceiling here, strict per-route override via @Throttle({share: {...}}) on
         // GET /shared/recaps/:token only (see session-shares.controller.ts).
         { name: THROTTLE_SHARE, limit: DEFAULT_THROTTLE_LIMIT, ttl: DEFAULT_THROTTLE_TTL_MS },
+        // AI invocation routes: loose module-level default here, strict per-route override
+        // via @Throttle({ ai: { limit: 10, ttl: 60000 } }) on AI endpoints.
+        { name: THROTTLE_AI, limit: DEFAULT_THROTTLE_LIMIT, ttl: DEFAULT_THROTTLE_TTL_MS },
       ],
       skipIf: () => isThrottleDisabled(),
     }),
