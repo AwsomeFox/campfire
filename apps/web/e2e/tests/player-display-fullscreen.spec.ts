@@ -62,9 +62,6 @@ async function installFullscreenMock(page: Page, mode: FullscreenMockMode = 'sup
         activeElement = null;
         change();
       };
-      document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape' && activeElement) exitExternally();
-      });
 
       (window as typeof window & {
         __fullscreenTest: { exitExternally: () => void; dispatchError: () => void; resolveRequest: () => void };
@@ -87,6 +84,10 @@ async function openPlayerDisplay(page: Page, mode: FullscreenMockMode = 'support
 
 function fullscreenNotice(page: Page) {
   return page.locator('#cf-screen-fullscreen-notice');
+}
+
+function playerDisplayControls(page: Page) {
+  return page.locator('.cf-screen-control-stack');
 }
 
 test.describe('Player Display fullscreen', () => {
@@ -157,14 +158,23 @@ test.describe('Player Display fullscreen', () => {
     await expect(fullscreen).toBeEnabled();
   });
 
-  test('tracks Escape and external exits reported by fullscreenchange', async ({ page }) => {
+  test('Escape exits browser fullscreen first, then exits the display route', async ({ page }) => {
     const fullscreen = await openPlayerDisplay(page);
+    const { campaignId } = seed();
 
     await fullscreen.click();
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
     await page.keyboard.press('Escape');
+    await expect(page).toHaveURL(`/c/${campaignId}/screen`);
     await expect(fullscreen).toHaveAccessibleName('Enter fullscreen');
     await expect(fullscreenNotice(page)).toContainText(/fullscreen ended/i);
+
+    await page.keyboard.press('Escape');
+    await expect(page).toHaveURL(`/c/${campaignId}`);
+  });
+
+  test('tracks external exits reported by fullscreenchange', async ({ page }) => {
+    const fullscreen = await openPlayerDisplay(page);
 
     await fullscreen.click();
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
@@ -207,6 +217,119 @@ test.describe('Player Display fullscreen', () => {
     await expect(fullscreen).toHaveAccessibleName('Exit fullscreen');
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
     await expect(fullscreen).toBeInViewport();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(results.violations).toEqual([]);
+    await context.close();
+  });
+});
+
+test.describe('Player Display controls', () => {
+  test.use({ storageState: stateFor('dm') });
+
+  test('renders an accessible exit while the display data is still loading', async ({ page }) => {
+    const { campaignId } = seed();
+    let releaseSummary: () => void = () => undefined;
+    const summaryGate = new Promise<void>((resolve) => {
+      releaseSummary = resolve;
+    });
+
+    await installFullscreenMock(page);
+    await page.route(`**/api/v1/campaigns/${campaignId}/summary`, async (route) => {
+      await summaryGate;
+      await route.continue();
+    });
+    await page.goto(`/c/${campaignId}/screen`);
+
+    await expect(page.getByText('Loading display…')).toBeVisible();
+    const exit = page.getByRole('button', { name: 'Exit player display' });
+    await expect(exit).toBeVisible();
+    await expect(exit).toBeInViewport();
+
+    releaseSummary();
+    await expect(page.getByRole('heading', { name: 'E2E — Cinderhaven' })).toBeVisible();
+  });
+
+  test('auto-hides after inactivity and resets the timer for pointer and keyboard activity', async ({ page }) => {
+    await page.clock.install();
+    await openPlayerDisplay(page);
+    const controls = playerDisplayControls(page);
+
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await page.clock.fastForward(3_501);
+    await expect(controls).toHaveCSS('pointer-events', 'none');
+
+    await page.locator('main').dispatchEvent('pointerdown', {
+      pointerId: 1,
+      pointerType: 'touch',
+      isPrimary: true,
+    });
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+
+    await page.clock.fastForward(3_000);
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await page.locator('main').dispatchEvent('pointermove', {
+      pointerId: 2,
+      pointerType: 'pen',
+      isPrimary: true,
+    });
+    // Move beyond the pointerdown timer's original deadline while leaving a
+    // comfortable margin before the pointermove-reset deadline.
+    await page.clock.fastForward(1_000);
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await page.clock.fastForward(2_501);
+    await expect(controls).toHaveCSS('pointer-events', 'none');
+
+    await page.keyboard.press('Shift');
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+
+    await page.clock.fastForward(3_501);
+    await expect(controls).toHaveCSS('pointer-events', 'none');
+    await page.mouse.move(100, 100);
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+  });
+
+  test('reveals hidden controls on focus and does not hide them while focus remains inside', async ({ page }) => {
+    await page.clock.install();
+    await openPlayerDisplay(page);
+    const controls = playerDisplayControls(page);
+    const exit = page.getByRole('button', { name: 'Exit player display' });
+
+    await page.clock.fastForward(3_501);
+    await expect(controls).toHaveCSS('pointer-events', 'none');
+
+    await exit.focus();
+    await expect(exit).toBeFocused();
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await page.clock.fastForward(10_000);
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+
+    await exit.evaluate((button) => (button as HTMLButtonElement).blur());
+    await page.clock.fastForward(3_501);
+    await expect(controls).toHaveCSS('pointer-events', 'none');
+  });
+
+  test('touch input restores controls in a reduced-motion mobile viewport and stays axe-clean', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: stateFor('dm'),
+      hasTouch: true,
+      isMobile: true,
+      reducedMotion: 'reduce',
+      viewport: { width: 390, height: 844 },
+    });
+    const page = await context.newPage();
+    await page.clock.install();
+    await openPlayerDisplay(page);
+    const controls = playerDisplayControls(page);
+
+    await expect(controls).toHaveCSS('transition-duration', '0s');
+    await page.clock.fastForward(3_501);
+    await expect(controls).toHaveCSS('pointer-events', 'none');
+
+    await page.touchscreen.tap(24, 420);
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await expect(page.getByRole('button', { name: 'Exit player display' })).toBeInViewport();
+    await expect(page.getByRole('button', { name: /fullscreen/i })).toBeInViewport();
 
     const results = await new AxeBuilder({ page }).analyze();
     expect(results.violations).toEqual([]);
