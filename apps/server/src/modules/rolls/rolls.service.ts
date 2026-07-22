@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, lte } from 'drizzle-orm';
-import type { DiceRoll, RollResult } from '@campfire/schema';
+import type { DiceRoll, RollResult, RollResultTerm } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { diceRolls } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -15,6 +15,7 @@ export const DEFAULT_ROLL_LIST_LIMIT = 50;
 
 function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
   const kept = row.kept != null ? fromJsonText<number[]>(row.kept, []) : undefined;
+  const terms = row.terms != null ? fromJsonText<RollResultTerm[]>(row.terms, []) : undefined;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -24,6 +25,8 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
     rolls: fromJsonText<number[]>(row.rolls, []),
     ...(kept !== undefined ? { kept } : {}),
     total: row.total,
+    // Compound-expression breakdown (issue #536); absent for a classic single-term roll.
+    ...(terms !== undefined && terms.length > 0 ? { terms } : {}),
     ...(row.label ? { label: row.label } : {}),
     // success is derived, not stored — it's always total >= dc when a dc is set.
     ...(row.dc != null ? { dc: row.dc, success: row.total >= row.dc } : {}),
@@ -53,6 +56,7 @@ export class RollsService {
         expr: result.expr,
         rolls: toJsonText(result.rolls),
         kept: result.kept !== undefined ? toJsonText(result.kept) : null,
+        terms: result.terms !== undefined ? toJsonText(result.terms) : null,
         total: result.total,
         label: result.label ?? null,
         dc: result.dc ?? null,

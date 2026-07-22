@@ -28,7 +28,7 @@
     "advancedSummary": "Advanced — type an expression",
     "expression": "Expression",
     "diceExpressionLabel": "Dice expression",
-    "exprPlaceholder": "1d20+3 or 4d6dl1",
+    "exprPlaceholder": "1d20+3, 4d6dl1, or 1d20+1d4+3",
     "emptyCompact": "Roll anytime — not just in combat. Try 1d20, 2d6+4, or 2d20kh1 (advantage).",
     "emptyFull": "No rolls yet — the whole table sees this log. Try 1d20, 2d6+4, or 2d20kh1 (advantage).",
     "pass": "PASS",
