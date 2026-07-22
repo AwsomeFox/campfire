@@ -593,6 +593,7 @@ export class AiProviderConfigService {
       baseUrl: input.baseUrl?.trim() || undefined,
       params: {},
     };
+    const candidateApiKey = input.apiKey?.trim();
 
     // Mock never consumes a credential, even if a stale/typed key exists.
     if (input.providerType === 'mock') {
@@ -604,9 +605,9 @@ export class AiProviderConfigService {
     }
 
     // A non-empty candidate key is used only for this probe and never persisted.
-    if (input.apiKey) {
+    if (candidateApiKey) {
       return {
-        config: { ...candidate, apiKey: input.apiKey },
+        config: { ...candidate, apiKey: candidateApiKey },
         testedTarget: campaignId === null ? 'server-default' : 'campaign-override',
         credentialSource: 'candidate',
       };

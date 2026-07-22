@@ -370,7 +370,9 @@ export function ProviderForm({
               <dt>Credential</dt>
               <dd style={{ margin: 0 }}>{testedCredentialLabel[testResult.credentialSource]}</dd>
               <dt>Tested</dt>
-              <dd style={{ margin: 0 }}>{new Date(testResult.testedAt).toLocaleString()}</dd>
+              <dd style={{ margin: 0 }}>
+                <time dateTime={testResult.testedAt}>{new Date(testResult.testedAt).toLocaleString()}</time>
+              </dd>
             </dl>
           </div>
         )}

@@ -378,7 +378,7 @@ describe('ai-provider-config visible draft connection tests (issue #852, e2e)', 
     const reused = await request(server)
       .post('/api/v1/settings/ai-provider/test')
       .set(dm)
-      .send({ providerType: 'openai', model: 'unsaved-blank-key-model', baseUrl: fake.baseUrl, apiKey: '' });
+      .send({ providerType: 'openai', model: 'unsaved-blank-key-model', baseUrl: fake.baseUrl, apiKey: ' \n\t ' });
     expect(reused.body).toMatchObject({
       ok: true,
       model: 'unsaved-blank-key-model',

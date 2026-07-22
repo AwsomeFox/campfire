@@ -62,7 +62,7 @@ test.describe('AI provider visible-draft connection test', () => {
       await expect(result).toContainText('openai / visible-unsaved-model · https://visible-unsaved.example/v1');
       await expect(result).toContainText('Server default draft');
       await expect(result).toContainText('Unsaved candidate key');
-      await expect(result).toContainText('7/22/2026');
+      await expect(result.locator('time')).toHaveAttribute('datetime', TESTED_AT);
       expect(requestBodies[0]).toEqual({
         providerType: 'openai',
         model: 'visible-unsaved-model',
