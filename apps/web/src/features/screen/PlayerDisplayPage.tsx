@@ -301,7 +301,10 @@ export default function PlayerDisplayPage() {
   const toggleFullscreen = useCallback(async () => {
     if (!fullscreenAvailable()) {
       setFullscreenSupported(false);
-      setFullscreenNotice({ kind: 'error', message: FULLSCREEN_UNSUPPORTED });
+      // Unsupported fullscreen is derived as an informational notice below. Do
+      // not retain a second error notice that could resurface if capability is
+      // later restored by the browser or display environment.
+      setFullscreenNotice(null);
       return;
     }
 
