@@ -3669,6 +3669,14 @@ export const Treasury = z.object({
 export type Treasury = z.infer<typeof Treasury>;
 // Union like HpPatch: { delta } (relative, may be negative but result must stay >= 0)
 // or { set } (absolute). Omitted denominations are left untouched.
+//
+// Issue #582: the `set` path is a full reconciliation, so it carries an optional
+// `expectedUpdatedAt` compare-and-swap token. The server returns 409 when the token
+// doesn't match the row's current updatedAt (someone else wrote in between), attaching
+// the fresh server values so the client can merge. The `delta` path never needs CAS —
+// two players spending different coins compose atomically and never conflict, and even
+// spending the SAME coin just composes (a spend that would go negative still 400s), so
+// deltas are the preferred write shape for add/spend flows.
 export const TreasuryPatch = z.union([
   z.object({
     delta: z.object({
@@ -3681,6 +3689,7 @@ export const TreasuryPatch = z.union([
   }),
   z.object({
     set: z.object({ cp: Coin.optional(), sp: Coin.optional(), ep: Coin.optional(), gp: Coin.optional(), pp: Coin.optional() }),
+    expectedUpdatedAt: IsoDate.optional(),
   }),
 ]);
 export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
@@ -3731,6 +3740,7 @@ export const CampaignEventType = z.enum([
   'encounter.deleted',
   'encounter.ping',
   'membership.revoked',
+  'treasury.updated',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -3766,6 +3776,20 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     userId: z.string().max(120),
     memberId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #582: the party treasury changed. A thin invalidation signal like the
+    // encounter.* ticks: no coin payload (permission-checked REST read is authoritative),
+    // so an open editor that snapshotted stale balances can mark itself stale and refetch
+    // instead of silently overwriting another player's concurrent spend on save. `userId`
+    // is String(users.id) of the actor (same identity space as RequestUser.id) so the
+    // editor can show "changed by <player>" without a second lookup — and so the editor's
+    // OWN write doesn't re-mark itself stale when it round-trips through the SSE stream
+    // (the client compares userId against the local session and ignores its own echo).
+    type: z.literal('treasury.updated'),
+    campaignId: Id,
+    userId: z.string().max(120),
     at: IsoDate,
   }),
 ]);
