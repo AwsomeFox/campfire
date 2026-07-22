@@ -367,5 +367,120 @@ describe('inventory & treasury (e2e)', () => {
       expect(res.status).toBe(200);
       expect(res.body.gp).toBe(0);
     });
+
+    // ---- issue #582: concurrency, CAS, and per-denomination audit ----
+
+    it('CAS: a stale expectedUpdatedAt returns 409 with the current server values (issue #582)', async () => {
+      const server = ctx.app.getHttpServer();
+      const camp = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'CAS Camp' })).body.id;
+
+      // Baseline reconciliation with a fresh CAS token — must succeed.
+      const base = await request(server)
+        .patch(`/api/v1/campaigns/${camp}/treasury`)
+        .set(dm)
+        .send({ set: { gp: 100, pp: 2 }, expectedUpdatedAt: (await request(server).get(`/api/v1/campaigns/${camp}/treasury`).set(dm)).body.updatedAt });
+      expect(base.status).toBe(200);
+      expect(base.body.gp).toBe(100);
+      const staleUpdatedAt = base.body.updatedAt;
+
+      // Another player spends some gold in between, advancing updatedAt. updatedAt is
+      // millisecond-resolution, so a write landing in the same ms as the baseline wouldn't
+      // move the CAS token — wait briefly before the spend to guarantee a fresh ms, so the
+      // stale-token assertion below is deterministic. (This mirrors real at-the-table usage
+      // where the gap between a player's load and save spans many ms.)
+      await new Promise((r) => setTimeout(r, 10));
+      const mid = await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(player).send({ delta: { gp: -30 } });
+      expect(mid.status).toBe(200);
+      expect(mid.body.gp).toBe(70);
+      expect(mid.body.updatedAt).not.toBe(staleUpdatedAt);
+
+      // Now the DM's STALE set (snapshotted before the spend) arrives with the old
+      // expectedUpdatedAt. Without the CAS guard it would write gp=100 and silently
+      // restore the 30gp the player just spent — the exact data-loss bug in #582.
+      const stale = await request(server)
+        .patch(`/api/v1/campaigns/${camp}/treasury`)
+        .set(dm)
+        .send({ set: { gp: 100 }, expectedUpdatedAt: staleUpdatedAt });
+      expect(stale.status).toBe(409);
+      expect(stale.body.code).toBe('TREASURY_CONFLICT');
+      // The 409 carries the live values so the client can merge.
+      expect(stale.body.current).toMatchObject({ gp: 70, pp: 2 });
+      expect(stale.body.current.updatedAt).toBe(mid.body.updatedAt);
+
+      // The stale write was rejected — the row is unchanged.
+      const after = await request(server).get(`/api/v1/campaigns/${camp}/treasury`).set(dm);
+      expect(after.body.gp).toBe(70);
+      expect(after.body.pp).toBe(2);
+
+      // A fresh set with the up-to-date token succeeds (the merge/reapply path).
+      const reapplied = await request(server)
+        .patch(`/api/v1/campaigns/${camp}/treasury`)
+        .set(dm)
+        .send({ set: { gp: 100 }, expectedUpdatedAt: after.body.updatedAt });
+      expect(reapplied.status).toBe(200);
+      expect(reapplied.body.gp).toBe(100);
+    });
+
+    it('CAS: a set without expectedUpdatedAt still applies (back-compat for pre-CAS callers)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}/treasury`)
+        .set(dm)
+        .send({ set: { sp: 9 } });
+      expect(res.status).toBe(200);
+      expect(res.body.sp).toBe(9);
+    });
+
+    it('an empty patch (no denominations) returns 400 rather than a no-op write', async () => {
+      const server = ctx.app.getHttpServer();
+      const deltaEmpty = await request(server).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(dm).send({ delta: {} });
+      expect(deltaEmpty.status).toBe(400);
+      const setEmpty = await request(server).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(dm).send({ set: {} });
+      expect(setEmpty.status).toBe(400);
+    });
+
+    it('audits per-denomination before/after and the actor on every treasury write (issue #582)', async () => {
+      const server = ctx.app.getHttpServer();
+      const camp = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Audit Camp' })).body.id;
+
+      // gp 0 -> 50 (delta), then gp 50 -> 50/pp 0 -> 1 (set), then gp 50 -> 40 (spend).
+      await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(player).send({ delta: { gp: 50 } });
+      await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(dm).send({ set: { pp: 1 } });
+      await request(server).patch(`/api/v1/campaigns/${camp}/treasury`).set(player).send({ delta: { gp: -10, sp: 5 } });
+
+      const auditRes = await request(server).get(`/api/v1/campaigns/${camp}/audit`).set(dm);
+      expect(auditRes.status).toBe(200);
+      const treasuryAudits = auditRes.body.filter((e: { action: string }) => e.action === 'treasury.update');
+      expect(treasuryAudits).toHaveLength(3);
+
+      // Each row carries a structured per-denomination detail with before/after + actor.
+      for (const row of treasuryAudits) {
+        const detail = JSON.parse(row.detail);
+        expect(detail.actor).toBeDefined();
+        expect(detail.actor.id).toEqual(expect.any(String));
+        expect(detail.actor.role).toEqual(expect.any(String));
+        expect(Array.isArray(detail.changes)).toBe(true);
+        for (const c of detail.changes) {
+          expect(['cp', 'sp', 'ep', 'gp', 'pp']).toContain(c.coin);
+          expect(typeof c.before).toBe('number');
+          expect(typeof c.after).toBe('number');
+        }
+      }
+
+      // The third write (a multi-coin delta) records both coins it touched.
+      const third = JSON.parse(treasuryAudits[0].detail); // newest-first
+      expect(third.kind).toBe('delta');
+      const coins = third.changes.map((c: { coin: string }) => c.coin).sort();
+      expect(coins).toEqual(['gp', 'sp']);
+      const gpChange = third.changes.find((c: { coin: string }) => c.coin === 'gp');
+      expect(gpChange).toEqual({ coin: 'gp', before: 50, delta: -10, after: 40 });
+      const spChange = third.changes.find((c: { coin: string }) => c.coin === 'sp');
+      expect(spChange).toEqual({ coin: 'sp', before: 0, delta: 5, after: 5 });
+
+      // The set write records setTo rather than delta.
+      const second = JSON.parse(treasuryAudits[1].detail);
+      expect(second.kind).toBe('set');
+      expect(second.changes[0]).toEqual({ coin: 'pp', before: 0, setTo: 1, after: 1 });
+    });
   });
 });
