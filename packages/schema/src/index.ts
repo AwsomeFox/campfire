@@ -1234,8 +1234,8 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     sourceKind: 'manual-upload',
     installableWithoutUrl: false,
     license: 'Open Game License v1.0a',
-    note: 'No live open source: unlike PF2e, the Archives of Nethys Starfinder site exposes no Elasticsearch backend, and the community Starjammer SRD (HTTP 410) and Dragonlash API are offline. Upload an OGL JSON pack, or pass `url`.',
-    candidateSourceUrl: null,
+    note: 'Foundry system pack data is stored as multi-file JSON and LevelDB databases. Upload an OGL-licensed JSON pack (or pass an explicit `url`).',
+    candidateSourceUrl: 'https://github.com/foundryvtt-starfinder/foundryvtt-starfinder',
   },
   archmage: {
     source: 'archmage',

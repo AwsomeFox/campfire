@@ -423,10 +423,12 @@ export async function fetchPf2eSection(
   section: Pf2eSection,
   logger: Pf2eImportLogger = consoleLogger,
   index: string = PF2E_INDEX,
+  systemLabel: string = 'PF2e',
 ): Promise<Pf2eSectionResult> {
   const aonType = SECTION_TO_AON_TYPE[section];
   const mapper = SECTION_MAPPER[section];
   const base = baseUrl.replace(/\/$/, '');
+  const logPrefix = `[${systemLabel.toLowerCase()}-importer]`;
   // De-dupe same-name rows to one canonical entry per (name, type): a section is a single
   // type, so a lowercased name is the (name, type) key. First-seen wins (stable order).
   const byName = new Map<string, ImportedEntry>();
@@ -437,7 +439,7 @@ export async function fetchPf2eSection(
 
   while (byName.size < MAX_ENTRIES_PER_SECTION) {
     if (pagesFetched >= MAX_PAGES_PER_SECTION) {
-      logger.warn(`[pf2e-importer] section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
+      logger.warn(`${logPrefix} section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
       break;
     }
     pagesFetched += 1;
@@ -446,20 +448,20 @@ export async function fetchPf2eSection(
     try {
       res = await fetchPageWithRetry(url, section, logger);
     } catch (err) {
-      throw new BadRequestException(`Failed to fetch PF2e section "${section}" from ${url}: ${(err as Error).message}`);
+      throw new BadRequestException(`Failed to fetch ${systemLabel} section "${section}" from ${url}: ${(err as Error).message}`);
     }
     if (!res.ok) {
-      throw new BadRequestException(`PF2e section "${section}" returned HTTP ${res.status} for ${url}`);
+      throw new BadRequestException(`${systemLabel} section "${section}" returned HTTP ${res.status} for ${url}`);
     }
     let page: AonPage;
     try {
       page = (await res.json()) as AonPage;
     } catch (err) {
-      throw new BadRequestException(`PF2e section "${section}" returned invalid JSON: ${(err as Error).message}`);
+      throw new BadRequestException(`${systemLabel} section "${section}" returned invalid JSON: ${(err as Error).message}`);
     }
     const hits = page.hits?.hits;
     if (!Array.isArray(hits)) {
-      throw new BadRequestException(`PF2e section "${section}" response missing "hits.hits" array (unexpected shape)`);
+      throw new BadRequestException(`${systemLabel} section "${section}" response missing "hits.hits" array (unexpected shape)`);
     }
     if (hits.length === 0) break; // exhausted
 
@@ -502,11 +504,11 @@ export async function fetchPf2eSection(
 
   const entries = [...byName.values()];
   logger.info(
-    `[pf2e-importer] section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)` +
+    `${logPrefix} section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)` +
       (dedupedCount > 0 ? ` (de-duped ${dedupedCount} same-name row(s))` : ''),
   );
   if (skippedCount > 0) {
-    logger.warn(`[pf2e-importer] section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
+    logger.warn(`${logPrefix} section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
   }
 
   return { entries, skippedCount, dedupedCount };
@@ -521,5 +523,5 @@ export async function fetchSf2eSection(
   section: Pf2eSection,
   logger: Pf2eImportLogger = consoleLogger,
 ): Promise<Pf2eSectionResult> {
-  return fetchPf2eSection(baseUrl, section, logger, SF2E_INDEX);
+  return fetchPf2eSection(baseUrl, section, logger, SF2E_INDEX, 'SF2e');
 }
