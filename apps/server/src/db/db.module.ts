@@ -4,7 +4,21 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { BOOTSTRAP_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
+import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
+
+// Re-export the boot-guard surface (issue #721) so callers and tests import it
+// from the db module barrel rather than reaching into boot-guard.ts directly —
+// keeps the public DB boundary in one place.
+export {
+  assertDataMount,
+  DataMountGuardError,
+  sentinelFilePath,
+  SENTINEL_FILENAME,
+  ALLOW_FRESH_DB_ENV,
+  type InstallSentinel,
+  type BootGuardOutcome,
+} from './boot-guard';
 
 export const DB = Symbol('DB');
 export type DrizzleDb = BetterSQLite3Database<typeof schema>;
@@ -1458,6 +1472,16 @@ export function openDatabase(dataDir: string): {
   ftsAvailable: boolean;
 } {
   fs.mkdirSync(dataDir, { recursive: true });
+
+  // Issue #721 boot guard: the mount must look correct BEFORE SQLite opens (and
+  // auto-creates) campfire.db. assertDataMount is the single arbiter of "fresh
+  // install vs broken mount": it initializes the install sentinel on first run,
+  // trusts an existing sentinel, and refuses to boot when a foreign DB appears
+  // without its sentinel (the missing/wrong-mount failure mode). Runs after the
+  // dir mkdir so a missing DATA_DIR itself doesn't trip the guard — the dir is
+  // the thing the operator mounts, the sentinel is what we write into it.
+  assertDataMount(dataDir, dbFilePath(dataDir));
+
   const sqlite = new Database(dbFilePath(dataDir));
   sqlite.pragma('journal_mode = WAL');
 
