@@ -346,9 +346,10 @@ export const notes = sqliteTable('notes', {
 // pointer and the thread topology stays intact. A tombstoned root is still
 // returned by list/get (as a placeholder) — unlike notes/campaigns, the row is
 // NOT filtered out of normal reads, because replies reference it. deleted_by
-// records who pulled the trigger (the author or a DM moderating) so the UI can
-// render "[deleted by author]" vs "[deleted by moderator]" and the audit trail
-// has provenance even after restore clears deleted_at.
+// records who pulled the trigger (the author or a DM moderating) WHILE the row
+// is tombstoned, so the UI can render "[deleted by author]" vs "[deleted by
+// moderator]". It is cleared on restore, so durable provenance of a past
+// tombstone (who/when) lives in the AUDIT LOG, not on this row.
 export const comments = sqliteTable('comments', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),

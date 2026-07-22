@@ -351,6 +351,89 @@ describe('comments / threaded discussion (e2e)', () => {
       expect(restore).toBeDefined();
       expect(restore.actorRole).toBe('dm'); // the DM restored.
     });
+
+    it('a reply can still anchor to a TOMBSTONED root (thread topology is the point of tombstoning)', async () => {
+      // Regression for the resolveParent fix: getRowOrThrow used to 404 a
+      // tombstoned parent, so once a root was soft-deleted no further replies
+      // could thread under it — the web UI still posted parentId=<tombstoned id>
+      // and got a 404. The whole reason we tombstone (not hard-delete) is so the
+      // row stays and replies keep their parent. resolveParent now loads the
+      // parent with includeDeleted=true, so a reply under a [deleted] placeholder
+      // succeeds and re-anchors to the tombstoned root's id.
+      const server = ctx.app.getHttpServer();
+      const parent = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Root that will be tombstoned, then replied-to' });
+      const parentId = parent.body.id;
+
+      // Tombstone the root.
+      const del = await request(server).delete(`/api/v1/comments/${parentId}`).set(authorPlayer);
+      expect(del.status).toBe(200);
+      expect(del.body.deletedAt).not.toBeNull();
+
+      // Now a DIFFERENT member replies under the tombstoned root. Before the fix
+      // this 404'd (resolveParent couldn't see the tombstoned parent); now it 201s
+      // and the reply's parentId is the tombstoned root's id.
+      const reply = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(otherPlayer)
+        .send({ ...anchor(), body: 'Reply posted AFTER the root was tombstoned', parentId });
+      expect(reply.status).toBe(201);
+      expect(reply.body.parentId).toBe(parentId);
+
+      // The reply is readable and threaded under the [deleted] placeholder.
+      const thread = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments`)
+        .query({ entityType: 'session', entityId: sessionId })
+        .set(otherPlayer);
+      expect(thread.status).toBe(200);
+      const tombstonedRoot = thread.body.find((c: { id: number }) => c.id === parentId);
+      expect(tombstonedRoot.body).toBe('[deleted]');
+      expect(thread.body.map((c: { id: number }) => c.id)).toContain(reply.body.id);
+    });
+
+    it('restore does NOT bump updatedAt (no false "edited" badge)', async () => {
+      // Regression for the restore updatedAt fix: restore is a lifecycle event,
+      // not a content edit. The web UI shows an "edited" badge when updatedAt
+      // !== createdAt, so bumping updatedAt on restore would falsely mark a
+      // restored comment as edited. updatedAt must stay at its pre-tombstone value.
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Will be tombstoned then restored' });
+      const id = created.body.id;
+      const createdAt = created.body.createdAt;
+      const updatedAtBefore = created.body.updatedAt;
+
+      await request(server).delete(`/api/v1/comments/${id}`).set(authorPlayer);
+      const restored = await request(server).post(`/api/v1/comments/${id}/restore`).set(authorPlayer);
+      expect(restored.status).toBe(201);
+      expect(restored.body.body).toBe('Will be tombstoned then restored');
+      expect(restored.body.deletedAt).toBeNull();
+      // updatedAt is UNCHANGED by the tombstone+restore cycle — no false "edited".
+      expect(restored.body.updatedAt).toBe(updatedAtBefore);
+      expect(restored.body.createdAt).toBe(createdAt);
+    });
+
+    it('DELETE returns the tombstoned comment (deletedAt/deletedBy on the response, per the OpenAPI shape)', async () => {
+      // Regression for the remove() return-shape fix: the controller/OpenAPI
+      // describe deletedAt/deletedBy on the returned shape, so remove() returns
+      // the tombstoned Comment rather than void — clients don't need a follow-up
+      // GET to confirm the deletion took effect.
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Delete-me' });
+      const del = await request(server).delete(`/api/v1/comments/${created.body.id}`).set(authorPlayer);
+      expect(del.status).toBe(200);
+      expect(del.body.id).toBe(created.body.id);
+      expect(del.body.body).toBe('[deleted]'); // redacted placeholder, not the original prose
+      expect(del.body.deletedAt).not.toBeNull();
+      expect(del.body.deletedBy).toBe('dev:author-1');
+    });
   });
 
   // Anchored-entity secrecy (issue #230, re: #123): a comment thread must be at least

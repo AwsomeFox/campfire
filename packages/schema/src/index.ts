@@ -946,8 +946,9 @@ export const Comment = z.object({
   // replies keep their parent. Cleared on restore.
   deletedAt: IsoDate.nullable().default(null),
   // Who tombstoned the comment (String(users.id), 'dev:<name>', or 'token:<name>');
-  // null on a live row. Lets the UI distinguish "[deleted by author]" from a DM
-  // removal and gives the audit trail provenance after a restore clears deletedAt.
+  // null on a live row. While tombstoned, this lets the UI distinguish "[deleted
+  // by author]" from a DM removal. It is cleared on restore, so durable
+  // provenance of a past tombstone (who/when) lives in the AUDIT LOG, not here.
   deletedBy: z.string().max(120).nullable().default(null),
   ...timestamps,
 });

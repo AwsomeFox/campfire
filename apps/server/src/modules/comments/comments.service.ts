@@ -254,9 +254,13 @@ export class CommentsService {
 
   async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(comments).where(eq(comments.id, id)).limit(1);
-    // A tombstoned comment reads as nonexistent to normal callers (restore is the
-    // only path that wants the tombstoned row). 404 (not 403) mirrors the
-    // secrecy convention so a non-author learns nothing about a removed comment.
+    // A tombstoned comment reads as nonexistent to normal callers. Callers that
+    // intentionally operate on the tombstoned row pass includeDeleted=true:
+    // getOrThrow (serves the [deleted] placeholder so replies' parent resolves),
+    // remove/restore (operate on the tombstone), and resolveParent (a reply to a
+    // tombstoned root must still anchor — the thread topology is the whole point
+    // of preserving the row). 404 (not 403) mirrors the secrecy convention so a
+    // non-author learns nothing about a removed comment.
     if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Comment ${id} not found`);
     return row;
   }
@@ -286,7 +290,11 @@ export class CommentsService {
     entityId: number,
     parentId: number,
   ): Promise<number> {
-    const parent = await this.getRowOrThrow(parentId);
+    // A reply may anchor to a tombstoned root — that is the entire point of
+    // tombstoning rather than hard-deleting (issue #503): the row stays so
+    // replies keep their parent. So resolve the parent with includeDeleted=true;
+    // the web UI still threads replies under a [deleted] placeholder.
+    const parent = await this.getRowOrThrow(parentId, true);
     if (
       parent.campaignId !== campaignId ||
       parent.entityType !== entityType ||
@@ -375,7 +383,7 @@ export class CommentsService {
    * deleted_at/deleted_by (a DM moderating after an author's soft-delete, say) but
    * does not 404 and does not touch replies.
    */
-  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role): Promise<Comment> {
     const existing = await this.getRowOrThrow(id, true);
     // A comment on an entity the caller can no longer see is, to them, nonexistent (issue #230).
     await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
@@ -383,10 +391,11 @@ export class CommentsService {
       throw new ForbiddenException('Only the author or a DM may delete this comment');
     }
     const ts = nowIso();
-    await this.db
+    const [row] = await this.db
       .update(comments)
       .set({ deletedAt: ts, deletedBy: auditActor(user) })
-      .where(eq(comments.id, id));
+      .where(eq(comments.id, id))
+      .returning();
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -399,6 +408,10 @@ export class CommentsService {
     // Tell anyone who replied to this root that the context above them changed, so
     // their reply doesn't read as a non-sequitur under a now-redacted parent.
     await this.notifyTombstone(existing, user);
+    // Return the tombstoned comment (redacted to a [deleted] placeholder by
+    // toDomain) so the endpoint is self-describing and matches its OpenAPI shape;
+    // clients don't need a follow-up GET to see the deletion took effect.
+    return toDomain(row);
   }
 
   /**
@@ -415,9 +428,14 @@ export class CommentsService {
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may restore this comment');
     }
+    // Restore is a LIFECYCLE event, not a content edit — do not bump updatedAt.
+    // The web UI shows an "edited" badge when updatedAt !== createdAt, so bumping
+    // here would falsely mark a restored comment as edited. Provenance of the
+    // tombstone (who deleted it, when) is preserved in the audit log, not on the
+    // row (deletedAt/deletedBy are cleared so the comment reads as live again).
     const [row] = await this.db
       .update(comments)
-      .set({ deletedAt: null, deletedBy: null, updatedAt: nowIso() })
+      .set({ deletedAt: null, deletedBy: null })
       .where(eq(comments.id, id))
       .returning();
     await this.audit.log({
