@@ -226,6 +226,12 @@ export class InvitesService {
   }
 
   private async addMembership(invite: typeof campaignInvites.$inferSelect, userId: number): Promise<void> {
+    // Authenticated invite acceptance normally guarantees this already, but keep
+    // the direct membership insert honest too: a stale/concurrent caller may not
+    // attach a disabled or missing account (#849). The database FK is the final
+    // missing-user backstop.
+    const target = await this.users.getRowOrThrow(userId);
+    if (target.disabled) throw new ForbiddenException('This account is disabled');
     const ts = nowIso();
     await this.db.insert(campaignMembers).values({
       campaignId: invite.campaignId,

@@ -1,7 +1,7 @@
 # What an AI can do
 
 Once [connected](connect.md), an AI assistant reaches Campfire through its **MCP
-server** (134 tools) and REST API. What it's allowed to do is capped by two
+server** (137 tools) and REST API. What it's allowed to do is capped by two
 independent, server-enforced token dimensions — a **read scope** (dm / player /
 viewer) and a **write mode** (direct / propose / read-only) — exactly like a human
 of that role.

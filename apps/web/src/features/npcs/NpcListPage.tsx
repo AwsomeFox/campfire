@@ -8,7 +8,8 @@ import { useNavigate, useParams } from 'react-router-dom';
 import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
+import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
 import { GameIcon } from '../../components/GameIcon';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
@@ -17,14 +18,6 @@ function initials(name: string): string {
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
-
-function dispositionVariant(disposition: string) {
-  const d = disposition.toLowerCase();
-  if (d.includes('friend') || d.includes('ally') || d.includes('trust')) return 'completed' as const;
-  if (d.includes('hostile') || d.includes('enemy') || d.includes('wary')) return 'failed' as const;
-  if (d.includes('warm') || d.includes('active')) return 'active' as const;
-  return statusVariant(disposition);
 }
 
 export default function NpcListPage() {
@@ -117,7 +110,7 @@ export default function NpcListPage() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
+    <div data-testid="npc-list-surface" className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
         <div className="flex items-center justify-between border-b border-slate-700 pb-3">
           <h1 className="font-bold text-white text-lg flex items-center gap-2"><GameIcon slug="hooded-figure" size={18} /> NPCs</h1>
@@ -186,11 +179,11 @@ export default function NpcListPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
+                  <NpcDispositionBadge disposition={npc.disposition} />
                   {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
                   {isDm && npc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   {locationName(npc.locationId) && (
-                    <span className="text-[11px] text-slate-500 ml-auto">{locationName(npc.locationId)}</span>
+                    <span className="text-[11px] text-slate-400 ml-auto">{locationName(npc.locationId)}</span>
                   )}
                 </div>
               </a>

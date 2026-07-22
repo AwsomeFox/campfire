@@ -394,12 +394,27 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS campaign_members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-  user_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   role TEXT NOT NULL,
   character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(campaign_id, user_id)
+);
+
+-- Migration repair history for #849. No FKs by design: rows describe missing
+-- references and must remain readable to a server admin without campaign access.
+CREATE TABLE IF NOT EXISTS membership_integrity_repairs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  member_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  action TEXT NOT NULL,
+  invalid_reference_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE(member_id, reason)
 );
 
 CREATE TABLE IF NOT EXISTS campaign_invites (
