@@ -4,8 +4,8 @@
  * Mirrors design/claude-design/Campfire.dc.html's "Login" screen aesthetic —
  * flame mark on a radial-gradient ground — extended into a two-column landing on
  * wide screens while preserving one semantic intro -> auth -> pitch order at
- * every viewport. SSO is first when OIDC is configured; local username/password
- * is the primary option when OIDC is off and secondary/collapsible when both are available.
+ * every viewport. SSO is first when OIDC is configured; local authentication is
+ * the primary option when OIDC is off and secondary/collapsible when both are available.
  */
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
