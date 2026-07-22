@@ -2061,15 +2061,22 @@ export class McpToolsService {
       server,
       user,
       'award_xp',
-      "Award XP. Either to one character by characterId (player owner or DM; delta may be negative to correct a mistake, XP never drops below 0), or DM-only to the whole party / a characterIds subset via amount.",
+      "Award XP. Either adjust one character by characterId (player owner or DM; amount may be negative and XP never drops below 0), or make a DM-only party award. Party awards default to active characters; characterIds is enforced exactly, and inactive/retired/dead recipients require both explicit characterIds and includeNonActive:true for deliberate historical corrections.",
       {
         campaignId: CampaignIdArg,
         characterId: Id.optional().describe('Single character to adjust (owner or DM); omit for a DM party-wide award'),
         amount: z.number().int().describe('XP to add. Party-wide awards require a positive amount'),
-        characterIds: z.array(Id).optional().describe('Party-award only: limit the award to these characters'),
+        characterIds: z.array(Id).min(1).optional().describe('Party-award only: exact recipient character ids'),
+        includeNonActive: z
+          .boolean()
+          .optional()
+          .describe('Party-award only: explicit opt-in required for inactive, retired, or dead recipients'),
       },
-      async ({ campaignId, characterId, amount, characterIds }) => {
+      async ({ campaignId, characterId, amount, characterIds, includeNonActive }) => {
         if (characterId !== undefined) {
+          if (characterIds !== undefined || includeNonActive !== undefined) {
+            throw new BadRequestException('characterIds/includeNonActive are only valid for party awards');
+          }
           const row = await this.characters.getRowOrThrow(characterId as number);
           if (row.campaignId !== (campaignId as number)) {
             throw new BadRequestException(`Character ${characterId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
@@ -2077,7 +2084,11 @@ export class McpToolsService {
           const role = await this.access.requireRole(user, row.campaignId, 'player');
           return this.characters.patchXp(characterId as number, { delta: amount as number }, user, role);
         }
-        const validated = XpAward.parse({ amount, ...(characterIds !== undefined ? { characterIds } : {}) });
+        const validated = XpAward.parse({
+          amount,
+          ...(characterIds !== undefined ? { characterIds } : {}),
+          ...(includeNonActive !== undefined ? { includeNonActive } : {}),
+        });
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.characters.awardXp(campaignId as number, validated, user, role);
       },

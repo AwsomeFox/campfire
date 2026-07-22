@@ -17,7 +17,7 @@ variables** — and you can mix them.
 ### In the admin UI
 
 Go to **Admin → OIDC single sign-on**. Fill in the issuer, client id and secret
-(and optionally the admin/allowed groups), press **Test connection** to validate
+(and optionally a provider display name and the admin/allowed groups), press **Test connection** to validate
 that the discovery endpoint is reachable, then **Save**. Changes take effect on
 the next sign-in — no restart needed. The client secret is write-only: once
 saved it is never shown again (the form shows only whether one is set).
@@ -30,6 +30,7 @@ saved it is never shown again (the form shows only whether one is set).
 | `OIDC_CLIENT_ID` | The OAuth client id |
 | `OIDC_CLIENT_SECRET` | The OAuth client secret |
 | `OIDC_REDIRECT_URI` | `https://<your-host>/api/v1/auth/oidc/callback` |
+| `OIDC_PROVIDER_NAME` | *(optional)* public login-button name, e.g. `Keycloak`; unset uses neutral `SSO` branding |
 | `OIDC_ADMIN_GROUP` | *(optional)* members of this group become **server admins** |
 | `OIDC_ALLOWED_GROUP` | *(optional)* when set, only members of this group (or the admin group) may sign in |
 | `OIDC_GROUPS_CLAIM` | *(optional)* claim to read groups from (default `groups`) |
@@ -46,10 +47,13 @@ admin screen marks any field that is currently pinned by the environment with an
 OIDC is considered **enabled** only once the effective issuer, client id, and
 client secret all resolve to non-empty values.
 
-When enabled, the login page offers **Sign in with &lt;provider&gt;**. On first
-login a Campfire account is provisioned automatically from the token's claims;
-membership in the admin group grants the server-admin role. Campaign roles
-(dm/player/viewer) are still assigned inside Campfire.
+When enabled, the login page offers **Sign in with &lt;provider&gt;**, using the
+configured provider display name or neutral **Sign in with SSO** branding. On
+first login, SSO provisions a Campfire account from the token's claims;
+membership in the admin group grants the independent server-admin role.
+Campaign access and DM/player/viewer roles are assigned inside Campfire, never
+from OIDC groups. A user who reaches an empty campaign hub should follow a
+campaign invite or ask a DM or server admin to add their account.
 
 !!! warning "Admin membership is re-synced on every login"
     When `OIDC_ADMIN_GROUP` is set, the server-admin role is applied **both
