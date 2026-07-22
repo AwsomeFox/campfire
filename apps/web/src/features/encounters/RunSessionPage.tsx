@@ -32,7 +32,7 @@ import type {
   TokenSize,
 } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
-import { entityTargetProps } from '../../lib/entityLinks';
+import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
@@ -166,11 +166,14 @@ function EncounterLinks({
   const [locations, setLocations] = useState<LinkRow[]>([]);
   const [quests, setQuests] = useState<LinkRow[]>([]);
   const [sessions, setSessions] = useState<LinkRow[]>([]);
+  const [linkListsLoaded, setLinkListsLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const hasLink = encounter.locationId != null || encounter.questId != null || encounter.sessionId != null;
+
   useEffect(() => {
-    if (!editing || (locations.length || quests.length || sessions.length)) return;
+    if ((!editing && !hasLink) || linkListsLoaded) return;
     let cancelled = false;
     void Promise.all([
       api.get<LinkRow[]>(`${API}/campaigns/${campaignId}/locations`).catch(() => []),
@@ -181,11 +184,12 @@ function EncounterLinks({
       setLocations(locs);
       setQuests(qs);
       setSessions(sess);
+      setLinkListsLoaded(true);
     });
     return () => {
       cancelled = true;
     };
-  }, [editing, campaignId, locations.length, quests.length, sessions.length]);
+  }, [editing, hasLink, campaignId, linkListsLoaded]);
 
   const locName = locations.find((l) => l.id === encounter.locationId);
   const questName = quests.find((q) => q.id === encounter.questId);
@@ -204,24 +208,52 @@ function EncounterLinks({
     }
   }
 
-  const hasLink = encounter.locationId != null || encounter.questId != null || encounter.sessionId != null;
-  if (!canEdit && !hasLink) return null;
+  const showLoc = encounter.locationId != null && (canEdit || locName != null);
+  const showQuest = encounter.questId != null && (canEdit || questName != null);
+  const showSess = encounter.sessionId != null && (canEdit || sessName != null);
+  const hasVisibleLink = showLoc || showQuest || showSess;
+
+  if (!canEdit && !hasVisibleLink) return null;
 
   return (
     <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11 }}>
-      {encounter.locationId != null && (
-        <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />{locName ? linkLabel('location', locName) : `Location #${encounter.locationId}`}
+      {showLoc && (
+        locName ? <Link
+          to={entityHref(campaignId, { type: 'location', id: encounter.locationId })}
+          className="tag tag-outline hover:border-accent"
+          style={{ fontSize: 10 }}
+        >
+          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
+          {linkLabel('location', locName)}
+        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
+          Location #{encounter.locationId} (unavailable)
         </span>
       )}
-      {encounter.questId != null && (
-        <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />{questName ? linkLabel('quest', questName) : `Quest #${encounter.questId}`}
+      {showQuest && (
+        questName ? <Link
+          to={entityHref(campaignId, { type: 'quest', id: encounter.questId })}
+          className="tag tag-outline hover:border-accent"
+          style={{ fontSize: 10 }}
+        >
+          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
+          {linkLabel('quest', questName)}
+        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
+          Quest #{encounter.questId} (unavailable)
         </span>
       )}
-      {encounter.sessionId != null && (
-        <span className="tag tag-outline" style={{ fontSize: 10 }}>
-          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />{sessName ? linkLabel('session', sessName) : `Session #${encounter.sessionId}`}
+      {showSess && (
+        sessName ? <Link
+          to={entityHref(campaignId, { type: 'session', id: encounter.sessionId })}
+          className="tag tag-outline hover:border-accent"
+          style={{ fontSize: 10 }}
+        >
+          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
+          {linkLabel('session', sessName)}
+        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
+          Session #{encounter.sessionId} (unavailable)
         </span>
       )}
       {!hasLink && canEdit && !editing && <span className="text-muted">No location / quest / session linked.</span>}

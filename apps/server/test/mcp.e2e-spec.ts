@@ -946,6 +946,57 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(viewerOgre.hpBand).toBeTruthy();
   });
 
+  it('get_encounter and list_encounters redact hidden quest/location and deleted-session links for a viewer PAT (issue #485)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const quest = parseResult(
+      await dmC.callTool({ name: 'create_quest', arguments: { campaignId, title: 'Secret MCP Quest', hidden: true } }),
+    ) as { id: number };
+
+    const loc = parseResult(
+      await dmC.callTool({ name: 'upsert_location', arguments: { campaignId, name: 'Secret Cave', status: 'unexplored' } }),
+    ) as { id: number };
+
+    const session = parseResult(
+      await dmC.callTool({ name: 'add_session_recap', arguments: { campaignId, recap: 'Deleted MCP session-link fixture' } }),
+    ) as { id: number };
+
+    const enc = parseResult(
+      await dmC.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId, name: 'MCP Link Fight', questId: quest.id, locationId: loc.id, sessionId: session.id },
+      }),
+    ) as { id: number };
+
+    const deleted = await dmC.callTool({ name: 'delete_session', arguments: { sessionId: session.id } });
+    expect(deleted.isError).toBeFalsy();
+
+    // DM PAT sees linked questId & locationId
+    const dmView = parseResult(
+      await dmC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { questId: number | null; locationId: number | null; sessionId: number | null };
+    expect(dmView.questId).toBe(quest.id);
+    expect(dmView.locationId).toBe(loc.id);
+    expect(dmView.sessionId).toBe(session.id);
+
+    // Viewer PAT gets questId & locationId redacted to null
+    const viewerC = await mcpClient(viewerToken);
+    const viewerView = parseResult(
+      await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { questId: number | null; locationId: number | null; sessionId: number | null };
+    expect(viewerView.questId).toBeNull();
+    expect(viewerView.locationId).toBeNull();
+    expect(viewerView.sessionId).toBeNull();
+
+    const viewerList = parseResult(
+      await viewerC.callTool({ name: 'list_encounters', arguments: { campaignId } }),
+    ) as Array<{ id: number; questId: number | null; locationId: number | null; sessionId: number | null }>;
+    const item = viewerList.find((e) => e.id === enc.id);
+    expect(item).toBeDefined();
+    expect(item?.questId).toBeNull();
+    expect(item?.locationId).toBeNull();
+    expect(item?.sessionId).toBeNull();
+  });
+
   it('draft_session_recap assembles the template scaffold + seeds encounters and resolved inbox threads (issue #62)', async () => {
     const client = await mcpClient(dmToken);
 
