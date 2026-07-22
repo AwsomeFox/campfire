@@ -692,7 +692,7 @@ export class AiProviderConfigService {
     const source = campaign
       ? campaignCredentialSource(campaign, server)
       : server
-        ? localCredentialSource(server)
+        ? inheritedServerCredentialSource(server)
         : 'none';
     const inherited = !campaign || source === 'server' || source === 'environment';
     return {
@@ -734,6 +734,12 @@ function localCredentialSource(row: Row): AiProviderCredentialSource {
   if (row.encryptedApiKey) return 'stored';
   if (row.providerType === 'mock') return 'not-required';
   return environmentApiKey(row.providerType) ? 'environment' : 'none';
+}
+
+/** Describe a server-owned credential from a campaign's point of view. */
+function inheritedServerCredentialSource(row: Row): AiProviderTestCredentialSource {
+  const source = localCredentialSource(row);
+  return source === 'stored' ? 'server' : source;
 }
 
 function campaignCredentialSource(campaign: Row, server: Row | undefined): AiProviderCredentialSource {

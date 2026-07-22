@@ -444,6 +444,32 @@ describe('ai-provider-config visible draft connection tests (issue #852, e2e)', 
     expect(persistedRows()).toHaveLength(1); // server row only; neither campaign draft persisted
   });
 
+  it('labels a stored server key as inherited when probing a campaign without a draft body', async () => {
+    const serverKey = 'sk-inherited-stored-health-8528';
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'server-health-model', baseUrl: fake.baseUrl, apiKey: serverKey });
+
+    // The admin health sweep exercises the stored/effective path directly rather
+    // than the draft-only HTTP DTO. From a campaign scope, a server-owned key
+    // must be described as inherited instead of stored locally.
+    const inherited = await ctx.app.get(AiProviderConfigService).testConnection(campaignId);
+
+    expect(inherited).toMatchObject({
+      ok: true,
+      scope: 'campaign',
+      testedTarget: 'inherited-server-default',
+      credentialSource: 'server',
+      providerType: 'openai',
+      model: 'server-health-model',
+      baseUrl: fake.baseUrl,
+    });
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0].authorization).toBe(`Bearer ${serverKey}`);
+    expect(persistedRows()).toHaveLength(1);
+  });
+
   it('reuses a campaign-stored key for a blank draft and redacts provider text that echoes a candidate key', async () => {
     const storedCampaignKey = 'sk-campaign-stored-8526';
     await request(server)
