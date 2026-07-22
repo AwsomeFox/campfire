@@ -425,11 +425,14 @@ export class AttachmentsService {
    * Uploader or dm may delete; others 403. Removes both the DB row and the on-disk file,
    * and clears any dangling references pointing at it in the same transaction:
    *  - campaign.mapAttachmentId, if it was this attachment (numeric FK).
+   *  - encounter.mapAttachmentId for every encounter whose battle map was this
+   *    attachment (issue #695 — one attachment may be the map for several
+   *    encounters, so all of them are cleared in the same statement).
    *  - character.portraitUrl, if it points at this attachment's file route
    *    (`.../attachments/<id>/file` — portraitUrl is a resolved URL string, not a
    *    numeric FK, so it's matched by suffix rather than equality).
-   * Without this, deleting an attachment still in use left the campaign map / character
-   * portrait pointing at a now-404ing file.
+   * Without this, deleting an attachment still in use left the campaign map / encounter
+   * map / character portrait pointing at a now-404ing file.
    */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
@@ -441,6 +444,7 @@ export class AttachmentsService {
     this.db.transaction((tx) => {
       tx.delete(attachments).where(eq(attachments.id, id)).run();
       tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, id)).run();
+      tx.update(encounters).set({ mapAttachmentId: null }).where(eq(encounters.mapAttachmentId, id)).run();
       tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
     });
 
@@ -575,9 +579,9 @@ export class AttachmentsService {
    * upload files (originals or thumbnails) with no backing row. With `dryRun` the
    * counts are reported but nothing is deleted. Server-admin action.
    *
-   * Row deletion also clears dangling references (campaign map / character
-   * portrait), mirroring remove(), so cleanup never leaves a pointer to a row it
-   * just dropped.
+   * Row deletion also clears dangling references (campaign map / encounter map /
+   * character portrait), mirroring remove(), so cleanup never leaves a pointer to a
+   * row it just dropped.
    */
   async cleanupOrphans(dryRun: boolean): Promise<StorageCleanupResult> {
     const rows = await this.db.select().from(attachments);
@@ -596,6 +600,7 @@ export class AttachmentsService {
         this.db.transaction((tx) => {
           tx.delete(attachments).where(eq(attachments.id, r.id)).run();
           tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, r.id)).run();
+          tx.update(encounters).set({ mapAttachmentId: null }).where(eq(encounters.mapAttachmentId, r.id)).run();
           tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
         });
         this.etagCache.delete(this.filePath(r));
