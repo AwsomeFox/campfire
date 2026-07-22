@@ -1,7 +1,7 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog, campaigns, characters, combatants, encounters } from '../../db/schema';
@@ -105,6 +105,22 @@ export class CharactersService {
     if (role === 'dm') return;
     if (row.ownerUserId && row.ownerUserId === user.id) return;
     throw new ForbiddenException('Only dm or the owning player may modify this character');
+  }
+
+  /**
+   * Resolve the campaign's RuleSystemAdapter (issue #535). `levelUp` reads the adapter's
+   * `maxLevel` so the ceiling is sourced from the rule system (5e=20, 13th Age=10, an uncapped
+   * OSR/Open Legend game=Infinity) instead of a hardcoded 5e `20`. Same resolution pattern as
+   * the encounters service; falls back to the 5e adapter for an unrecognized/empty slug, so every
+   * existing campaign keeps exactly the level-20 cap it had before.
+   */
+  private async adapterForCampaign(campaignId: number) {
+    const [row] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return ruleSystemAdapter(row?.ruleSystem);
   }
 
   /**
@@ -518,17 +534,30 @@ export class CharactersService {
   }
 
   /**
-   * Guided level-up: +1 level (never past 20), optionally raising hpMax; the
-   * hit points gained are added to hpCurrent too (existing damage is kept),
-   * then clamped to [0, newHpMax] like every other HP-writing path.
-   * Deliberately not gated on XP thresholds — milestone campaigns level
-   * without XP; the web UI surfaces the threshold advisory instead.
+   * Guided level-up: +1 level (never past the rule system's cap), optionally raising hpMax;
+   * the hit points gained are added to hpCurrent too (existing damage is kept), then clamped to
+   * [0, newHpMax] like every other HP-writing path. Deliberately not gated on XP thresholds —
+   * milestone campaigns level without XP; the web UI surfaces the threshold advisory instead.
+   *
+   * The cap is read from the campaign's RuleSystemAdapter (`adapter.maxLevel`, issue #535), so
+   * 5e stays capped at 20, 13th Age caps at 10, and an uncapped system (Open Legend, an OSR
+   * retroclone) reports `Infinity` and never rejects on the cap. Previously the 5e `20` was
+   * hardcoded here, which wrongly capped every non-5e campaign at level 20.
    */
   async levelUp(id: number, input: LevelUpInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
     await this.assertProgressionAllowed(existing.campaignId, role);
-    if (existing.level >= 20) throw new BadRequestException('Already at level 20 — there is no level 21');
+    const maxLevel = (await this.adapterForCampaign(existing.campaignId)).maxLevel;
+    if (existing.level >= maxLevel) {
+      // Name the system's actual ceiling in the message (e.g. "level 20" for 5e, "level 10"
+      // for 13th Age). An Infinity cap (Open Legend, OSR retroclones) never reaches this branch.
+      throw new BadRequestException(
+        Number.isFinite(maxLevel)
+          ? `Already at level ${maxLevel} — there is no level ${maxLevel + 1}`
+          : 'Already at the maximum level for this rule system',
+      );
+    }
 
     const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nowIso() };
     if (input.hpMax !== undefined) {

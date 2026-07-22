@@ -4,13 +4,14 @@
  * (the block starting at the `inApp` sc-if, just above "Dashboard").
  * Campaign-scoped nav only renders inside /c/:campaignId routes.
  */
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
+import { useFormattingLocale } from '../lib/format';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
@@ -180,6 +181,71 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
   );
 }
 
+/**
+ * Coarse "x ago" label for the offline banner. Intentionally low-precision
+ * (minutes/hours/days): the exact second is noise next to "your data may be
+ * stale", and a coarse label avoids the jitter of a ticking clock on a banner
+ * that doesn't need to update in place.
+ */
+function relativeAgo(at: number, now: number = Date.now()): string {
+  const secs = Math.max(0, Math.round((now - at) / 1000));
+  if (secs < 60) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.round(hours / 24);
+  return `${days} d ago`;
+}
+
+/**
+ * "Offline — showing last-known" banner (issue #579). Rendered across every authed
+ * page while `staleIdentity` is true — i.e. `/me` could not reach the server and
+ * AuthProvider restored the last-known identity from localStorage rather than
+ * bouncing to /login or wiping the cache. Keeps the user oriented on stale data
+ * instead of presenting a wiped screen or a false sign-in.
+ *
+ * The sync timestamp comes from when the identity was last confirmed LIVE, so it
+ * faithfully tells the user how stale the data may be (NOT when the banner was
+ * first shown). Re-renders each minute so the "x ago" label stays roughly current
+ * without a per-second timer.
+ */
+function OfflineBanner({ lastSyncedAt }: { lastSyncedAt: number | null }) {
+  const { t } = useTranslation();
+  const formattingLocale = useFormattingLocale();
+  // Tick once a minute so the relative label stays current. `staleIdentity` only
+  // flips on a real /me outcome, so this effect is mounted at most while offline.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => tick((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const when = useMemo(() => {
+    if (lastSyncedAt == null) return null;
+    const ago = relativeAgo(lastSyncedAt);
+    const abs = new Date(lastSyncedAt).toLocaleString(formattingLocale);
+    return { ago, abs };
+  }, [lastSyncedAt, formattingLocale]);
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="px-4 py-2 text-center"
+      style={{
+        fontSize: 12.5,
+        color: 'var(--color-neutral-200, #e5e7eb)',
+        background: 'color-mix(in srgb, var(--color-neutral-500, #888) 14%, transparent)',
+        borderBottom: '1px solid var(--color-divider)',
+      }}
+      title={when ? when.abs : undefined}
+    >
+      {t('nav.offlineBanner')}
+      {when ? <span className="text-muted">{t('nav.offlineSyncedAt', { when: when.ago })}</span> : null}
+    </div>
+  );
+}
+
 function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: boolean; onClick?: () => void }) {
   const inner = (
     <>
@@ -240,7 +306,7 @@ export function Layout() {
 
 function LayoutContent() {
   const { t } = useTranslation();
-  const { me, isAdmin, roleIn, refresh: refreshAuth, logout } = useAuth();
+  const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
   const campaign = useCampaign(campaignId);
@@ -682,6 +748,12 @@ function LayoutContent() {
             </button>
           </header>
         )}
+
+        {/* Offline / stale-data banner (#579): a real /me failure (not 401) means
+            we're serving the last-known identity + cached campaign data. Surface
+            it so the user knows the data may be stale rather than wiping the cache
+            or bouncing to /login. */}
+        {staleIdentity && <OfflineBanner lastSyncedAt={lastSyncedAt} />}
 
         {/* Archived (paused/completed) campaigns are read-only server-side — surface it on every campaign page. */}
         {campaign && campaign.status !== 'active' && (
