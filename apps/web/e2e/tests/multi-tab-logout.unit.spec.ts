@@ -29,7 +29,7 @@ test.describe('Auth Storage Utilities', () => {
     });
 
     try {
-      setAuthStorage({ id: 42, username: 'testuser' });
+      setAuthStorage({ id: 42 });
       expect(store['cf.authUserId']).toBe('42');
 
       clearAuthStorage();
