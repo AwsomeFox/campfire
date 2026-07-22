@@ -144,7 +144,7 @@ export const api = {
   post: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'POST', json }),
   patch: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'PATCH', json }),
   put: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'PUT', json }),
-  delete: <T>(path: string, init?: RequestInit) => request<T>(path, { ...init, method: 'DELETE' }),
+  delete: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'DELETE', json }),
 };
 
 export const API = '/api/v1';

@@ -23,6 +23,17 @@ const CAMPAIGN_KEY = 'sk-campaign-SUPERSECRET-9999';
 const ORIGINAL_OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ORIGINAL_ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
+async function confirmedProviderDelete(
+  server: ReturnType<TestAppContext['app']['getHttpServer']>,
+  path: string,
+  headers = dm,
+) {
+  const preview = await request(server).get(`${path}/removal-impact`).set(headers);
+  if (preview.status === 404) return preview;
+  expect(preview.status).toBe(200);
+  return request(server).delete(path).set(headers).send({ impactRevision: preview.body.impactRevision });
+}
+
 beforeAll(() => {
   // The ordinary provider tests must not depend on the machine running Jest.
   delete process.env.OPENAI_API_KEY;
@@ -217,12 +228,24 @@ describe('ai-provider-config (e2e)', () => {
   });
 
   it('DELETE removes each scope', async () => {
-    const delCamp = await request(server).delete(`/api/v1/campaigns/${campaignId}/ai-provider`).set(dm);
+    const campaignPreview = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-provider/removal-impact`)
+      .set(dm);
+    expect(campaignPreview.body).toMatchObject({ scope: 'campaign', campaignId, affectedCampaignCount: 1 });
+    const delCamp = await request(server)
+      .delete(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ impactRevision: campaignPreview.body.impactRevision });
     expect(delCamp.status).toBe(204);
     const getCamp = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider`).set(dm);
     expect(getCamp.body.scope).toBeUndefined();
 
-    const delServer = await request(server).delete('/api/v1/settings/ai-provider').set(dm);
+    const serverPreview = await request(server).get('/api/v1/settings/ai-provider/removal-impact').set(dm);
+    expect(serverPreview.body).toMatchObject({ scope: 'server', campaignId: null });
+    const delServer = await request(server)
+      .delete('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ impactRevision: serverPreview.body.impactRevision });
     expect(delServer.status).toBe(204);
     const getServer = await request(server).get('/api/v1/settings/ai-provider').set(dm);
     expect(getServer.body.scope).toBeUndefined();
@@ -251,6 +274,15 @@ describe('ai-provider-config (e2e)', () => {
       .delete(`/api/v1/campaigns/${campaignId}/ai-provider/key`)
       .set(player);
     expect(clear.status).toBe(403);
+    const previewRemoval = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-provider/removal-impact`)
+      .set(player);
+    expect(previewRemoval.status).toBe(403);
+    const remove = await request(server)
+      .delete(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(player)
+      .send({ impactRevision: '0'.repeat(64) });
+    expect(remove.status).toBe(403);
     const test = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
       .set(player)
@@ -282,8 +314,8 @@ describe('ai-provider-config visible draft connection tests (issue #852, e2e)', 
     fake.calls.length = 0;
     delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
-    await request(server).delete(`/api/v1/campaigns/${campaignId}/ai-provider`).set(dm);
-    await request(server).delete('/api/v1/settings/ai-provider').set(dm);
+    await confirmedProviderDelete(server, `/api/v1/campaigns/${campaignId}/ai-provider`);
+    await confirmedProviderDelete(server, '/api/v1/settings/ai-provider');
   });
 
   afterAll(async () => {
@@ -893,6 +925,238 @@ describe('ai-provider-config key-exfiltration guard (issue #373, e2e)', () => {
 });
 
 /**
+ * Issue #755: removal impact and confirmation are computed against real SQLite
+ * state, cover both vendor variants and both scopes, and compare-and-delete
+ * atomically so stale previews cannot remove the active configuration.
+ */
+describe('ai-provider-config safe removal workflow (issue #755, real DB)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    const enabled = await request(server).post('/api/v1/settings/ai/kill').set(dm).send({ enabled: true });
+    expect(enabled.status).toBe(200);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('previews server-default removal per campaign, protects stale OpenAI/Anthropic state, and audits without secrets', async () => {
+    const inherited = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Inherited OpenAI' });
+    const borrowed = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Borrowed Credential' });
+    const independent = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Independent Anthropic' });
+
+    const openAiKey = 'sk-removal-server-openai-never-return-7551';
+    const anthropicKey = 'sk-removal-campaign-anthropic-never-return-7552';
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'gpt-removal', apiKey: openAiKey });
+    await request(server)
+      .put(`/api/v1/campaigns/${borrowed.body.id}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'anthropic', model: 'claude-borrowed' });
+    await request(server)
+      .put(`/api/v1/campaigns/${independent.body.id}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'anthropic', model: 'claude-independent', apiKey: anthropicKey });
+    const borrowedSeat = await request(server)
+      .put(`/api/v1/campaigns/${borrowed.body.id}/ai-dm`)
+      .set(dm)
+      .send({ mode: 'co_dm', enabled: true, tokenBudget: 1200 });
+    expect(borrowedSeat.status).toBe(200);
+
+    const preview = await request(server).get('/api/v1/settings/ai-provider/removal-impact').set(dm);
+    expect(preview.status).toBe(200);
+    expect(preview.body).toMatchObject({
+      scope: 'server',
+      campaignId: null,
+      providerType: 'openai',
+      model: 'gpt-removal',
+      credentialSource: 'stored',
+      storedKeyWillBeLost: true,
+      affectedCampaignCount: 2,
+    });
+    expect(preview.body.impactRevision).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(preview.body)).not.toContain(openAiKey);
+    expect(JSON.stringify(preview.body)).not.toContain(anthropicKey);
+    expect(preview.body).not.toHaveProperty('keyLast4');
+
+    const byName = new Map(
+      preview.body.affectedCampaigns.map((campaign: { campaignName: string }) => [campaign.campaignName, campaign]),
+    );
+    expect(byName.has('Independent Anthropic')).toBe(false);
+    expect(byName.get('Inherited OpenAI')).toMatchObject({
+      result: 'disabled',
+      current: { source: 'server', providerType: 'openai', model: 'gpt-removal', ready: true },
+      after: { configured: false, source: null, providerType: null, model: null, ready: false },
+      runtime: { budgetsUnchanged: true, implication: 'provider-disabled' },
+    });
+    expect(byName.get('Borrowed Credential')).toMatchObject({
+      result: 'disabled',
+      current: {
+        source: 'campaign',
+        providerType: 'openai',
+        model: 'claude-borrowed',
+        credentialSource: 'server',
+        ready: true,
+      },
+      after: {
+        configured: true,
+        source: 'campaign',
+        providerType: 'anthropic',
+        model: 'claude-borrowed',
+        credentialSource: 'none',
+        ready: false,
+      },
+      runtime: {
+        mode: 'co_dm',
+        enabled: true,
+        tokenBudget: 1200,
+        tokensUsed: 0,
+        budgetRemaining: 1200,
+        budgetsUnchanged: true,
+        implication: 'enabled-seat-will-stop',
+      },
+    });
+
+    const missingConfirmation = await request(server).delete('/api/v1/settings/ai-provider').set(dm).send({});
+    expect(missingConfirmation.status).toBe(400);
+
+    const rotatedKey = 'sk-removal-server-anthropic-never-return-7553';
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'anthropic', model: 'claude-server-rotated', apiKey: rotatedKey });
+    const stale = await request(server)
+      .delete('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ impactRevision: preview.body.impactRevision });
+    expect(stale.status).toBe(409);
+    expect(stale.body).toMatchObject({ code: 'AI_PROVIDER_REMOVAL_STALE' });
+
+    const stillActive = await request(server).get('/api/v1/settings/ai-provider').set(dm);
+    expect(stillActive.body).toMatchObject({ providerType: 'anthropic', model: 'claude-server-rotated', configured: true });
+    expect(JSON.stringify(stillActive.body)).not.toContain(rotatedKey);
+
+    const fresh = await request(server).get('/api/v1/settings/ai-provider/removal-impact').set(dm);
+    const removed = await request(server)
+      .delete('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ impactRevision: fresh.body.impactRevision });
+    expect(removed.status).toBe(204);
+    const independentEffective = await ctx.app
+      .get(AiProviderConfigService)
+      .resolveEffectiveConfig(independent.body.id);
+    expect(independentEffective).toMatchObject({ providerType: 'anthropic', model: 'claude-independent' });
+
+    const audit = await request(server).get('/api/v1/admin/audit').set(dm);
+    const deletion = audit.body.find(
+      (entry: { action: string; detail: string }) =>
+        entry.action === 'ai-provider.delete' && entry.detail.startsWith('server affected='),
+    );
+    expect(deletion.detail).toContain('stored-key=deleted');
+    expect(JSON.stringify(deletion)).not.toContain(openAiKey);
+    expect(JSON.stringify(deletion)).not.toContain(anthropicKey);
+    expect(JSON.stringify(deletion)).not.toContain(rotatedKey);
+  });
+
+  it('previews campaign override removal with an exact fallback and without one', async () => {
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Campaign Removal' });
+    const serverKey = 'sk-campaign-removal-openai-never-return-7554';
+    const campaignKey = 'sk-campaign-removal-anthropic-never-return-7555';
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'gpt-fallback', apiKey: serverKey });
+    await request(server)
+      .put(`/api/v1/campaigns/${campaign.body.id}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'anthropic', model: 'claude-current', apiKey: campaignKey });
+    const campaignSeat = await request(server)
+      .put(`/api/v1/campaigns/${campaign.body.id}/ai-dm`)
+      .set(dm)
+      .send({ mode: 'co_dm', enabled: true, tokenBudget: 900 });
+    expect(campaignSeat.status).toBe(200);
+
+    const path = `/api/v1/campaigns/${campaign.body.id}/ai-provider`;
+    const fallbackPreview = await request(server).get(`${path}/removal-impact`).set(dm);
+    expect(fallbackPreview.body).toMatchObject({
+      scope: 'campaign',
+      campaignId: campaign.body.id,
+      providerType: 'anthropic',
+      storedKeyWillBeLost: true,
+      affectedCampaignCount: 1,
+      affectedCampaigns: [
+        {
+          result: 'fallback',
+          current: { source: 'campaign', providerType: 'anthropic', ready: true },
+          after: {
+            source: 'server',
+            providerType: 'openai',
+            model: 'gpt-fallback',
+            credentialSource: 'stored',
+            ready: true,
+          },
+          runtime: {
+            budgetRemaining: 900,
+            budgetsUnchanged: true,
+            implication: 'continues-with-fallback',
+          },
+        },
+      ],
+    });
+
+    await request(server)
+      .put(path)
+      .set(dm)
+      .send({ providerType: 'anthropic', model: 'claude-current-updated' });
+    const staleCampaignDelete = await request(server)
+      .delete(path)
+      .set(dm)
+      .send({ impactRevision: fallbackPreview.body.impactRevision });
+    expect(staleCampaignDelete.status).toBe(409);
+    const activeOverride = await request(server).get(path).set(dm);
+    expect(activeOverride.body).toMatchObject({ model: 'claude-current-updated', configured: true });
+
+    const freshFallbackPreview = await request(server).get(`${path}/removal-impact`).set(dm);
+    const fallbackDelete = await request(server)
+      .delete(path)
+      .set(dm)
+      .send({ impactRevision: freshFallbackPreview.body.impactRevision });
+    expect(fallbackDelete.status).toBe(204);
+    const inherited = await ctx.app.get(AiProviderConfigService).resolveEffectiveConfig(campaign.body.id);
+    expect(inherited).toMatchObject({ providerType: 'openai', model: 'gpt-fallback', apiKey: serverKey });
+
+    await confirmedProviderDelete(server, '/api/v1/settings/ai-provider');
+    await request(server)
+      .put(path)
+      .set(dm)
+      .send({ providerType: 'anthropic', model: 'claude-no-fallback', apiKey: campaignKey });
+    const disabledPreview = await request(server).get(`${path}/removal-impact`).set(dm);
+    expect(disabledPreview.body.affectedCampaigns[0]).toMatchObject({
+      result: 'disabled',
+      after: { configured: false, ready: false },
+      runtime: { implication: 'enabled-seat-will-stop', budgetsUnchanged: true },
+    });
+    expect(JSON.stringify(disabledPreview.body)).not.toContain(serverKey);
+    expect(JSON.stringify(disabledPreview.body)).not.toContain(campaignKey);
+
+    const disabledDelete = await request(server)
+      .delete(path)
+      .set(dm)
+      .send({ impactRevision: disabledPreview.body.impactRevision });
+    expect(disabledDelete.status).toBe(204);
+    expect(await ctx.app.get(AiProviderConfigService).resolveEffectiveConfig(campaign.body.id)).toBeNull();
+  });
+});
+
+/**
  * Server-default endpoints are server-admin gated. All dev-auth users are admin, so
  * the non-admin 403 needs a real cookie-session (no-dev-auth) non-admin user.
  */
@@ -932,6 +1196,14 @@ describe('ai-provider-config server default is admin-gated (e2e, no dev auth)', 
 
     const deniedClear = await userAgent.delete('/api/v1/settings/ai-provider/key');
     expect(deniedClear.status).toBe(403);
+
+    const deniedRemovalPreview = await userAgent.get('/api/v1/settings/ai-provider/removal-impact');
+    expect(deniedRemovalPreview.status).toBe(403);
+
+    const deniedRemoval = await userAgent
+      .delete('/api/v1/settings/ai-provider')
+      .send({ impactRevision: '0'.repeat(64) });
+    expect(deniedRemoval.status).toBe(403);
 
     const deniedTest = await userAgent
       .post('/api/v1/settings/ai-provider/test')
