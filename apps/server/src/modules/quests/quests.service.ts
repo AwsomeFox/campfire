@@ -1,7 +1,15 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { and, asc, eq, inArray, max, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch, ObjectiveReorder } from '@campfire/schema';
+import {
+  QuestCreate,
+  QuestUpdate,
+  QuestStatusPatch,
+  ObjectiveCreate,
+  ObjectivePatch,
+  ObjectiveReorder,
+  QuestListObjective,
+} from '@campfire/schema';
 import type { Quest, QuestListItem, QuestObjective, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { quests, questObjectives, npcs, sessions } from '../../db/schema';
@@ -136,27 +144,13 @@ export class QuestsService {
     const progressRows = await this.db
       .select({
         questId: quests.id,
-        total: sql<number>`(
-          select count(*)
-          from quest_objectives as counted_objective
-          where counted_objective.quest_id = ${outerQuestId}
-        )`,
-        completed: sql<number>`(
-          select count(*)
-          from quest_objectives as completed_objective
-          where completed_objective.quest_id = ${outerQuestId}
-            and completed_objective.done = 1
-        )`,
-        nextObjectiveId: sql<number | null>`(
-          select next_objective.id
-          from quest_objectives as next_objective
-          where next_objective.quest_id = ${outerQuestId}
-            and next_objective.done = 0
-          order by next_objective.sort_order asc, next_objective.id asc
-          limit 1
-        )`,
-        nextObjectiveText: sql<string | null>`(
-          select next_objective.text
+        total: sql<number>`count(${questObjectives.id})`,
+        completed: sql<number>`coalesce(sum(case when ${questObjectives.done} = 1 then 1 else 0 end), 0)`,
+        // Return id + text from one ordered lookup instead of repeating the same
+        // correlated subquery for each field. Counts are computed by the grouped
+        // join, so the poll performs only this one per-quest lookup.
+        nextObjectiveJson: sql<string | null>`(
+          select json_object('id', next_objective.id, 'text', next_objective.text)
           from quest_objectives as next_objective
           where next_objective.quest_id = ${outerQuestId}
             and next_objective.done = 0
@@ -165,21 +159,23 @@ export class QuestsService {
         )`,
       })
       .from(quests)
-      .where(inArray(quests.id, questList.map((q) => q.id)));
+      .leftJoin(questObjectives, eq(questObjectives.questId, quests.id))
+      .where(inArray(quests.id, questList.map((q) => q.id)))
+      .groupBy(quests.id);
 
     const progressByQuest = new Map(progressRows.map((row) => [row.questId, row]));
     return questList.map((quest) => {
       const progress = progressByQuest.get(quest.id);
+      const nextObjective = progress?.nextObjectiveJson
+        ? QuestListObjective.parse(JSON.parse(progress.nextObjectiveJson) as unknown)
+        : null;
       return {
         ...quest,
         objectiveProgress: {
           completed: progress?.completed ?? 0,
           total: progress?.total ?? 0,
         },
-        nextObjective:
-          progress?.nextObjectiveId != null && progress.nextObjectiveText != null
-            ? { id: progress.nextObjectiveId, text: progress.nextObjectiveText }
-            : null,
+        nextObjective,
       };
     });
   }

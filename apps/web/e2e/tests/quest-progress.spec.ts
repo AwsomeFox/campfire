@@ -23,8 +23,10 @@ test.describe('quest-board objective progress', () => {
     await expect(card.getByRole('checkbox')).toHaveCount(0);
 
     const details = card.getByRole('link', { name: `View details for ${fixture.quests.active.title}` });
+    await expect(details).toBeVisible();
     const detailBox = await details.boundingBox();
-    expect(detailBox?.height).toBeGreaterThanOrEqual(44);
+    expect(detailBox).not.toBeNull();
+    expect(detailBox!.height).toBeGreaterThanOrEqual(44);
 
     const layout = await card.evaluate((element) => ({
       cardClientWidth: element.clientWidth,
