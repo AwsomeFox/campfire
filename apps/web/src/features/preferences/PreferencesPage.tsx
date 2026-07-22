@@ -15,7 +15,13 @@ import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
 import type { TextSize, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
-import i18n, { SUPPORTED_LANGUAGES, LANG_STORAGE_KEY } from '../../i18n';
+import {
+  localeController,
+  SUPPORTED_LANGUAGES,
+  SYSTEM_LOCALE,
+  type LanguageCode,
+  type LocalePreference,
+} from '../../i18n';
 import { useAuth } from '../../app/auth';
 import { Card, ErrorNote } from '../../components/ui';
 
@@ -38,30 +44,15 @@ export default function PreferencesPage() {
   const { me, refresh } = useAuth();
   const user = me?.user ?? null;
   const mcpUrl = `${window.location.origin}/mcp`;
-  // Explicit language override (empty string = follow the browser). Seeded from the
-  // persisted value so the switcher reflects the active choice.
-  const [lang, setLang] = useState<string>(() => {
-    try {
-      return localStorage.getItem(LANG_STORAGE_KEY) ?? '';
-    } catch {
-      return '';
-    }
-  });
+  const [lang, setLang] = useState<LocalePreference>(() => localeController.preference);
+
+  useEffect(() => localeController.subscribe(() => setLang(localeController.preference)), []);
 
   function changeLanguage(next: string) {
-    setLang(next);
-    if (next) {
-      void i18n.changeLanguage(next);
-    } else {
-      // Clear the override and fall back to the browser-detected language.
-      try {
-        localStorage.removeItem(LANG_STORAGE_KEY);
-      } catch {
-        /* ignore */
-      }
-      const detected = (navigator.language || 'en').split('-')[0];
-      void i18n.changeLanguage(detected);
-    }
+    const preference: LocalePreference =
+      next === SYSTEM_LOCALE ? SYSTEM_LOCALE : (next as LanguageCode);
+    setLang(preference);
+    localeController.setPreference(preference);
   }
 
   const [displayName, setDisplayName] = useState(user?.displayName ?? '');
@@ -257,7 +248,7 @@ export default function PreferencesPage() {
             value={lang}
             onChange={(e) => changeLanguage(e.target.value)}
           >
-            <option value="">{t('preferences.languageSystem')}</option>
+            <option value={SYSTEM_LOCALE}>{t('preferences.languageSystem')}</option>
             {SUPPORTED_LANGUAGES.map((l) => (
               <option key={l.code} value={l.code}>
                 {l.label}

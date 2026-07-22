@@ -162,6 +162,7 @@ export default async function globalSetup(config: FullConfig) {
     number: 1,
     title: 'DLRNAV First Crossing',
     recap: 'The party crossed the moon gate.',
+    playedAt: '2026-07-21',
   });
   const navTimeline = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/timeline`, {
     title: 'DLRNAV Sundering',

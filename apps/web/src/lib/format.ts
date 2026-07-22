@@ -6,23 +6,26 @@
  * locale). Everything now routes through these helpers so formatting is consistent and
  * follows the user's locale.
  *
- * Locale resolution: an explicit user override (`cf.lang` in localStorage, set from the
- * Preferences language switcher) wins; otherwise `undefined` lets `Intl` use the
- * runtime/browser default — never a hardcoded region.
+ * Locale resolution is centralized in `i18n/locale`: an explicit language uses that
+ * locale, while System preserves the browser's full locale (not the rendered catalog).
  */
-import { LANG_STORAGE_KEY } from '../i18n';
+import { useSyncExternalStore } from 'react';
+import { localeController } from '../i18n/locale';
+
+const subscribeToLocale = (onStoreChange: () => void) => localeController.subscribe(onStoreChange);
+const formattingLocaleSnapshot = () => localeController.resolved.formatLocale;
+
+/** Subscribe a formatting surface so a runtime browser-language change re-renders it. */
+export function useFormattingLocale(): string | undefined {
+  return useSyncExternalStore(subscribeToLocale, formattingLocaleSnapshot, () => undefined);
+}
 
 /**
- * The locale to hand to `Intl`. Returns the user's explicit override if set, else
- * `undefined` so the browser's own locale (and its date/number conventions) is used.
+ * The locale to hand to `Intl`: an explicit language or System's full browser locale.
+ * `undefined` is used only when the runtime does not expose a browser locale.
  */
 export function activeLocale(): string | undefined {
-  try {
-    const override = localStorage.getItem(LANG_STORAGE_KEY);
-    return override && override.length > 0 ? override : undefined;
-  } catch {
-    return undefined;
-  }
+  return localeController.resolved.formatLocale;
 }
 
 /** Matches a bare calendar date with no time/zone component, e.g. `2026-07-21`. */
@@ -60,30 +63,33 @@ function toDate(value: Date | string | number): Date {
 }
 
 /** Format a date (day granularity). Options default to the browser's locale-native short date. */
-export function formatDate(
-  value: Date | string | number,
-  options?: Intl.DateTimeFormatOptions,
-): string {
-  return toDate(value).toLocaleDateString(activeLocale(), options);
+export function createLocaleFormatters(getLocale: () => string | undefined) {
+  return {
+    formatDate(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
+      return toDate(value).toLocaleDateString(getLocale(), options);
+    },
+
+    formatDateTime(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
+      return toDate(value).toLocaleString(getLocale(), options);
+    },
+
+    formatTime(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
+      return toDate(value).toLocaleTimeString(getLocale(), options);
+    },
+
+    formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
+      return value.toLocaleString(getLocale(), options);
+    },
+  };
 }
 
+const formatters = createLocaleFormatters(activeLocale);
+
+/** Format a date (day granularity). */
+export const formatDate = formatters.formatDate;
 /** Format a date + time. */
-export function formatDateTime(
-  value: Date | string | number,
-  options?: Intl.DateTimeFormatOptions,
-): string {
-  return toDate(value).toLocaleString(activeLocale(), options);
-}
-
+export const formatDateTime = formatters.formatDateTime;
 /** Format a time-of-day. */
-export function formatTime(
-  value: Date | string | number,
-  options?: Intl.DateTimeFormatOptions,
-): string {
-  return toDate(value).toLocaleTimeString(activeLocale(), options);
-}
-
+export const formatTime = formatters.formatTime;
 /** Format a number with locale grouping/decimal separators. */
-export function formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
-  return value.toLocaleString(activeLocale(), options);
-}
+export const formatNumber = formatters.formatNumber;
