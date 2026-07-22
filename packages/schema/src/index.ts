@@ -2579,10 +2579,27 @@ export type CoDmDraftResult = z.infer<typeof CoDmDraftResult>;
 // The API key is stored ENCRYPTED at rest (aes-256-gcm) and is WRITE-ONLY: it is
 // accepted on write but NEVER returned by any read/export/log/audit. A read exposes
 // only a `configured` flag + the last-4 chars (`keyLast4`) — never the key. The
+// non-secret `credentialSource` + `ready` fields distinguish encrypted storage,
+// operator environment fallback, server fallback, and a missing credential. The
 // decrypted key is materialized in-process only at call time (the effective-config
 // resolver hands it straight to createAiProvider) and is never serialized to a client.
 export const AiProviderConfigType = z.enum(['openai', 'anthropic', 'mock']);
 export type AiProviderConfigType = z.infer<typeof AiProviderConfigType>;
+
+// Non-secret description of where the effective credential comes from. `server`
+// means a campaign override is borrowing the server-default stored credential;
+// `environment` means the matching OPENAI_API_KEY / ANTHROPIC_API_KEY is in use.
+// Keyless providers such as `mock` report `not-required` rather than pretending a
+// secret exists. This enum is safe to return to admins/DMs; it never carries key
+// material, a last-four value, or an environment-variable value.
+export const AiProviderCredentialSource = z.enum([
+  'stored',
+  'environment',
+  'server',
+  'not-required',
+  'none',
+]);
+export type AiProviderCredentialSource = z.infer<typeof AiProviderCredentialSource>;
 
 // Sampling / limit params carried alongside the provider selection.
 export const AiProviderParams = z.object({
@@ -2638,6 +2655,8 @@ export const AiProviderConfigView = z.object({
   params: AiProviderParams,
   configured: z.boolean(), // an encrypted API key is stored for this scope
   keyLast4: z.string().nullable(), // masked indicator only — never the key
+  credentialSource: AiProviderCredentialSource,
+  ready: z.boolean(), // the selected provider can resolve every required credential
   allowedModels: z.array(z.string()), // admin model allowlist (server scope); [] = unrestricted
   createdBy: z.string(),
   ...timestamps,
@@ -2659,13 +2678,16 @@ export type AiProviderTestResult = z.infer<typeof AiProviderTestResult>;
 // A campaign DM cannot read the admin-only server-default config (/settings/ai-provider),
 // so this minimal, role-gated (dm) read tells the campaign AI settings which provider is
 // actually in effect and whether it comes from the SERVER default or a CAMPAIGN override.
-// It carries NO key material — only the resolved type/model and the source scope.
+// It carries NO key material — only the resolved type/model, source scope, and
+// non-secret credential source/readiness.
 // `configured` is false (and the other fields null) when neither scope has a provider.
 export const AiProviderEffectiveView = z.object({
   configured: z.boolean(),
   providerType: AiProviderConfigType.nullable(),
   model: z.string().nullable(),
   source: z.enum(['server', 'campaign']).nullable(),
+  credentialSource: AiProviderCredentialSource,
+  ready: z.boolean(),
 });
 export type AiProviderEffectiveView = z.infer<typeof AiProviderEffectiveView>;
 
@@ -2737,6 +2759,8 @@ export const AiConsoleOverview = z.object({
   allowedModels: z.array(z.string()), // the #310 server allowlist ([] = unrestricted)
   serverProviderConfigured: z.boolean(), // a server-default provider row exists
   serverProviderType: AiProviderConfigType.nullable(),
+  serverProviderReady: z.boolean(),
+  serverCredentialSource: AiProviderCredentialSource,
   usage: AiUsageRollup,
 });
 export type AiConsoleOverview = z.infer<typeof AiConsoleOverview>;
