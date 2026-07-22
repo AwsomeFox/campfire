@@ -84,7 +84,9 @@ test.describe('AI provider safe removal', () => {
 
     await dialog.getByRole('button', { name: 'Remove server default' }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByRole('status')).toHaveText('Server default removed successfully.');
+    await expect(page.getByRole('status').filter({ hasText: 'Server default removed successfully.' })).toHaveText(
+      'Server default removed successfully.',
+    );
     const removed = await page.request.get('/api/v1/settings/ai-provider');
     expect((await removed.text()).trim()).toBe('');
   });
