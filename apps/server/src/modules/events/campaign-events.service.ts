@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Subject, type Observable } from 'rxjs';
 import { filter } from 'rxjs/operators';
-import type { CampaignEvent } from '@campfire/schema';
+import type { CampaignEvent, CampaignEventInput } from '@campfire/schema';
 import { nowIso } from '../../common/time';
 
 /**
@@ -19,8 +19,14 @@ import { nowIso } from '../../common/time';
 export class CampaignEventsService {
   private readonly subject = new Subject<CampaignEvent>();
 
-  emit(event: Omit<CampaignEvent, 'at'>): void {
-    this.subject.next({ ...event, at: nowIso() });
+  /**
+   * Accepts a single CampaignEvent variant minus its `at` timestamp (see
+   * CampaignEventInput — distributive so a caller passing `{type, campaignId,
+   * encounterId}` with `type` as a subset of the literals still type-checks).
+   * The `at` is stamped here so emitters can't forge or skew it.
+   */
+  emit(event: CampaignEventInput): void {
+    this.subject.next({ ...event, at: nowIso() } as CampaignEvent);
   }
 
   streamFor(campaignId: number): Observable<CampaignEvent> {

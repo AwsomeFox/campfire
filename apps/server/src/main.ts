@@ -222,6 +222,22 @@ async function bootstrap() {
     new Logger('Bootstrap').warn('DEV_AUTH=1 is set but IGNORED because NODE_ENV=production (issue #119).');
   }
 
+  // Issue #527: SSE real-time (campaign events + AI DM narration) is single-instance only.
+  // The pub/sub backing it (CampaignEventsService / AiDmStreamService) is an in-process
+  // RxJS Subject — events emitted on one node never reach subscribers connected to another.
+  // A revoked member on a different node would NOT be disconnected, and cross-node members
+  // would miss live ticks entirely. There is no reliable way to detect sibling instances
+  // from inside the app without external coordination (a shared Redis / DB heartbeat), so
+  // this is a documented static caveat rather than a detection: if you scale horizontally,
+  // add a shared transport (Redis pub/sub) and route emit()/streamFor() through it, or keep
+  // the deployment to a single replica behind sticky sessions.
+  new Logger('Bootstrap').warn(
+    'SSE (campaign events + AI DM narration) is single-instance: the in-process RxJS pub/sub does NOT ' +
+      'fan out across multiple server nodes. Run a single replica, or add a shared transport (Redis pub/sub) ' +
+      'before scaling horizontally — otherwise members on other nodes miss events and revocation (issue #527) ' +
+      'will not disconnect a removed member connected elsewhere. (issue #527)',
+  );
+
   const port = process.env.PORT ? Number(process.env.PORT) : 8080;
   await app.listen(port);
   // eslint-disable-next-line no-console

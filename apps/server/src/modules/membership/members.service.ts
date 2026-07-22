@@ -8,6 +8,7 @@ import { campaignMembers, campaigns, users, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -20,6 +21,7 @@ export class MembersService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly events: CampaignEventsService,
   ) {}
 
   async listForCampaign(campaignId: number): Promise<CampaignMember[]> {
@@ -258,6 +260,20 @@ export class MembersService {
       entityType: 'campaign_member',
       entityId: memberId,
       campaignId,
+    });
+
+    // Issue #527: notify every open SSE subscriber that this user was removed so the
+    // affected subscriber's own stream tears down immediately. The event is emitted AFTER
+    // the DB delete succeeds so a rolled-back remove never disconnects anyone. It carries
+    // no entity payload — only the affected userId/memberId — mirroring the thin-convention
+    // of every other campaign event (subscribers refetch through permission-checked REST,
+    // and the only consumer of THIS event type is the stream-termination filter). `userId`
+    // is the String form of campaignMembers.userId so it matches RequestUser.id directly.
+    this.events.emit({
+      type: 'membership.revoked',
+      campaignId,
+      userId: String(existing.userId),
+      memberId,
     });
   }
 }

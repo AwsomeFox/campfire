@@ -3549,19 +3549,74 @@ export type RollResult = z.infer<typeof RollResult>;
 // ---------- real-time campaign events (SSE) ----------
 // Thin invalidation signals pushed over GET /campaigns/:id/events — they carry ids, not
 // entity payloads, so clients refetch through the normal (permission-checked) REST reads.
-export const CampaignEventType = z.enum(['encounter.updated', 'encounter.deleted', 'encounter.ping']);
+//
+// A discriminated union on `type`: encounter.* signals are id-only change notifications;
+// `membership.revoked` (issue #527) carries the affected user instead — the SSE controller
+// uses it to tear down that user's open stream the instant they are removed (previously the
+// requireMember check ran once at open, so a kicked member kept receiving ticks until they
+// themselves disconnected). It is still thin (no entity payload): the only consumer is the
+// subscriber whose own stream it ends, and a reconnecting client re-hits requireMember and
+// gets a 403. `memberId` is the campaign_members row id (included so a future UI can surface
+// "you were removed" rather than just dropping the tab — but it carries no secret fields).
+export const CampaignEventType = z.enum([
+  'encounter.updated',
+  'encounter.deleted',
+  'encounter.ping',
+  'membership.revoked',
+]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
-export const CampaignEvent = z.object({
-  type: CampaignEventType,
-  campaignId: Id,
-  encounterId: Id,
-  // Present only on 'encounter.ping' (issue #238): the transient battle-map ping's location and
-  // optional colour/label. Unlike the id-only updated/deleted signals this carries a small,
-  // non-secret payload (a click coordinate the sender chose), so there is nothing to leak.
-  ping: MapPing.optional(),
-  at: IsoDate,
-});
+export const CampaignEvent = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('encounter.updated'),
+    campaignId: Id,
+    encounterId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('encounter.deleted'),
+    campaignId: Id,
+    encounterId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Present only on 'encounter.ping' (issue #238): the transient battle-map ping's location and
+    // optional colour/label. Unlike the id-only updated/deleted signals this carries a small,
+    // non-secret payload (a click coordinate the sender chose), so there is nothing to leak.
+    type: z.literal('encounter.ping'),
+    campaignId: Id,
+    encounterId: Id,
+    ping: MapPing,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #527: a member was removed (or self-left) from the campaign. The affected
+    // user's open SSE stream completes on receipt; other members' streams ignore it (they
+    // are not the revokee). `userId` is String(users.id) — the same identity space as
+    // RequestUser.id / campaignMembers.userId (String form), so the controller can match it
+    // against the subscriber's own id without a second lookup.
+    type: z.literal('membership.revoked'),
+    campaignId: Id,
+    userId: z.string().max(120),
+    memberId: Id,
+    at: IsoDate,
+  }),
+]);
 export type CampaignEvent = z.infer<typeof CampaignEvent>;
+
+/**
+ * Distributive Omit over the CampaignEvent union so each variant keeps its own
+ * discriminated shape. A plain `Omit<Union, K>` collapses to one object with a
+ * widened `type`, which then rejects object-literal emit() calls whose `type` is
+ * a subset of the literals (TS can't correlate a variable discriminant with which
+ * extra fields are present, so it flags `encounterId`/`userId` as excess). Routing
+ * the union through a generic conditional forces real distribution: each member
+ * is omitted independently and the result is a union of single-variant shapes,
+ * against which an object literal with a matching `type` discriminant assigns fine.
+ * This is the input shape for CampaignEventsService.emit(): callers pass one
+ * variant minus its server-assigned `at` timestamp.
+ */
+export type DistributiveOmit<T, K extends keyof any> = [T] extends [never] ? never : T extends unknown ? Omit<T, K> : never;
+export type CampaignEventInput = DistributiveOmit<CampaignEvent, 'at'>;
 
 // A persisted, campaign-shared dice roll (issue #35): RollResult plus authorship +
 // timestamp. Rolls are stored server-side so every campaign member sees the same
