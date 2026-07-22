@@ -1,5 +1,5 @@
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InviteCreate } from '@campfire/schema';
 import type { CampaignInvite, InvitePreview, InviteRole, Me } from '@campfire/schema';
@@ -62,18 +62,19 @@ export class InvitesService {
     return false;
   }
 
-  /** Lists a campaign's live invites, purging expired/exhausted rows as it goes (lazy sweep — no timer needed). */
+  /**
+   * Lists a campaign's live invites without mutating retained invite history.
+   * Expired/exhausted rows remain available to whole-server backups and direct
+   * operator diagnostics until an explicit revoke or campaign deletion removes them.
+   * Campaign exports intentionally omit invite codes altogether.
+   */
   async listForCampaign(campaignId: number): Promise<CampaignInvite[]> {
-    const rows = await this.db.select().from(campaignInvites).where(eq(campaignInvites.campaignId, campaignId));
-    const live: CampaignInvite[] = [];
-    for (const row of rows) {
-      if (this.isSpent(row)) {
-        await this.db.delete(campaignInvites).where(eq(campaignInvites.id, row.id));
-      } else {
-        live.push(this.toDomain(row));
-      }
-    }
-    return live;
+    const rows = await this.db
+      .select()
+      .from(campaignInvites)
+      .where(eq(campaignInvites.campaignId, campaignId))
+      .orderBy(asc(campaignInvites.id));
+    return rows.filter((row) => !this.isSpent(row)).map((row) => this.toDomain(row));
   }
 
   async create(campaignId: number, input: InviteCreateInput, actor: RequestUser): Promise<CampaignInvite> {
