@@ -42,9 +42,12 @@ test.describe('party XP recipient preview and historical correction (issue #814)
     // The Playwright project deliberately shares one backend. Earlier combat
     // journeys may add another active PC, so narrow the exact selection back to
     // this spec's named active fixture before asserting/committing recipients.
-    for (const checkbox of await page.locator('#party-xp-form tbody input[type="checkbox"]:checked').all()) {
-      if ((await checkbox.getAttribute('aria-label')) !== `Select ${xpRecipients.active.name} (Active) for XP award`) {
-        await checkbox.uncheck();
+    const selectedLabels = await page
+      .locator('#party-xp-form tbody input[type="checkbox"]:checked')
+      .evaluateAll((checkboxes) => checkboxes.map((checkbox) => checkbox.getAttribute('aria-label')).filter(Boolean) as string[]);
+    for (const label of selectedLabels) {
+      if (label !== `Select ${xpRecipients.active.name} (Active) for XP award`) {
+        await page.getByRole('checkbox', { name: label, exact: true }).uncheck();
       }
     }
     await expect(page.getByText('1 recipient selected.')).toBeVisible();
