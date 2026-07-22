@@ -4,7 +4,7 @@
  * accessible new-user dialog, inline edit/disable/delete controls, and an
  * inline one-time password reset.
  */
-import { useId, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent } from 'react';
 import type { ServerRole, User } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Btn, TextInput, EmptyState } from '../../components/ui';
@@ -108,6 +108,7 @@ function NewUserForm({
   const [password, setPassword] = useState('');
   const [serverRole, setServerRole] = useState<ServerRole>('user');
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [fieldErrors, setFieldErrors] = useState<{ username?: string; password?: string }>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -129,6 +130,7 @@ function NewUserForm({
 
   async function create(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (savingRef.current) return;
 
     const trimmedUsername = username.trim();
     const errors: { username?: string; password?: string } = {};
@@ -152,6 +154,7 @@ function NewUserForm({
       return;
     }
 
+    savingRef.current = true;
     setSaving(true);
     try {
       await api.post(`${API}/users`, {
@@ -167,6 +170,7 @@ function NewUserForm({
       } else {
         setSubmitError(err instanceof ApiError ? err.message : "Couldn't create user.");
       }
+      savingRef.current = false;
       setSaving(false);
       return;
     }

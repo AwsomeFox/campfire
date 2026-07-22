@@ -81,13 +81,24 @@ test.describe('admin user creation accessibility', () => {
     await expect(dialog).toBeVisible();
 
     const uniqueUsername = `keyboard-user-${Date.now()}`;
+    let uniqueCreateRequests = 0;
+    await page.route('**/api/v1/users', async (route) => {
+      const body = route.request().postDataJSON() as { username?: string } | null;
+      if (body?.username === uniqueUsername) {
+        uniqueCreateRequests += 1;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      await route.continue();
+    });
     await username.fill(uniqueUsername);
     await displayName.fill('Keyboard User');
     await password.fill('keyboard-user-password');
     await role.selectOption('user');
     await password.press('Enter');
+    await password.press('Enter');
 
     await expect(dialog).toBeHidden();
+    expect(uniqueCreateRequests).toBe(1);
     await expect(trigger).toBeFocused();
     await expect(page.getByRole('cell', { name: uniqueUsername })).toBeVisible();
     await expect(page.getByRole('cell', { name: 'Keyboard User' })).toBeVisible();
