@@ -238,13 +238,13 @@ export default function PreferencesPage() {
           className="cf-inset reading-preview"
           data-preview-reading-mode={textSize}
           data-testid="reading-preview"
-          aria-live="polite"
-          aria-atomic="true"
           style={{ padding: '12px 14px' }}
         >
           <span className="card-kicker">{t('preferences.readingPreview')}</span>
           <p>{t('preferences.readingPreviewText')}</p>
-          <span className="sr-only">{t('preferences.readingPreviewAnnouncement', { mode: t(`preferences.textSize${textSize[0].toUpperCase()}${textSize.slice(1)}`) })}</span>
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {t('preferences.readingPreviewAnnouncement', { mode: t(`preferences.textSize${textSize[0].toUpperCase()}${textSize.slice(1)}`) })}
+          </span>
         </div>
 
         <p id="reading-mode-help" className="text-muted reading-supporting" style={{ margin: 0 }}>
