@@ -1461,6 +1461,25 @@ export class EncountersService {
       }
     }
 
+    // Reconcile the turn pointer after an initiative write while combat is running
+    // (issue #715). Clearing a combatant's initiative (or rewriting it) re-sorts the
+    // running order: a cleared combatant sinks below everyone with a roll (see
+    // sortCombatants), and a rewritten value may move it up or down. The current-turn
+    // pointer is IDENTITY-based (issue #49) so it stays pointing at the right actor,
+    // but the denormalized `turnIndex` is positional and would otherwise drift out of
+    // lockstep with the new sort. Re-derive it against the post-write order so clients
+    // that key off turnIndex (the highlight ring, the "next turn" target) stay aligned.
+    // Clearing the CURRENT actor's own initiative is intentional and does NOT advance
+    // the turn — its identity pointer survives, it just slides down the order.
+    if (encounterRow.status === 'running' && staticUpdate.initiative !== undefined) {
+      const sortedAfter = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+      const turnIndex = turnIndexFor(sortedAfter, encounterRow.currentCombatantId);
+      await this.db
+        .update(encounters)
+        .set({ turnIndex, updatedAt: nowIso() })
+        .where(eq(encounters.id, encounterId));
+    }
+
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
 
     return combatantToDomain(row);

@@ -2984,4 +2984,166 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(diff.body.monsterCount).toBe(1);
     });
   });
+
+  // Issue #715 — initiative is nullable in storage but the update schema only accepted
+  // numbers, so a mistaken value could not be cleared back to the unrolled state. The
+  // PATCH body now accepts `initiative: null`, the service writes NULL onto the row,
+  // the audit log records the clear, and a running encounter reconciles its positional
+  // turnIndex against the re-sorted order while keeping the identity-based current-turn
+  // pointer stable.
+  describe('clearing initiative back to null (issue #715)', () => {
+    let encounterId: number;
+    let goblinAId: number;
+    let goblinBId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Clear Initiative Fight' });
+      encounterId = res.body.id;
+      const a = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Goblin A', hpMax: 7 });
+      goblinAId = a.body.id;
+      const b = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Goblin B', hpMax: 7 });
+      goblinBId = b.body.id;
+    });
+
+    it('dm sets then clears initiative to null while preparing', async () => {
+      const server = ctx.app.getHttpServer();
+      const setRes = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${goblinAId}`)
+        .set(dm)
+        .send({ initiative: 18 });
+      expect(setRes.status).toBe(200);
+      expect(setRes.body.initiative).toBe(18);
+
+      // The regression: before #715 this body (`{ initiative: null }`) was rejected by
+      // the CombatantUpdate schema (initiative was z.number().int().optional()), so a
+      // mistaken value could never be honestly cleared. Now it 200s and writes NULL.
+      const clearRes = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${goblinAId}`)
+        .set(dm)
+        .send({ initiative: null });
+      expect(clearRes.status).toBe(200);
+      expect(clearRes.body.initiative).toBeNull();
+
+      // Persisted: a fresh GET reads null back (not a stale 18, not 0).
+      const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const a = (getRes.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === goblinAId);
+      expect(a?.initiative).toBeNull();
+    });
+
+    it('clearing initiative is audited with the null payload', async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const audits = (await db.select().from(auditLog).where(eq(auditLog.entityId, goblinAId))).filter(
+        (row) => row.action === 'encounter.combatant.update' && row.detail.includes('initiative'),
+      );
+      // The clear wrote `{"initiative":null}` into the audit detail — proving the null
+      // value flows through the audit path, not just the column write.
+      const cleared = audits.find((row) => row.detail.includes('"initiative":null'));
+      expect(cleared).toBeDefined();
+    });
+
+    it('clearing initiative while running re-sorts order and keeps the current-turn pointer stable', async () => {
+      const server = ctx.app.getHttpServer();
+      // Roll initiative for every combatant. The party characters get 8, goblinA gets 12,
+      // goblinB gets 20, so the running order starts: B(20), A(12), <party at 8>...
+      const beforeStart = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const partyIds = (beforeStart.body.combatants as Array<{ id: number; kind: string }>)
+        .filter((c) => c.kind === 'character')
+        .map((c) => c.id);
+      for (const c of beforeStart.body.combatants as Array<{ id: number }>) {
+        const target = c.id === goblinAId ? 12 : c.id === goblinBId ? 20 : 8;
+        await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`).set(dm).send({ initiative: target });
+      }
+
+      const startRes = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+      expect(startRes.status).toBe(201);
+      expect(startRes.body.status).toBe('running');
+      // B (20) is first.
+      expect(startRes.body.currentCombatantId).toBe(goblinBId);
+      expect(startRes.body.turnIndex).toBe(0);
+
+      // Clear B's initiative: B sinks below everyone with a roll (goblinA + the party),
+      // landing at the very bottom of the order. The current-turn pointer is identity-based
+      // (issue #49) so it stays on B, but turnIndex must reconcile to B's new (last) position.
+      const clearRes = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${goblinBId}`)
+        .set(dm)
+        .send({ initiative: null });
+      expect(clearRes.status).toBe(200);
+      expect(clearRes.body.initiative).toBeNull();
+
+      const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const order = (getRes.body.combatants as Array<{ id: number }>).map((c) => c.id);
+      // B slid from top (index 0) to the very bottom; goblinA (12) is now the top.
+      expect(order[0]).toBe(goblinAId);
+      expect(order[order.length - 1]).toBe(goblinBId);
+      // The last index is exactly where B's reconciled turnIndex should point.
+      const lastIndex = order.length - 1;
+      // Current-turn pointer is unchanged (still B), but its positional turnIndex moved
+      // from 0 to `lastIndex` to track the re-sort.
+      expect(getRes.body.currentCombatantId).toBe(goblinBId);
+      expect(getRes.body.turnIndex).toBe(lastIndex);
+
+      // next-turn still works: from B (last index) it wraps to A (top) and round+1.
+      const nextRes = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+      expect(nextRes.status).toBe(201);
+      expect(nextRes.body.currentCombatantId).toBe(goblinAId);
+      expect(nextRes.body.round).toBe(2);
+      expect(nextRes.body.turnIndex).toBe(0);
+      // Silence the unused-var lint: partyIds documents the party-at-8 setup above.
+      expect(partyIds.length).toBeGreaterThan(0);
+    });
+
+    it('roll-initiative re-fills a cleared initiative (preparing flow parity)', async () => {
+      const server = ctx.app.getHttpServer();
+      // End the running encounter so we can reopen to preparing-like state, then make a
+      // fresh preparing encounter to prove roll-initiative still fills cleared nulls.
+      await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Clear Initiative 2' });
+      const enc2 = res.body.id;
+      const m = await request(server)
+        .post(`/api/v1/encounters/${enc2}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Wolf', hpMax: 11 });
+      const wolfId = m.body.id;
+      await request(server).patch(`/api/v1/encounters/${enc2}/combatants/${wolfId}`).set(dm).send({ initiative: 5 });
+      await request(server).patch(`/api/v1/encounters/${enc2}/combatants/${wolfId}`).set(dm).send({ initiative: null });
+
+      const rollRes = await request(server).post(`/api/v1/encounters/${enc2}/roll-initiative`).set(dm);
+      expect(rollRes.status).toBe(201);
+      const wolf = (rollRes.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === wolfId);
+      expect(wolf?.initiative).not.toBeNull();
+    });
+
+    it('a player still cannot clear initiative (DM-only, unchanged)', async () => {
+      const server = ctx.app.getHttpServer();
+      // Fresh preparing encounter (encounterId above was ended in the running test) so the
+      // only gate exercised here is the DM-only initiative guard, not ended-immutability.
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Clear Initiative 3' });
+      const enc3 = res.body.id;
+      const m = await request(server)
+        .post(`/api/v1/encounters/${enc3}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Brute', hpMax: 20 });
+      await request(server).patch(`/api/v1/encounters/${enc3}/combatants/${m.body.id}`).set(dm).send({ initiative: 10 });
+
+      const denied = await request(server)
+        .patch(`/api/v1/encounters/${enc3}/combatants/${m.body.id}`)
+        .set(player)
+        .send({ initiative: null });
+      expect(denied.status).toBe(403);
+    });
+  });
 });
