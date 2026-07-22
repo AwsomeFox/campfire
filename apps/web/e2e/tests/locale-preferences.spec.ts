@@ -33,13 +33,15 @@ test('Preferences keeps catalog language separate from System formatting across 
 
   // A tampered form value must not be persisted as a locale the app cannot render.
   await language.evaluate((element) => {
-    const select = element as HTMLSelectElement;
+    if (!(element instanceof HTMLSelectElement)) {
+      throw new TypeError('Display language must be a select element');
+    }
     const option = document.createElement('option');
     option.value = 'fr-FR';
     option.textContent = 'Unsupported';
-    select.append(option);
-    select.value = option.value;
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    element.append(option);
+    element.value = option.value;
+    element.dispatchEvent(new Event('change', { bubbles: true }));
   });
   expect(await page.evaluate((key) => localStorage.getItem(key), LANG_STORAGE_KEY)).toBeNull();
 
