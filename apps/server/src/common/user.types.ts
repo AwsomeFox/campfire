@@ -1,4 +1,4 @@
-import type { Role, ServerRole, WriteScope } from '@campfire/schema';
+import type { AuditActorRole, Role, ServerRole, WriteScope } from '@campfire/schema';
 
 /**
  * Resolved from either a session cookie (real users) or, when DEV_AUTH=1,
@@ -96,6 +96,27 @@ export function minWriteScope(a: WriteScope, b: WriteScope): WriteScope {
 /** Audit-log / proposer actor string: `token:<name>` when acting via a PAT, else the user id. */
 export function auditActor(user: RequestUser): string {
   return user.tokenContext ? `token:${user.tokenContext.name}` : user.id;
+}
+
+/**
+ * Audit-log actor ROLE for a SERVER-scoped admin action (issue #526): `'admin'`
+ * when the actor currently holds real server-admin power (the same test
+ * ServerRolesGuard + hasServerAdminPower use), otherwise `'dm'`.
+ *
+ * Used by the server-scoped admin write paths (users, rule packs, AI provider
+ * config, server settings) so an incident reviewer can distinguish a privileged
+ * operator action from an ordinary campaign-DM's. Every one of those routes is
+ * already @ServerRoles('admin')-gated, so the non-admin branch is only reached
+ * by callers that reached the route through a DM-equivalent path (e.g. a DM
+ * installing a rule pack, which #9 permits) — there the campaign role `dm` is
+ * the honest attribution. Campaign-scoped actions (quests/NPCs/sessions/etc.)
+ * keep passing the effective campaign role directly and never call this.
+ *
+ * See hasServerAdminPower() for why this checks real power rather than the raw
+ * serverRole string (a scope-capped PAT owned by an admin does NOT count).
+ */
+export function auditActorRole(user: RequestUser): AuditActorRole {
+  return hasServerAdminPower(user) ? 'admin' : 'dm';
 }
 
 /**

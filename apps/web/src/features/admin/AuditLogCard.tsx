@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { AuditEntry } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Skeleton } from '../../components/ui';
+import { ActorRoleBadge } from './ActorRoleBadge';
 
 export function AuditLogCard() {
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
@@ -60,7 +61,14 @@ export function AuditLogCard() {
               {entries.map((e) => (
                 <tr key={e.id}>
                   <td className="py-2 pr-4 whitespace-nowrap text-slate-400">{new Date(e.createdAt).toLocaleString()}</td>
-                  <td className="pr-4 text-slate-300">{e.actor}</td>
+                  <td className="pr-4 text-slate-300">
+                    <span className="inline-flex items-center gap-1.5">
+                      {e.actor}
+                      {/* #526: badge the actor's attributed role so a reviewer can scan
+                          for privileged server-admin actions vs ordinary campaign-DM ones. */}
+                      <ActorRoleBadge role={e.actorRole} />
+                    </span>
+                  </td>
                   <td className="pr-4">
                     <code className="text-[11px] text-amber-400">{e.action}</code>
                   </td>
@@ -71,7 +79,9 @@ export function AuditLogCard() {
           </table>
         </div>
       )}
-      <p className="text-[11px] text-slate-500">Server-wide actions only — per-campaign history lives on each campaign.</p>
+      <p className="text-[11px] text-slate-500">
+        Server-wide actions only — per-campaign history lives on each campaign. A <span style={{ color: 'rgb(252 211 77)' }}>Server admin</span> badge marks a privileged operator action; <span>DM</span> marks a campaign-DM acting here.
+      </p>
     </Card>
   );
 }

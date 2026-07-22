@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry } from '@campfire/schema';
+import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
@@ -692,7 +692,12 @@ function timeAgo(iso: string): string {
   return `${days}d`;
 }
 
-const ACTOR_ICON: Record<Role, string> = { dm: 'top-hat', player: 'person', viewer: 'person' };
+// Issue #526: actorRole is now AuditActorRole (dm/player/viewer + the 'admin'
+// sentinel). This per-campaign audit list only ever sees campaign-scoped rows,
+// so 'admin' won't legitimately appear here (admin actions are server-scoped
+// and live on /admin/audit) — but key the full widened type and give 'admin' a
+// distinct icon so a stray value renders gracefully instead of `undefined`.
+const ACTOR_ICON: Record<AuditActorRole, string> = { dm: 'top-hat', player: 'person', viewer: 'person', admin: 'crown' };
 
 /**
  * Resolve an AuditEntry.actor (see auditActor() in apps/server/src/common/user.types.ts)

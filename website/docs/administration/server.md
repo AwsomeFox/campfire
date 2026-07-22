@@ -66,6 +66,25 @@ cleanup.
 A server-wide trail of admin actions not tied to any one campaign (account creation,
 settings changes, pack installs), alongside the existing per-campaign audit.
 
+Each entry is **attributed** to the role its actor was actually exercising when they
+acted, so an incident reviewer can tell the two scopes apart:
+
+- **Server-scoped entries** (`campaign` column empty) carry `actorRole: admin` when a
+  server admin exercised server-wide power — creating/disabling/deleting accounts,
+  resetting passwords, minting admin tokens, changing server settings, installing or
+  removing rule packs, and changing the AI provider config or model allowlist. A
+  campaign-DM performing one of the DM-allowed admin actions (e.g. installing a rule
+  pack, which DMs may do) is attributed `dm` instead — the honest role at the time.
+- **Campaign-scoped entries** (tied to a campaign) carry the actor's effective campaign
+  role (`dm`/`player`/`viewer`) for that campaign. A server admin who is also a member
+  of a campaign is recorded by their campaign role there, never as `admin` — server
+  power is not story access (see [Admin vs DM](access-model.md)).
+
+In the UI, server-admin-attributed entries show a **Server admin** badge, distinct
+from a campaign **DM**, so a reviewer can scan for privileged operator actions.
+Entries written before this attribution landed all read `dm`; they represent the older
+lossy state and are not retroactively rewritten.
+
 ## API tokens & AI (per-user)
 
 Any user can mint **API tokens** for connecting an AI or automation over the REST API

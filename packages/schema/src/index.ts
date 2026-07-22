@@ -3782,11 +3782,27 @@ export type ProposalStatus = z.infer<typeof ProposalStatus>;
 export type ApiTokenCreated = z.infer<typeof ApiTokenCreated>;
 export type AttachmentKind = z.infer<typeof AttachmentKind>;
 
+// The role attributed to an audit-log actor. The audit table's `actor_role`
+// column is a free-form TEXT column (NOT a DB enum — see the server's
+// db/schema.ts), so its value space is wider than the campaign `Role` enum.
+//
+// `dm`/`player`/`viewer` are the campaign-scoped roles (who did what *inside* a
+// campaign — the actor's effective membership role at the time). `admin` is the
+// server-scoped sentinel (issue #526): it marks an action taken by a server
+// admin exercising server-wide power (user/rule-pack/ai-provider/settings
+// writes), so an incident reviewer can distinguish a privileged operator action
+// from an ordinary campaign-DM one. Server-scoped admin rows carry
+// `campaignId: null`; a campaign-scoped row is never attributed `admin`
+// (an admin who also happens to be a DM in a campaign is recorded by their
+// campaign role there).
+export const AuditActorRole = z.enum(['dm', 'player', 'viewer', 'admin']);
+export type AuditActorRole = z.infer<typeof AuditActorRole>;
+
 export const AuditEntry = z.object({
   id: Id,
   campaignId: Id.nullable(),
   actor: z.string().max(200), // user id or token name
-  actorRole: Role,
+  actorRole: AuditActorRole,
   action: z.string().max(80), // e.g. quest.update
   entityType: z.string().max(40).nullable(),
   entityId: Id.nullable(),

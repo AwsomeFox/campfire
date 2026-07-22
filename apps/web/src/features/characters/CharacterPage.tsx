@@ -160,7 +160,11 @@ export default function CharacterPage() {
   async function savePortrait(attachment: Attachment) {
     setActionError(null);
     try {
-      await api.patch(`${API}/characters/${id}`, { portraitUrl: attachmentFileUrl(attachment.id) });
+      // Issue #498: embed the authorization-aware version token in the stored portrait
+      // URL so a later content/hidden change invalidates any cached copy.
+      await api.patch(`${API}/characters/${id}`, {
+        portraitUrl: attachmentFileUrl(attachment.id, { hidden: attachment.hidden, updatedAt: attachment.updatedAt }),
+      });
       await load();
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Couldn't save the portrait.");
