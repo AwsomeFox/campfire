@@ -5,7 +5,7 @@
  * browse & open a detail page.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, Link } from 'react-router-dom';
 import type { Faction, FactionStanding } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -153,13 +153,9 @@ export default function FactionListPage() {
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {factions.map((faction) => (
-              <a
+              <Link
                 key={faction.id}
-                href={`/c/${id}/factions/${faction.id}`}
-                onClick={(e) => {
-                  e.preventDefault();
-                  navigate(`/c/${id}/factions/${faction.id}`);
-                }}
+                to={`/c/${id}/factions/${faction.id}`}
                 className="cf-card p-3.5 space-y-2 hover:border-amber-500/50"
               >
                 <div className="flex items-center gap-2.5">
@@ -178,7 +174,7 @@ export default function FactionListPage() {
                   {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
                   {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                 </div>
-              </a>
+              </Link>
             ))}
           </div>
         )}
