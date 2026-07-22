@@ -247,8 +247,8 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
+    expect(tools).toHaveLength(146);
     expect(tools).toHaveLength(143);
-    expect(tools).toHaveLength(140);
 
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
