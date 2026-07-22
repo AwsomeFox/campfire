@@ -500,6 +500,12 @@ export default function RunSessionPage() {
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
+        // Only the encounter.* variants carry an encounterId; membership.revoked
+        // (and any future non-encounter variant) is irrelevant here and has no
+        // encounterId to compare against. The server already filters revoked
+        // frames out of the data path, but narrowing on type keeps this correct
+        // even if that ever changes.
+        if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping') return;
         if (event.encounterId !== eid) return;
         if (event.type === 'encounter.deleted') {
           navigate(`/c/${cid}/encounters`);

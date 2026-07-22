@@ -25,14 +25,40 @@ export interface CampaignEventsHandlers {
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 15_000;
 
+/**
+ * Runtime guard for the CampaignEvent union (issue #527 widened it to a
+ * discriminated union). Accepts every variant: the encounter.* signals carry an
+ * encounterId; membership.revoked carries userId/memberId instead. Consumers
+ * narrow by `type` before reading variant-specific fields (see RunSessionPage).
+ *
+ * Note: the server filters membership.revoked out of the data path as an internal
+ * control signal, so in practice this client only ever sees encounter.* frames —
+ * but validating the full union here keeps the guard correct if that filtering
+ * ever changes, and lets the type system prove that `onEvent` callbacks handle
+ * every variant (or explicitly narrow).
+ */
+const ENCOUNTER_EVENT_TYPES = new Set(['encounter.updated', 'encounter.deleted', 'encounter.ping']);
 function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
-  return (
-    (v.type === 'encounter.updated' || v.type === 'encounter.deleted' || v.type === 'encounter.ping') &&
-    typeof v.campaignId === 'number' &&
-    typeof v.encounterId === 'number'
-  );
+  // Common to every variant: a known type, a numeric campaignId, and a string `at`
+  // timestamp. Validating `at` here keeps the predicate honest about the full union
+  // shape (every CampaignEvent variant requires it) rather than only checking the
+  // discriminant + campaignId.
+  if (typeof v.type !== 'string' || typeof v.campaignId !== 'number' || typeof v.at !== 'string') return false;
+  if (ENCOUNTER_EVENT_TYPES.has(v.type)) {
+    // encounter.* variants: require encounterId. The ping variant additionally
+    // carries a `ping` payload whose shape (MapPing) is NOT validated client-side
+    // — the server is authoritative on frame shape, and a malformed ping would
+    // simply be ignored by addPing rather than crash. So the guard narrows to the
+    // CampaignEvent type on the fields the client actually reads.
+    return typeof v.encounterId === 'number';
+  }
+  if (v.type === 'membership.revoked') {
+    // membership.revoked: userId + memberId instead of encounterId.
+    return typeof v.userId === 'string' && typeof v.memberId === 'number';
+  }
+  return false;
 }
 
 /** Extracts the concatenated `data:` payload of one SSE event block. */
