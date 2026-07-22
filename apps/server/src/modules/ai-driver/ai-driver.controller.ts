@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Sse, type MessageEvent } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { interval, merge, map, type Observable } from 'rxjs';
@@ -104,6 +105,7 @@ export class AiDriverController {
   ) {}
 
   @Post('message')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'Submit player input to the AI DM seat and run a streamed turn',
     description:
@@ -167,6 +169,7 @@ export class AiDriverController {
   // ---- Stuck-ladder player levers (#314): available to any player at the table ----
 
   @Post('nudge')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'Retry / nudge a stuck AI DM turn',
     description:
@@ -180,6 +183,7 @@ export class AiDriverController {
   }
 
   @Post('flag')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'Flag / dispute the AI DM’s last ruling',
     description: 'Player+. Injects the objection into context and re-runs the turn so the AI must re-decide. Audited + notified.',
