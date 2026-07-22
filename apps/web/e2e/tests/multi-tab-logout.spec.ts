@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { CREDS } from '../global-setup';
 import { seed, stateFor } from './seed';
 
 test.describe('Multi-Tab Sign-Out', () => {
@@ -52,6 +53,11 @@ test.describe('Multi-Tab Sign-Out', () => {
 
   test('logging out in Tab A automatically redirects Tab B to login', async ({ browser }) => {
     const context = await browser.newContext({ storageState: stateFor('player') });
+    // Mint a disposable session for this context. Logging out the shared
+    // global-setup session would invalidate player.json for unrelated specs
+    // running later in the same CI shard.
+    const login = await context.request.post('/api/v1/auth/login', { data: CREDS.player });
+    expect(login.ok()).toBeTruthy();
     const pageA = await context.newPage();
     const pageB = await context.newPage();
 
