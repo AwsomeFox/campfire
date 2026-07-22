@@ -114,6 +114,265 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Login information architecture (#862): one source order at every size —
+   compact value statement, applicable authentication, then the full pitch. */
+.login-page {
+  min-height: 100vh;
+  min-height: 100svh;
+  width: 100%;
+}
+
+.login-shell {
+  width: 100%;
+  max-width: 72rem;
+  min-height: 100vh;
+  min-height: 100svh;
+  margin-inline: auto;
+  padding: 40px 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 380px);
+  grid-template-areas:
+    "intro auth"
+    "pitch auth";
+  align-content: center;
+  align-items: start;
+  column-gap: 48px;
+  row-gap: 24px;
+}
+
+.login-intro {
+  grid-area: intro;
+  width: 100%;
+  max-width: 36rem;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-intro h1 {
+  max-width: 17ch;
+  margin: 0;
+  color: var(--color-text);
+  font-size: clamp(28px, 4vw, 42px);
+  font-weight: 800;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+}
+
+.login-intro p {
+  max-width: 46ch;
+  margin: 0;
+  font-size: clamp(14px, 1.5vw, 16px);
+  line-height: 1.55;
+}
+
+.login-auth {
+  grid-area: auth;
+  width: 100%;
+  align-self: center;
+  justify-self: end;
+}
+
+.login-auth-stack {
+  width: min(380px, 100%);
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.login-auth-card {
+  padding: 28px 26px;
+  gap: 14px;
+}
+
+.login-auth-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.login-auth-mark {
+  display: grid;
+  place-items: center;
+}
+
+.login-pitch {
+  grid-area: pitch;
+  width: 100%;
+  max-width: 36rem;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.login-pitch h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--color-text);
+}
+
+@media (max-width: 1023px) {
+  .login-shell {
+    min-height: 0;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "intro"
+      "auth"
+      "pitch";
+    align-content: start;
+    row-gap: 18px;
+  }
+
+  .login-intro,
+  .login-pitch {
+    max-width: 380px;
+    margin-inline: auto;
+  }
+
+  .login-intro {
+    gap: 8px;
+  }
+
+  .login-intro h1 {
+    max-width: none;
+    font-size: clamp(24px, 7.4vw, 30px);
+  }
+
+  .login-intro p {
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  .login-auth {
+    justify-self: center;
+  }
+
+  .login-auth-card {
+    padding: 20px 18px;
+    gap: 12px;
+  }
+
+  .login-auth-heading {
+    flex-direction: row;
+    justify-content: center;
+    text-align: left;
+  }
+
+  .login-auth-mark {
+    display: none;
+  }
+
+  .login-pitch {
+    padding-top: 14px;
+    border-top: 1px solid var(--color-divider);
+  }
+}
+
+/* 200% browser zoom on the widest supported handset (430x932) reflows to a
+   215x466 CSS viewport. The headline remains the compact value statement;
+   only its redundant supporting sentence and card subtitle are suppressed. */
+@media (max-width: 280px) {
+  .login-shell {
+    padding: 8px;
+    row-gap: 10px;
+  }
+
+  .login-intro h1 {
+    font-size: 20px;
+  }
+
+  .login-intro > p {
+    display: none;
+  }
+
+  .login-auth-card {
+    padding: 12px 10px;
+    gap: 8px;
+  }
+
+  .login-auth-heading > div > p {
+    display: none;
+  }
+
+  .login-auth-heading h2 {
+    font-size: 20px;
+  }
+}
+
+/* A short landscape viewport still exposes the complete local submit path.
+   The fields become a compact row only when there is enough horizontal room;
+   DOM and tab order remain username -> password -> submit. */
+@media (min-width: 560px) and (max-width: 1023px) and (max-height: 500px) {
+  .login-shell {
+    padding-block: 10px;
+    row-gap: 8px;
+  }
+
+  .login-intro {
+    max-width: 100%;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    column-gap: 12px;
+  }
+
+  .login-intro > div {
+    grid-row: 1 / span 2;
+  }
+
+  .login-intro h1 {
+    font-size: 20px;
+  }
+
+  .login-intro p {
+    font-size: 12px;
+  }
+
+  .login-auth-stack {
+    width: min(620px, 100%);
+    gap: 6px;
+  }
+
+  .login-auth-card {
+    padding: 10px 14px;
+    gap: 7px;
+  }
+
+  .login-auth-heading p,
+  .login-auth-mark {
+    display: none;
+  }
+
+  .login-auth-heading h2 {
+    font-size: 18px;
+  }
+
+  .login-auth-card form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 8px;
+  }
+
+  .login-auth-card form > [role="alert"],
+  .login-auth-card form > p {
+    grid-column: 1 / -1;
+  }
+
+  .login-auth-card form .btn {
+    width: auto;
+    min-width: 100px;
+    margin-top: 0;
+  }
+
+  .login-pitch {
+    padding-top: 10px;
+  }
+}
+
 /* Personal "Text size" preference (Preferences page). The app's type scale is
    specified in px throughout (inline styles + component CSS), so a root
    font-size bump wouldn't reach it — `zoom` scales the rendered UI the same
