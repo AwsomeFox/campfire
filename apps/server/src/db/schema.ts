@@ -640,6 +640,15 @@ export const ruleEntries = sqliteTable('rule_entries', {
   // different rulebooks are distinguishable and attributable (issue #143). Nullable-as-''
   // in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   source: text('source').notNull().default(''),
+  // Per-entry provenance (issue #734): a pack may mix licenses, and the reader must credit
+  // each entry under its OWN license rather than the pack's. license/attribution/author/
+  // sourceUrl capture the entry's effective open-license metadata; '' on rows written
+  // before migration 0050 (callers treat '' as "inherit the pack's value"). See
+  // migrateRuleEntriesTableForLicensing().
+  license: text('license').notNull().default(''),
+  attribution: text('attribution').notNull().default(''),
+  author: text('author').notNull().default(''),
+  sourceUrl: text('source_url').notNull().default(''),
   // Optional manual icon override (issue #305): slug of a bundled game-icons.net entity
   // icon, or '' to let the web app derive a default from type/dataJson. Nullable/absent
   // in older DBs pre-migration; see db/db.module.ts migrateRuleEntriesTableForIconSlug().
