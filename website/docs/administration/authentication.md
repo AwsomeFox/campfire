@@ -72,6 +72,26 @@ will refuse sign-in (and skip account provisioning) for anyone outside it. The
 check runs on every login, so removing someone from the group locks them out the
 next time they sign in. Members of `OIDC_ADMIN_GROUP` can always sign in.
 
+### Sign-in recovery and support references
+
+Expected SSO failures do not leave users on a raw API response. Campfire sends
+the browser back to a dedicated same-origin recovery page for cancellation,
+expired or missing flows, state/PKCE verification failure, provider outage,
+client/token failure, missing claims, sign-in-group denial, and disabled
+accounts.
+
+The page offers **Try SSO again**, which creates a new state/PKCE flow. It only
+offers username/password sign-in when public auth status says local login is
+available. Each failure also shows a random support reference an operator can
+match to the server's `OIDC_RECOVERY` diagnostic.
+
+Recovery URLs and UI contain only a fixed safe category and that reference.
+Provider error descriptions and payloads, authorization codes, state, PKCE
+values, tokens, claims, client secrets, issuer details, and group names are not
+copied into the redirect, rendered to the user, or written to the redacted
+diagnostic. If a user reports a failure, ask for the support reference rather
+than a screenshot of the provider callback URL.
+
 ### Authentik quick setup
 
 1. Create an **OAuth2/OpenID Provider** and an **Application** named `campfire`.
@@ -83,7 +103,8 @@ next time they sign in. Members of `OIDC_ADMIN_GROUP` can always sign in.
 
 !!! note "Resilient by design"
     If the IdP is unreachable at boot, Campfire still starts, serves the app, and
-    retries discovery on the next login attempt — it won't crash-loop.
+    retries discovery on the next login attempt — it won't crash-loop. A failed
+    attempt reaches the recovery page with a support reference.
 
 Local first-run setup also works **before** OIDC is configured, so you can stand the
 server up, create the admin, then layer SSO on later.
