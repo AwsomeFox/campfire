@@ -18,16 +18,31 @@ import { Card, TextInput, Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { DiceTray } from './DiceTray';
 import { RolledDice } from './RolledDice';
+import { RolledTerms } from './RolledTerms';
 
 const POLL_MS = 5000;
 
 // Flavor a d20 roll for the crit flourish (issue #67): a natural 20 gets a gold
 // total + sparkle, a natural 1 a muted-rose shudder. Only meaningful for a single
-// d20 (the classic to-hit / save die); everything else is a plain roll.
+// d20 (the classic to-hit / save die); everything else is a plain roll. For a compound
+// expression (issue #536) we read the d20 term's kept dice from `terms[]` so a dropped
+// d20 or a coincidental face value on another die can't fake a crit/fumble.
 function rollFlavor(r: DiceRoll): 'crit' | 'fumble' | null {
-  if (!/\bd20\b/i.test(r.expr)) return null;
-  if (r.rolls.includes(20)) return 'crit';
-  if (r.rolls.includes(1)) return 'fumble';
+  if (!/d20(?!\d)/i.test(r.expr)) return null;
+  let dice: number[];
+  if (r.terms) {
+    dice = [];
+    for (const t of r.terms) {
+      if (!/^1?d20(?!\d)/i.test(t.term)) continue;
+      const termDice = t.kept && t.kept.length > 0 ? t.kept : t.rolls;
+      if (termDice) dice.push(...termDice);
+    }
+    if (dice.length === 0) return null;
+  } else {
+    dice = r.rolls;
+  }
+  if (dice.includes(20)) return 'crit';
+  if (dice.includes(1)) return 'fumble';
   return null;
 }
 
@@ -185,6 +200,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                 </span>
               </span>
               <RolledDice rolls={r.rolls} kept={r.kept} />
+              {r.terms && <RolledTerms terms={r.terms} />}
               {fresh && flavor === 'crit' && (
                 <span className="cf-crit-spark" aria-hidden="true" style={{ fontSize: compact ? 12 : 14, color: 'var(--cf-crit)', flex: 'none' }}>
                   ✦

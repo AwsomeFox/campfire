@@ -680,6 +680,24 @@ function migrateDiceRollsTableForKeepDrop(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before compound dice expressions (issue #536): `dice_rolls`
+ * gained `terms` (JSON of the per-term breakdown). Plain nullable ADD COLUMN — no table
+ * rebuild needed, same shape as migrateDiceRollsTableForKeepDrop above. Existing rolls
+ * get NULL (== a classic single-term roll, no breakdown), preserving their meaning. New
+ * DBs never hit this path — BOOTSTRAP_SQL declares the column.
+ */
+function migrateDiceRollsTableForTerms(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('terms')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN terms TEXT');
+}
+
+/**
  * Migration for DBs created before soft-delete / trash (issue #116): the trashable
  * entities gained a nullable `deleted_at` timestamp — NULL means live, an ISO string
  * means the row is in the trash (excluded from normal reads, restorable). Idempotent
@@ -1245,6 +1263,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0045_comments_soft_delete', run: migrateCommentsTableForSoftDelete },
   { name: '0046_campaign_members_user_fk', run: migrateCampaignMembersTableForUserFk },
   { name: '0047_comments_editor_provenance', run: migrateCommentsTableForEditorProvenance },
+  { name: '0048_dice_rolls_terms', run: migrateDiceRollsTableForTerms },
 ];
 
 /**
