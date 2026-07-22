@@ -69,6 +69,19 @@ export function CharacterTrashMenu({
     setConfirming(true);
   }
 
+  // After the parent's async trash() resolves, close the confirm dialog. On
+  // failure the page surfaces the error via its own actionError state, so
+  // closing here is correct either way — previously the dialog stayed open
+  // (backdrop and all) even after a successful delete because confirming was
+  // only ever reset by Cancel.
+  async function confirmTrash() {
+    try {
+      await onTrash();
+    } finally {
+      setConfirming(false);
+    }
+  }
+
   const triggerAriaLabel = triggerLabel
     ? `Actions for ${characterName} (${triggerLabel})`
     : `Actions for ${characterName}`;
@@ -102,7 +115,7 @@ export function CharacterTrashMenu({
           }
           confirmLabel={busy ? 'Moving…' : 'Move to Trash'}
           busy={busy}
-          onConfirm={onTrash}
+          onConfirm={confirmTrash}
           onCancel={() => setConfirming(false)}
         />
       )}

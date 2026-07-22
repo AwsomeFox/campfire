@@ -75,8 +75,8 @@ export default function PartyPage() {
   }, [id, load]);
 
   // Keep party HP live at the table (issue #113): poll ~5s while the tab is visible.
-  // Paused while an undo is pending so the just-trashed character doesn't briefly
-  // reappear (the server lists it until the restore/expire settles).
+  // Paused while an undo is pending so a restore in flight isn't clobbered by a
+  // fresh list fetch that hasn't yet observed the restored row.
   usePollWhileVisible(() => void load(), 5000, Number.isFinite(id) && !pendingUndo);
 
   // Roster trash (issue #716) — soft-delete the character, drop the card locally, and
