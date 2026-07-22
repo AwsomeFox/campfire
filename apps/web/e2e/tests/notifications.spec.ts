@@ -47,6 +47,7 @@ test.describe('shared notification controller', () => {
     const bell = page.getByRole('button', { name: 'Notifications (2 unread)' });
     await expect(bell).toHaveAttribute('aria-haspopup', 'dialog');
     await expect(bell).toHaveAttribute('aria-expanded', 'false');
+    await expect(bell).not.toHaveAttribute('aria-controls');
 
     await bell.focus();
     await page.keyboard.press('Enter');
@@ -83,6 +84,7 @@ test.describe('shared notification controller', () => {
     await expect(dialog).toHaveCount(0);
     await expect(bell).toBeFocused();
     await expect(bell).toHaveAttribute('aria-expanded', 'false');
+    await expect(bell).not.toHaveAttribute('aria-controls');
     await expect.poll(() => bell.evaluate((element) => element.closest('[inert]') !== null)).toBe(false);
   });
 

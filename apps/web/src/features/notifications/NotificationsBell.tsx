@@ -519,7 +519,7 @@ export function NotificationsBell() {
       aria-label={count > 0 ? `Notifications (${count} unread)` : 'Notifications'}
       aria-haspopup="dialog"
       aria-expanded={open}
-      aria-controls={NOTIFICATIONS_DIALOG_ID}
+      aria-controls={open ? NOTIFICATIONS_DIALOG_ID : undefined}
       onClick={togglePanel}
       className="relative flex items-center justify-center h-8 w-8 rounded-full"
       style={{ color: 'var(--color-neutral-300)', border: '1px solid var(--color-divider)' }}
