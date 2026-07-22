@@ -78,9 +78,13 @@ export class CampaignCharactersController {
   }
 
   @Post('xp')
-  @ApiOperation({ summary: 'Award XP to the party', description: 'dm role required. Adds `amount` XP to every character in the campaign, or only to `characterIds` when given.' })
+  @ApiOperation({
+    summary: 'Award XP to party recipients',
+    description:
+      'dm role required. With no `characterIds`, adds `amount` XP to active characters only. An explicit recipient list is enforced exactly. Selecting an inactive, retired, or dead character additionally requires `includeNonActive: true`, and that opt-in is invalid without explicit `characterIds`, so historical corrections are deliberate.',
+  })
   @ApiResponse({ status: 201, description: 'Updated characters.' })
-  @ApiResponse({ status: 400, description: 'A characterId does not belong to this campaign, or the campaign has no characters.' })
+  @ApiResponse({ status: 400, description: 'A recipient is outside the campaign, a non-active recipient lacks explicit opt-in, or there are no eligible recipients.' })
   async awardXp(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: XpAwardDto,

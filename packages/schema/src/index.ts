@@ -318,10 +318,22 @@ export const XpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
 ]);
-/** DM party-wide XP award: amount to every character in the campaign, or just `characterIds`. */
+/**
+ * DM party XP award. Omitting `characterIds` targets active characters only.
+ * A non-active (inactive, retired, or dead) recipient is accepted only when the
+ * caller explicitly opts in with `includeNonActive: true`; this keeps archived
+ * careers safe while preserving deliberate historical corrections.
+ */
 export const XpAward = z.object({
   amount: z.number().int().min(1).max(1_000_000),
-  characterIds: z.array(Id).min(1).optional(),
+  characterIds: z
+    .array(Id)
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length, { message: 'Recipient characterIds must be unique' })
+    .optional(),
+  includeNonActive: z.boolean().optional().default(false).describe(
+    'Explicit opt-in required to award XP to inactive, retired, or dead characters.',
+  ),
 });
 /**
  * Guided level-up: +1 level, optionally raising hpMax (hpCurrent grows by the

@@ -13,7 +13,7 @@
  * the 403 path below is for budget-exhausted or flag-disabled edge cases that slip past
  * a stale seat read).
  */
-import { useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { CoDmDraftResult, CoDmDraftTarget } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -23,6 +23,7 @@ import { Btn, TextArea } from '../../components/ui';
 import { isKnownAiGate } from './aiGate';
 import { AiGateExplainer } from './AiSetupChecklist';
 import { GameIcon } from '../../components/GameIcon';
+import { useDialog } from '../../components/useDialog';
 
 /** Targets that support drafting N items at once (mirrors CoDmService's MULTI_TARGETS). */
 const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
@@ -36,13 +37,31 @@ const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
   map: 'map',
 };
 
-const TARGET_PLACEHOLDER: Record<CoDmDraftTarget, string> = {
-  npc: 'e.g. a shady fence with a soft spot for stray cats, tied to the thieves guild',
-  location: 'e.g. a half-flooded shrine the locals avoid after dark',
-  beat: 'e.g. the next story beat once the party learns the mayor is a doppelganger',
-  recap: 'e.g. summarize tonight: the ambush at the bridge, losing Kira, the truce offer',
-  encounter: 'e.g. a level-3 ambush on a forest road, bandits with a hidden archer',
-  map: 'e.g. a small smugglers’ cave with a tidal chamber',
+const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
+  npc: 'NPCs',
+  location: 'locations',
+  beat: 'story beats',
+  recap: 'session recaps',
+  encounter: 'encounters',
+  map: 'maps',
+};
+
+const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
+  npc: 'Draft an NPC with AI',
+  location: 'Draft a location with AI',
+  beat: 'Draft a story beat with AI',
+  recap: 'Draft a session recap with AI',
+  encounter: 'Draft an encounter with AI',
+  map: 'Draft a map with AI',
+};
+
+const TARGET_EXAMPLE: Record<CoDmDraftTarget, string> = {
+  npc: 'a shady fence with a soft spot for stray cats, tied to the thieves guild',
+  location: 'a half-flooded shrine the locals avoid after dark',
+  beat: 'the next story beat once the party learns the mayor is a doppelganger',
+  recap: 'summarize tonight: the ambush at the bridge, losing Kira, the truce offer',
+  encounter: 'a level-3 ambush on a forest road, bandits with a hidden archer',
+  map: 'a small smugglers’ cave with a tidal chamber',
 };
 
 /**
@@ -65,24 +84,36 @@ export function DraftWithAiButton({
   const isDm = roleIn(campaignId) === 'dm';
   const { data: seat } = useAiDmSeat(isDm ? campaignId : undefined);
   const [open, setOpen] = useState(false);
+  const dialogId = useId();
 
   if (!isDm || !seat || seat.mode === 'off' || !seat.enabled) return null;
 
   return (
     <>
-      <Btn ghost className={className} onClick={() => setOpen(true)}>
+      <Btn
+        ghost
+        className={className}
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={dialogId}
+      >
         <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{label}
       </Btn>
-      {open && <DraftWithAiModal campaignId={campaignId} target={target} onClose={() => setOpen(false)} />}
+      {open && (
+        <DraftWithAiModal id={dialogId} campaignId={campaignId} target={target} onClose={() => setOpen(false)} />
+      )}
     </>
   );
 }
 
 function DraftWithAiModal({
+  id,
   campaignId,
   target,
   onClose,
 }: {
+  id: string;
   campaignId: number;
   target: CoDmDraftTarget;
   onClose: () => void;
@@ -96,9 +127,23 @@ function DraftWithAiModal({
   // (aiGate.ts / #343) instead of a bare 403 string.
   const [gateErr, setGateErr] = useState<unknown>(null);
   const [result, setResult] = useState<CoDmDraftResult | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+  const promptId = useId();
+  const promptHelpId = useId();
+  const quantityLabelId = useId();
+  const quantityValueId = useId();
 
   const multi = MULTI_TARGETS.has(target);
   const noun = TARGET_NOUN[target];
+  const plural = TARGET_PLURAL[target];
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose,
+    disabled: busy,
+    initialFocusRef: promptRef,
+    inertBackground: true,
+  });
 
   async function submit() {
     if (!prompt.trim() || busy) return;
@@ -129,24 +174,39 @@ function DraftWithAiModal({
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)' }}
-      onClick={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
     >
       <div
+        id={id}
+        ref={dialogRef}
         className="cf-card w-full max-w-lg p-5 space-y-3.5"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={`Draft ${noun} with AI`}
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        aria-busy={busy || undefined}
+        tabIndex={-1}
       >
         <div className="flex items-start justify-between gap-2">
           <div>
-            <h2 className="flex items-center gap-2 text-base font-extrabold text-white m-0"><GameIcon slug="sparkles" size={16} /> Draft a {noun} with AI</h2>
-            <p className="text-muted text-xs m-0 mt-1">
+            <h2 id={titleId} className="flex items-center gap-2 text-base font-extrabold text-white m-0">
+              <GameIcon slug="sparkles" size={16} /> {TARGET_TITLE[target]}
+            </h2>
+            <p id={descriptionId} className="text-muted text-xs m-0 mt-1">
               Describe what you want — the AI DM drafts it and files {multi ? 'pending proposals' : 'a pending proposal'} for
               your review. Nothing touches canon until you approve.
             </p>
           </div>
-          <button type="button" className="text-slate-500 hover:text-white text-lg leading-none" onClick={onClose} aria-label="Close">
+          <button
+            type="button"
+            className="text-slate-500 hover:text-white text-lg leading-none disabled:opacity-50"
+            onClick={onClose}
+            aria-label="Close AI drafting dialog"
+            disabled={busy}
+          >
             ×
           </button>
         </div>
@@ -155,34 +215,56 @@ function DraftWithAiModal({
           <DraftResultCard campaignId={campaignId} result={result} onClose={onClose} />
         ) : (
           <>
-            <TextArea
-              autoFocus
-              rows={4}
-              placeholder={TARGET_PLACEHOLDER[target]}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              maxLength={20_000}
-              disabled={busy}
-            />
+            <div className="space-y-1.5">
+              <label htmlFor={promptId} className="block text-xs font-semibold text-slate-300">
+                Describe the {noun} you want to draft
+              </label>
+              <TextArea
+                id={promptId}
+                ref={promptRef}
+                rows={4}
+                placeholder={`e.g. ${TARGET_EXAMPLE[target]}`}
+                aria-describedby={promptHelpId}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                maxLength={20_000}
+                disabled={busy}
+              />
+              <p id={promptHelpId} className="text-[11px] text-slate-400 m-0">
+                Include the details, tone, and connections the AI should use. Example: {TARGET_EXAMPLE[target]}
+              </p>
+            </div>
 
             {multi && (
-              <div className="flex items-center gap-2.5">
-                <span className="text-xs text-slate-400">How many?</span>
+              <div className="flex items-center gap-2.5" role="group" aria-labelledby={quantityLabelId}>
+                <span id={quantityLabelId} className="text-xs text-slate-400">Number of {plural}</span>
                 <div className="flex items-center gap-1.5">
                   <Btn
                     ghost
                     className="!min-h-0 !py-1 !px-2.5 text-xs"
                     onClick={() => setCount((n) => Math.max(1, n - 1))}
                     disabled={busy || count <= 1}
+                    aria-label={`Decrease number of ${plural}`}
+                    aria-describedby={quantityValueId}
                   >
                     −
                   </Btn>
-                  <span className="text-sm text-white w-6 text-center tabular-nums">{count}</span>
+                  <output
+                    id={quantityValueId}
+                    className="text-sm text-white min-w-6 text-center tabular-nums"
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                  >
+                    {count}<span className="sr-only"> {count === 1 ? noun : plural}</span>
+                  </output>
                   <Btn
                     ghost
                     className="!min-h-0 !py-1 !px-2.5 text-xs"
                     onClick={() => setCount((n) => Math.min(10, n + 1))}
                     disabled={busy || count >= 10}
+                    aria-label={`Increase number of ${plural}`}
+                    aria-describedby={quantityValueId}
                   >
                     +
                   </Btn>

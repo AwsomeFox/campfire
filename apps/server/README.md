@@ -498,7 +498,9 @@ combat — over MCP alone.
   (`number` defaults to max+1), `update_session`.
 - **Write — characters:** `upsert_character` (player owner or dm),
   `update_character_hp` (exactly one of `delta`|`set`),
-  `award_xp` (single character: owner or dm; party-wide/subset: dm),
+  `award_xp` (single character: owner or dm; party-wide/subset: dm; party awards
+  default to active PCs and require `includeNonActive:true` for explicitly selected
+  inactive/retired/dead historical corrections),
   `level_up_character` (owner or dm — +1 level, optional new `hpMax`),
   `set_character_conditions` (add/remove).
 - **Write — notes & inbox:** `add_note`, `update_note`/`delete_note`
