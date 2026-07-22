@@ -42,6 +42,11 @@ export {
   type MeFetchOutcome,
 } from './authDecision';
 import { decideAuthOutcome, type MeFetchOutcome } from './authDecision';
+import {
+  clearAuthStorage,
+  setAuthStorage,
+  useAuthStorageListener,
+} from '../features/auth/useAuthStorageListener';
 
 /**
  * Blends a #rrggbb hex color toward white by `ratio` (0-1). Used to derive a
@@ -111,6 +116,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // stale/restored identity), so it can't itself be poisoned by offline artifacts.
   const lastInstanceRef = useRef<ServerInstance | null>(null);
 
+  const handleMultiTabSignOut = useCallback(() => {
+    setMe(null);
+    lastUserIdRef.current = null;
+    applyAccentColor(null);
+    applyTextSize('default');
+    clearAuthStorage();
+    void clearApiCache();
+    queryClient.clear();
+  }, []);
+
+  useAuthStorageListener(handleMultiTabSignOut);
+
   const refresh = useCallback(async () => {
     let outcome: MeFetchOutcome;
     try {
@@ -160,9 +177,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (decision.me) {
       applyAccentColor(decision.me.user.accentColor);
       applyTextSize(decision.me.user.textSize);
+      // #666: mirror the live identity into localStorage so a storage-event
+      // listener in OTHER tabs of this origin can observe sign-in / account
+      // switches. We only write on a proven-live identity — never on a stale /
+      // restored snapshot — so offline restores can't themselves seed the keys.
+      setAuthStorage(decision.me.user);
     } else {
       applyAccentColor(null);
       applyTextSize('default');
+      // #666: when a proven logout (or no identity) is decided, drop the shared
+      // auth keys. The storage event this fires propagates the sign-out to peer
+      // tabs whose own /me hasn't re-run yet.
+      clearAuthStorage();
     }
 
     setReady(true);
@@ -190,21 +216,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await api.post(`${API}/auth/logout`);
-    // Drop this account's cached campaign data so the next person to sign in on
-    // this device never inherits it (issue #268), and clear the persisted
-    // offline identity so an offline reload no longer restores this account.
-    lastUserIdRef.current = null;
-    lastInstanceRef.current = null;
-    await clearApiCache();
-    queryClient.clear();
-    clearMeSnapshot();
-    setMe(null);
-    setStaleIdentity(false);
-    setLastSyncedAt(null);
-    setConnectionError(false);
-    applyAccentColor(null);
-    applyTextSize('default');
+    try {
+      await api.post(`${API}/auth/logout`);
+    } finally {
+      // #666: drop the shared auth keys first — the storage event this fires is
+      // what propagates the sign-out to peer tabs (their useAuthStorageListener
+      // runs their own logout path). Wrapped in finally so a failing logout POST
+      // still clears the local session instead of leaving the user stuck authed.
+      clearAuthStorage();
+      // Drop this account's cached campaign data so the next person to sign in on
+      // this device never inherits it (issue #268), and clear the persisted
+      // offline identity so an offline reload no longer restores this account.
+      lastUserIdRef.current = null;
+      lastInstanceRef.current = null;
+      await clearApiCache();
+      queryClient.clear();
+      clearMeSnapshot();
+      setMe(null);
+      setStaleIdentity(false);
+      setLastSyncedAt(null);
+      setConnectionError(false);
+      applyAccentColor(null);
+      applyTextSize('default');
+    }
   }, []);
 
   const isAdmin = me?.user.serverRole === 'admin';
@@ -227,3 +261,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
+
