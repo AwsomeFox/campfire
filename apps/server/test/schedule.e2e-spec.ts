@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import ICAL from 'ical.js';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
@@ -182,6 +183,36 @@ describe('session scheduling (e2e)', () => {
 
       const res = await request(server).get(`/api/v1/calendar/${token}.ics`);
       expect(res.text).toContain('SUMMARY:Fire\\, brimstone\\; doom');
+
+      await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
+    });
+
+    it('serves parser-valid Unicode content folded to at most 75 UTF-8 octets', async () => {
+      const server = ctx.app.getHttpServer();
+      const title = 'ليلة النجوم 星の夜 👩‍🚀🇺🇳 ' + 'é'.repeat(70);
+      const location = 'https://example.test/مكان/星?' + 'crew=👨‍👩‍👧‍👦'.repeat(8);
+      const notes = `RTL العربية، CJK 漢字; combining ${'e\u0301'.repeat(45)}\n${'🚀'.repeat(60)}`;
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/schedule`)
+        .set(dm)
+        .send({ scheduledAt: '2099-09-02T18:00:00Z', title, location, notes });
+      expect(created.status).toBe(201);
+
+      const res = await request(server).get(`/api/v1/calendar/${token}.ics`);
+      expect(res.status).toBe(200);
+      expect(res.text.endsWith('\r\n')).toBe(true);
+      expect(res.text.replace(/\r\n/g, '')).not.toMatch(/[\r\n]/);
+      for (const line of res.text.split('\r\n').slice(0, -1)) {
+        expect(Buffer.byteLength(line, 'utf8')).toBeLessThanOrEqual(75);
+      }
+
+      const calendar = new ICAL.Component(ICAL.parse(res.text));
+      const event = calendar
+        .getAllSubcomponents('vevent')
+        .find((candidate) => candidate.getFirstPropertyValue('summary') === title);
+      expect(event).toBeDefined();
+      expect(event!.getFirstPropertyValue('location')).toBe(location);
+      expect(event!.getFirstPropertyValue('description')).toBe(notes);
 
       await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
     });
