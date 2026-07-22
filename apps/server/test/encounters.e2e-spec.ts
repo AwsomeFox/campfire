@@ -1261,6 +1261,64 @@ describe('encounters — issue #49: identity-based turn pointer (e2e)', () => {
   });
 });
 
+describe('encounters — issue #528: removeCombatant increments round on turn wrap (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let c1Id: number; // top of initiative
+  let c2Id: number; // middle
+  let c3Id: number; // LAST in initiative (the wrap point)
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Round Wrap' })).body.id;
+
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Wrap Fight' });
+    encounterId = encRes.body.id;
+
+    c1Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'C1', hpMax: 10 })).body.id;
+    c2Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'C2', hpMax: 10 })).body.id;
+    c3Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'C3', hpMax: 10 })).body.id;
+
+    // Deterministic order via explicit initiatives: C1=20, C2=10, C3=5.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${c1Id}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${c2Id}`).set(dm).send({ initiative: 10 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${c3Id}`).set(dm).send({ initiative: 5 });
+
+    // Start (round=1, turnIndex=0, current=C1) then advance twice so C3 (the LAST in
+    // initiative order) is the current actor.
+    const startRes = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(startRes.status).toBe(201);
+    expect(startRes.body.currentCombatantId).toBe(c1Id);
+    expect(startRes.body.round).toBe(1);
+
+    const next1 = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(next1.body.currentCombatantId).toBe(c2Id);
+    const next2 = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(next2.body.currentCombatantId).toBe(c3Id);
+    expect(next2.body.round).toBe(1); // still round 1 — C3 is the last actor this round
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('removing the last-in-order current combatant wraps to the top AND increments the round (matches advanceTurn)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Current is C3 (last in initiative). Removing it must wrap the pointer to C1
+    // (top of the next round) and bump the round — exactly as advanceTurn does when
+    // stepping past the end of the order.
+    const del = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${c3Id}`).set(dm);
+    expect(del.status).toBe(200);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.currentCombatantId).toBe(c1Id); // wrapped to the top
+    expect(getRes.body.turnIndex).toBe(0);
+    expect(getRes.body.round).toBe(2); // regression: was 1 before the fix
+  });
+});
+
 describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
