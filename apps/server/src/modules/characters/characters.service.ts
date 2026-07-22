@@ -352,26 +352,30 @@ export class CharactersService {
   }
 
   async patchHp(id: number, patch: HpPatchInput, user: RequestUser, role: Role): Promise<Character> {
-    const existing = await this.getRowOrThrow(id);
-    this.assertCanWrite(existing, user, role);
+    // Read the latest committed value, apply the relative/absolute patch, and write it
+    // back in one synchronous better-sqlite3 transaction. Keeping every operation in
+    // the callback makes concurrent deltas compose instead of both computing from the
+    // same pre-await row (issue #653; mirrors patchTreasury).
+    let row!: typeof characters.$inferSelect;
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(characters).where(eq(characters.id, id)).limit(1).all();
+      if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
+      this.assertCanWrite(fresh, user, role);
 
-    const hpMax = existing.hpMax;
-    let hpCurrent: number;
-    if ('delta' in patch) {
-      hpCurrent = existing.hpCurrent + patch.delta;
-    } else {
-      hpCurrent = patch.set;
-    }
-    hpCurrent = clampHpCurrent(hpCurrent, hpMax);
+      const requested = 'delta' in patch ? fresh.hpCurrent + patch.delta : patch.set;
+      const hpCurrent = clampHpCurrent(requested, fresh.hpMax);
+      const [updated] = tx
+        .update(characters)
+        .set({ hpCurrent, updatedAt: nowIso() })
+        .where(eq(characters.id, id))
+        .returning()
+        .all();
+      row = updated;
+    });
 
-    const [row] = await this.db
-      .update(characters)
-      .set({ hpCurrent, updatedAt: nowIso() })
-      .where(eq(characters.id, id))
-      .returning();
-
-    // Keep any live encounter's combatant row in sync (issue #50).
-    await this.syncActiveCombatants(id, hpCurrent);
+    // The transaction has committed before linked combatants are synchronized. Use the
+    // exact row returned by that commit so the mirror and response agree.
+    await this.syncActiveCombatants(id, row.hpCurrent);
 
     await this.audit.log({
       actor: auditActor(user),
@@ -379,31 +383,43 @@ export class CharactersService {
       action: 'character.hp',
       entityType: 'character',
       entityId: id,
-      campaignId: existing.campaignId,
+      campaignId: row.campaignId,
       detail: JSON.stringify(patch),
     });
     return redactSecret(toDomain(row), role);
   }
 
   async patchXp(id: number, patch: XpPatchInput, user: RequestUser, role: Role): Promise<Character> {
-    const existing = await this.getRowOrThrow(id);
-    this.assertCanWrite(existing, user, role);
-    await this.assertProgressionAllowed(existing.campaignId, role);
+    // Same atomic read+compute+write contract as HP. The progression policy lookup is
+    // synchronous in the same callback too, preserving the existing gate without an
+    // await between the character read and its update.
+    let row!: typeof characters.$inferSelect;
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(characters).where(eq(characters.id, id)).limit(1).all();
+      if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
+      this.assertCanWrite(fresh, user, role);
+      if (role !== 'dm') {
+        const [campaign] = tx
+          .select({ dmControlsProgression: campaigns.dmControlsProgression })
+          .from(campaigns)
+          .where(eq(campaigns.id, fresh.campaignId))
+          .limit(1)
+          .all();
+        if (campaign?.dmControlsProgression) {
+          throw new ForbiddenException('This campaign restricts XP awards and level-ups to the DM');
+        }
+      }
 
-    // Mirrors patchHp: { delta } is relative, { set } absolute; XP never goes negative.
-    let xp: number;
-    if ('delta' in patch) {
-      xp = existing.xp + patch.delta;
-    } else {
-      xp = patch.set;
-    }
-    xp = Math.max(0, xp);
-
-    const [row] = await this.db
-      .update(characters)
-      .set({ xp, updatedAt: nowIso() })
-      .where(eq(characters.id, id))
-      .returning();
+      // Mirrors patchHp: { delta } is relative, { set } absolute; XP never goes negative.
+      const requested = 'delta' in patch ? fresh.xp + patch.delta : patch.set;
+      const [updated] = tx
+        .update(characters)
+        .set({ xp: Math.max(0, requested), updatedAt: nowIso() })
+        .where(eq(characters.id, id))
+        .returning()
+        .all();
+      row = updated;
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -411,7 +427,7 @@ export class CharactersService {
       action: 'character.xp',
       entityType: 'character',
       entityId: id,
-      campaignId: existing.campaignId,
+      campaignId: row.campaignId,
       detail: JSON.stringify(patch),
     });
     return toDomain(row);

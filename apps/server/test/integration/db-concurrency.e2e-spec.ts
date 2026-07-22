@@ -1,6 +1,39 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from '../test-app';
 import { dm, player } from './fixtures';
+import { CharactersService } from '../../src/modules/characters/characters.service';
+
+/**
+ * Hold each pair of reads until both requests have fetched the real SQLite row.
+ * The controller performs the first pair. Before #653 the service then performed a
+ * second, stale pair before either update; the fixed service instead reads inside its
+ * synchronous transaction. This makes the REST race deterministic without mocking DB
+ * data or replacing the listening HTTP server.
+ */
+function synchronizeCharacterLookupPairs(service: CharactersService, characterId: number) {
+  const original = service.getRowOrThrow.bind(service);
+  const gates = Array.from({ length: 2 }, () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { arrivals: 0, promise, release };
+  });
+  let matchingCalls = 0;
+
+  return jest.spyOn(service, 'getRowOrThrow').mockImplementation(async (id, includeDeleted = false) => {
+    const row = await original(id, includeDeleted);
+    if (id !== characterId) return row;
+
+    const gate = gates[Math.floor(matchingCalls / 2)];
+    matchingCalls += 1;
+    if (!gate) return row;
+    gate.arrivals += 1;
+    if (gate.arrivals === 2) gate.release();
+    await gate.promise;
+    return row;
+  });
+}
 
 /**
  * Integration coverage for the atomic write paths under real concurrency (issue
@@ -32,6 +65,54 @@ describe('concurrency (real SQLite, atomic writes)', () => {
 
   afterAll(async () => {
     await closeTestApp(ctx);
+  });
+
+  it('composes two concurrent character HP deltas from 10 to 0 (#653)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Exact HP Race' });
+    const character = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaign.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Two-Hit Target', hpMax: 10, hpCurrent: 10 });
+    const characterId = character.body.id;
+    const lookupSpy = synchronizeCharacterLookupPairs(ctx.app.get(CharactersService), characterId);
+
+    let results: request.Response[];
+    try {
+      results = await Promise.all([
+        request(baseUrl).post(`/api/v1/characters/${characterId}/hp`).set(dm).send({ delta: -5 }),
+        request(baseUrl).post(`/api/v1/characters/${characterId}/hp`).set(dm).send({ delta: -5 }),
+      ]);
+    } finally {
+      lookupSpy.mockRestore();
+    }
+
+    expect(results.every((r) => r.status === 201)).toBe(true);
+    const finalRow = await request(baseUrl).get(`/api/v1/characters/${characterId}`).set(dm);
+    expect(finalRow.body.hpCurrent).toBe(0);
+  });
+
+  it('composes concurrent character XP deltas (#653)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'XP Race' });
+    const character = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaign.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Fast Learner', xp: 0 });
+    const characterId = character.body.id;
+    const lookupSpy = synchronizeCharacterLookupPairs(ctx.app.get(CharactersService), characterId);
+
+    let results: request.Response[];
+    try {
+      results = await Promise.all([
+        request(baseUrl).post(`/api/v1/characters/${characterId}/xp`).set(dm).send({ delta: 5 }),
+        request(baseUrl).post(`/api/v1/characters/${characterId}/xp`).set(dm).send({ delta: 7 }),
+      ]);
+    } finally {
+      lookupSpy.mockRestore();
+    }
+
+    expect(results.every((r) => r.status === 201)).toBe(true);
+    const finalRow = await request(baseUrl).get(`/api/v1/characters/${characterId}`).set(dm);
+    expect(finalRow.body.xp).toBe(12);
   });
 
   it('applies every one of N concurrent HP damage patches — no lost updates (#86)', async () => {
