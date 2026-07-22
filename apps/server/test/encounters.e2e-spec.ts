@@ -958,6 +958,107 @@ describe('encounters (e2e)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Issue #532 — optimistic concurrency for encounters. Live combat is the
+// highest-contention entity (the same encounter open across multiple DM devices
+// — a laptop + a tablet at the table), so PATCH /encounters/:id enforces the
+// same `expectedUpdatedAt` CAS invariant as quests/npcs/locations/sessions.
+// A stale tab's save 409s instead of silently clobbering the fresher edit (the
+// "lost fog/grid edit looks like the map reverted" failure).
+// ---------------------------------------------------------------------------
+describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'CAS Encounter Campaign' })).body.id;
+    encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush at the Crossroads' })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('omitting expectedUpdatedAt is unchanged back-compat (unconditional write)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ name: 'Ambush' });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Ambush');
+  });
+
+  it('a stale expectedUpdatedAt PATCH 409s with STALE_WRITE and does NOT mutate the row', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(before.body.name).toBe('Ambush');
+
+    const conflict = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ name: 'CLOBBER', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('STALE_WRITE');
+
+    // The row is untouched — no clobber.
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(after.body.name).toBe('Ambush');
+    expect(after.body.updatedAt).toBe(before.body.updatedAt);
+  });
+
+  it('a matching expectedUpdatedAt PATCH succeeds', async () => {
+    const server = ctx.app.getHttpServer();
+    const current = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+
+    const ok = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ name: 'Crossroads Ambush', expectedUpdatedAt: current.body.updatedAt });
+    expect(ok.status).toBe(200);
+    expect(ok.body.name).toBe('Crossroads Ambush');
+  });
+
+  // The headline regression: two DM tabs both load the encounter, both save. The
+  // first write commits (and bumps updatedAt); the second tab's stale expectedUpdatedAt
+  // must now 409 instead of overwriting the first edit. This is the exact repro from
+  // the issue (Tab A saves a fog edit; stale Tab B's name edit would silently win).
+  it('two concurrent updates: the second (stale) one gets 409 and the first edit survives', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Both tabs load the same version.
+    const tabA = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const tabB = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(tabA.body.updatedAt).toBe(tabB.body.updatedAt);
+    const loadedAt = tabA.body.updatedAt;
+
+    // Tab A saves a fog edit first — succeeds and bumps updatedAt.
+    const fog = { enabled: true, revealed: [{ x: 0, y: 0, w: 50, h: 50 }] };
+    const firstSave = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ fog, expectedUpdatedAt: loadedAt });
+    expect(firstSave.status).toBe(200);
+    expect(firstSave.body.fog.enabled).toBe(true);
+    expect(firstSave.body.updatedAt).not.toBe(loadedAt); // bumped
+
+    // Tab B (still holding the pre-A updatedAt) tries a name edit — must 409, not clobber.
+    const staleSave = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ name: 'Tab B Wins', expectedUpdatedAt: loadedAt });
+    expect(staleSave.status).toBe(409);
+    expect(staleSave.body.code).toBe('STALE_WRITE');
+
+    // Tab A's fog edit survives; Tab B's name change did NOT land.
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(after.body.name).toBe('Crossroads Ambush'); // unchanged from the prior test
+    expect(after.body.fog.enabled).toBe(true); // Tab A's edit survived
+  });
+});
+
 // Dev-auth headers (x-dev-role/x-dev-user) always resolve to serverRole 'admin', and admins
 // are always treated as dm regardless of campaign membership (see RoleResolver.baseEffectiveRole)
 // — so a genuine "not a member" 403 can't be expressed with dev-auth users. Use real
