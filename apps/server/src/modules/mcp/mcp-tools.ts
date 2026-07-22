@@ -2007,14 +2007,17 @@ export class McpToolsService {
         'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
         'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise. Set status to ' +
         "active|dead|retired|inactive to mark a PC's lifecycle — only active PCs are auto-added to new encounters. With propose:true " +
-        'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly.',
+        'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly. ' +
+        'Pass expectedUpdatedAt (the updatedAt you last read) on an update to opt into optimistic concurrency (issue #746): ' +
+        'a stale value returns 409 Conflict instead of silently clobbering a fresher edit from another tab or a connected AI.',
       {
         campaignId: CampaignIdArg,
         characterId: Id.optional().describe('Existing character id (update); omit to create'),
         propose: ProposeArg,
+        expectedUpdatedAt: ExpectedUpdatedAt,
         ...CharacterUpdate.shape,
       },
-      async ({ campaignId, characterId, propose, ...fields }) => {
+      async ({ campaignId, characterId, propose, expectedUpdatedAt, ...fields }) => {
         if (characterId !== undefined) {
           const row = await this.characters.getRowOrThrow(characterId as number);
           if (row.campaignId !== (campaignId as number)) {
@@ -2027,7 +2030,9 @@ export class McpToolsService {
             return { proposal };
           }
           const role = await this.access.requireRole(user, row.campaignId, 'player');
-          return this.characters.update(characterId as number, validated, user, role);
+          return this.characters.update(characterId as number, validated, user, role, {
+            expectedUpdatedAt: expectedUpdatedAt as string | undefined,
+          });
         }
         const validated = CharacterCreate.parse(fields); // name required on create
         if (requireWriteMode(user, propose)) {
@@ -2682,10 +2687,12 @@ export class McpToolsService {
       'update_combatant',
       'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
-        'successes = stable), addConditions/removeConditions. DM-only fields: initiative, and the identity edits ' +
-        'name / hpMax / initMod (rename a duplicate, fix a mistyped stat). Battle-map token position tokenX/tokenY ' +
-        '(0–100 percent overlay, clamped) moves the combatant\'s token on the encounter map. DM may modify any ' +
-        'combatant; a player may only touch hp/temp-hp/death-saves/conditions/token on a combatant linked to a character they own.',
+        'successes = stable), deathSaveRoll (a d20 death-save result; 5e crit/fumble rules: nat 1 = two failures, ' +
+        'nat 20 = revive at 1 HP, 10–19 = one success, 2–9 = one failure), addConditions/removeConditions. DM-only ' +
+        'fields: initiative, and the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat). ' +
+        'Battle-map token position tokenX/tokenY (0–100 percent overlay, clamped) moves the combatant\'s token on the ' +
+        'encounter map. DM may modify any combatant; a player may only touch hp/temp-hp/death-saves/conditions/token ' +
+        'on a combatant linked to a character they own.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantUpdate.shape },
       async ({ encounterId, combatantId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

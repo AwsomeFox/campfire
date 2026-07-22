@@ -1,6 +1,12 @@
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
-import { dbFilePath, openDatabase, MIGRATION_NAMES } from '../../src/db/db.module';
+import {
+  dbFilePath,
+  openDatabase,
+  MIGRATION_NAMES,
+  compareAppVersions,
+  getRecordedAppVersion,
+} from '../../src/db/db.module';
 import { makeTempDataDir, writeOldSchemaDb, columnNames, countRows } from './fixtures';
 
 /**
@@ -33,7 +39,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
 
       expect(columnNames(sqlite, 'campaigns')).toEqual(
-        expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token']),
+        expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at']),
       );
       expect(columnNames(sqlite, 'characters')).toEqual(
         expect.arrayContaining(['xp', 'save_proficiencies', 'skills', 'actions', 'spell_slots', 'dm_secret']),
@@ -104,6 +110,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       const campaign = sqlite.prepare('SELECT * FROM campaigns WHERE id = 1').get() as Record<string, unknown>;
       expect(campaign).toMatchObject({ name: 'Legacy Campaign', rule_system: '' });
       expect(campaign.ics_token).toBeNull();
+      // 0049 (issue #554): the ICS token expiry column is added by migration on
+      // old-shaped DBs, null on the legacy row (no expiry until the DM rotates).
+      expect(campaign.ics_token_expires_at).toBeNull();
 
       const character = sqlite.prepare('SELECT * FROM characters WHERE id = 1').get() as Record<string, unknown>;
       expect(character).toMatchObject({ name: 'Legacy Hero', hp_current: 17, hp_max: 24, xp: 0, dm_secret: '' });
@@ -417,6 +426,146 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       ).toBe(0);
     } finally {
       upgraded.sqlite.close();
+    }
+  });
+
+  // ── app-version compatibility guard (issue #726) ──────────────────────────
+  //
+  // The running binary's APP_VERSION is read from apps/server/package.json
+  // (currently 0.14.1). These specs simulate the downgrade scenario — a DB last
+  // migrated by a NEWER binary than the one now booting — by opening the file
+  // once (which records the binary's own version), then hand-writing a HIGHER
+  // version into __db_meta before a second openDatabase() call.
+
+  /** The version openDatabase() will record / compare against (single-sourced from package.json). */
+  const BINARY_VERSION = '0.14.1';
+
+  it('compareAppVersions orders semver triples correctly', () => {
+    expect(compareAppVersions('0.14.0', '0.14.1')).toBeLessThan(0);
+    expect(compareAppVersions('0.14.1', '0.14.1')).toBe(0);
+    expect(compareAppVersions('0.14.2', '0.14.1')).toBeGreaterThan(0);
+    expect(compareAppVersions('0.15.0', '0.14.99')).toBeGreaterThan(0); // minor beats patch
+    expect(compareAppVersions('1.0.0', '0.99.99')).toBeGreaterThan(0); // major beats minor
+    // A pre-release suffix is treated as equal to its release (the project does
+    // not gate on pre-release ordering; the safe direction for a downgrade guard).
+    expect(compareAppVersions('0.14.1-rc.1', '0.14.1')).toBe(0);
+    // Malformed stored values collapse to 0.0.0 — they can never read as "newer".
+    expect(compareAppVersions('garbage', '0.14.1')).toBeLessThan(0);
+  });
+
+  it('records the running binary version in __db_meta after a successful boot', () => {
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(getRecordedAppVersion(sqlite)).toBe(BINARY_VERSION);
+      const row = sqlite
+        .prepare("SELECT value, updated_at FROM __db_meta WHERE key = 'app_version'")
+        .get() as { value: string; updated_at: string };
+      expect(row.value).toBe(BINARY_VERSION);
+      expect(typeof row.updated_at).toBe('string');
+      expect(row.updated_at.length).toBeGreaterThan(0);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('refuses to boot when the DB was last migrated by a NEWER binary (downgrade)', () => {
+    dataDir = makeTempDataDir();
+    // First boot records the running binary's version and brings the schema up.
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    // Simulate the downgrade: a newer image previously migrated this DB, then an
+    // older image was rolled out against it. We hand-stamp a higher recorded
+    // version than THIS binary.
+    const stamp = new Database(dbFilePath(dataDir));
+    try {
+      stamp
+        .prepare(
+          "INSERT INTO __db_meta (key, value, updated_at) VALUES ('app_version', ?, ?) " +
+            'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        )
+        .run('0.99.0', '2026-07-21T00:00:00.000Z');
+    } finally {
+      stamp.close();
+    }
+
+    // The older binary must refuse to boot — NOT silently run against the newer
+    // schema. The error names the recorded + running versions and the two recourses.
+    expect(() => openDatabase(dataDir)).toThrow(/NEWER than this running binary/);
+    expect(() => openDatabase(dataDir)).toThrow(/v0\.99\.0/);
+    expect(() => openDatabase(dataDir)).toThrow(new RegExp(BINARY_VERSION));
+    expect(() => openDatabase(dataDir)).toThrow(/restore the pre-upgrade database snapshot/);
+  });
+
+  it('boots normally when the recorded version EQUALS the running binary (same/upgrade path)', () => {
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    sqlite.close();
+
+    // Re-stamp the same version (simulating a re-deploy of the same image) — must boot.
+    const stamp = new Database(dbFilePath(dataDir));
+    try {
+      stamp
+        .prepare(
+          "INSERT INTO __db_meta (key, value, updated_at) VALUES ('app_version', ?, ?) " +
+            'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        )
+        .run(BINARY_VERSION, '2026-07-21T00:00:00.000Z');
+    } finally {
+      stamp.close();
+    }
+
+    expect(() => openDatabase(dataDir)).not.toThrow();
+  });
+
+  it('boots normally when the recorded version is OLDER than the running binary (upgrade)', () => {
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    sqlite.close();
+
+    // An older image recorded a lower version; this newer binary upgrades it.
+    const stamp = new Database(dbFilePath(dataDir));
+    try {
+      stamp
+        .prepare(
+          "INSERT INTO __db_meta (key, value, updated_at) VALUES ('app_version', ?, ?) " +
+            'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        )
+        .run('0.13.0', '2026-01-01T00:00:00.000Z');
+    } finally {
+      stamp.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      // A successful upgrade ADVANCES the recorded version to the running binary.
+      expect(getRecordedAppVersion(upgraded.sqlite)).toBe(BINARY_VERSION);
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('boots a pre-issue-#726 DB (no __db_meta row) and records the version on first open', () => {
+    dataDir = makeTempDataDir();
+    // Hand-build a DB that has __migrations but predates the __db_meta table —
+    // the real shape of every DB created before this change shipped.
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('CREATE TABLE __migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)');
+      legacy.prepare("INSERT INTO __migrations (name, applied_at) VALUES ('0001_users_oidc', ?)").run('2024-01-01');
+      expect(getRecordedAppVersion(legacy)).toBeNull();
+    } finally {
+      legacy.close();
+    }
+
+    // openDatabase treats a null recorded version as compatible (nothing to be
+    // newer than) and records THIS binary's version on the successful boot.
+    const opened = openDatabase(dataDir);
+    try {
+      expect(getRecordedAppVersion(opened.sqlite)).toBe(BINARY_VERSION);
+    } finally {
+      opened.sqlite.close();
     }
   });
 });

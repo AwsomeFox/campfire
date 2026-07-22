@@ -29,6 +29,12 @@ export const campaigns = sqliteTable('campaigns', {
   // the feed URL can be re-displayed to members — see modules/sessions/scheduling.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   icsToken: text('ics_token'),
+  // Issue #554: absolute expiry (ISO UTC) after which the feed token stops authorizing
+  // the public .ics endpoint (a leaked URL self-destructs on a schedule). Nullable for
+  // back-compat — legacy rows written before this column existed have no expiry and keep
+  // working until the DM rotates (which always stamps a fresh expiry). Cleared alongside
+  // icsToken on disableFeed. See migrateCampaignsTableForIcsTokenExpiresAt.
+  icsTokenExpiresAt: text('ics_token_expires_at'),
   // Per-campaign upload quota in bytes, or NULL for no limit (issue #24). Admin-set
   // via the storage console; enforced on attachment upload. Nullable in older DBs
   // pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -634,6 +640,15 @@ export const ruleEntries = sqliteTable('rule_entries', {
   // different rulebooks are distinguishable and attributable (issue #143). Nullable-as-''
   // in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   source: text('source').notNull().default(''),
+  // Per-entry provenance (issue #734): a pack may mix licenses, and the reader must credit
+  // each entry under its OWN license rather than the pack's. license/attribution/author/
+  // sourceUrl capture the entry's effective open-license metadata; '' on rows written
+  // before migration 0050 (callers treat '' as "inherit the pack's value"). See
+  // migrateRuleEntriesTableForLicensing().
+  license: text('license').notNull().default(''),
+  attribution: text('attribution').notNull().default(''),
+  author: text('author').notNull().default(''),
+  sourceUrl: text('source_url').notNull().default(''),
   // Optional manual icon override (issue #305): slug of a bundled game-icons.net entity
   // icon, or '' to let the web app derive a default from type/dataJson. Nullable/absent
   // in older DBs pre-migration; see db/db.module.ts migrateRuleEntriesTableForIconSlug().

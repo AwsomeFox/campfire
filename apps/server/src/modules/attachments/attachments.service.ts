@@ -8,6 +8,7 @@ import {
   Injectable,
   NotFoundException,
   PayloadTooLargeException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { and, desc, eq, like, sql } from 'drizzle-orm';
 import type {
@@ -425,11 +426,14 @@ export class AttachmentsService {
    * Uploader or dm may delete; others 403. Removes both the DB row and the on-disk file,
    * and clears any dangling references pointing at it in the same transaction:
    *  - campaign.mapAttachmentId, if it was this attachment (numeric FK).
+   *  - encounter.mapAttachmentId for every encounter whose battle map was this
+   *    attachment (issue #695 — one attachment may be the map for several
+   *    encounters, so all of them are cleared in the same statement).
    *  - character.portraitUrl, if it points at this attachment's file route
    *    (`.../attachments/<id>/file` — portraitUrl is a resolved URL string, not a
    *    numeric FK, so it's matched by suffix rather than equality).
-   * Without this, deleting an attachment still in use left the campaign map / character
-   * portrait pointing at a now-404ing file.
+   * Without this, deleting an attachment still in use left the campaign map / encounter
+   * map / character portrait pointing at a now-404ing file.
    */
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
@@ -441,6 +445,7 @@ export class AttachmentsService {
     this.db.transaction((tx) => {
       tx.delete(attachments).where(eq(attachments.id, id)).run();
       tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, id)).run();
+      tx.update(encounters).set({ mapAttachmentId: null }).where(eq(encounters.mapAttachmentId, id)).run();
       tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
     });
 
@@ -549,7 +554,18 @@ export class AttachmentsService {
       .sort((a, b) => b.totalBytes - a.totalBytes);
 
     const validIds = new Set(rows.map((r) => r.id));
-    const disk = this.scanDisk(validIds);
+    // storageStats is the admin's read-only visibility surface, so a transient
+    // storage outage (missing/unreadable volume) is tolerated here — the admin
+    // needs to SEE the situation, and nothing deletes rows on this path. We fall
+    // back to 0 disk bytes rather than throwing. scanDisk() itself fails closed
+    // (throws) on infra errors; that stricter behaviour is reserved for
+    // cleanupOrphans, which DELETES based on the orphan verdict (issue #722).
+    let disk: { totalBytes: number; orphanFiles: Array<{ path: string; size: number }>; orphanBytes: number };
+    try {
+      disk = this.scanDisk(validIds);
+    } catch {
+      disk = { totalBytes: 0, orphanFiles: [], orphanBytes: 0 };
+    }
 
     // Rows whose backing original file is gone from disk.
     let rowsWithoutFile = 0;
@@ -575,11 +591,28 @@ export class AttachmentsService {
    * upload files (originals or thumbnails) with no backing row. With `dryRun` the
    * counts are reported but nothing is deleted. Server-admin action.
    *
-   * Row deletion also clears dangling references (campaign map / character
-   * portrait), mirroring remove(), so cleanup never leaves a pointer to a row it
-   * just dropped.
+   * Row deletion also clears dangling references (campaign map / encounter map /
+   * character portrait), mirroring remove(), so cleanup never leaves a pointer to a
+   * row it just dropped.
+   *
+   * FAIL CLOSED (issue #722): before classifying anything as an orphan, the upload
+   * root is verified to be present and readable. A missing/unreadable volume is an
+   * INFRASTRUCTURE failure, not a "clean disk with no orphans": every row would
+   * look orphaned (its file lives under that very volume) and hard-deleting them
+   * would nuke metadata + clear encounter/campaign/character references for
+   * attachments whose bytes are merely behind a transiently-unmounted volume. So
+   * we refuse to mark rows as orphans in that case (throw 503) rather than
+   * silently destroying good data. The same guard covers the dry-run preview: a
+   * preview that reports "all rows are orphans" while the disk is gone is itself a
+   * footgun the admin could act on.
    */
   async cleanupOrphans(dryRun: boolean): Promise<StorageCleanupResult> {
+    // Pre-flight: if the storage root is unavailable, refuse to classify orphans
+    // at all. scanDisk() below also re-validates readability as it walks the tree,
+    // so a partial failure (e.g. a campaign subdir that lost its permissions
+    // mid-walk) surfaces the same way rather than being mistaken for an empty dir.
+    this.assertStorageAccessible();
+
     const rows = await this.db.select().from(attachments);
     const validIds = new Set(rows.map((r) => r.id));
 
@@ -596,6 +629,7 @@ export class AttachmentsService {
         this.db.transaction((tx) => {
           tx.delete(attachments).where(eq(attachments.id, r.id)).run();
           tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, r.id)).run();
+          tx.update(encounters).set({ mapAttachmentId: null }).where(eq(encounters.mapAttachmentId, r.id)).run();
           tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
         });
         this.etagCache.delete(this.filePath(r));
@@ -624,10 +658,50 @@ export class AttachmentsService {
   }
 
   /**
+   * Verify the upload root is present and readable. Throws 503
+   * (ServiceUnavailableException) when it isn't, so callers that DELETE rows
+   * based on "file missing" can fail closed instead of mistaking a vanished
+   * volume for an empty directory and nuking good metadata (issue #722).
+   *
+   * - ENOENT (root absent): the configured DATA_DIR/uploads isn't there at all —
+   *   a misconfigured / unmounted / moved volume, not "a campaign with no files."
+   * - EACCES / other access errors: the directory exists but the process can't
+   *   read it (perms flip, mount swap). Same conclusion: refuse to classify.
+   *
+   * Uses fs.access (R_OK) rather than existsSync so a present-but-unreadable
+   * directory is caught too — existsSync would happily return true for a dir the
+   * process then can't readdir.
+   */
+  private assertStorageAccessible(): void {
+    const root = uploadsRoot();
+    try {
+      // Throws on ENOENT (missing) or EACCES/EPERM (unreadable).
+      fs.accessSync(root, fs.constants.R_OK);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      // A transient I/O blip (EIO/ENODEV) reading the volume is just as
+      // disqualifying as the root being outright missing — surface it the same way
+      // so cleanup never proceeds on an unreliable view of disk state.
+      throw new ServiceUnavailableException(
+        `Attachment storage is unavailable (${code ?? 'unknown error'} at ${root}); ` +
+          'refusing to mark rows as orphans to avoid deleting good data. ' +
+          'Restore the storage volume and retry.',
+      );
+    }
+  }
+
+  /**
    * Walk DATA_DIR/uploads once, returning the total on-disk byte size and the set
    * of orphan files — those whose leading numeric id (from `<id>.<ext>` or
    * `<id>.thumb.png`) has no matching attachment row in `validIds`. Non-numeric
    * or unparseable entries are treated as orphans too (nothing else writes here).
+   *
+   * FAIL CLOSED on infra errors (issue #722): if the root vanished between the
+   * caller's preflight and this walk, or readdir fails for an infrastructure
+   * reason (EACCES/EIO), we throw rather than returning an empty/"all orphans"
+   * result. Per-file stat failures (a single corrupt entry) are still tolerated —
+   * one unreadable file shouldn't abort the whole scan, and the file is simply
+   * skipped rather than misclassified.
    */
   private scanDisk(validIds: Set<number>): {
     totalBytes: number;
@@ -639,12 +713,41 @@ export class AttachmentsService {
     let totalBytes = 0;
     let orphanBytes = 0;
 
-    if (!fs.existsSync(root)) return { totalBytes, orphanFiles, orphanBytes };
+    if (!fs.existsSync(root)) {
+      throw new ServiceUnavailableException(
+        `Attachment storage root is missing (${root}); refusing to scan for orphans.`,
+      );
+    }
 
-    for (const campaignDir of fs.readdirSync(root, { withFileTypes: true })) {
+    let top: fs.Dirent[];
+    try {
+      top = fs.readdirSync(root, { withFileTypes: true });
+    } catch (err) {
+      // Unreadable root -> can't trust any orphan classification derived from it.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      throw new ServiceUnavailableException(
+        `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); ` +
+          'refusing to scan for orphans.',
+      );
+    }
+
+    for (const campaignDir of top) {
       if (!campaignDir.isDirectory()) continue;
       const dirPath = path.join(root, campaignDir.name);
-      for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      } catch (err) {
+        // A single campaign subdir we can't read is an infra problem too: any
+        // attachment rows under it would look like orphans. Fail closed rather
+        // than silently dropping their metadata.
+        const code = (err as NodeJS.ErrnoException)?.code;
+        throw new ServiceUnavailableException(
+          `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} at ${dirPath}); ` +
+            'refusing to scan for orphans.',
+        );
+      }
+      for (const entry of entries) {
         if (!entry.isFile()) continue;
         const filePath = path.join(dirPath, entry.name);
         let size = 0;

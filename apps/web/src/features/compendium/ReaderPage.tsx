@@ -152,9 +152,17 @@ export default function ReaderPage() {
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}
           <p className="text-muted" style={{ margin: 0, fontSize: 11, borderTop: '1px solid var(--color-divider)', paddingTop: 12 }}>
+            {/* Per-entry provenance (issue #734): credit the entry under its OWN license
+                rather than the pack's — a pack may mix OGL/ORC/CC entries, and the reader
+                previously labelled every entry with the pack license. The entry's effective
+                license falls back to the pack's only when the entry didn't carry one
+                (older imports, or a uniformly-licensed pack). Attribution/author are shown
+                when the source data recorded the credit line the licence obliges. */}
             From {entry.source || pack?.name || 'the installed rule system'}
             {entry.source && pack?.name && entry.source !== pack.name ? ` (${pack.name})` : ''}
-            {pack?.license ? ` · ${pack.license}` : ''}.
+            {entry.author ? ` · by ${entry.author}` : ''}
+            {(entry.license || pack?.license) ? ` · ${entry.license || pack?.license}` : ''}
+            {entry.attribution ? `. ${entry.attribution}` : ''}.
           </p>
         </div>
       )}

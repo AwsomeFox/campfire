@@ -739,9 +739,16 @@ export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
 // may read it (the feed only exposes schedule data members already see);
 // enable/rotate/disable is DM-only.
+//
+// Issue #554: every issued token carries an `expiresAt` (ISO UTC). After it
+// passes, the public .ics endpoint stops serving that token (404) — a leaked
+// URL self-destructs on a schedule rather than living forever. Members see the
+// expiry so the UI can nudge the DM to rotate before it lapses. Null on legacy
+// rows written before #554 (no expiry) and after disable (no live token).
 export const CalendarFeed = z.object({
   token: z.string().nullable(),
   url: z.string().nullable(), // relative feed path, e.g. /api/v1/calendar/<token>.ics
+  expiresAt: z.string().nullable(), // ISO UTC when the current token stops authorizing the feed
 });
 export type CalendarFeed = z.infer<typeof CalendarFeed>;
 
@@ -1087,6 +1094,25 @@ export const RuleEntry = z.object({
   // distinguishable and the reader can attribute the real source/license (issue #143).
   // '' for older imports/uploads that predate the column — the reader falls back to the pack name.
   source: z.string().max(200).default(''),
+  // Per-entry provenance (issue #734): a pack may mix licenses (an OGL pack with a CC-BY
+  // spell, a community feat under ORC). Previously the entry's license was dropped on
+  // import and the reader labelled every entry with the PACK license — losing attribution
+  // the licence legally requires. These four fields capture what the entry ACTUALLY came
+  // under, falling back to the pack's value when the source data doesn't say otherwise
+  // (see effectiveLicense/effectiveAttribution). '' for rows written before the columns
+  // existed (migration 0050) — callers treat '' as "inherit the pack's value".
+  //   - license: the SPDX-ish/open-license string the entry is distributed under
+  //     ("OGL 1.0a", "CC-BY-4.0", "ORC"). Validated open by the importer/upload path.
+  //   - attribution: the credit line the licence obliges us to show (author + title +
+  //     copyright statement), e.g. "Fireball, © WotC, Open Game Content under the OGL 1.0a".
+  //   - author: the creator/rights-holder name to credit, when separable from the
+  //     attribution line ("Chris Gonnerman", "Archives of Nethys").
+  //   - sourceUrl: a deep link back to the entry on its origin site (CC-BY(-SA) requires
+  //     a link; also useful for the reader's "view original" affordance).
+  license: z.string().max(160).default(''),
+  attribution: z.string().max(500).default(''),
+  author: z.string().max(200).default(''),
+  sourceUrl: z.string().max(500).default(''),
   // Optional manual icon override (issue #305): the slug of a bundled game-icons.net
   // entity icon (see apps/web/src/lib/icons) shown in the compendium list + reader in
   // place of the type/school-derived default. '' means "no override — the web app
@@ -2046,8 +2072,15 @@ export const RulePackUploadEntry = z.object({
   summary: z.string().max(1000).optional(),
   body: z.string().max(50_000).optional(), // markdown
   dataJson: z.string().max(100_000).nullable().optional(), // raw structured fields, JSON-encoded
-  license: z.string().max(120).optional(), // per-entry license; falls back to the pack license
+  license: z.string().max(120).optional(), // per-entry license; falls back to the pack license (validated open, issue #734)
   source: z.string().max(200).optional(), // per-entry source/document label; falls back to the pack name
+  // Per-entry attribution/authorship provenance (issue #734): captured so a pack can mix
+  // licenses/sources and the reader credits each entry correctly. Each falls back to the
+  // pack-level value when omitted (attribution to the pack name, author to '', sourceUrl
+  // to the pack's sourceUrl).
+  attribution: z.string().max(500).optional(), // credit line the licence obliges us to show
+  author: z.string().max(200).optional(), // creator/rights-holder name to credit
+  sourceUrl: z.string().max(500).optional(), // deep link back to the entry on its origin site
   iconSlug: z.string().max(80).optional(), // optional bundled game-icons.net slug to seed the entry's icon (issue #305)
 });
 export type RulePackUploadEntry = z.infer<typeof RulePackUploadEntry>;
@@ -3618,6 +3651,12 @@ export const CombatantUpdate = z.object({
   // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
   deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
   deathSaveFailures: z.number().int().min(0).max(3).optional(),
+  // A death-save d20 roll result (issue #619). Mutually exclusive in spirit with the
+  // manual counter sets above: instead of a DM clicking pips, a rolled death save drives
+  // the outcome per the 5e crit/fumble rules — nat 1 = two failures, nat 20 = revive at
+  // 1 HP (clears the dying slate), 10–19 = one success, 2–9 = one failure. The server's
+  // 5e HP engine (applyCombatantHp) applies the roll to the combatant's death-save state.
+  deathSaveRoll: z.number().int().min(1).max(20).optional(),
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   initiative: z.number().int().optional(), // dm only, enforced server-side
