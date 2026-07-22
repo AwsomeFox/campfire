@@ -7,6 +7,7 @@
  */
 import type { DiceRoll } from '@campfire/schema';
 import { RolledDice } from '../features/dice/RolledDice';
+import { RolledTerms } from '../features/dice/RolledTerms';
 import { d20Flavor } from '../lib/useRoller';
 
 export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismiss: () => void }) {
@@ -21,6 +22,7 @@ export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismis
         <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
           <span>{roll.expr}</span>
           <RolledDice rolls={roll.rolls} kept={roll.kept} fontSize={11} />
+          {roll.terms && <RolledTerms terms={roll.terms} fontSize={11} />}
           {crit && <span style={{ color: totalColor }}>nat 20!</span>}
           {fumble && <span style={{ color: totalColor }}>nat 1</span>}
         </p>
