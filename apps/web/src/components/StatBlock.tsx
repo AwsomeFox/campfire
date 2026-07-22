@@ -4,21 +4,27 @@
  * Monster entries carry an EMPTY markdown `body`; their stats live in the
  * JSON-encoded `dataJson` produced by the server's open5e-importer
  * (mapCreature): { type, size, challengeRating, armorClass, hitPoints,
- * speed, abilityScores }. The compendium reader used to render only `body`,
+ * speed, abilityScores, specialAbilities, actions, reactions,
+ * legendaryActions }. The compendium reader used to render only `body`,
  * so every monster showed as a blank page (issue #142).
  *
  * The parser is deliberately tolerant — it accepts both the stored camelCase
  * shape and the raw Open5e snake_case shape, and renders whatever fields are
  * present (missing fields are simply omitted). It also understands optional
- * `specialAbilities`/`actions` arrays so the same component can back the
- * in-combat statblock (issue #56) if those get imported later.
+ * `specialAbilities`/`actions`/`legendaryActions`/`reactions` arrays so the
+ * compendium reader and in-combat card share the complete presentation.
  */
-import { Fragment, type CSSProperties } from 'react';
+import { Fragment, useId, type CSSProperties } from 'react';
 import { ruleSystemAdapter } from '@campfire/schema';
 
 interface NamedEntry {
   name: string;
   desc: string;
+  attackBonus: string | null;
+  damage: string[];
+  savingThrow: string | null;
+  usage: string | null;
+  legendaryActionCost: number | null;
 }
 
 export interface MonsterStatblock {
@@ -32,6 +38,8 @@ export interface MonsterStatblock {
   abilities: Array<{ label: string; score: number; mod: string }>;
   specialAbilities: NamedEntry[];
   actions: NamedEntry[];
+  legendaryActions: NamedEntry[];
+  reactions: NamedEntry[];
 }
 
 const ABILITIES: Array<{ label: string; keys: string[] }> = [
@@ -92,9 +100,36 @@ function namedEntries(v: unknown): NamedEntry[] {
         const o = e as Record<string, unknown>;
         const name = typeof o.name === 'string' ? o.name : '';
         const desc = typeof o.desc === 'string' ? o.desc : typeof o.description === 'string' ? o.description : '';
-        return { name: name.trim(), desc: desc.trim() };
+        const attackBonus = toText(o.attackBonus ?? o.attack_bonus);
+        const damage = Array.isArray(o.damage)
+          ? o.damage
+              .map((raw) => {
+                if (typeof raw === 'string') return raw.trim();
+                if (!raw || typeof raw !== 'object') return '';
+                const d = raw as Record<string, unknown>;
+                const expression = toText(d.expression ?? d.dice);
+                const type = toText(d.type);
+                return [expression, type].filter(Boolean).join(' ');
+              })
+              .filter(Boolean)
+          : [];
+        const save = o.savingThrow && typeof o.savingThrow === 'object' ? (o.savingThrow as Record<string, unknown>) : null;
+        const saveDc = toText(save?.dc ?? o.saveDc ?? o.save_dc);
+        const saveAbility = toText(save?.ability ?? o.saveAbility ?? o.save_ability);
+        const usage = o.usage && typeof o.usage === 'object' ? (o.usage as Record<string, unknown>) : null;
+        const usageLabel = toText(usage?.label ?? (typeof o.usage === 'string' ? o.usage : null));
+        const legendaryActionCostRaw = Number(o.legendaryActionCost ?? o.legendary_action_cost);
+        return {
+          name: name.trim(),
+          desc: desc.trim(),
+          attackBonus: attackBonus ? (attackBonus.startsWith('+') || attackBonus.startsWith('-') ? attackBonus : `+${attackBonus}`) : null,
+          damage,
+          savingThrow: saveDc ? `DC ${saveDc}${saveAbility ? ` ${saveAbility.toUpperCase()}` : ''}` : null,
+          usage: usageLabel,
+          legendaryActionCost: Number.isFinite(legendaryActionCostRaw) ? legendaryActionCostRaw : null,
+        };
       }
-      return { name: '', desc: '' };
+      return { name: '', desc: '', attackBonus: null, damage: [], savingThrow: null, usage: null, legendaryActionCost: null };
     })
     .filter((e) => e.name || e.desc);
 }
@@ -147,6 +182,8 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
     abilities,
     specialAbilities: namedEntries(mapped.specialAbilities),
     actions: namedEntries(mapped.actions),
+    legendaryActions: namedEntries(mapped.legendaryActions),
+    reactions: namedEntries(mapped.reactions),
   };
 
   const hasAnything =
@@ -158,7 +195,9 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
     block.speed ||
     block.abilities.length > 0 ||
     block.specialAbilities.length > 0 ||
-    block.actions.length > 0;
+    block.actions.length > 0 ||
+    block.legendaryActions.length > 0 ||
+    block.reactions.length > 0;
 
   return hasAnything ? block : null;
 }
@@ -178,18 +217,56 @@ function KeyLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-function NamedSection({ title, entries }: { title: string; entries: NamedEntry[] }) {
+function normalizedComparable(value: string): string {
+  return value.toLowerCase().replace(/[\u2012-\u2015]/g, '-').replace(/\s+/g, ' ').trim();
+}
+
+function mechanicsNotAlreadyInText(entry: NamedEntry, includeLegendaryCost: boolean): string[] {
+  const source = normalizedComparable(`${entry.name} ${entry.desc}`);
+  const details: string[] = [];
+  if (entry.usage && !source.includes(normalizedComparable(entry.usage))) details.push(entry.usage);
+  if (entry.attackBonus && !source.includes(normalizedComparable(entry.attackBonus))) details.push(`Attack ${entry.attackBonus}`);
+  for (const damage of entry.damage) {
+    if (!source.includes(normalizedComparable(damage))) details.push(`Damage ${damage}`);
+  }
+  if (entry.savingThrow && !source.includes(normalizedComparable(entry.savingThrow))) details.push(`Save ${entry.savingThrow}`);
+  if (includeLegendaryCost && entry.legendaryActionCost && entry.legendaryActionCost > 1) {
+    const cost = `${entry.legendaryActionCost} legendary actions`;
+    if (!source.includes(cost)) details.push(`Costs ${cost}`);
+  }
+  return details;
+}
+
+function NamedSection({ title, entries, headingLevel }: { title: string; entries: NamedEntry[]; headingLevel: 2 | 3 | 4 }) {
+  const headingId = useId();
+  const Heading = `h${headingLevel}` as 'h2' | 'h3' | 'h4';
   if (entries.length === 0) return null;
   return (
-    <div style={{ ...dividerRule, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <h4 style={{ margin: 0, fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-accent)' }}>{title}</h4>
-      {entries.map((e, i) => (
-        <p key={i} style={{ margin: 0, fontSize: 13, lineHeight: 1.5 }}>
-          {e.name && <span style={{ fontWeight: 600, fontStyle: 'italic' }}>{e.name}. </span>}
-          <span className="text-muted" style={{ color: 'var(--color-text)' }}>{e.desc}</span>
-        </p>
-      ))}
-    </div>
+    <section aria-labelledby={headingId} style={{ ...dividerRule, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+      <Heading id={headingId} style={{ margin: 0, fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--color-accent-300, var(--color-text))' }}>{title}</Heading>
+      <dl style={{ display: 'flex', flexDirection: 'column', gap: 8, margin: 0, minWidth: 0 }}>
+        {entries.map((entry, i) => {
+          const mechanics = mechanicsNotAlreadyInText(entry, title === 'Legendary Actions');
+          return (
+            <div key={i} style={{ margin: 0, fontSize: 13, lineHeight: 1.5, minWidth: 0, overflowWrap: 'anywhere' }}>
+              {entry.name && <dt style={{ fontWeight: 600, fontStyle: 'italic' }}>{entry.name}</dt>}
+              <dd className="text-muted" style={{ margin: 0, color: 'var(--color-text)' }}>
+                {entry.desc}
+                {mechanics.length > 0 && (
+                  <ul aria-label={`${entry.name || title} mechanics`} style={{ display: 'flex', flexWrap: 'wrap', gap: 4, margin: '4px 0 0', padding: 0, listStyle: 'none' }}>
+                    {mechanics.map((mechanic) => (
+                      <li key={mechanic} className="tag tag-neutral" style={{ maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere', fontSize: 10 }}>
+                        {mechanic}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </dd>
+            </div>
+          );
+        })}
+      </dl>
+    </section>
   );
 }
 
@@ -200,7 +277,7 @@ function NamedSection({ title, entries }: { title: string; entries: NamedEntry[]
  * campaign's rule system (issue #234) — it selects the adapter that maps the
  * statblock fields and ability modifiers; omit for the 5e default.
  */
-export function StatBlock({ data, ruleSystem }: { data: unknown; ruleSystem?: string | null }) {
+export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknown; ruleSystem?: string | null; headingLevel?: 2 | 3 | 4 }) {
   const block = parseMonsterStatblock(data, ruleSystem);
   if (!block) return null;
 
@@ -208,7 +285,7 @@ export function StatBlock({ data, ruleSystem }: { data: unknown; ruleSystem?: st
   const cr = block.challengeRating;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <section aria-label="Creature statblock" style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
       {(metaBits || cr) && (
         <p className="text-muted" style={{ margin: 0, fontSize: 12.5, fontStyle: 'italic' }}>
           {metaBits}
@@ -236,7 +313,7 @@ export function StatBlock({ data, ruleSystem }: { data: unknown; ruleSystem?: st
           {block.abilities.map((a) => (
             <Fragment key={a.label}>
               <div>
-                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: 'var(--color-accent)' }}>{a.label}</div>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: 'var(--color-accent-300, var(--color-text))' }}>{a.label}</div>
                 <div style={{ fontSize: 14 }}>{a.score}</div>
                 <div className="text-muted" style={{ fontSize: 12 }}>{a.mod}</div>
               </div>
@@ -245,9 +322,11 @@ export function StatBlock({ data, ruleSystem }: { data: unknown; ruleSystem?: st
         </div>
       )}
 
-      <NamedSection title="Traits" entries={block.specialAbilities} />
-      <NamedSection title="Actions" entries={block.actions} />
-    </div>
+      <NamedSection title="Traits" entries={block.specialAbilities} headingLevel={headingLevel} />
+      <NamedSection title="Actions" entries={block.actions} headingLevel={headingLevel} />
+      <NamedSection title="Reactions" entries={block.reactions} headingLevel={headingLevel} />
+      <NamedSection title="Legendary Actions" entries={block.legendaryActions} headingLevel={headingLevel} />
+    </section>
   );
 }
 

@@ -350,7 +350,7 @@ function DeleteAccountCard({ username }: { username: string }) {
             {t('preferences.deleteBlurb')}
           </p>
           <div className="flex-1" />
-          <button className="btn btn-ghost" style={{ fontSize: 12.5, color: '#f87171' }} onClick={() => setOpen(true)}>
+          <button className="btn btn-ghost btn-danger" style={{ fontSize: 12.5 }} onClick={() => setOpen(true)}>
             {t('preferences.deleteMyAccountEllipsis')}
           </button>
         </div>
@@ -386,9 +386,10 @@ function DeleteAccountCard({ username }: { username: string }) {
             </button>
             <div className="flex-1" />
             <button
-              className="btn btn-secondary"
-              style={{ fontSize: 12.5, color: '#f87171', borderColor: '#f87171' }}
+              className="btn btn-danger"
+              style={{ fontSize: 12.5 }}
               disabled={!canDelete || deleting}
+              aria-busy={deleting || undefined}
               onClick={remove}
             >
               {deleting ? t('preferences.deleting') : t('preferences.deleteMyAccount')}

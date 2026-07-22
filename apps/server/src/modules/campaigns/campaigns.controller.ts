@@ -176,7 +176,7 @@ export class CampaignsController {
   }
 
   @Get(':id/summary')
-  @ApiOperation({ summary: 'Campaign dashboard/AI-primer summary', description: 'Aggregates campaign metadata, current location, quests (with objectives), npcs, locations, characters, and sessions in one call — intended for dashboards and as an LLM context primer. Requires campaign membership.' })
+  @ApiOperation({ summary: 'Campaign dashboard/AI-primer summary', description: 'Aggregates campaign metadata, current location, quests (with objectives), npcs, locations, characters, logged sessions, and the next scheduled session in one authoritative call — intended for dashboards and as an LLM context primer. Requires campaign membership.' })
   @ApiResponse({ status: 200, description: 'Aggregate campaign summary.' })
   async summary(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireMember(user, id);

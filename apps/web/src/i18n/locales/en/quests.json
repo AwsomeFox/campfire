@@ -11,6 +11,11 @@
     "nQuests": "{{n}} quests",
     "changedSummary": "{{countLabel}} changed since your last session ({{time}}).",
     "loadFailed": "Couldn't load quests.",
+    "objectiveProgress": "{{completed}} of {{total}} objectives complete",
+    "objectiveProgressLabel": "Objective progress for {{title}}",
+    "continue": "Continue:",
+    "viewDetails": "View quest details",
+    "viewDetailsLabel": "View details for {{title}}",
     "empty": {
       "title": "No quests yet",
       "hintDm": "Start one with \"+ New quest\".",

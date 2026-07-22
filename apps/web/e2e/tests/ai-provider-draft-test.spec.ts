@@ -52,7 +52,7 @@ test.describe('AI provider visible-draft connection test', () => {
       await page.goto('/admin/ai');
       await expect(page.getByRole('heading', { level: 1, name: 'AI console' })).toBeVisible();
       await page.getByLabel('Provider').selectOption('openai');
-      await page.getByLabel('Model').fill('visible-unsaved-model');
+      await page.getByLabel('Model', { exact: true }).fill('visible-unsaved-model');
       await page.getByLabel('Base URL (optional)').fill('https://visible-unsaved.example/v1');
       await page.getByLabel(/API key/).fill(DRAFT_KEY);
       await page.getByRole('button', { name: 'Test connection' }).click();
@@ -72,7 +72,7 @@ test.describe('AI provider visible-draft connection test', () => {
       await expect(page.getByText(DRAFT_KEY)).toHaveCount(0);
 
       // Any edit invalidates the completed result immediately.
-      await page.getByLabel('Model').fill('edited-after-success');
+      await page.getByLabel('Model', { exact: true }).fill('edited-after-success');
       await expect(result).toHaveCount(0);
 
       // A response launched for an older fingerprint is discarded after an
@@ -80,7 +80,7 @@ test.describe('AI provider visible-draft connection test', () => {
       holdNext = true;
       await page.getByRole('button', { name: 'Test connection' }).click();
       await heldStarted;
-      await page.getByLabel('Model').fill('edited-while-test-in-flight');
+      await page.getByLabel('Model', { exact: true }).fill('edited-while-test-in-flight');
       releaseHeld?.();
       await expect.poll(() => requestBodies.length).toBe(2);
       await expect(result).toHaveCount(0);
@@ -103,7 +103,7 @@ test.describe('AI provider visible-draft connection test', () => {
       await page.getByRole('button', { name: 'Save provider' }).click();
       await expect(page.getByText('Synthetic save failure')).toBeVisible();
       await expect(result).toHaveCount(0);
-      await expect(page.getByLabel('Model')).toHaveValue('edited-while-test-in-flight');
+      await expect(page.getByLabel('Model', { exact: true })).toHaveValue('edited-while-test-in-flight');
       await expect(page.getByLabel(/API key/)).toHaveValue(DRAFT_KEY);
 
       const accessibilityScan = await new AxeBuilder({ page }).include('[data-testid="ai-provider-form-server"]').analyze();

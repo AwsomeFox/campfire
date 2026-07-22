@@ -591,7 +591,7 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
             permanently removed until you purge it from the Trash on your campaigns page.
           </p>
           <div className="flex-1" />
-          <button className="btn btn-ghost" style={{ fontSize: 12.5, color: '#f87171' }} onClick={() => setOpen(true)}>
+          <button className="btn btn-ghost btn-danger" style={{ fontSize: 12.5 }} onClick={() => setOpen(true)}>
             Delete campaign…
           </button>
         </div>
@@ -622,9 +622,10 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
             </button>
             <div className="flex-1" />
             <button
-              className="btn btn-secondary"
-              style={{ fontSize: 12.5, color: '#f87171', borderColor: '#f87171' }}
+              className="btn btn-danger"
+              style={{ fontSize: 12.5 }}
               disabled={!canDelete || deleting}
+              aria-busy={deleting || undefined}
               onClick={remove}
             >
               {deleting ? 'Moving…' : 'Move to Trash'}

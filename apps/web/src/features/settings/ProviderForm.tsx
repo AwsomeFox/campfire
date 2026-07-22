@@ -395,9 +395,10 @@ export function ProviderForm({
           </button>
           {provider && (
             <button
-              className="btn btn-secondary"
-              style={{ fontSize: 12.5, color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
+              className="btn btn-danger"
+              style={{ fontSize: 12.5 }}
               disabled={removing || clearing}
+              aria-busy={removing || undefined}
               onClick={() => void remove()}
             >
               {removing ? 'Removing…' : 'Remove'}
