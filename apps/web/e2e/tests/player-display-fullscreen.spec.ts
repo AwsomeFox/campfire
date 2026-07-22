@@ -118,7 +118,9 @@ test.describe('Player Display fullscreen', () => {
     await page.evaluate(() => {
       (window as typeof window & { __fullscreenTest: { dispatchError: () => void } }).__fullscreenTest.dispatchError();
     });
-    await expect(fullscreenNotice(page)).toContainText(/fullscreen failed.*browser presentation controls/i);
+    // A late generic fullscreenerror event must not replace the more specific
+    // permission-denied recovery guidance produced by the rejected request.
+    await expect(fullscreenNotice(page)).toContainText(/blocked.*allow fullscreen.*tab active.*try again/i);
   });
 
   test('awaits entry and exit, supports keyboard activation, and reflects successful state', async ({ page }) => {
