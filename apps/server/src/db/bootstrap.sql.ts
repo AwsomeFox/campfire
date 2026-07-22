@@ -835,6 +835,20 @@ CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
+-- Issue #749: partial UNIQUE indexes that enforce "at most one row per
+-- (encounter, identity)" at the DB boundary. A character (and likewise an NPC)
+-- may appear at most once in an encounter; the service layer's pre-check is a
+-- SELECT-then-INSERT (TOCTOU), so two concurrent adds of the same identity both
+-- passed the probe and inserted. These partial indexes — scoped to non-NULL
+-- identity so monster/NPC-less/character-less rows are exempt — turn the loser
+-- of that race into a caught SQLITE_CONSTRAINT_UNIQUE instead of a silent
+-- duplicate (which the service maps to a deterministic 409 with the winning
+-- combatant id). Pre-existing duplicate rows on upgraded DBs are collapsed by
+-- migration 0054 before this CREATE runs, so the index builds cleanly. The
+-- classic kind='monster' rows (character_id AND npc_id both NULL) are never
+-- constrained — duplicates there are intentional ("three Goblins", issue #114).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_character ON combatants(encounter_id, character_id) WHERE character_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_npc ON combatants(encounter_id, npc_id) WHERE npc_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_encounter_events_encounter ON encounter_events(encounter_id);
 CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);

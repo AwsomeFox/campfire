@@ -28,6 +28,22 @@ type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
 
+/**
+ * better-sqlite3 throws a synchronous Error with `.code` set to one of the
+ * SQLITE_CONSTRAINT_* codes on a constraint violation (issue #749). The combatant
+ * partial unique indexes (idx_combatants_encounter_character /
+ * idx_combatants_encounter_npc) surface a lost concurrent-add race as a UNIQUE
+ * violation; this helper detects that so the service can convert it into a
+ * deterministic 409 (with the winning combatant id) instead of a raw 500. Mirrors
+ * the isUniqueConstraintError helper in rules.service.ts.
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as { code?: string } | undefined)?.code;
+  if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return true;
+  const message = err instanceof Error ? err.message : '';
+  return /UNIQUE constraint failed/i.test(message);
+}
+
 /** Clamp a 0–100 percent overlay coordinate, mirroring the campaign map's location-pin drag. */
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
@@ -209,6 +225,32 @@ export class EncountersService {
 
   async listCombatantRows(encounterId: number) {
     return this.db.select().from(combatants).where(eq(combatants.encounterId, encounterId));
+  }
+
+  /**
+   * Re-read the single combatant that holds a given character/NPC identity in an
+   * encounter (issue #749). Used ONLY by the race-loser branch of addCombatant:
+   * when a concurrent add beats our SELECT-then-INSERT probe and the partial
+   * unique index rejects our INSERT, we re-read the winner so the 409 body can
+   * carry its id deterministically. Exactly one row can match (the partial unique
+   * index guarantees it), so `.limit(1)` is belt-and-suspenders. `characterId`
+   * and `npcId` are never both set on the same combatant, so selecting one
+   * predicate based on which id is non-null is safe (no OR is needed).
+   */
+  private async findExistingIdentityCombatant(
+    encounterId: number,
+    characterId: number | null,
+    npcId: number | null,
+  ): Promise<typeof combatants.$inferSelect | undefined> {
+    const where =
+      characterId !== null
+        ? and(eq(combatants.encounterId, encounterId), eq(combatants.characterId, characterId))
+        : npcId !== null
+          ? and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npcId))
+          : undefined;
+    if (!where) return undefined;
+    const [row] = await this.db.select().from(combatants).where(where).limit(1);
+    return row;
   }
 
   /**
@@ -879,13 +921,20 @@ export class EncountersService {
       // Uniqueness guard — the issue #51 pattern, extended to NPC combatants per #374: an NPC
       // may appear at most once in an encounter. Without this, re-adding the same NPC forks it
       // into two rows that then track HP independently. 409 rather than a silent duplicate.
+      // Carries the existing combatant id (issue #749) so a caller can treat the duplicate as
+      // an idempotent re-add; the DB partial unique index (idx_combatants_encounter_npc) is the
+      // backstop that catches the TOCTOU race where two adds pass this probe simultaneously.
       const [dup] = await this.db
         .select()
         .from(combatants)
         .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npc.id)))
         .limit(1);
       if (dup) {
-        throw new ConflictException(`NPC ${npc.id} is already a combatant in encounter ${encounterId}`);
+        throw new ConflictException({
+          code: 'COMBATANT_IDENTITY_CONFLICT',
+          message: `NPC ${npc.id} is already a combatant in encounter ${encounterId}`,
+          combatantId: dup.id,
+        });
       }
       npcId = npc.id;
       name = name ?? npc.name;
@@ -905,14 +954,21 @@ export class EncountersService {
       // encounter's initiative. Without this the API happily adds the same PC twice
       // (a manual re-add, or racing the create() auto-add) — duplicate rows that
       // then track HP independently and clutter the order. 409 Conflict rather than
-      // silently upserting, so the caller learns their add was a no-op.
+      // silently upserting, so the caller learns their add was a no-op. Carries the
+      // existing combatant id (issue #749); the DB partial unique index
+      // (idx_combatants_encounter_character) backstops the TOCTOU race where two
+      // adds pass this probe at once.
       const [dup] = await this.db
         .select()
         .from(combatants)
         .where(and(eq(combatants.encounterId, encounterId), eq(combatants.characterId, character.id)))
         .limit(1);
       if (dup) {
-        throw new ConflictException(`Character ${character.id} is already a combatant in encounter ${encounterId}`);
+        throw new ConflictException({
+          code: 'COMBATANT_IDENTITY_CONFLICT',
+          message: `Character ${character.id} is already a combatant in encounter ${encounterId}`,
+          combatantId: dup.id,
+        });
       }
       characterId = character.id;
       name = name ?? character.name;
@@ -966,26 +1022,58 @@ export class EncountersService {
     // count and insert colliding sortOrders. Sequential awaits (not Promise.all) so
     // each row's MAX(sort_order)+1 subquery observes the prior insert and the batch
     // gets distinct, contiguous orders.
+    //
+    // Issue #749: the SELECT-then-INSERT duplicate probes above are a TOCTOU race
+    // — two concurrent adds of the same character/NPC both observe no existing row
+    // and both reach this INSERT. The partial unique indexes
+    // (idx_combatants_encounter_character / idx_combatants_encounter_npc) now make
+    // the loser's INSERT throw SQLITE_CONSTRAINT_UNIQUE. We catch it and re-read the
+    // WINNING combatant so the caller gets a deterministic 409 carrying the existing
+    // combatant id, not a generic 500. This fires only for identity adds (character/
+    // npc) — a `count>1` monster batch never touches the partial indexes, so the
+    // loop never throws there. Throwing here (before audit/event) keeps everything
+    // consistent: the WINNING caller owns the single audit entry + SSE signal.
     const insertedRows: (typeof combatants.$inferSelect)[] = [];
-    for (const n of names) {
-      const [inserted] = await this.db
-        .insert(combatants)
-        .values({
-          encounterId,
-          kind: input.kind,
-          characterId,
-          npcId,
-          name: n,
-          initiative: null,
-          initMod,
-          hpCurrent,
-          hpMax,
-          conditions: '[]',
-          ruleEntryId,
-          sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
-        })
-        .returning();
-      insertedRows.push(inserted);
+    try {
+      for (const n of names) {
+        const [inserted] = await this.db
+          .insert(combatants)
+          .values({
+            encounterId,
+            kind: input.kind,
+            characterId,
+            npcId,
+            name: n,
+            initiative: null,
+            initMod,
+            hpCurrent,
+            hpMax,
+            conditions: '[]',
+            ruleEntryId,
+            sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
+          })
+          .returning();
+        insertedRows.push(inserted);
+      }
+    } catch (err) {
+      if (isUniqueConstraintError(err) && (characterId !== null || npcId !== null)) {
+        // The race loser: another caller inserted this same identity between our
+        // probe and our INSERT. Re-read the winning row so the 409 carries its id
+        // (deterministic — exactly one row can match the partial unique index now).
+        // If the re-read somehow finds nothing (the winner was rolled back, or the
+        // constraint fired for an unrelated reason), rethrow the original
+        // SQLITE_CONSTRAINT error so the caller sees the real failure rather than
+        // a generic 409 that masks it.
+        const winner = await this.findExistingIdentityCombatant(encounterId, characterId, npcId);
+        if (winner) {
+          throw new ConflictException({
+            code: 'COMBATANT_IDENTITY_CONFLICT',
+            message: `${characterId !== null ? `Character ${characterId}` : `NPC ${npcId}`} is already a combatant in encounter ${encounterId}`,
+            combatantId: winner.id,
+          });
+        }
+      }
+      throw err;
     }
     const row = insertedRows[0];
 
