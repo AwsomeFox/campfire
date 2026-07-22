@@ -10,6 +10,7 @@ import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, type DdbFetch } from './ddb-importer';
@@ -81,6 +82,13 @@ export class CharactersService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    // Shared optimistic-concurrency guard (issue #157). Characters only consume the
+    // `assertNotStale` tier here — the prose revision-history tier (record/list/restore)
+    // does not apply, since a character sheet has no single prose column the way
+    // quests/npcs/locations/sessions do. The CAS invariant alone closes the issue's
+    // headline failure: a stale full-snapshot save can no longer silently clobber a
+    // fresher edit (a live HP/level change, a DM-secret edit) from another tab/device.
+    private readonly revisions: RevisionsService,
   ) {}
 
   async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
@@ -252,8 +260,33 @@ export class CharactersService {
     return redactSecret(toDomain(row), role);
   }
 
-  async update(id: number, input: CharacterUpdateInput, user: RequestUser, role: Role): Promise<Character> {
+  /**
+   * dm or the owning player may write; other players get 403. Only fields present in
+   * `input` are written (a field-level patch, not a full-snapshot replace), and
+   * dmSecret/ownerUserId narrow further to dm-only.
+   *
+   * Optimistic concurrency (issue #746): a character sheet is the classic blind
+   * last-write-wins clobber victim — two tabs (or a player tab + a DM tab, or a
+   * connected AI over MCP) both load the sheet, one applies a live HP/level change
+   * or a DM-secret edit, and the other's stale full-snapshot save silently restores
+   * the old HP max, level, status, or ability scores. Mirroring the quests/npcs/
+   * locations/sessions/encounters CAS invariant (#157/#532), when the caller
+   * supplies an `expectedUpdatedAt` that no longer matches the row's current
+   * `updatedAt` the write is rejected with 409 Conflict before any mutation — so the
+   * stale client can refetch and reapply instead of destroying the fresher edit.
+   * Omitted => unconditional write (unchanged back-compat for any client that hasn't
+   * opted in, including the proposal-applied path which never sends a guard).
+   */
+  async update(
+    id: number,
+    input: CharacterUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
+    // Optimistic concurrency (#746): 409 on a stale expectedUpdatedAt before any write.
+    this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
     this.assertCanWrite(existing, user, role);
     // Editing xp/level through the general PATCH is progression too — gate it the same
     // way as patchXp/levelUp so dmControlsProgression can't be bypassed here (issue #270).
