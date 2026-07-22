@@ -155,15 +155,34 @@ export class TimelineService {
     return toCalendarDomain(row);
   }
 
-  async setCalendar(campaignId: number, input: CalendarUpdateInput, user: RequestUser, role: Role): Promise<TimelineCalendar> {
-    const ts = nowIso();
-    const [existing] = await this.db
+  /**
+   * The existence probe used by `setCalendar`'s lazy-create. Split into its own
+   * method so the concurrency regression in db-concurrency.e2e-spec.ts can park
+   * both racers between the read and the insert — better-sqlite3 is synchronous,
+   * so without that coordination the two HTTP requests never actually race at
+   * the SQL layer. Mirrors the `getRowOrThrow` seam used by #653's HP race test
+   * and the treasury's `readLazyRow` in InventoryService (#658).
+   */
+  async readLazyRow(campaignId: number): Promise<typeof timelineCalendars.$inferSelect | undefined> {
+    const [row] = await this.db
       .select()
       .from(timelineCalendars)
       .where(eq(timelineCalendars.campaignId, campaignId))
       .limit(1);
+    return row;
+  }
 
-    let row: typeof timelineCalendars.$inferSelect;
+  async setCalendar(campaignId: number, input: CalendarUpdateInput, user: RequestUser, role: Role): Promise<TimelineCalendar> {
+    const ts = nowIso();
+    const existing = await this.readLazyRow(campaignId);
+
+    // Issue #658: the read-then-insert races on concurrent first-access — two
+    // callers each see `!existing`, both INSERT, and the second loses the
+    // `campaignId` PRIMARY KEY constraint (an unhandled 500). The INSERT carries
+    // `onConflictDoNothing({ target: campaignId })` so the loser's conflict is
+    // ignored; a losing racer observes an empty RETURNING and falls through to
+    // the UPDATE branch below, which applies its patch onto the winner's row.
+    let row: typeof timelineCalendars.$inferSelect | undefined;
     if (!existing) {
       [row] = await this.db
         .insert(timelineCalendars)
@@ -174,8 +193,14 @@ export class TimelineService {
           createdAt: ts,
           updatedAt: ts,
         })
+        .onConflictDoNothing({ target: timelineCalendars.campaignId })
         .returning();
-    } else {
+    }
+
+    if (!row) {
+      // Either `existing` was already present, or a concurrent first-access beat
+      // us to the INSERT and our onConflictDoNothing yielded nothing. Either way
+      // the row now exists, so apply the requested patch via UPDATE.
       const patch: Partial<typeof timelineCalendars.$inferInsert> = { updatedAt: ts };
       if (input.currentDate !== undefined) patch.currentDate = input.currentDate;
       if (input.note !== undefined) patch.note = input.note;
