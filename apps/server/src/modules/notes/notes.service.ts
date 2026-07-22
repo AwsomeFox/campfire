@@ -1,10 +1,24 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, asc, desc, eq, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
 import type { Note, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, campaigns, characters, encounters, factions, locations, notes, npcs, quests, sessions, users } from '../../db/schema';
+import {
+  auditLog,
+  campaignMembers,
+  campaigns,
+  characters,
+  encounters,
+  factions,
+  locations,
+  notes,
+  notifications,
+  npcs,
+  quests,
+  sessions,
+  users,
+} from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { applyPage } from '../../common/pagination';
@@ -644,39 +658,94 @@ export class NotesService {
    * Resolving may link the entity the item became (entityType/entityId) — shown
    * in the resolved-history view. The link is soft (not FK-validated), same as
    * regular note entity anchors.
+   *
+   * The canonical terminal result is the tuple (resolvedNote, entityType,
+   * entityId). Repeating that exact tuple is idempotent and returns the stored
+   * row; requesting a different tuple after resolution is a deterministic 409.
+   * The unresolved -> resolved compare-and-set, audit row, and real submitter
+   * notification share one synchronous better-sqlite3 transaction, so competing
+   * DMs and retries can produce exactly one transition and one set of effects.
    */
   async resolveInbox(id: number, input: InboxResolveInput, user: RequestUser, role: Role): Promise<Note> {
     const existing = await this.getRowOrThrow(id);
     if (existing.kind !== 'inbox') throw new NotFoundException(`Inbox item ${id} not found`);
+    const terminal = {
+      resolvedNote: input.resolvedNote ?? '',
+      entityType: input.entityType ?? null,
+      entityId: input.entityId ?? null,
+    };
+    const ts = nowIso();
 
-    const [row] = await this.db
-      .update(notes)
-      .set({
-        resolved: true,
-        resolvedNote: input.resolvedNote ?? '',
-        entityType: input.entityType ?? null,
-        entityId: input.entityId ?? null,
-        updatedAt: nowIso(),
-      })
-      .where(eq(notes.id, id))
-      .returning();
+    const outcome = this.db.transaction((tx) => {
+      const [row] = tx
+        .update(notes)
+        .set({ resolved: true, ...terminal, updatedAt: ts })
+        .where(and(eq(notes.id, id), eq(notes.kind, 'inbox'), eq(notes.resolved, false), isNull(notes.deletedAt)))
+        .returning()
+        .all();
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'inbox.resolve',
-      entityType: 'note',
-      entityId: id,
-      campaignId: existing.campaignId,
+      if (!row) {
+        const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
+        return { transitioned: false as const, row: current };
+      }
+
+      tx.insert(auditLog)
+        .values({
+          campaignId: row.campaignId,
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'inbox.resolve',
+          entityType: 'note',
+          entityId: id,
+          detail: '',
+          createdAt: ts,
+        })
+        .run();
+
+      // Keep NotificationsService.notifyUser's existing semantics: synthetic
+      // DEV_AUTH identities have no users row, and an actor is never notified
+      // about their own action. Real submitters receive the reply atomically.
+      const recipient = Number(row.authorUserId);
+      if (Number.isInteger(recipient) && recipient > 0 && String(recipient) !== user.id) {
+        // Authored-history attribution survives account deletion. Only insert
+        // when the real user row still exists, matching notifyUser's former
+        // best-effort behavior without letting a notification FK abort canon.
+        const recipientExists = tx.select({ id: users.id }).from(users).where(eq(users.id, recipient)).limit(1).get();
+        if (recipientExists) {
+          tx.insert(notifications)
+            .values({
+              userId: recipient,
+              campaignId: row.campaignId,
+              type: 'note_reply',
+              title: `${user.name || 'The DM'} resolved your inbox note`,
+              body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(row.body),
+              entityType: null,
+              entityId: null,
+              actorName: user.name,
+              readAt: null,
+              createdAt: ts,
+            })
+            .run();
+        }
+      }
+
+      return { transitioned: true as const, row };
     });
 
-    // The DM answering an inbox item is the "reply" the submitter is waiting on.
-    await this.notifications.notifyUser(existing.authorUserId, existing.campaignId, user, {
-      type: 'note_reply',
-      title: `${user.name || 'The DM'} resolved your inbox note`,
-      body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(existing.body),
-      actorName: user.name,
-    });
+    const row = outcome.row;
+    if (!row || row.kind !== 'inbox' || row.deletedAt != null) {
+      throw new NotFoundException(`Inbox item ${id} not found`);
+    }
+    if (!outcome.transitioned) {
+      const identical =
+        row.resolved &&
+        row.resolvedNote === terminal.resolvedNote &&
+        row.entityType === terminal.entityType &&
+        row.entityId === terminal.entityId;
+      if (!identical) {
+        throw new ConflictException(`Inbox item ${id} already has a different terminal result`);
+      }
+    }
     return toDomain(row);
   }
 }

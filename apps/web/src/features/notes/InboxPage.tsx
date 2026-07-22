@@ -9,7 +9,7 @@
  * (resolved items, GET /campaigns/:cid/inbox?resolved=true) — history shows each
  * item's resolution note and a link to the entity it was resolved into.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import type { Note } from '@campfire/schema';
@@ -105,8 +105,8 @@ export default function InboxPage() {
         resolvedNote,
         ...(link ? { entityType: link.entityType, entityId: link.entityId } : {}),
       });
-      setExpandedId(null);
       await load();
+      setExpandedId(null);
     } catch {
       setError(t('notes.inboxCouldntResolve'));
     }
@@ -257,8 +257,8 @@ function InboxItem({
   item: Note;
   expanded: boolean;
   onToggle: () => void;
-  onResolve: (resolvedNote: string, link: { entityType: EntityTypeValue; entityId: number } | null) => void;
-  onDismiss: () => void;
+  onResolve: (resolvedNote: string, link: { entityType: EntityTypeValue; entityId: number } | null) => Promise<void>;
+  onDismiss: () => Promise<void>;
 }) {
   const { t } = useTranslation();
   const [resolutionNote, setResolutionNote] = useState('');
@@ -293,22 +293,30 @@ function InboxItem({
     };
   }, [linkType, campaignId]);
 
-  async function handleResolve() {
+  const busyRef = useRef(false);
+
+  async function runAction(action: () => Promise<void>): Promise<void> {
+    // State updates are not synchronous: the ref also closes the same-tick gap
+    // where two activations can arrive before React renders disabled controls.
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     try {
-      onResolve(resolutionNote.trim(), linkType && linkId !== '' ? { entityType: linkType, entityId: linkId } : null);
+      await action();
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
 
-  async function handleDismiss() {
-    setBusy(true);
-    try {
-      onDismiss();
-    } finally {
-      setBusy(false);
-    }
+  function handleResolve(): Promise<void> {
+    return runAction(() =>
+      onResolve(resolutionNote.trim(), linkType && linkId !== '' ? { entityType: linkType, entityId: linkId } : null),
+    );
+  }
+
+  function handleDismiss(): Promise<void> {
+    return runAction(onDismiss);
   }
 
   return (
@@ -331,12 +339,14 @@ function InboxItem({
             value={resolutionNote}
             onChange={(e) => setResolutionNote(e.target.value)}
             placeholder={t('notes.resolutionPlaceholder')}
+            disabled={busy}
           />
           <div className="flex gap-2 flex-wrap">
             <select
               className="cf-select !min-h-0 !py-2 text-xs"
               value={linkType}
               onChange={(e) => setLinkType(e.target.value as EntityTypeValue | '')}
+              disabled={busy}
             >
               <option value="">{t('notes.noEntityLink')}</option>
               {LINKABLE.map((l) => (
@@ -350,7 +360,7 @@ function InboxItem({
                 className="cf-select !min-h-0 !py-2 text-xs flex-1 min-w-0"
                 value={linkId}
                 onChange={(e) => setLinkId(e.target.value === '' ? '' : Number(e.target.value))}
-                disabled={optionsLoading}
+                disabled={busy || optionsLoading}
               >
                 <option value="">{optionsLoading ? t('notes.loading') : options.length === 0 ? t('notes.nothingToLink') : t('notes.pickOne')}</option>
                 {options.map((o) => (
@@ -378,7 +388,7 @@ function InboxItem({
       )}
 
       <div className="flex justify-end">
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onToggle}>
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onToggle} disabled={busy}>
           {expanded ? t('notes.collapse') : t('notes.resolveArrow')}
         </Btn>
       </div>

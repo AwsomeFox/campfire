@@ -1315,6 +1315,27 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(resolved.entityType).toBe('campaign');
     expect(resolved.entityId).toBe(campaignId);
 
+    // Terminal idempotency is shared with REST: the same canonical payload
+    // returns the stored Note, while a different terminal payload is a 409.
+    const identicalRetry = await dmClient.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: item.id, resolvedNote: 'handled', entityType: 'campaign', entityId: campaignId },
+    });
+    expect(identicalRetry.isError).toBeFalsy();
+    expect(parseResult(identicalRetry)).toEqual(parseResult(resolveResult));
+
+    const conflictingRetry = await dmClient.callTool({
+      name: 'resolve_inbox_item',
+      arguments: { noteId: item.id, resolvedNote: 'dismissed' },
+    });
+    expect(conflictingRetry.isError).toBe(true);
+    expect(parseResult(conflictingRetry)).toMatchObject({
+      error: {
+        status: 409,
+        message: `Inbox item ${item.id} already has a different terminal result`,
+      },
+    });
+
     // resolved history via read_inbox { resolved: true }; open list no longer has it
     const openAfter = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId } });
     expect((parseResult(openAfter) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(false);
