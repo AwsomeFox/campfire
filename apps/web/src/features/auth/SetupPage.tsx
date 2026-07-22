@@ -1,10 +1,10 @@
 /**
  * First-run "light the fire" screen — creates the initial admin user.
  * Same card-on-radial-ground language as LoginPage (design's Login screen).
- * If setup is not required, bounce to /login.
+ * If setup is not required, authenticated users return to the campaign hub and
+ * signed-out users continue to /login.
  */
 import { useState, type FormEvent } from 'react';
-import { useTranslation } from 'react-i18next';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -30,8 +30,8 @@ function FlameMark() {
 }
 
 export function SetupPage() {
-  const { status, loading } = useAuthStatus();
-  const { refresh } = useAuth();
+  const { status, loading, refresh: refreshAuthStatus } = useAuthStatus();
+  const { me, ready, refresh: refreshAuth } = useAuth();
   const navigate = useNavigate();
 
   const [username, setUsername] = useState('');
@@ -41,8 +41,17 @@ export function SetupPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  if (!loading && status && !status.setupRequired) {
-    return <Navigate to="/login" replace />;
+  // During a successful setup submit, onSubmit owns the single history-replacing
+  // navigation after both auth contexts refresh. Do not race it with this guard.
+  if (!submitting && !loading && status && !status.setupRequired) {
+    if (!ready) {
+      return (
+        <div className="min-h-screen grid place-items-center p-6" aria-live="polite">
+          <p className="text-muted">Checking your session…</p>
+        </div>
+      );
+    }
+    return <Navigate to={me ? '/' : '/login'} replace />;
   }
 
   async function onSubmit(e: FormEvent) {
@@ -69,16 +78,29 @@ export function SetupPage() {
         password,
         displayName: displayName.trim() || undefined,
       });
-      await refresh();
-      navigate('/', { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
         setError('Too many attempts — wait a minute and try again.');
       } else {
         setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
       }
-    } finally {
       setSubmitting(false);
+      return;
+    }
+
+    try {
+      // Setup mutates both pieces of auth state that gate the router. Refresh
+      // identity first so the configured-state render can never bounce the new
+      // admin through /login, then refresh /auth/status so AuthedLayout no
+      // longer redirects the campaign hub back to this setup screen.
+      await refreshAuth();
+      await refreshAuthStatus();
+      navigate('/', { replace: true });
+    } catch {
+      // The account already exists and the one-time setup endpoint is now
+      // closed. If either cache refresh fails, never strand the new admin on a
+      // form that can no longer succeed: rebuild both providers from the server.
+      window.location.replace('/');
     }
   }
 

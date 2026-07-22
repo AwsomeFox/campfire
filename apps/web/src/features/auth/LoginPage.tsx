@@ -203,7 +203,7 @@ function safeInternalPath(raw: string | null | undefined): string | null {
 
 export function LoginPage() {
   const { status, loading } = useAuthStatus();
-  const { refresh } = useAuth();
+  const { me, ready, refresh } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -227,6 +227,11 @@ export function LoginPage() {
 
   if (!loading && status?.setupRequired) {
     return <Navigate to="/setup" replace />;
+  }
+  // During a successful submit, onSubmit owns the single history-replacing
+  // navigation after refreshing identity. Do not race it with this guard.
+  if (!submitting && !loading && ready && me) {
+    return <Navigate to={redirectTo} replace />;
   }
 
   async function onSubmit(e: FormEvent) {
