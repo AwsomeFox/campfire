@@ -18,7 +18,7 @@ import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.modu
 import { rulePacks, ruleEntries, combatants, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
-import { auditActor } from '../../common/user.types';
+import { auditActor, auditActorRole } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
   ALL_OPEN5E_SECTIONS,
@@ -1089,7 +1089,7 @@ export class RulesService {
 
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: pack.id,
@@ -1171,7 +1171,7 @@ export class RulesService {
 
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: updatedPack.id,
@@ -1205,7 +1205,7 @@ export class RulesService {
     });
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'rulepack.uninstall',
       entityType: 'rule_pack',
       entityId: id,

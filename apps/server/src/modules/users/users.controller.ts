@@ -3,7 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { ApiTokenCreated } from '@campfire/schema';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { hasServerAdminPower, type RequestUser, auditActor } from '../../common/user.types';
+import { hasServerAdminPower, auditActorRole, type RequestUser, auditActor } from '../../common/user.types';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { UsersService } from './users.service';
 import { TokensService } from '../tokens/tokens.service';
@@ -78,9 +78,11 @@ export class UsersController {
   async create(@Body() body: UserCreateDto, @CurrentUser() actor: RequestUser) {
     const created = await this.users.create(body);
     // #23: server-wide admin trail (campaignId null) — account creation.
+    // #526: attribute the actor's TRUE server role (admin vs dm) so an incident
+    // reviewer can tell a privileged operator action from an ordinary DM's.
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      actorRole: auditActorRole(actor),
       action: 'user.create',
       entityType: 'user',
       entityId: created.id,
@@ -103,7 +105,7 @@ export class UsersController {
     if (body.displayName !== undefined) changes.push('displayName');
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      actorRole: auditActorRole(actor),
       action: 'user.update',
       entityType: 'user',
       entityId: id,
@@ -124,7 +126,7 @@ export class UsersController {
     // #23: server-wide admin trail — account deletion.
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      actorRole: auditActorRole(actor),
       action: 'user.delete',
       entityType: 'user',
       entityId: id,
@@ -146,7 +148,7 @@ export class UsersController {
     // #23: log that a reset happened — never the password itself.
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      actorRole: auditActorRole(actor),
       action: 'user.password_reset',
       entityType: 'user',
       entityId: id,
@@ -193,7 +195,7 @@ export class UsersController {
     // #23: server-wide admin trail — admin minted a PAT on another user's behalf.
     await this.audit.log({
       actor: auditActor(requester),
-      actorRole: 'dm',
+      actorRole: auditActorRole(requester),
       action: 'user.token.mint',
       entityType: 'user',
       entityId: target.id,

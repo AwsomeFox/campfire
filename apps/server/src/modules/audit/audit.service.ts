@@ -1,6 +1,6 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, desc, eq, gt, isNull, lt } from 'drizzle-orm';
-import type { Role } from '@campfire/schema';
+import type { AuditActorRole } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -43,7 +43,7 @@ export class AuditService implements OnApplicationBootstrap {
 
   async log(params: {
     actor: string;
-    actorRole: Role;
+    actorRole: AuditActorRole;
     action: string;
     entityType?: string | null;
     entityId?: number | null;

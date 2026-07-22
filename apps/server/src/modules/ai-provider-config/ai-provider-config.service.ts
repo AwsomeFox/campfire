@@ -13,7 +13,7 @@ import { DB, type DrizzleDb, resolveDataDir } from '../../db/db.module';
 import { aiProviderConfigs } from '../../db/schema';
 import { encryptSecret, decryptSecret, secretLast4 } from '../../common/crypto';
 import { nowIso } from '../../common/time';
-import { auditActor, type RequestUser } from '../../common/user.types';
+import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import {
   createAiProvider,
@@ -296,7 +296,7 @@ export class AiProviderConfigService {
     // Audit records WHAT changed and the key ACTION only — never the key or last4.
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.configure',
       entityType: 'ai-provider',
       campaignId: auditCampaignId ?? null,
@@ -330,7 +330,7 @@ export class AiProviderConfigService {
       .where(eq(aiProviderConfigs.id, existing.id));
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.allowlist',
       entityType: 'ai-provider',
       detail: `server allowlist=${models.length} model(s)`,
@@ -368,7 +368,7 @@ export class AiProviderConfigService {
       .where(eq(aiProviderConfigs.id, row.id));
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.key-clear',
       entityType: 'ai-provider',
       campaignId: campaignId ?? null,
@@ -380,7 +380,7 @@ export class AiProviderConfigService {
     await this.db.delete(aiProviderConfigs).where(eq(aiProviderConfigs.scope, 'server'));
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.delete',
       entityType: 'ai-provider',
       detail: 'server',
@@ -393,7 +393,7 @@ export class AiProviderConfigService {
       .where(and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.campaignId, campaignId)));
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.delete',
       entityType: 'ai-provider',
       campaignId,
