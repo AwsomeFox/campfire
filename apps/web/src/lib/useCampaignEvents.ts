@@ -5,8 +5,9 @@
  * Implemented with fetch + ReadableStream rather than native EventSource so the
  * request carries the exact same auth surface as lib/api.ts: the session cookie
  * (credentials: include) plus the dev-role override headers, which EventSource
- * cannot send. Events are thin invalidation signals ({type, campaignId,
- * entity ids) — consumers refetch through the normal REST reads.
+ * cannot send. Events are thin invalidation signals
+ * (`{ type, campaignId, ...entityIds }`) — consumers refetch through the normal
+ * REST reads.
  *
  * Reconnects automatically with capped exponential backoff; after a drop is
  * healed, onReconnect fires so pages can refetch whatever they missed while
