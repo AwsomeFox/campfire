@@ -1148,11 +1148,17 @@ describe('encounters — issue #51: character uniqueness guard (e2e)', () => {
 
   it('re-adding a character already present in the encounter is rejected 409', async () => {
     const server = ctx.app.getHttpServer();
+    // Capture the winning combatant id (Aria was auto-added by create) so we can
+    // assert the 409 body carries it (issue #749: the loser must learn which row won).
+    const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const existingAria = (before.body.combatants as CombatantShape[]).find((c) => c.characterId === ariaId)!;
     const res = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants`)
       .set(dm)
       .send({ kind: 'character', characterId: ariaId });
     expect(res.status).toBe(409);
+    expect(res.body.code).toBe('COMBATANT_IDENTITY_CONFLICT');
+    expect(res.body.combatantId).toBe(existingAria.id);
 
     // and no duplicate row was created — Aria still appears exactly once.
     const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
@@ -1559,6 +1565,8 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect(first.status).toBe(201);
     const second = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', npcId, hpMax: 10 });
     expect(second.status).toBe(409); // already a combatant — no silent duplicate row
+    expect(second.body.code).toBe('COMBATANT_IDENTITY_CONFLICT');
+    expect(second.body.combatantId).toBe(first.body.id); // issue #749: carries the winning combatant id
   });
 
   it('a soft-deleted (trashed) NPC cannot be added as a combatant (#374)', async () => {
