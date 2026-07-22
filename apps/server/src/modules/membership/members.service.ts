@@ -281,10 +281,15 @@ export class MembersService {
         campaignId,
       });
     } catch (err) {
-      new Logger(MembersService.name).error(
-        `membership.revoked emitted for memberId=${memberId} but audit log failed — the remove succeeded; ` +
-          `this row will be missing from the audit trail. Underlying error: ${String(err)}`,
-      );
+      // Pass the error as the trace arg (not stringified into the message) so
+      // Nest's Logger emits the full stack — stringifying drops it and makes a
+      // real DB failure hard to diagnose. The message names the member + the
+      // consequence (audit-trail gap) so the log line stands on its own; the
+      // trace carries the actionable root cause.
+      const logger = new Logger(MembersService.name);
+      const message = `membership.revoked emitted for memberId=${memberId} but audit log failed — the remove succeeded; this row will be missing from the audit trail.`;
+      if (err instanceof Error) logger.error(message, err.stack);
+      else logger.error(`${message} Underlying error: ${String(err)}`);
     }
   }
 }

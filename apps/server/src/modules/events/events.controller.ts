@@ -70,9 +70,12 @@ export class CampaignEventsController {
     );
 
     // Drop membership.revoked frames from the data path — they are an internal
-    // termination signal, not a "refetch this" tick. (Even if forwarded, the web
-    // client's guard ignores the unknown type; we filter here so the wire stays
-    // clean and the semantics are explicit.)
+    // termination signal, not a "refetch this" tick. (The web client's
+    // isCampaignEvent guard now accepts the membership.revoked variant, but no
+    // client handler acts on it — RunSessionPage narrows to encounter.* before
+    // reading fields. We filter it out server-side anyway so the wire stays clean
+    // and the semantics are explicit: revoked frames are for the takeUntil
+    // notifier above, never for the data path.)
     const dataStream = this.events.streamFor(campaignId).pipe(
       filter((event) => event.type !== 'membership.revoked'),
       map((event): MessageEvent => ({ data: event })),

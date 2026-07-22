@@ -41,10 +41,17 @@ const ENCOUNTER_EVENT_TYPES = new Set(['encounter.updated', 'encounter.deleted',
 function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
-  if (typeof v.type !== 'string' || typeof v.campaignId !== 'number') return false;
+  // Common to every variant: a known type, a numeric campaignId, and a string `at`
+  // timestamp. Validating `at` here keeps the predicate honest about the full union
+  // shape (every CampaignEvent variant requires it) rather than only checking the
+  // discriminant + campaignId.
+  if (typeof v.type !== 'string' || typeof v.campaignId !== 'number' || typeof v.at !== 'string') return false;
   if (ENCOUNTER_EVENT_TYPES.has(v.type)) {
-    // encounter.* variants: require encounterId (ping also requires a ping payload,
-    // but we don't validate its shape here — the server is authoritative).
+    // encounter.* variants: require encounterId. The ping variant additionally
+    // carries a `ping` payload whose shape (MapPing) is NOT validated client-side
+    // — the server is authoritative on frame shape, and a malformed ping would
+    // simply be ignored by addPing rather than crash. So the guard narrows to the
+    // CampaignEvent type on the fields the client actually reads.
     return typeof v.encounterId === 'number';
   }
   if (v.type === 'membership.revoked') {
