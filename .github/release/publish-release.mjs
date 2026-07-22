@@ -99,6 +99,7 @@ export function verifyRequiredChecks(payload, requiredChecks) {
 
 async function candidateFromRelease(api, release, currentSha, config) {
   if (release.draft) return { rejection: `${release.tag_name ?? '<untagged>'}: draft release` };
+  if (release.prerelease) return { rejection: `${release.tag_name ?? '<untagged>'}: prerelease` };
   try {
     parseReleaseTag(release.tag_name);
   } catch (error) {
@@ -231,12 +232,13 @@ export async function executeRelease({ api, config, tag, dryRun = false, reposit
   if (!mainRef || mainRef.object?.type !== 'commit') {
     throw new ReleaseError('MISSING_MAIN', `Protected branch ${config.mainBranch} could not be resolved.`);
   }
-  await assertAncestor(
-    api,
-    tagged.commitSha,
-    mainRef.object.sha,
-    `Tag ${tag} points to ${tagged.commitSha}, which is not reachable from protected ${config.mainBranch}.`,
-  );
+  if (tagged.commitSha !== mainRef.object.sha) {
+    throw new ReleaseError(
+      'STALE_MAIN_TAG',
+      `Tag ${tag} points to ${tagged.commitSha}, but protected ${config.mainBranch} currently points to ${mainRef.object.sha}. ` +
+        'A release tag must target the exact protected-branch head selected by the release procedure.',
+    );
+  }
   await validateVersionsAtRef(api, tagged.commitSha, tag, config.versionSources);
   await validateReleaseCommit(api, tagged.commitSha, tag, config);
   verifyRequiredChecks(await api.listCheckRuns(tagged.commitSha), config.requiredChecks);

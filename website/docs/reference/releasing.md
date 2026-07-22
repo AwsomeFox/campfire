@@ -37,7 +37,7 @@ finds the existing release by tag instead of creating a duplicate.
 The publisher fails closed unless all of these are true:
 
 - the ref is an annotated tag whose name is exactly `vX.Y.Z` (no prerelease suffix);
-- the tagged commit is an ancestor of protected `main`;
+- the tagged commit is the exact current head of protected `main`;
 - all configured package, workspace, lockfile, server-runtime, and web-UI version
   values equal `X.Y.Z`;
 - the tagged commit itself changed every version metadata file, making it the version

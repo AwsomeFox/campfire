@@ -27,7 +27,7 @@ test('no prior release uses only the explicitly pinned bootstrap baseline', asyn
 test('a divergent pushed tag fails closed before any mutation', async () => {
   const fake = new FakeGitHub();
   fake.tags.set('v0.14.2', { type: 'tag', sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', commitSha: SHAS.divergent });
-  await assert.rejects(run(fake), (error) => error.code === 'DIVERGENT_TAG');
+  await assert.rejects(run(fake), (error) => error.code === 'STALE_MAIN_TAG');
   assert.equal(fake.requests.some((request) => request.method !== 'GET'), false);
 });
 
@@ -43,6 +43,31 @@ test('a GitHub Release without its tag is rejected as a baseline', async () => {
   await assert.rejects(
     run(fake, { config: testConfig({ bootstrap: false }) }),
     (error) => error.code === 'NO_BASELINE' && error.message.includes('v0.14.1: MISSING_TAG'),
+  );
+});
+
+test('a prerelease is never selected as the previous stable baseline', async () => {
+  const fake = new FakeGitHub();
+  fake.tags.set('v0.14.1', { type: 'commit', sha: SHAS.feature });
+  fake.files.set(SHAS.feature, {
+    'package.json': { version: '0.14.1' },
+    'apps/server/package.json': { version: '0.14.1' },
+    'apps/web/package.json': { version: '0.14.1' },
+    'packages/schema/package.json': { version: '0.14.1' },
+    'package-lock.json': {
+      version: '0.14.1',
+      packages: {
+        '': { version: '0.14.1' },
+        'apps/server': { version: '0.14.1' },
+        'apps/web': { version: '0.14.1' },
+        'packages/schema': { version: '0.14.1' },
+      },
+    },
+  });
+  fake.releases.push({ tag_name: 'v0.14.1', draft: false, prerelease: true });
+  await assert.rejects(
+    run(fake, { config: testConfig({ bootstrap: false }) }),
+    (error) => error.code === 'NO_BASELINE' && error.message.includes('v0.14.1: prerelease'),
   );
 });
 
@@ -104,10 +129,10 @@ test('a stale semantic version is rejected even when its commit is on main', asy
   );
 });
 
-test('a synchronized tag on a non-main commit is rejected', async () => {
+test('a synchronized tag that is not the exact current main head is rejected', async () => {
   const fake = new FakeGitHub();
   fake.mainSha = SHAS.feature;
-  await assert.rejects(run(fake), (error) => error.code === 'DIVERGENT_TAG');
+  await assert.rejects(run(fake), (error) => error.code === 'STALE_MAIN_TAG');
 });
 
 test('missing, failed, or non-GitHub required CI fails closed', async () => {
