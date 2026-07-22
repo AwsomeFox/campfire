@@ -73,11 +73,24 @@ test('Preferences keeps catalog language separate from System formatting across 
 
   // Dashboard schedule banners use the explicit formatting preference too.
   const scheduledAt = '2026-07-21T17:05:00.000Z';
-  await page.route(`**/api/v1/campaigns/${seed().campaignId}/schedule/next`, async (route) => {
-    await route.fulfill({
-      contentType: 'application/json',
-      body: JSON.stringify({ id: 99_001, scheduledAt }),
-    });
+  await page.route(`**/api/v1/campaigns/${seed().campaignId}/summary`, async (route) => {
+    const response = await route.fetch();
+    const summary = await response.json();
+    await route.fulfill({ response, json: {
+      ...summary,
+      nextSession: {
+        id: 99_001,
+        campaignId: seed().campaignId,
+        scheduledAt,
+        durationMinutes: 240,
+        title: '',
+        location: '',
+        notes: '',
+        rsvps: [],
+        createdAt: scheduledAt,
+        updatedAt: scheduledAt,
+      },
+    } });
   });
   const expectedEnglishSchedule = await page.evaluate((value) => new Date(value).toLocaleString('en', {
     weekday: 'short',

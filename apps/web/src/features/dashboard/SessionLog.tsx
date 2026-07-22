@@ -1,7 +1,5 @@
-import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
-import { api, API } from '../../lib/api';
 import { formatDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
@@ -15,62 +13,83 @@ function firstLinePlain(text: string): string {
     .trim();
 }
 
-export function SessionLog({ campaignId, sessions }: { campaignId: number; sessions: SessionListItem[] }) {
+export function SessionLog({
+  campaignId,
+  sessions,
+  nextSession,
+  scheduleSync,
+}: {
+  campaignId: number;
+  sessions: SessionListItem[];
+  nextSession: ScheduledSessionWithRsvps | null;
+  scheduleSync: 'live' | 'stale' | 'offline';
+}) {
   useFormattingLocale();
   const sorted = [...sessions].sort((a, b) => b.number - a.number);
   const latest3 = sorted.slice(0, 3);
 
-  // Next scheduled session (issue #13) — fetched here (not part of the campaign
-  // summary) and rendered as a banner row; failures just hide the banner.
-  const [next, setNext] = useState<ScheduledSessionWithRsvps | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .get<ScheduledSessionWithRsvps | null>(`${API}/campaigns/${campaignId}/schedule/next`)
-      .then((n) => {
-        if (!cancelled) setNext(n);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [campaignId]);
+  const syncMessage = scheduleSync === 'offline'
+    ? 'Offline — showing last-known next-session details.'
+    : scheduleSync === 'stale'
+      ? 'Live updates interrupted — showing last-known next-session details.'
+      : null;
 
   return (
-    <div className="card elev-sm">
+    <section className="card elev-sm dashboard-session-log" aria-labelledby="dashboard-session-log-title">
       <div style={{ display: 'flex', alignItems: 'center' }}>
-        <span className="card-kicker">Session log</span>
+        <h2 id="dashboard-session-log-title" className="card-kicker">Session log</h2>
         <div style={{ flex: 1 }} />
         <Link to={`/c/${campaignId}/sessions`} className="btn btn-ghost" style={{ fontSize: 12 }}>
           All sessions →
         </Link>
       </div>
-      {next && (
+      {syncMessage && (
+        <p
+          role="status"
+          aria-live="polite"
+          className={scheduleSync === 'offline' ? 'cf-chip cf-chip-offline' : 'cf-chip cf-chip-neutral'}
+          style={{ display: 'block', width: 'fit-content', maxWidth: '100%', margin: '8px 0', whiteSpace: 'normal' }}
+        >
+          {syncMessage}
+        </p>
+      )}
+      {nextSession && (
         <Link
           to={`/c/${campaignId}/sessions?tab=schedule`}
           style={{
-            display: 'flex',
-            gap: 8,
-            alignItems: 'baseline',
+            display: 'grid',
+            gridTemplateColumns: 'minmax(0, 1fr) auto',
+            gap: '3px 12px',
+            alignItems: 'center',
             textDecoration: 'none',
             padding: '8px 12px',
+            minHeight: 48,
             marginBottom: 8,
             borderRadius: 8,
             background: 'var(--color-accent-900, rgba(145,132,217,0.12))',
             color: 'var(--color-text)',
           }}
         >
-          <span style={{ fontSize: 12, color: 'var(--color-accent)', flex: 'none' }}><GameIcon slug="calendar" size={12} className="inline align-text-bottom mr-1" />Next session</span>
-          <span style={{ fontSize: 13 }}>
-            {formatDateTime(next.scheduledAt, {
-              weekday: 'short',
-              month: 'short',
-              day: 'numeric',
-              hour: 'numeric',
-              minute: '2-digit',
-            })}
+          <span style={{ minWidth: 0 }}>
+            <span style={{ display: 'block', fontSize: 12, color: 'var(--color-accent-2-300)' }}>
+              <GameIcon slug="calendar" size={12} className="inline align-text-bottom mr-1" />Next session
+            </span>
+            <span style={{ display: 'block', fontSize: 13 }}>
+              {formatDateTime(nextSession.scheduledAt, {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+              })}
+            </span>
+            {nextSession.title && (
+              <span className="text-muted" style={{ display: 'block', fontSize: 12, overflowWrap: 'anywhere' }}>
+                {nextSession.title}
+              </span>
+            )}
           </span>
-          <span className="text-muted" style={{ fontSize: 11, marginLeft: 'auto', flex: 'none' }}>
+          <span className="text-muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
             RSVP →
           </span>
         </Link>
@@ -102,6 +121,6 @@ export function SessionLog({ campaignId, sessions }: { campaignId: number; sessi
           </Link>
         ))
       )}
-    </div>
+    </section>
   );
 }
