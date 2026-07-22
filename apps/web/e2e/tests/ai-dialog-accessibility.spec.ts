@@ -95,16 +95,26 @@ test.describe('AI drafting accessibility', () => {
     await trigger.click();
     const dialog = page.getByRole('dialog', { name: 'Draft an NPC with AI' });
     await dialog.getByRole('textbox', { name: 'Describe the NPC you want to draft' }).fill('A patient archivist.');
+    // Exercise the shared hook's container fallback rather than relying on this
+    // dialog's own tabIndex. During the request every child control is disabled.
+    await dialog.evaluate((element) => element.removeAttribute('tabindex'));
     await dialog.getByRole('button', { name: 'Draft NPC' }).click();
     await requestStarted;
 
     await expect(dialog).toHaveAttribute('aria-busy', 'true');
     await expect(dialog.getByRole('button', { name: 'Close AI drafting dialog' })).toBeDisabled();
     await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    await expect(
+      dialog.locator(
+        'button:enabled, a[href], input:enabled, select:enabled, textarea:enabled, [tabindex]:not([tabindex="-1"])',
+      ),
+    ).toHaveCount(0);
     await page.keyboard.press('Escape');
     await expect(dialog).toBeVisible();
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press('Tab');
     await expect(dialog).toBeFocused();
+    await expect(dialog).toHaveAttribute('tabindex', '-1');
     await page.mouse.click(2, 2);
     await expect(dialog).toBeVisible();
 

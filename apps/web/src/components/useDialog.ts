@@ -50,6 +50,15 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>({
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const inerted: Array<{ element: HTMLElement; hadAttribute: boolean; value: string | null }> = [];
+    const root = ref.current;
+    const addedFallbackTabIndex = Boolean(
+      root && (autoFocus || trapFocus) && !root.hasAttribute('tabindex'),
+    );
+
+    // The container is the last-resort focus target when a dialog opens with no
+    // enabled controls, or when every control becomes disabled while work is in
+    // flight. HTMLElement.focus() is otherwise a no-op for a plain <div>.
+    if (addedFallbackTabIndex) root?.setAttribute('tabindex', '-1');
 
     if (inertBackground) {
       // The app's overlays are rendered near their trigger rather than through a
@@ -74,7 +83,6 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>({
     }
 
     if (autoFocus) {
-      const root = ref.current;
       const first = root?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
       (initialFocusRef?.current ?? first ?? root)?.focus();
     }
@@ -84,6 +92,11 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>({
       for (const { element, hadAttribute, value } of inerted.reverse()) {
         if (hadAttribute) element.setAttribute('inert', value ?? '');
         else element.removeAttribute('inert');
+      }
+      // Do not erase a tab index that the caller deliberately changed while
+      // the overlay was mounted.
+      if (addedFallbackTabIndex && root?.getAttribute('tabindex') === '-1') {
+        root.removeAttribute('tabindex');
       }
       // Return focus to the trigger so keyboard users aren't dumped at the top.
       previouslyFocused?.focus?.();
@@ -107,6 +120,7 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>({
         );
         if (focusable.length === 0) {
           e.preventDefault();
+          if (!root.hasAttribute('tabindex')) root.setAttribute('tabindex', '-1');
           root.focus();
           return;
         }
