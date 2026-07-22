@@ -132,6 +132,20 @@ test.describe('shared notification controller', () => {
     await expect(bell).toBeFocused();
   });
 
+  test('announces the same notification load failure that it displays', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 0 } }));
+    await page.route(LIST_URL, (route) => route.fulfill({ status: 503, json: { message: 'Unavailable' } }));
+
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: 'Notifications', exact: true }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog.locator('p').filter({ hasText: "Couldn't load notifications." })).toHaveText("Couldn't load notifications.");
+    await expect(dialog.getByRole('status')).toHaveText("Couldn't load notifications.");
+    await expect(dialog).toHaveAccessibleDescription("Couldn't load notifications.");
+  });
+
   test('renders one responsive bell and does not overlap route refreshes', async ({ page }) => {
     const { campaignId } = seed();
     let requests = 0;

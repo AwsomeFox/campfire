@@ -555,7 +555,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
   const { count, items, loadError, closePanel, markRead, markAllRead } = notifications;
   const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
   const itemCountAnnouncement = items === null
-    ? (loadError ? 'Item count unavailable.' : 'Loading items.')
+    ? (loadError ? "Couldn't load notifications." : 'Loading items.')
     : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`;
 
   return (
