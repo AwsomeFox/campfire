@@ -2,9 +2,10 @@ name: Publish release
 
 on:
   push:
-    # GitHub's ref-filter syntax anchors the whole ref. This accepts only stable
-    # SemVer tags; the publisher independently validates the same invariant.
-    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    # GitHub tag filters are globs, not regular expressions. Narrow the trigger
+    # to version-shaped tags here; the publisher then applies the exact stable
+    # SemVer vX.Y.Z validation before any mutation.
+    tags: ['v[0-9]*.[0-9]*.[0-9]*']
 
 permissions:
   contents: read

@@ -3,12 +3,13 @@
 Campfire's release cadence is deliberately human-controlled. Repository automation
 does **not** count merged pull requests, decide that a release is due, open a version
 pull request, change a version, or create a tag. After roughly ten merges, the lead
-decides whether to prepare the next patch release.
+decides whether to prepare a patch, minor, or major release based on the changes.
 
 ## Manual release procedure
 
 1. Inspect `main`, the previous valid GitHub Release, and the changes since it.
-2. Open a normal patch-version pull request. It must set the same version in:
+2. Open a normal version pull request for the intended patch, minor, or major release.
+   It must set the same version in:
    `package.json`, every workspace `package.json`, and the root and workspace entries
    in `package-lock.json`. The server runtime reads `apps/server/package.json`; the
    signed-out UI build reads `apps/web/package.json`, so neither may drift.
@@ -75,10 +76,11 @@ git merge-base --is-ancestor 'v0.14.1^{commit}' origin/main
 Recovery is forward-only:
 
 1. Leave `v0.14.1` un-released; do not force-move or reuse it.
-2. Prepare the next patch (`v0.14.2`) through the normal version pull request, making
-   all package and lockfile values `0.14.2`.
+2. Prepare a new, higher version through the normal version pull request. For the
+   planned minor release, use `v0.15.0` and make all package and lockfile values
+   `0.15.0`.
 3. Wait for required CI on that exact `main` commit.
-4. Create and push the annotated `v0.14.2` tag manually.
+4. Create and push the annotated `v0.15.0` tag manually.
 
 Until a valid GitHub Release exists, release notes start from the explicit `v0.14.0`
 bootstrap pinned to commit `2bf2303ff73573819d006b9c7f95ee99ef30d1e0`.
@@ -88,7 +90,7 @@ divergent `v0.14.1` history cannot be selected accidentally.
 ## Failed-run recovery
 
 - A validation failure creates no image and no GitHub Release. Fix metadata or CI in
-  a new version PR and use a new patch version; do not move an already pushed tag.
+  a new version PR and use a new higher version; do not move an already pushed tag.
 - If image or GitHub API publishing fails transiently, rerun the same workflow. Image
   publication is content-addressed, and release creation is idempotent by tag.
 - If a draft or conflicting hand-made release already owns the tag, the publisher
