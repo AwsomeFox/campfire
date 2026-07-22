@@ -39,6 +39,7 @@ test.describe('combat-log accessibility formatting', () => {
     }
     expect(formatCombatLogEventSummary(cases[1].value)).toBe('Mira to Ash Hound: dealt 7 damage');
     expect(formatCombatLogEventSummary(cases[0].value)).toBe("Mira's turn");
+    expect(formatCombatLogEventSummary(cases[2].value)).toBe('Mira healed 4 HP');
   });
 
   test('keeps redacted-monster announcements limited to the already-safe event payload', () => {

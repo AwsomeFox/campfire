@@ -2804,9 +2804,9 @@ const EVENT_ICON: Record<string, string> = {
 
 /**
  * Persistent per-encounter combat log (issue #61). Renders the server-stored event
- * trail (damage/heal, conditions, deaths, turns) in chronological order — it survives
- * reload and updates live with the rest of the tracker. Scrollable so a long fight
- * doesn't push the page down.
+ * trail (damage/heal, conditions, deaths, rolls, turns, notes, overrides, and
+ * corrections) in chronological order — it survives reload and updates live with
+ * the rest of the tracker. Scrollable so a long fight doesn't push the page down.
  */
 function CombatLog({ events }: { events: EncounterEvent[] }) {
   const headingId = 'combat-log-heading';

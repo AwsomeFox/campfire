@@ -82,7 +82,7 @@ test.describe('combat log accessibility — remote clients', () => {
       );
       expect(damaged.ok()).toBe(true);
       await waitForAnnouncement(viewerPage, 'Outcome: took 1 damage');
-      await expect(log).toContainText('Secret Ash Hound: took 1 damage');
+      await expect(log).toContainText('Secret Ash Hound took 1 damage');
 
       const afterDamage = await announcements(viewerPage);
       expect(afterDamage.filter((message) => message.includes('Outcome: took 1 damage'))).toHaveLength(1);
@@ -122,9 +122,11 @@ test.describe('combat log accessibility — remote clients', () => {
       );
       expect(defeated.ok()).toBe(true);
       await waitForAnnouncement(viewerPage, 'Outcome: dropped to 0 HP');
-      await expect(log).toContainText('Secret Ash Hound: dropped to 0 HP');
+      await expect(log).toContainText('Secret Ash Hound dropped to 0 HP');
     } finally {
       await viewerContext.close();
+      const removed = await dmPage.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      expect(removed.ok()).toBe(true);
     }
   });
 
@@ -158,6 +160,8 @@ test.describe('combat log accessibility — remote clients', () => {
     } finally {
       await viewerContext.setOffline(false);
       await viewerContext.close();
+      const removed = await dmPage.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      expect(removed.ok()).toBe(true);
     }
   });
 

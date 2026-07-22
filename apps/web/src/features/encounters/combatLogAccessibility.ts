@@ -28,6 +28,11 @@ export function formatCombatLogEventSummary(event: EncounterEvent): string {
   const participants = actor && target && actor !== target ? `${actor} to ${target}` : target ?? actor;
 
   if (!participants) return detail || 'Combat log updated';
+  // The persisted damage/heal/condition/death details are verb phrases ("took
+  // 7 damage", "gained Prone", …). A target-only event therefore reads most
+  // naturally without an inserted colon and preserves the established visible-log
+  // wording used by players and existing browser journeys.
+  if (target && !actor) return detail ? `${target} ${detail}` : target;
   return detail ? `${participants}: ${detail}` : participants;
 }
 
