@@ -42,12 +42,44 @@ export const MONSTERS = [
   { name: 'Goblin Skirmisher', hpMax: 12, initiative: 7 },
 ] as const;
 
+const STATBLOCK_DATA = {
+  type: 'Construct',
+  size: 'Large',
+  challengeRating: 8,
+  armorClass: 18,
+  hitPoints: 126,
+  speed: { walk: 30, unit: 'feet' },
+  abilityScores: { strength: 20, dexterity: 12, constitution: 18, intelligence: 8, wisdom: 14, charisma: 10 },
+  specialAbilities: [{ name: 'Immutable Form', desc: 'The sentinel is immune to effects that would alter its form.' }],
+  actions: [
+    { name: 'Multiattack', desc: 'The sentinel makes two arc blade attacks.' },
+    {
+      name: 'Arc Blade',
+      desc: 'The sentinel swings a crackling blade at one creature within reach.',
+      attackBonus: 8,
+      damage: [{ expression: '2d10 + 5', type: 'lightning' }],
+    },
+    {
+      name: 'Static Burst',
+      desc: 'Each nearby creature must make a DC 16 Dexterity saving throw or take lightning damage.',
+      savingThrow: { dc: 16, ability: 'Dexterity' },
+      usage: { type: 'recharge', min: 5, max: 6, label: 'Recharge 5\u20136' },
+    },
+  ],
+  reactions: [{ name: 'Deflect', desc: 'The sentinel adds 2 to its armor class against one attack that would hit it.' }],
+  legendaryActions: [
+    { name: 'Sweep', desc: 'The sentinel makes one arc blade attack.', legendaryActionCost: 2 },
+  ],
+};
+
 export interface SeedData {
   baseURL: string;
   campaignId: number;
   encounterId: number;
   /** A second encounter that was started and then ended — must render read-only (#368). */
   endedEncounterId: number;
+  statblockEntryId: number;
+  statblockEncounterId: number;
   npcId: number;
   xpRecipients: Record<'active' | 'retired' | 'dead' | 'inactive', { id: number; name: string; xp: number }>;
   semantic: {
@@ -100,6 +132,17 @@ async function loginContext(baseURL: string, who: keyof typeof CREDS): Promise<A
   return ctx;
 }
 
+async function waitForInstall(ctx: APIRequestContext, jobId: string) {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const job = await okJson(ctx, 'get', `/api/v1/rules/packs/install-jobs/${jobId}`);
+    if (job.status === 'completed') return job;
+    if (job.status === 'failed') throw new Error(`Rule-pack fixture install failed: ${job.error ?? 'unknown error'}`);
+    if (Date.now() >= deadline) throw new Error(`Rule-pack fixture install ${jobId} timed out`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 export default async function globalSetup(config: FullConfig) {
   const baseURL = config.projects[0]?.use?.baseURL ?? 'http://127.0.0.1:8123';
   mkdirSync(AUTH_DIR, { recursive: true });
@@ -149,6 +192,40 @@ export default async function globalSetup(config: FullConfig) {
 
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.player, role: 'player' });
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
+
+  // Issue #621 browser fixture: use the public upload/search/encounter APIs so both the
+  // compendium reader and combat card consume exactly the same persisted dataJson string.
+  const statblockUpload = await okJson(admin, 'post', '/api/v1/rules/packs/upload', {
+    source: 'upload',
+    pack: {
+      slug: 'e2e-open5e-actions',
+      name: 'E2E Open5e action fixtures',
+      version: '1',
+      license: 'CC0',
+    },
+    entries: [
+      {
+        slug: 'fixture-sentinel',
+        name: 'Fixture Sentinel',
+        type: 'monster',
+        summary: 'Large construct · CR 8',
+        dataJson: JSON.stringify(STATBLOCK_DATA),
+      },
+    ],
+  });
+  await waitForInstall(admin, statblockUpload.id);
+  const [statblockEntry] = await okJson(dm, 'get', '/api/v1/rules/search?q=fixture%20sentinel&type=monster&pack=e2e-open5e-actions');
+  if (!statblockEntry) throw new Error('Uploaded statblock fixture was not searchable');
+  const statblockEntryId: number = statblockEntry.id;
+
+  const statblockEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'E2E — Complete Statblock',
+  });
+  const statblockEncounterId: number = statblockEncounter.id;
+  await okJson(dm, 'post', `/api/v1/encounters/${statblockEncounterId}/combatants`, {
+    kind: 'monster',
+    ruleEntryId: statblockEntryId,
+  });
 
   const npc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: NPC_NAME,
@@ -402,6 +479,8 @@ export default async function globalSetup(config: FullConfig) {
     campaignId,
     encounterId,
     endedEncounterId,
+    statblockEntryId,
+    statblockEncounterId,
     npcId,
     xpRecipients,
     semantic: {
