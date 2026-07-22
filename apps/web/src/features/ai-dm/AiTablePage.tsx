@@ -14,17 +14,17 @@
  *
  * Flow: the SSE stream folds into a `useReducer(transcriptReducer)`; a `turn.start`
  * opens a DM bubble that `narration.delta` fills token-by-token and `turn.end` closes
- * with a meta row. Between `turn.start` and `turn.end` the composer is locked
- * TABLE-WIDE — every client sees the same events, so every composer locks together.
- * Submitting a player action POSTs to /ai-dm/message (speaker-prefixed per #317) and
- * echoes locally; the AI's reply streams back in.
+ * with a meta row. Runtime state disables only Send; the local, campaign-scoped
+ * composer remains editable throughout narration and reconnects. An explicit submit
+ * POSTs to /ai-dm/message (speaker-prefixed per #317) and echoes locally; the AI's
+ * reply streams back in.
  *
  * The stuck-ladder banner + recovery levers (#340), co-DM draft buttons (#341), the
  * scribe (#342) and onboarding checklist (#343) are OWNED BY THEIR OWN ISSUES — this
  * page leaves clearly-marked seams for them (see the `session.stuck` / `session.state`
  * region below) and renders only a minimal fallback for the gated/off states.
  */
-import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -38,7 +38,7 @@ import {
   useAiDmSession,
   invalidateAiDm,
 } from '../../lib/query';
-import { useAiDmStream } from '../../lib/useAiDmStream';
+import { useAiDmStream, type AiDmStreamConnectionState } from '../../lib/useAiDmStream';
 import {
   transcriptReducer,
   loadTranscript,
@@ -56,6 +56,20 @@ import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetup
 import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
 import { Btn, Card, Chip, EmptyState, Skeleton, TextArea, TextInput, type ChipVariant } from '../../components/ui';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+import {
+  EMPTY_AI_TABLE_DRAFT,
+  aiTableDraftEquals,
+  aiTableDraftStorageKey,
+  aiTableSendBlockReason,
+  clearAiTableDraft,
+  isAiTableDraftPersisted,
+  loadAiTableDraft,
+  saveAiTableDraft,
+  type AiTableDraft,
+  type AiTableDraftScope,
+  type AiTableSendBlockReason,
+} from './tableDraft';
 
 /** game-icons slug for a tool chip's resource family — the shared map returns lucide
  * names, which this app doesn't bundle, so we render an equivalent <GameIcon> glyph. */
@@ -103,16 +117,16 @@ export default function AiTablePage() {
     (id) => (id !== undefined ? loadTranscript(id) : emptyTranscript),
   );
 
-  // `streaming` is the table-wide composer lock: true between turn.start and turn.end.
-  // It is driven purely by SSE events, so every client's composer locks in lockstep.
+  // `streaming` is the table-wide submission lock: true between turn.start and turn.end.
+  // It never disables local drafting; it only contributes to Send availability.
   const [streaming, setStreaming] = useState(false);
-
-  const [input, setInput] = useState('');
-  const [sceneField, setSceneField] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [streamConnection, setStreamConnection] = useState<AiDmStreamConnectionState>('connecting');
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+
+  useEffect(() => {
+    setStreamConnection(isDriver ? 'connecting' : 'closed');
+  }, [campaignId, isDriver]);
 
   // Party roster — resolves this member's character name for speaker attribution, and
   // is also a live surface refreshed by party-touching tool events.
@@ -198,16 +212,20 @@ export default function AiTablePage() {
           if (event.type === 'state' && event.state !== 'running') setStreaming(false);
         }
       },
-      onReconnect: () => {
+      onReconnect: async () => {
         if (campaignId === undefined) return;
         // Caught up after a drop: refetch the session + the live surfaces we may have missed.
         setStreaming(false);
-        invalidateAiDm(queryClient, campaignId);
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) });
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: queryKeys.aiDmSession(campaignId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.aiDmSeat(campaignId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) }),
+        ]);
       },
+      onConnectionStateChange: setStreamConnection,
     },
     { enabled: campaignId !== undefined && isDriver },
   );
@@ -218,51 +236,15 @@ export default function AiTablePage() {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [transcript.entries]);
 
-  // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
+  // Runtime states gate explicit submission only. The composer remains locally editable.
   const paused = session?.state === 'paused';
   const humanControl = session?.state === 'human_control';
-  const awaiting = session?.state === 'awaiting_players';
-  const locked = streaming || paused || humanControl || awaiting;
-  const lockReason = streaming
-    ? t('table.composerLockedStreaming')
-    : paused
-      ? t('table.composerLockedPaused')
-      : humanControl
-        ? t('table.composerLockedHuman')
-        : awaiting
-          ? t('table.composerLockedAwaiting')
-          : null;
 
   const placeholder = activeEncounter
     ? currentCombatantName
       ? t('table.composerPlaceholderTurn', { name: currentCombatantName })
       : t('table.composerPlaceholderCombat')
     : t('table.composerPlaceholder');
-
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    const text = input.trim();
-    if (!text || locked || submitting || campaignId === undefined) return;
-    setSubmitting(true);
-    setSubmitError(null);
-    // Prefix with the speaker identity (#317-safe flavour). The DM may also set the scene.
-    const body: { input: string; scene?: string } = {
-      input: `${speakerPrefix(memberName, characterName)} ${text}`,
-    };
-    if (isDm && sceneField.trim()) body.scene = sceneField.trim();
-    try {
-      await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
-      // Echo our own action immediately — the stream carries only the AI's narration back.
-      dispatch({ type: 'localPlayer', memberName, characterName, text });
-      setInput('');
-      setSceneField('');
-    } catch (err) {
-      // 403 (gate/turn cap) / 503 (provider) messages are shown verbatim.
-      setSubmitError(translateApiError(err, t));
-    } finally {
-      setSubmitting(false);
-    }
-  }
 
   async function onTogglePause() {
     if (campaignId === undefined) return;
@@ -421,41 +403,279 @@ export default function AiTablePage() {
 
       {/* Composer */}
       {canCompose ? (
-        <form onSubmit={onSubmit} className="flex flex-col gap-2">
-          {isDm && (
-            <TextInput
-              value={sceneField}
-              onChange={(e) => setSceneField(e.target.value)}
-              placeholder={t('table.sceneFieldPlaceholder')}
-              disabled={submitting}
-            />
-          )}
-          <div className="flex items-end gap-2">
-            <TextArea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  void onSubmit(e as unknown as FormEvent);
-                }
-              }}
-              placeholder={locked && lockReason ? lockReason : placeholder}
-              disabled={locked || submitting}
-              rows={2}
-              className="flex-1 resize-none"
-            />
-            <Btn type="submit" disabled={locked || submitting || !input.trim()}>
-              {submitting ? t('table.sending') : t('table.send')}
-            </Btn>
-          </div>
-          {lockReason && <p className="text-xs text-[var(--color-neutral-600)]">{lockReason}</p>}
-          {submitError && <p className="text-xs text-rose-400">{submitError}</p>}
-        </form>
+        <AiTableComposer
+          key={aiTableDraftStorageKey({ campaignId: campaignId!, userId: me?.user.id ?? 'anonymous' })}
+          campaignId={campaignId!}
+          userId={me?.user.id ?? 'anonymous'}
+          isDm={isDm}
+          memberName={memberName}
+          characterName={characterName}
+          placeholder={placeholder}
+          connection={streamConnection}
+          sessionLoading={sessionQuery.isLoading}
+          sessionError={sessionQuery.isError}
+          sessionStatus={session?.status}
+          sessionState={session?.state}
+          streaming={streaming}
+          tokensUsed={seat?.tokensUsed ?? 0}
+          tokenBudget={seat?.tokenBudget ?? 0}
+          onSubmitted={(text) =>
+            dispatch({ type: 'localPlayer', memberName, characterName, text })
+          }
+        />
       ) : (
         <p className="text-xs text-center text-[var(--color-neutral-600)] py-2">{t('table.viewerHint')}</p>
       )}
     </div>
+  );
+}
+
+const SEND_REASON_KEYS: Record<AiTableSendBlockReason, string> = {
+  composing: 'table.sendBlockedComposing',
+  submitting: 'table.sendBlockedSubmitting',
+  connecting: 'table.sendBlockedConnecting',
+  reconnecting: 'table.sendBlockedReconnecting',
+  connection_unavailable: 'table.sendBlockedConnectionUnavailable',
+  session_loading: 'table.sendBlockedSessionLoading',
+  session_unavailable: 'table.sendBlockedSessionUnavailable',
+  turn_active: 'table.composerLockedStreaming',
+  paused: 'table.composerLockedPaused',
+  human_control: 'table.composerLockedHuman',
+  awaiting_players: 'table.composerLockedAwaiting',
+  budget_exhausted: 'table.sendBlockedBudget',
+  empty: 'table.sendBlockedEmpty',
+};
+
+function hasDraft(draft: AiTableDraft): boolean {
+  return draft.input.length > 0 || draft.scene.length > 0;
+}
+
+/**
+ * The client-only composer is keyed by user + campaign by its parent, so campaign
+ * switches cannot flash or submit another campaign's text. Runtime state enters only
+ * the Send decision; neither field is disabled while the user drafts.
+ */
+function AiTableComposer({
+  campaignId,
+  userId,
+  isDm,
+  memberName,
+  characterName,
+  placeholder,
+  connection,
+  sessionLoading,
+  sessionError,
+  sessionStatus,
+  sessionState,
+  streaming,
+  tokensUsed,
+  tokenBudget,
+  onSubmitted,
+}: {
+  campaignId: number;
+  userId: number | string;
+  isDm: boolean;
+  memberName: string;
+  characterName?: string;
+  placeholder: string;
+  connection: AiDmStreamConnectionState;
+  sessionLoading: boolean;
+  sessionError: boolean;
+  sessionStatus?: 'idle' | 'running' | 'paused';
+  sessionState?: 'running' | 'awaiting_players' | 'paused' | 'human_control';
+  streaming: boolean;
+  tokensUsed: number;
+  tokenBudget: number;
+  onSubmitted: (text: string) => void;
+}) {
+  const { t } = useTranslation();
+  const scope = useMemo<AiTableDraftScope>(() => ({ campaignId, userId }), [campaignId, userId]);
+  const [draft, setDraft] = useState<AiTableDraft>(() => loadAiTableDraft(scope));
+  const draftRef = useRef(draft);
+  const [persisted, setPersisted] = useState(
+    () => !hasDraft(draft) || isAiTableDraftPersisted(scope, draft),
+  );
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [composing, setComposing] = useState(false);
+  const composingRef = useRef(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const mountedRef = useRef(true);
+  const formRef = useRef<HTMLFormElement>(null);
+  const idPrefix = useId();
+  const reasonId = `${idPrefix}-send-reason`;
+  const storageWarningId = `${idPrefix}-storage-warning`;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasDraft(draft) || persisted) return;
+    setPersisted(saveAiTableDraft(scope, draft));
+  }, [draft, persisted, scope]);
+
+  useEffect(() => {
+    if (persisted || !hasDraft(draft)) return;
+    const protectDraft = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', protectDraft);
+    return () => window.removeEventListener('beforeunload', protectDraft);
+  }, [draft, persisted]);
+
+  const replaceDraft = (next: AiTableDraft) => {
+    draftRef.current = next;
+    setDraft(next);
+    if (hasDraft(next)) setPersisted(saveAiTableDraft(scope, next));
+    else {
+      clearAiTableDraft(scope);
+      setPersisted(true);
+    }
+  };
+
+  const blockReason = aiTableSendBlockReason({
+    input: draft.input,
+    composing,
+    submitting,
+    connection,
+    sessionLoading,
+    sessionError,
+    streaming,
+    sessionStatus,
+    sessionState,
+    tokensUsed,
+    tokenBudget,
+  });
+  const blockMessage = blockReason ? t(SEND_REASON_KEYS[blockReason]) : null;
+
+  async function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    const currentBlockReason = aiTableSendBlockReason({
+      input: draftRef.current.input,
+      composing: composingRef.current,
+      submitting,
+      connection,
+      sessionLoading,
+      sessionError,
+      streaming,
+      sessionStatus,
+      sessionState,
+      tokensUsed,
+      tokenBudget,
+    });
+    if (currentBlockReason) return;
+
+    const snapshot = { ...draftRef.current };
+    const text = snapshot.input.trim();
+    const body: { input: string; scene?: string } = {
+      input: `${speakerPrefix(memberName, characterName)} ${text}`,
+    };
+    if (isDm && snapshot.scene.trim()) body.scene = snapshot.scene.trim();
+
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
+      if (mountedRef.current) {
+        // Echo only into the campaign that still owns this mounted composer.
+        onSubmitted(text);
+        // Edits made while the request was in flight are a new draft and survive.
+        if (aiTableDraftEquals(draftRef.current, snapshot)) replaceDraft({ ...EMPTY_AI_TABLE_DRAFT });
+      } else {
+        // A route change unmounted us. Clear only if no newly-mounted composer has
+        // changed this campaign's draft in the meantime.
+        const current = loadAiTableDraft(scope);
+        if (aiTableDraftEquals(current, snapshot)) clearAiTableDraft(scope);
+      }
+    } catch (err) {
+      if (mountedRef.current) setSubmitError(translateApiError(err, t));
+    } finally {
+      if (mountedRef.current) setSubmitting(false);
+    }
+  }
+
+  const discard = () => {
+    replaceDraft({ ...EMPTY_AI_TABLE_DRAFT });
+    setSubmitError(null);
+    setConfirmDiscard(false);
+  };
+
+  return (
+    <>
+      <form ref={formRef} onSubmit={onSubmit} className="flex flex-col gap-2" data-testid="ai-table-composer">
+        {isDm && (
+          <TextInput
+            value={draft.scene}
+            onChange={(event) => replaceDraft({ ...draftRef.current, scene: event.target.value })}
+            placeholder={t('table.sceneFieldPlaceholder')}
+            aria-label={t('table.sceneFieldLabel')}
+          />
+        )}
+        <div className="flex items-end gap-2">
+          <TextArea
+            value={draft.input}
+            onChange={(event) => replaceDraft({ ...draftRef.current, input: event.target.value })}
+            onCompositionStart={() => {
+              composingRef.current = true;
+              setComposing(true);
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
+              setComposing(false);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+              if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
+              event.preventDefault();
+              formRef.current?.requestSubmit();
+            }}
+            placeholder={placeholder}
+            aria-label={t('table.messageLabel')}
+            aria-describedby={!persisted ? storageWarningId : undefined}
+            rows={2}
+            className="flex-1 resize-none"
+          />
+          <Btn type="submit" disabled={blockReason !== null} aria-describedby={blockReason ? reasonId : undefined}>
+            {submitting ? t('table.sending') : t('table.send')}
+          </Btn>
+        </div>
+        <div className="min-h-5 flex items-start justify-between gap-3">
+          <div>
+            {blockMessage && (
+              <p id={reasonId} role="status" aria-live="polite" className="text-xs text-[var(--color-neutral-600)]">
+                {blockMessage}
+              </p>
+            )}
+            {!persisted && hasDraft(draft) && (
+              <p id={storageWarningId} role="alert" className="text-xs text-amber-400 mt-1">
+                {t('table.draftStorageWarning')}
+              </p>
+            )}
+            {submitError && <p role="alert" className="text-xs text-rose-400 mt-1">{submitError}</p>}
+          </div>
+          {hasDraft(draft) && (
+            <Btn type="button" ghost onClick={() => setConfirmDiscard(true)} className="shrink-0">
+              {t('table.discardDraft')}
+            </Btn>
+          )}
+        </div>
+      </form>
+      {confirmDiscard && (
+        <ConfirmDialog
+          title={t('table.discardDraftTitle')}
+          body={t('table.discardDraftBody')}
+          confirmLabel={t('table.discardDraftConfirm')}
+          cancelLabel={t('table.discardDraftCancel')}
+          onConfirm={discard}
+          onCancel={() => setConfirmDiscard(false)}
+        />
+      )}
+    </>
   );
 }
 
