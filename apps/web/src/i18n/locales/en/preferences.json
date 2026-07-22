@@ -15,7 +15,7 @@
     "language": "Language",
     "languageLabel": "Display language",
     "languageSystem": "System (browser default)",
-    "languageNote": "Changes the app's language on your devices. Dates and numbers follow this too.",
+    "languageNote": "System uses your browser's regional date and number formats. The display language falls back to English when a translation isn't available.",
     "profile": "Profile",
     "displayName": "Display name",
     "mcpTitle": "Connect an AI (MCP)",
