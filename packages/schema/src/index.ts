@@ -3893,6 +3893,7 @@ export const CampaignEventType = z.enum([
   'encounter.updated',
   'encounter.deleted',
   'encounter.ping',
+  'schedule.updated',
   'membership.revoked',
   'treasury.updated',
 ]);
@@ -3918,6 +3919,16 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     encounterId: Id,
     ping: MapPing,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #790: a scheduled session was created, edited, cancelled, or received
+    // an RSVP. This remains an id-only invalidation signal: clients refetch the
+    // permission-checked campaign projection so a reschedule replaces every detail
+    // together and a cancellation clears the card instead of merging stale fields.
+    type: z.literal('schedule.updated'),
+    campaignId: Id,
+    scheduleId: Id,
     at: IsoDate,
   }),
   z.object({
