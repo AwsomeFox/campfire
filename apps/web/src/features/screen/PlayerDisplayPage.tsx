@@ -49,6 +49,45 @@ const HP_BAND_LABEL: Record<HpBand, string> = {
 const HP_BAND_PCT: Record<HpBand, number> = { healthy: 100, bloodied: 50, critical: 20, down: 0 };
 const HP_BAND_TONE: Record<HpBand, string> = { healthy: '', bloodied: 'low', critical: 'crit', down: 'crit' };
 
+type FullscreenNotice = { kind: 'info' | 'error'; message: string };
+
+const FULLSCREEN_UNSUPPORTED =
+  "Fullscreen isn't available in this browser. Use the browser's presentation or cast controls, or share this window instead.";
+
+function fullscreenAvailable(): boolean {
+  try {
+    return (
+      document.fullscreenEnabled === true &&
+      typeof document.documentElement.requestFullscreen === 'function' &&
+      typeof document.exitFullscreen === 'function'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function fullscreenActive(): boolean {
+  try {
+    return document.fullscreenElement != null;
+  } catch {
+    return false;
+  }
+}
+
+function fullscreenFailure(action: 'enter' | 'exit', error: unknown): string {
+  if (action === 'exit') {
+    return "Couldn't exit fullscreen. Press Escape, then try the control again.";
+  }
+  if (error instanceof DOMException && error.name === 'NotAllowedError') {
+    return 'Fullscreen was blocked. Allow fullscreen for this site in your browser settings, keep this tab active, then try again.';
+  }
+  if (error instanceof DOMException && error.name === 'InvalidStateError') {
+    return "Fullscreen couldn't start because the display is not ready. Keep this tab active, then try again.";
+  }
+  const detail = error instanceof Error && error.message.trim() ? ` (${error.message.trim()})` : '';
+  return `Fullscreen couldn't start${detail}. Keep this tab active, allow fullscreen for this site, then try again.`;
+}
+
 export default function PlayerDisplayPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
@@ -69,6 +108,12 @@ export default function PlayerDisplayPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [controlsVisible, setControlsVisible] = useState(true);
+  const [fullscreenSupported, setFullscreenSupported] = useState(fullscreenAvailable);
+  const [isFullscreen, setIsFullscreen] = useState(fullscreenActive);
+  const [fullscreenPending, setFullscreenPending] = useState(false);
+  const [fullscreenNotice, setFullscreenNotice] = useState<FullscreenNotice | null>(null);
+  const fullscreenActiveRef = useRef(isFullscreen);
+  const controlsRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     if (!Number.isFinite(cid)) return;
@@ -172,30 +217,122 @@ export default function PlayerDisplayPage() {
     prevAnnounceRef.current = { hp, turnKey };
   }, [encounter, announce]);
 
+  // Fullscreen can end without this control being used (Escape, browser chrome,
+  // or another caller), so the browser events — not the request promise — own
+  // the displayed state. fullscreenerror also catches failures that are not
+  // accompanied by a useful rejected value.
+  const syncFullscreen = useCallback(() => {
+    const next = fullscreenActive();
+    const previous = fullscreenActiveRef.current;
+    fullscreenActiveRef.current = next;
+    setIsFullscreen(next);
+    setFullscreenSupported(fullscreenAvailable());
+    if (previous && !next) {
+      setFullscreenNotice({
+        kind: 'info',
+        message: 'Fullscreen ended. Select Enter fullscreen to start it again.',
+      });
+    } else if (!previous && next) {
+      setFullscreenNotice(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenError = () => {
+      setFullscreenSupported(fullscreenAvailable());
+      setFullscreenNotice((prev) =>
+        prev?.kind === 'error'
+          ? prev
+          : {
+              kind: 'error',
+              message:
+                'Fullscreen failed. Keep this tab active, allow fullscreen for this site, and try again. You can also use the browser presentation controls.',
+            },
+      );
+    };
+
+    document.addEventListener('fullscreenchange', syncFullscreen);
+    document.addEventListener('fullscreenerror', handleFullscreenError);
+    return () => {
+      document.removeEventListener('fullscreenchange', syncFullscreen);
+      document.removeEventListener('fullscreenerror', handleFullscreenError);
+    };
+  }, [syncFullscreen]);
+
   // Auto-hide the exit/fullscreen controls after a few idle seconds so the cast
-  // is clean; any mouse move brings them back.
+  // is clean. Pointer, touch, keyboard, and focus activity all bring them back;
+  // focused controls and recovery guidance remain visible.
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    function ping() {
-      setControlsVisible(true);
+    function clearHideTimer() {
       if (hideTimer.current) clearTimeout(hideTimer.current);
-      hideTimer.current = setTimeout(() => setControlsVisible(false), 3500);
+      hideTimer.current = null;
     }
-    window.addEventListener('mousemove', ping);
+
+    function scheduleHide() {
+      clearHideTimer();
+      hideTimer.current = setTimeout(() => {
+        if (!controlsRef.current?.contains(document.activeElement)) setControlsVisible(false);
+      }, 3500);
+    }
+
+    function ping(event?: Event) {
+      setControlsVisible(true);
+      if (event?.type === 'focusin' && controlsRef.current?.contains(event.target as Node)) {
+        clearHideTimer();
+      } else {
+        scheduleHide();
+      }
+    }
+
+    window.addEventListener('pointermove', ping, { passive: true });
+    window.addEventListener('pointerdown', ping, { passive: true });
+    window.addEventListener('keydown', ping);
+    window.addEventListener('focusin', ping);
+    window.addEventListener('focusout', ping);
     ping();
     return () => {
-      window.removeEventListener('mousemove', ping);
-      if (hideTimer.current) clearTimeout(hideTimer.current);
+      window.removeEventListener('pointermove', ping);
+      window.removeEventListener('pointerdown', ping);
+      window.removeEventListener('keydown', ping);
+      window.removeEventListener('focusin', ping);
+      window.removeEventListener('focusout', ping);
+      clearHideTimer();
     };
   }, []);
 
-  const toggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      void document.exitFullscreen?.();
-    } else {
-      void document.documentElement.requestFullscreen?.();
+  const toggleFullscreen = useCallback(async () => {
+    if (!fullscreenAvailable()) {
+      setFullscreenSupported(false);
+      // Unsupported fullscreen is derived as an informational notice below. Do
+      // not retain a second error notice that could resurface if capability is
+      // later restored by the browser or display environment.
+      setFullscreenNotice(null);
+      return;
     }
-  }, []);
+
+    const action = fullscreenActive() ? 'exit' : 'enter';
+    setFullscreenPending(true);
+    setFullscreenNotice(null);
+    try {
+      if (action === 'exit') {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+      // Standards-compliant browsers dispatch fullscreenchange before resolving,
+      // but synchronizing here also handles implementations that resolve first.
+      syncFullscreen();
+    } catch (fullscreenError) {
+      setFullscreenSupported(fullscreenAvailable());
+      setFullscreenNotice({ kind: 'error', message: fullscreenFailure(action, fullscreenError) });
+    } finally {
+      // The async browser operation — not fullscreenchange/fullscreenerror — owns
+      // pending state. Browsers may dispatch either event before the promise
+      // settles, and the control must remain busy/disabled until it actually does.
+      setFullscreenPending(false);
+    }
+  }, [syncFullscreen]);
 
   if (!Number.isFinite(cid)) {
     return <CenteredMessage icon="tv" title="No campaign selected." />;
@@ -230,24 +367,52 @@ export default function PlayerDisplayPage() {
   const combatants = encounter ? safeCombatants(encounter.combatants) : [];
   const currentId =
     encounter && encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
+  const displayedFullscreenNotice = fullscreenSupported
+    ? fullscreenNotice
+    : ({ kind: 'info', message: FULLSCREEN_UNSUPPORTED } satisfies FullscreenNotice);
+  const keepControlsVisible = controlsVisible || displayedFullscreenNotice != null;
 
   return (
-    <div className="cf-screen">
+    <main className="cf-screen">
       <style>{SCREEN_CSS}</style>
 
-      {/* Floating controls (auto-hide) */}
-      <div className="cf-screen-controls" style={{ opacity: controlsVisible ? 1 : 0 }}>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => navigate(`/c/${cid}`)}
-          title="Exit the display"
-        >
-          ✕ Exit
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={toggleFullscreen} title="Toggle fullscreen">
-          ⛶ Fullscreen
-        </button>
+      {/* Floating operator chrome stays outside the player-facing content panels. */}
+      <div
+        ref={controlsRef}
+        className="cf-screen-control-stack"
+        style={{ opacity: keepControlsVisible ? 1 : 0, pointerEvents: keepControlsVisible ? 'auto' : 'none' }}
+      >
+        <div className="cf-screen-controls">
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => navigate(`/c/${cid}`)}
+            title="Exit the display"
+          >
+            ✕ Exit
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => void toggleFullscreen()}
+            disabled={!fullscreenSupported || fullscreenPending}
+            aria-pressed={isFullscreen}
+            aria-busy={fullscreenPending}
+            aria-describedby={displayedFullscreenNotice ? 'cf-screen-fullscreen-notice' : undefined}
+            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          >
+            <span aria-hidden="true">⛶</span> {isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          </button>
+        </div>
+        {displayedFullscreenNotice && (
+          <p
+            id="cf-screen-fullscreen-notice"
+            className={`cf-screen-fullscreen-notice ${displayedFullscreenNotice.kind === 'error' ? 'error' : ''}`}
+            role={displayedFullscreenNotice.kind === 'error' ? 'alert' : 'status'}
+          >
+            {displayedFullscreenNotice.message}
+          </p>
+        )}
       </div>
 
       {/* Header: campaign + where the party is */}
@@ -383,7 +548,7 @@ export default function PlayerDisplayPage() {
           </section>
         )}
       </div>
-    </div>
+    </main>
   );
 }
 
@@ -486,14 +651,36 @@ const SCREEN_CSS = `
   padding: clamp(16px, 3vw, 48px);
   font-family: var(--font-body);
 }
-.cf-screen-controls {
+.cf-screen-control-stack {
   position: fixed;
   top: 14px;
   right: 14px;
-  display: flex;
-  gap: 8px;
+  width: min(420px, calc(100vw - 28px));
   z-index: 20;
   transition: opacity 0.4s ease;
+}
+.cf-screen-controls {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cf-screen-fullscreen-notice {
+  margin: 8px 0 0 auto;
+  width: fit-content;
+  max-width: 38ch;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 94%, transparent);
+  color: var(--color-neutral-200);
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 38%, transparent);
+}
+.cf-screen-fullscreen-notice.error {
+  border-color: color-mix(in srgb, var(--color-danger, #e5735b) 58%, transparent);
+  color: #fff;
 }
 .cf-screen-head { margin-bottom: clamp(16px, 2.4vw, 32px); }
 .cf-screen-head h1 {
