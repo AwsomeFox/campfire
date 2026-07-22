@@ -84,6 +84,8 @@ test.describe('encounter dice — apply rolled damage', () => {
       // Issue #744: the seeded "Ambush" encounter was ended above so the drill could
       // start; reopen it so the combat-tracker suite finds it RUNNING again. Safe to
       // call unconditionally — /reopen 400s on a non-'ended' status, which we ignore.
+      // Restoring the seed fight keeps the one-live-fight invariant intact for every
+      // subsequent serial spec that assumes a single RUNNING encounter.
       const seedEncounterId = seed().encounterId;
       await dm.post(`/api/v1/encounters/${seedEncounterId}/reopen`).catch(() => undefined);
       // Dispose the API contexts so they don't leak across the worker.
