@@ -1,6 +1,6 @@
 import express from 'express';
 import type { Server } from 'node:http';
-import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
+import { createHash, createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 
 /**
  * Minimal fake OIDC identity provider for e2e tests, run in-process on an
@@ -31,7 +31,17 @@ export interface FakeIdp {
   server: Server;
   /** Queues the claims to return for the next /authorize -> /token round trip. Keyed by the `code` minted for that request. */
   setNextUser(user: FakeIdpUser): void;
+  /** Controls one authorization round trip, then resets to success. */
+  setNextMode(mode: FakeIdpMode): void;
   close(): Promise<void>;
+}
+
+export type FakeIdpMode = 'success' | 'cancel' | 'token_error' | 'missing_claims';
+
+interface PendingAuthorization {
+  user: FakeIdpUser;
+  mode: FakeIdpMode;
+  codeChallenge?: string;
 }
 
 const b64url = (input: Buffer | string): string =>
@@ -56,7 +66,8 @@ export async function startFakeIdp(): Promise<FakeIdp> {
   const publicJwks = { keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] };
 
   let nextUser: FakeIdpUser = { sub: 'default-sub', preferred_username: 'defaultuser', email: 'default@example.com', name: 'Default User' };
-  const pendingCodes = new Map<string, FakeIdpUser>();
+  let nextMode: FakeIdpMode = 'success';
+  const pendingCodes = new Map<string, PendingAuthorization>();
 
   const app = express();
   app.use(express.urlencoded({ extended: false }));
@@ -86,25 +97,59 @@ export async function startFakeIdp(): Promise<FakeIdp> {
 
   // No real login screen: immediately "authenticates" as whatever setNextUser() queued and redirects back.
   app.get('/authorize', (req, res) => {
-    const { redirect_uri, state } = req.query as Record<string, string>;
-    const code = `code-${Math.random().toString(36).slice(2)}`;
-    pendingCodes.set(code, nextUser);
+    const { redirect_uri, state, code_challenge } = req.query as Record<string, string>;
+    const mode = nextMode;
+    nextMode = 'success';
     const url = new URL(redirect_uri);
-    url.searchParams.set('code', code);
     if (state) url.searchParams.set('state', state);
+    if (mode === 'cancel') {
+      url.searchParams.set('error', 'access_denied');
+      url.searchParams.set('error_description', 'PROVIDER_PRIVATE_CANCELLATION_DETAIL');
+      res.redirect(url.toString());
+      return;
+    }
+    const code = `code-${Math.random().toString(36).slice(2)}`;
+    pendingCodes.set(code, { user: nextUser, mode, codeChallenge: code_challenge });
+    url.searchParams.set('code', code);
     res.redirect(url.toString());
   });
 
   app.post('/token', (req, res) => {
-    const { code } = req.body as Record<string, string>;
-    const user = pendingCodes.get(code);
-    if (!user) {
+    const { code, code_verifier } = req.body as Record<string, string>;
+    const pending = pendingCodes.get(code);
+    if (!pending) {
       res.status(400).json({ error: 'invalid_grant' });
       return;
     }
     pendingCodes.delete(code);
+    const actualChallenge = code_verifier
+      ? b64url(createHash('sha256').update(code_verifier).digest())
+      : '';
+    if (pending.codeChallenge && actualChallenge !== pending.codeChallenge) {
+      res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'PROVIDER_PRIVATE_PKCE_DETAIL',
+      });
+      return;
+    }
+    if (pending.mode === 'token_error') {
+      res.status(401).json({
+        error: 'invalid_client',
+        error_description: 'PROVIDER_PRIVATE_TOKEN_DETAIL',
+      });
+      return;
+    }
+    if (pending.mode === 'missing_claims') {
+      res.json({
+        access_token: `access-${Math.random().toString(36).slice(2)}`,
+        token_type: 'Bearer',
+        expires_in: 300,
+      });
+      return;
+    }
 
     const now = Math.floor(Date.now() / 1000);
+    const user = pending.user;
     const idToken = signRs256Jwt(
       {
         iss: issuer,
@@ -141,6 +186,9 @@ export async function startFakeIdp(): Promise<FakeIdp> {
     server,
     setNextUser(user: FakeIdpUser) {
       nextUser = user;
+    },
+    setNextMode(mode: FakeIdpMode) {
+      nextMode = mode;
     },
     close() {
       return new Promise((resolve, reject) => {

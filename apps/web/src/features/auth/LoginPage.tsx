@@ -223,7 +223,9 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [showLocalForm, setShowLocalForm] = useState(false);
+  const [showLocalForm, setShowLocalForm] = useState(
+    () => new URLSearchParams(location.search).get('local') === '1',
+  );
 
   if (!loading && status?.setupRequired) {
     return <Navigate to="/setup" replace />;
