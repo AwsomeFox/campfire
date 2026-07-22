@@ -161,12 +161,13 @@ export class AttachmentsController {
    * AttachmentsService.resolveFile / thumbnail.ts).
    */
   @Get(':id/file')
-  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses are privately cacheable (strong ETag + long-lived Cache-Control, no `immutable` so revalidation still runs the auth check); a matching If-None-Match returns 304. Clients should append `?v=<versionToken>` (from the attachment row) so an authorization change yields a new URL. `?size=thumb` serves a downscaled PNG preview.' })
+  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Hidden (DM-only) attachments return 404 for non-DM roles, except encounter maps when fog is fully revealed (fog === null). Responses are privately cacheable (strong ETag + long-lived Cache-Control, no `immutable` so revalidation still runs the auth check); a matching If-None-Match returns 304. Clients should append `?v=<versionToken>` (from the attachment row) so an authorization change yields a new URL. `?size=thumb` serves a downscaled PNG preview.' })
   @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for the full-size original; `thumb` for a downscaled PNG preview.' })
   @ApiQuery({ name: 'v', required: false, type: String, description: 'Authorization-aware version token (see AttachmentsService.versionToken). Optional but recommended — clients should append it so a content/hidden change produces a new URL.' })
   @ApiResponse({ status: 200, description: 'Raw file bytes, with Content-Type/Content-Disposition/ETag set from the stored attachment.' })
   @ApiResponse({ status: 304, description: 'Client cache is current (If-None-Match matched the ETag).' })
   @ApiResponse({ status: 400, description: 'Unsupported `size` value.' })
+  @ApiResponse({ status: 404, description: 'Attachment not found or hidden.' })
   async getFile(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
@@ -180,19 +181,16 @@ export class AttachmentsController {
     const row = await this.attachmentsService.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
 
-    // Issue #97: a hidden (DM-only, unrevealed) attachment must be indistinguishable
+    // Issue #97 / #523: a hidden (DM-only, unrevealed) attachment must be indistinguishable
     // from a nonexistent one for non-DM members — otherwise sequential integer ids
     // let a player enumerate & fetch every staged handout. 404 (not 403) so the
     // response leaks nothing about whether the id exists, matching how hidden
     // quests/npcs are treated (#42). The DM reveals it (POST :id/reveal) to share.
+    // Encounter map attachments are gated on role === 'dm' OR fog === null (fully revealed map);
+    // non-DM GET on a hidden encounter map with active fog (fog !== null) returns 404.
     if (row.hidden && role !== 'dm') {
-      // Issue #259: a fogged encounter's battle map stays hidden (DM-only) as a handout so it
-      // never surfaces raw on the player Handouts card — but the fogged encounter canvas still
-      // renders it for every member, so a hidden attachment that IS an encounter's map remains
-      // fetchable here by non-DM. All other hidden attachments stay 404 (indistinguishable from
-      // nonexistent, so ids can't be enumerated).
-      const servesEncounterMap = await this.attachmentsService.isEncounterMap(id, row.campaignId);
-      if (!servesEncounterMap) {
+      const mapFog = await this.attachmentsService.getEncounterMapFog(id, row.campaignId);
+      if (!mapFog.isMap || mapFog.fog !== null) {
         throw new NotFoundException(`Attachment ${id} not found`);
       }
     }
