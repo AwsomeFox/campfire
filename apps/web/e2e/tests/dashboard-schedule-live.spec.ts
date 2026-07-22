@@ -156,7 +156,11 @@ test('dashboard next-session projection stays live across remote writes, campaig
 
     await json<unknown>(await writer.request.delete(`/api/v1/schedule/${created.id}`), 'cancel remotely');
     await expect(page.getByText('E2E790 Gamma', { exact: true })).toHaveCount(0);
-    await expect(page.locator('.dashboard-session-log a').filter({ hasText: 'Next session' })).toHaveCount(0);
+    // The global-setup seed 'DLRNAV Saturday Game' (2032-07-24) is the
+    // campaign's only remaining future session, so once the test-authored
+    // Gamma session is cancelled the live projection falls back to it —
+    // proving the deletion propagated rather than the card staying stale.
+    await expect(page.locator('.dashboard-session-log a').filter({ hasText: 'DLRNAV Saturday Game' })).toBeVisible();
   } finally {
     await Promise.all([reader.close(), writer.close()]);
   }
