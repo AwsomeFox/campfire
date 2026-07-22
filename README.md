@@ -144,7 +144,7 @@ running on 8080 — maps to the container's internal 8080).
 | `OIDC_SCOPE` | `openid profile email` | OIDC scopes requested |
 | `OIDC_GROUPS_CLAIM` | `groups` | Claim in the ID token holding the user's group memberships |
 | `OIDC_ADMIN_GROUP` | *(unset)* | Group name that grants the Campfire **server admin** role (campaign roles dm/player/viewer are per-campaign memberships managed in-app) |
-| `OIDC_ALLOWED_GROUP` | *(unset)* | Group name required to **sign in at all** — users outside it get a 403 and no account is provisioned. Unset = any authenticated IdP user may sign in. Members of `OIDC_ADMIN_GROUP` always have access |
+| `OIDC_ALLOWED_GROUP` | *(unset)* | Group name required to **sign in at all** — users outside it reach safe sign-in recovery and no account is provisioned. Unset = any authenticated IdP user may sign in. Members of `OIDC_ADMIN_GROUP` always have access |
 | `OIDC_ALLOW_INSECURE` | *(unset)* | Set to allow OIDC over plain HTTP — dev/testing only, never in production |
 | `OPENAI_API_KEY` | *(unset)* | Fallback credential for a configured `openai` / OpenAI-compatible server-default provider when no encrypted key is stored. The admin UI reports `Environment credential`; the value is never returned or logged |
 | `ANTHROPIC_API_KEY` | *(unset)* | Fallback credential for a configured `anthropic` server-default provider when no encrypted key is stored. The admin UI reports `Environment credential`; the value is never returned or logged |
@@ -215,6 +215,11 @@ an Authentik group (e.g. `campfire-admins`) to `OIDC_ADMIN_GROUP` so its members
 Campfire server admins. Campaign access and `dm` / `player` / `viewer` roles are still
 assigned inside Campfire. Campfire itself never needs a public port in this setup
 — only Traefik does; Campfire and Traefik talk over the Docker network.
+
+Expected SSO failures return to Campfire's accessible sign-in recovery page.
+Users can start a fresh SSO flow and give an operator the displayed support
+reference; provider payloads, authorization codes, state/PKCE values, tokens,
+claims, and secrets are never placed in the recovery URL or UI.
 
 ## AI Dungeon Master (experimental)
 

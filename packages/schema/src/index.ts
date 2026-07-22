@@ -2176,6 +2176,24 @@ export const AuthStatus = z.object({
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
 
+/**
+ * Safe, public reasons an OIDC browser flow can land on Campfire's recovery
+ * page. These values are deliberately coarse: provider responses, OAuth
+ * codes, state, PKCE material, tokens, claims, and configuration details must
+ * never be copied into the recovery URL or rendered by the web client.
+ */
+export const OidcRecoveryCategory = z.enum([
+  'cancelled',
+  'flow_expired',
+  'state_pkce_mismatch',
+  'provider_unavailable',
+  'client_token_failure',
+  'missing_claims',
+  'group_denied',
+  'account_disabled',
+]);
+export type OidcRecoveryCategory = z.infer<typeof OidcRecoveryCategory>;
+
 export const ServerSettings = z.object({
   allowLocalLogin: z.boolean().default(true), // gate for non-admin local login
   allowSignup: z.boolean().default(false), // gate for self-service signup (POST /auth/signup) — off by default

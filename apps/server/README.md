@@ -221,10 +221,13 @@ free-text string, not a FK).
   "Driving Campfire as an AI agent" below.
 - `POST /auth/logout` — deletes the session row, clears the cookie, 204.
 - `GET /auth/oidc/login` (public) — 302 to the identity provider's
-  authorization endpoint, or 503 if OIDC isn't configured or discovery
-  currently fails. See below.
+  authorization endpoint. If OIDC cannot start, 302s same-origin to the web
+  recovery page with only a safe category and random support reference.
 - `GET /auth/oidc/callback` (public) — completes the code exchange,
-  provisions/updates the user, sets the session cookie, 302 to `/`.
+  provisions/updates the user, sets the session cookie, and 302s to `/` on
+  success. Expected cancellation/flow/security/provider/account failures 302
+  same-origin to `/login/sso-error`; raw provider payloads, code, state, PKCE
+  values, tokens, claims, and secrets are never copied into that redirect.
 - `GET /me` — `{user, memberships}`; `passwordHash` never included; 401 if
   unauthenticated. `dev:*` header users get a synthesized `id: 0` shape with
   no memberships (there's no DB row to read).
@@ -271,12 +274,12 @@ any standards-compliant provider), configurable from the admin UI or env vars
 | `OIDC_SCOPE` | no | `openid profile email` | Add `groups` (or your provider's scope name) here too if group membership isn't included by default. |
 | `OIDC_GROUPS_CLAIM` | no | `groups` | Name of the ID-token claim holding the user's group list. |
 | `OIDC_ADMIN_GROUP` | no | — (admin sync disabled) | Group name that grants `serverRole: 'admin'`. Applied on **every** login, both directions — added to the group -> promoted, removed -> demoted — except the last enabled admin is never demoted (a warn is logged and the role left as-is). |
-| `OIDC_ALLOWED_GROUP` | no | — (any authenticated IdP user may sign in) | Group name required to sign in at all. Checked on **every** login: without it the callback 403s, no account is auto-provisioned, and existing accounts get no session (removing the group at the IdP locks the user out on their next login). Members of `OIDC_ADMIN_GROUP` always have access, so setting only the admin group can't lock admins out. |
+| `OIDC_ALLOWED_GROUP` | no | — (any authenticated IdP user may sign in) | Group name required to sign in at all. Checked on **every** login: without it the callback redirects to safe access-denied recovery, no account is auto-provisioned, and existing accounts get no session (removing the group at the IdP locks the user out on their next login). Members of `OIDC_ADMIN_GROUP` always have access, so setting only the admin group can't lock admins out. |
 | `APP_URL` | no | `http://localhost:8080` | Only used to build the default `OIDC_REDIRECT_URI`. |
 
 \* All three of `OIDC_ISSUER`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` must be
 set together; a partial set behaves as OIDC disabled (`oidcEnabled: false`,
-the `/auth/oidc/*` routes 503).
+and direct `/auth/oidc/*` visits lead to safe recovery rather than a raw API error).
 
 **Authentik setup:**
 
@@ -303,9 +306,9 @@ the `/auth/oidc/*` routes 503).
 - **Discovery** (`OidcService.getClientConfig()`) is lazy — the first call to
   `/auth/oidc/login` or `/callback` triggers it, not server boot — and
   cached in-memory after success. If the IdP is unreachable, discovery fails,
-  the failure is logged (`console.warn`) and **not** cached, and the route
-  returns 503; the *next* request retries discovery from scratch. The server
-  never crashes or refuses to boot because the IdP is down.
+  the failure is **not** cached, and the browser reaches the recovery page; the
+  *next* request retries discovery from scratch. The server never crashes or
+  refuses to boot because the IdP is down.
 - **Login** (`GET /auth/oidc/login`) generates PKCE (`code_verifier` +
   S256 `code_challenge`) and a random `state`, stores `state:codeVerifier` in
   a short-lived (5 min) httpOnly cookie scoped to `/api/v1/auth/oidc`, then
@@ -315,6 +318,13 @@ the `/auth/oidc/*` routes 503).
   token's signature against the provider's published JWKS (`openid-client`
   handles this — a real RS256/ES256 JWT is required; `alg: none` is
   rejected).
+- **Recovery**: cancellation, missing/expired flow cookies, state/PKCE
+  mismatch, provider outage, client/token failure, missing claims, group
+  denial, and disabled accounts map to eight fixed public categories. The
+  redirect contains only that category and a random 16-hex support reference.
+  Server diagnostics use the same reference and fixed redacted fields — never
+  an exception message, callback query/cookie, provider body, token, claim, or
+  configuration value. “Try SSO again” starts a brand-new state/PKCE flow.
 - **Claim mapping / provisioning** (`OidcService.provisionOrUpdateUser`):
   `sub` is the stable identity key (stored as `users.oidc_sub`, indexed).
   First login for a `sub` auto-provisions a user: username from
