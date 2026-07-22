@@ -133,7 +133,7 @@ function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | nul
     `easy ${difficulty.thresholds.easy.toLocaleString()}, medium ${difficulty.thresholds.medium.toLocaleString()}, ` +
     `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
   return (
-    <span className="tag" style={{ fontSize: 10, ...DIFFICULTY_STYLE[difficulty.band] }} title={title}>
+    <span className="tag" style={DIFFICULTY_STYLE[difficulty.band]} title={title}>
       <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />{DIFFICULTY_LABEL[difficulty.band]}
     </span>
   );
@@ -216,16 +216,15 @@ function EncounterLinks({
   if (!canEdit && !hasVisibleLink) return null;
 
   return (
-    <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11 }}>
+    <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 'var(--type-meta)' }}>
       {showLoc && (
         locName ? <Link
           to={entityHref(campaignId, { type: 'location', id: encounter.locationId })}
           className="tag tag-outline hover:border-accent"
-          style={{ fontSize: 10 }}
         >
           <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
           {linkLabel('location', locName)}
-        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+        </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
           Location #{encounter.locationId} (unavailable)
         </span>
@@ -234,11 +233,10 @@ function EncounterLinks({
         questName ? <Link
           to={entityHref(campaignId, { type: 'quest', id: encounter.questId })}
           className="tag tag-outline hover:border-accent"
-          style={{ fontSize: 10 }}
         >
           <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
           {linkLabel('quest', questName)}
-        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+        </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
           Quest #{encounter.questId} (unavailable)
         </span>
@@ -247,18 +245,17 @@ function EncounterLinks({
         sessName ? <Link
           to={entityHref(campaignId, { type: 'session', id: encounter.sessionId })}
           className="tag tag-outline hover:border-accent"
-          style={{ fontSize: 10 }}
         >
           <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
           {linkLabel('session', sessName)}
-        </Link> : <span className="tag tag-outline text-muted" style={{ fontSize: 10 }}>
+        </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
           Session #{encounter.sessionId} (unavailable)
         </span>
       )}
       {!hasLink && canEdit && !editing && <span className="text-muted">No location / quest / session linked.</span>}
       {canEdit && (
-        <button type="button" className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => setEditing((v) => !v)}>
+        <button type="button" className="btn btn-ghost" style={{ fontSize: 'var(--type-label)' }} onClick={() => setEditing((v) => !v)}>
           {editing ? 'Done' : hasLink ? 'Edit links' : '+ Link'}
         </button>
       )}
@@ -397,7 +394,7 @@ function DeathSaveTracker({
     );
   }
   return (
-    <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 10, flexWrap: 'wrap' }}>
+    <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 'var(--type-label)', flexWrap: 'wrap' }}>
       <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Saves</span>
         <Pips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" />
@@ -414,7 +411,7 @@ function DeathSaveTracker({
           title="Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)"
           disabled={busy}
           onClick={onRoll}
-          style={{ fontSize: 10, minHeight: 20, padding: '1px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+          style={{ fontSize: 'var(--type-label)', minHeight: 20, padding: '1px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
         >
           Roll
         </button>
@@ -937,7 +934,7 @@ export default function RunSessionPage() {
   const currentCombatantId = encounter.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
 
   return (
-    <div className="max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
+    <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
       <div>
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/encounters`)}>
           ← Back
@@ -956,11 +953,11 @@ export default function RunSessionPage() {
 
       <div className="flex items-center gap-2.5 flex-wrap">
         <h1 className="text-2xl font-extrabold text-white m-0 min-w-0 break-words">{encounter.name}</h1>
-        <span className={STATUS_TAG_CLASS[encounter.status]} style={{ fontSize: 10 }}>
+        <span className={STATUS_TAG_CLASS[encounter.status]}>
           {STATUS_LABEL[encounter.status]}
         </span>
         {encounter.status === 'running' && (
-          <span className="tag tag-neutral" style={{ fontSize: 10 }}>
+          <span className="tag tag-neutral">
             Round {encounter.round}
           </span>
         )}
@@ -1726,7 +1723,7 @@ function BattleMap({
   );
 
   return (
-    <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden' }}>
+    <div className="card elev-sm reading-exempt" data-testid="battle-map" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">Battle map</span>
         <div style={{ flex: 1 }} />
@@ -2529,7 +2526,7 @@ function CombatantRow({
         {editingIdentity ? (
           <div className="flex gap-2 items-end flex-wrap" style={{ marginBottom: 4 }}>
             <div className="field" style={{ flex: 1, minWidth: 120 }}>
-              <label htmlFor={`rename-${combatant.id}`} style={{ fontSize: 10 }}>Name</label>
+              <label htmlFor={`rename-${combatant.id}`}>Name</label>
               <TextInput
                 id={`rename-${combatant.id}`}
                 value={nameDraft}
@@ -2543,7 +2540,7 @@ function CombatantRow({
               />
             </div>
             <div className="field" style={{ width: 72 }}>
-              <label htmlFor={`hpmax-${combatant.id}`} style={{ fontSize: 10 }}>Max HP</label>
+              <label htmlFor={`hpmax-${combatant.id}`}>Max HP</label>
               <TextInput
                 id={`hpmax-${combatant.id}`}
                 aria-label={`Max HP for ${combatant.name}`}
@@ -2557,7 +2554,7 @@ function CombatantRow({
               />
             </div>
             <div className="field" style={{ width: 108 }}>
-              <label htmlFor={`tokensize-${combatant.id}`} style={{ fontSize: 10 }}>Token size</label>
+              <label htmlFor={`tokensize-${combatant.id}`}>Token size</label>
               <select
                 id={`tokensize-${combatant.id}`}
                 aria-label={`Token size for ${combatant.name}`}
@@ -2572,7 +2569,7 @@ function CombatantRow({
               </select>
             </div>
             <Btn onClick={commitIdentity} disabled={busy}>Save</Btn>
-            <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => { setEditingIdentity(false); setNameDraft(combatant.name); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }}>Cancel</button>
+            <button className="btn btn-ghost" style={{ fontSize: 'var(--type-label)' }} onClick={() => { setEditingIdentity(false); setNameDraft(combatant.name); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }}>Cancel</button>
           </div>
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
@@ -2580,16 +2577,16 @@ function CombatantRow({
               {down && <GameIcon slug="death-skull" size={14} className="inline align-text-bottom mr-1.5" />}
               {combatant.name}
             </span>
-            <span className={kindTagClass} style={{ fontSize: 9 }}>
+            <span className={kindTagClass}>
               {kindLabel}
             </span>
             {combatant.deathState !== 'none' && combatant.deathState !== undefined ? (
-              <span className="tag tag-outline" style={{ fontSize: 9 }}>
+              <span className="tag tag-outline">
                 {DEATH_STATE_LABEL[combatant.deathState] ?? 'Down'}
               </span>
             ) : (
               down && (
-                <span className="tag tag-outline" style={{ fontSize: 9 }}>
+                <span className="tag tag-outline">
                   Down
                 </span>
               )
@@ -2602,7 +2599,7 @@ function CombatantRow({
                 title="Rename / edit max HP"
                 disabled={busy}
                 onClick={() => setEditingIdentity(true)}
-                style={{ fontSize: 10, minHeight: 20, padding: '1px 6px' }}
+                style={{ fontSize: 'var(--type-label)', minHeight: 20, padding: '1px 6px' }}
               >
                 ✎
               </button>
@@ -2628,7 +2625,7 @@ function CombatantRow({
         {combatant.conditions.length > 0 && (
           <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
             {combatant.conditions.map((cond) => (
-              <span key={cond} className="tag tag-outline" style={{ fontSize: 9.5, gap: 6 }}>
+              <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
                 {cond}
                 {canEdit && (
                   <button
@@ -2661,7 +2658,7 @@ function CombatantRow({
                   <button
                     key={s}
                     className="btn btn-ghost"
-                    style={{ fontSize: 10.5, border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                    style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
                     onClick={() => {
                       onAddCondition(s);
                       setAddingCondition(false);
@@ -2672,7 +2669,7 @@ function CombatantRow({
                 ))}
                 <button
                   className="btn btn-ghost"
-                  style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px' }}
+                  style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
                   onClick={() => setAddingCondition(false)}
                 >
                   Cancel
@@ -2681,7 +2678,7 @@ function CombatantRow({
             ) : (
               <button
                 className="btn btn-ghost"
-                style={{ fontSize: 10.5, border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
                 onClick={() => setAddingCondition(true)}
               >
                 + condition
@@ -2717,7 +2714,7 @@ function CombatantRow({
           <>
             <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3, display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'baseline' }}>
               {combatant.hpTemp != null && combatant.hpTemp > 0 && (
-                <span className="tag tag-accent" style={{ fontSize: 9 }} title="Temporary HP — absorbs damage first">
+                <span className="tag tag-accent" title="Temporary HP — absorbs damage first">
                   <GameIcon slug="shield" size={10} className="inline align-text-bottom mr-1" />{combatant.hpTemp}
                 </span>
               )}
@@ -2758,7 +2755,7 @@ function CombatantRow({
                 border: '1px solid var(--color-divider)',
                 background: 'transparent',
                 textAlign: 'center',
-                fontSize: 11,
+                fontSize: 'var(--type-label)',
                 color: 'var(--color-text)',
               }}
             />
@@ -2838,7 +2835,7 @@ function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; 
         className="btn btn-ghost"
         aria-expanded={open}
         onClick={toggle}
-        style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+        style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
       >
         {open ? '▾' : '▸'} Statblock
       </button>
@@ -2916,6 +2913,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
         aria-labelledby={headingId}
         aria-live="off"
         tabIndex={0}
+        className="reading-supporting"
         style={{ maxHeight: 260, overflowY: 'auto', overflowAnchor: 'none' }}
       >
         {events.length === 0 ? (
@@ -3315,7 +3313,7 @@ function AddCombatantPanel({
                   onClick={() => addFromCompendium(entry)}
                 >
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
-                  <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>
+                  <span className="tag tag-neutral">
                     monster
                   </span>
                 </button>
@@ -3363,7 +3361,7 @@ function AddCombatantPanel({
                 onClick={() => addFromParty(c)}
               >
                 <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{c.name}</span>
-                <span className="text-muted" style={{ fontSize: 11 }}>
+                <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>
                   {c.hpCurrent}/{c.hpMax}
                 </span>
               </button>
@@ -3411,7 +3409,7 @@ function AddCombatantPanel({
                 </Btn>
               </form>
               <div className="hr" style={{ margin: '4px 0' }} />
-              <p className="text-muted" style={{ fontSize: 11.5 }}>
+              <p className="text-muted reading-supporting">
                 …or give it a statblock — search the compendium and pick one (its HP is used):
               </p>
               <TextInput
@@ -3448,7 +3446,7 @@ function AddCombatantPanel({
                       onClick={() => void addFromNpc(entry)}
                     >
                       <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
-                      <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>
+                      <span className="tag tag-neutral">
                         statblock
                       </span>
                     </button>

@@ -2236,10 +2236,11 @@ export type ServerRole = z.infer<typeof ServerRole>;
 // Hex color, e.g. #9184d9. Shared by User.accentColor and PreferencesUpdate below.
 const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 
-// UI text-size preference. 'default' follows the design's base scale; 'large'
-// scales the whole UI up for readability. Shared by User.textSize and
-// PreferencesUpdate below.
-export const TextSize = z.enum(['default', 'large']);
+// Semantic reading preference. The persisted field keeps its historical
+// `textSize` name for API/storage compatibility, but the values now tune prose
+// and other reading surfaces only — never controls, maps, or VTT geometry.
+// `comfortable` also constrains prose to a readable line length.
+export const TextSize = z.enum(['default', 'comfortable', 'large']);
 export type TextSize = z.infer<typeof TextSize>;
 
 export const User = z.object({
@@ -2250,7 +2251,7 @@ export const User = z.object({
   disabled: z.boolean().default(false),
   // Personal accent color override (per-user UI theming). null = follow the server default (Nocturne blurple).
   accentColor: HexColor.nullable().default(null),
-  // Personal text-size preference (per-user UI scaling).
+  // Personal reading preference (per-user semantic typography).
   textSize: TextSize.default('default'),
   ...timestamps,
 }); // passwordHash never leaves the server

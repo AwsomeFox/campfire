@@ -21,7 +21,7 @@
  * and an offline reload no longer wipes the very cache it depends on.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Me, Role, ServerInstance, TextSize } from '@campfire/schema';
+import type { Me, Role, ServerInstance } from '@campfire/schema';
 import { api, ApiError, API } from '../lib/api';
 import { queryClient } from '../lib/query';
 import {
@@ -37,6 +37,7 @@ import {
   setAuthStorage,
   useAuthStorageListener,
 } from '../features/auth/useAuthStorageListener';
+import { applyReadingPreference } from './readingPreferences';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
 // e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
 // can be unit-tested without JSX and without React.
@@ -79,18 +80,6 @@ function applyAccentColor(accentColor: string | null): void {
   }
 }
 
-/**
- * Applies (or clears, for 'default') the user's text-size preference as a
- * data attribute on <html>; index.css scales the UI off it.
- */
-function applyTextSize(textSize: TextSize): void {
-  if (textSize === 'large') {
-    document.documentElement.dataset.textSize = 'large';
-  } else {
-    delete document.documentElement.dataset.textSize;
-  }
-}
-
 /** Translates a thrown /me error into a MeFetchOutcome. */
 function outcomeFromError(err: unknown): MeFetchOutcome {
   if (err instanceof ApiError && err.status === 401) return { kind: 'loggedOut' };
@@ -121,7 +110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     lastUserIdRef.current = null;
     lastInstanceRef.current = null;
     applyAccentColor(null);
-    applyTextSize('default');
+    applyReadingPreference(document.documentElement, 'default');
     clearAuthStorage();
     clearMeSnapshot();
     setStaleIdentity(false);
@@ -183,11 +172,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     if (decision.me) {
       applyAccentColor(decision.me.user.accentColor);
-      applyTextSize(decision.me.user.textSize);
+      applyReadingPreference(document.documentElement, decision.me.user.textSize);
       if (outcome.kind === 'live') setAuthStorage(decision.me.user);
     } else {
       applyAccentColor(null);
-      applyTextSize('default');
+      applyReadingPreference(document.documentElement, 'default');
       if (outcome.kind === 'loggedOut') clearAuthStorage();
     }
 
@@ -233,7 +222,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLastSyncedAt(null);
       setConnectionError(false);
       applyAccentColor(null);
-      applyTextSize('default');
+      applyReadingPreference(document.documentElement, 'default');
     }
   }, []);
 

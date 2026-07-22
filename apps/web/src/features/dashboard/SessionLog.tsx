@@ -89,7 +89,7 @@ export function SessionLog({
               </span>
             )}
           </span>
-          <span className="text-muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+          <span className="text-muted" style={{ fontSize: 'var(--type-meta)', marginLeft: 'auto', flex: 'none' }}>
             RSVP →
           </span>
         </Link>
@@ -115,7 +115,7 @@ export function SessionLog({
           >
             <span style={{ fontSize: 12, color: 'var(--color-accent)', flex: 'none' }}>S{s.number}</span>
             <span style={{ fontSize: 14 }}>{s.title || firstLinePlain(s.recapExcerpt) || 'No recap yet.'}</span>
-            <span className="text-muted" style={{ fontSize: 11, marginLeft: 'auto', flex: 'none' }}>
+            <span className="text-muted" style={{ fontSize: 'var(--type-meta)', marginLeft: 'auto', flex: 'none' }}>
               {s.playedAt ? formatDate(s.playedAt) : ''}
             </span>
           </Link>

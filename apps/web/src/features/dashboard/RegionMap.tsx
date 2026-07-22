@@ -146,7 +146,7 @@ export function RegionMap({
   }
 
   return (
-    <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden' }}>
+    <div className="card elev-sm reading-exempt" data-testid="dashboard-map" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">World map</span>
         <div style={{ flex: 1 }} />
@@ -315,7 +315,7 @@ export function RegionMap({
           gap: 12,
           padding: '10px 14px',
           borderTop: '1px solid var(--color-divider)',
-          fontSize: 11,
+          fontSize: 'var(--type-meta)',
         }}
       >
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
