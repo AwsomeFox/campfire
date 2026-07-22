@@ -1352,6 +1352,9 @@ export interface MonsterStatblockData {
   abilityScores: Record<string, unknown> | undefined;
   specialAbilities: unknown;
   actions: unknown;
+  /** Optional action categories used by systems that distinguish them in a statblock. */
+  legendaryActions?: unknown;
+  reactions?: unknown;
 }
 
 export interface RuleSystemAdapter {
@@ -1449,6 +1452,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
+      legendaryActions: d.legendaryActions ?? d.legendary_actions,
+      reactions: d.reactions,
     };
   },
   monsterHitPoints(d: Record<string, unknown>): number | null {

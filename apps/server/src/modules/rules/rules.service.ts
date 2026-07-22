@@ -640,16 +640,17 @@ export class RulesService {
 
   /**
    * Installs a rule pack from Open5e, or — if "open5e-srd" is already installed —
-   * incrementally adds whatever entries from the requested sections aren't present yet
-   * (round-2 finding #2). Dedupe key is (slug, type): an entry already in the pack with
-   * the same slug+type is skipped rather than duplicated or overwritten.
+   * refreshes entries from the requested sections in place and incrementally adds any
+   * that aren't present yet. Dedupe key is (slug, type); refreshing keeps stable entry
+   * ids and manual icon overrides while replacing importer-owned content. This matters
+   * when a newer importer starts retaining additional upstream fields (issue #621).
    *
    * Fresh install: 201, returns the RulePack as before.
    * Incremental install (pack already exists): 200, returns
    * `RulePack & { added: number; skippedExisting: number }`. We deliberately never 409
    * here even if every requested entry already existed (added:0, skippedExisting:N) —
    * simpler UX than forcing the caller to pre-check section coverage, and idempotent:
-   * calling install repeatedly with the same sections converges to a 200 no-op rather
+   * calling install repeatedly with the same sections converges to a 200 refresh rather
    * than an error the caller has to special-case.
    *
    * Concurrency (round-2 finding #3): two concurrent *fresh* installs can both pass the
@@ -696,6 +697,7 @@ export class RulesService {
       allEntries,
       user,
       `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { refreshExisting: true },
     );
   }
 
@@ -1071,6 +1073,7 @@ export class RulesService {
     rawEntries: ImportedEntry[],
     user: RequestUser,
     detailSuffix: string,
+    options: { refreshExisting?: boolean } = {},
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence. Importers
     // only de-dupe WITHIN a section, but several sources map two sections onto one entry
@@ -1089,7 +1092,7 @@ export class RulesService {
 
     const [existing] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
     if (existing) {
-      return this.addEntriesToExistingPack(existing, entries, meta.sectionLabels, user);
+      return this.addEntriesToExistingPack(existing, entries, meta.sectionLabels, user, options);
     }
 
     const ts = nowIso();
@@ -1137,7 +1140,7 @@ export class RulesService {
       // incremental path against it instead of surfacing a raw 500.
       const [raced] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
       if (!raced) throw err; // shouldn't happen, but don't swallow a genuine failure
-      return this.addEntriesToExistingPack(raced, entries, meta.sectionLabels, user);
+      return this.addEntriesToExistingPack(raced, entries, meta.sectionLabels, user, options);
     }
 
     await this.audit.log({
@@ -1154,31 +1157,53 @@ export class RulesService {
 
   /**
    * Adds whichever of `fetchedEntries` aren't already present (by slug+type) in
-   * `packRow`'s entries, bumping entryCount/version. Wrapped in a transaction so a
-   * partial write never happens; also absorbs a UNIQUE-constraint race between two
-   * concurrent incremental installs targeting the same pack (one retries against the
-   * fresh entry list rather than 500ing).
+   * `packRow`'s entries, bumping entryCount/version. Callers may additionally refresh
+   * importer-owned fields on matching rows while preserving row ids, createdAt, and
+   * user-selected iconSlug. Wrapped in a transaction so a partial write never happens;
+   * also absorbs a UNIQUE-constraint race between concurrent incremental installs.
    */
   private async addEntriesToExistingPack(
     packRow: typeof rulePacks.$inferSelect,
     fetchedEntries: ImportedEntry[],
     sections: string[],
     user: RequestUser,
+    options: { refreshExisting?: boolean } = {},
   ): Promise<RulePack & { added: number; skippedExisting: number }> {
     const existingRows = await this.db
-      .select({ slug: ruleEntries.slug, type: ruleEntries.type })
+      .select({ id: ruleEntries.id, slug: ruleEntries.slug, type: ruleEntries.type })
       .from(ruleEntries)
       .where(eq(ruleEntries.packId, packRow.id));
     const existingKeys = new Set(existingRows.map((r) => `${r.type}::${r.slug}`));
+    const existingIds = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r.id]));
 
     const toAdd = fetchedEntries.filter((e) => !existingKeys.has(`${e.type}::${e.slug}`));
+    const toRefresh = options.refreshExisting
+      ? fetchedEntries.flatMap((entry) => {
+          const id = existingIds.get(`${entry.type}::${entry.slug}`);
+          return id === undefined ? [] : [{ id, entry }];
+        })
+      : [];
     const skippedExisting = fetchedEntries.length - toAdd.length;
     const ts = nowIso();
 
     let updatedPack = packRow;
-    if (toAdd.length > 0) {
+    if (toAdd.length > 0 || toRefresh.length > 0) {
       try {
         updatedPack = this.db.transaction((tx) => {
+          for (const { id, entry } of toRefresh) {
+            tx.update(ruleEntries)
+              .set({
+                name: entry.name,
+                summary: entry.summary,
+                body: entry.body,
+                dataJson: entry.dataJson,
+                source: entry.source,
+                license: entry.license,
+                updatedAt: ts,
+              })
+              .where(eq(ruleEntries.id, id))
+              .run();
+          }
           for (const entry of toAdd) {
             tx.insert(ruleEntries)
               .values({
@@ -1190,6 +1215,7 @@ export class RulesService {
                 body: entry.body,
                 dataJson: entry.dataJson,
                 source: entry.source,
+                license: entry.license,
                 createdAt: ts,
                 updatedAt: ts,
               })
@@ -1228,7 +1254,7 @@ export class RulesService {
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: updatedPack.id,
-      detail: `incremental install for pack "${packRow.slug}": +${toAdd.length} entries from sections ${sections.join(',')}, ${skippedExisting} already present`,
+      detail: `incremental install for pack "${packRow.slug}": +${toAdd.length} entries from sections ${sections.join(',')}, ${skippedExisting} already present${options.refreshExisting ? ` (${toRefresh.length} refreshed)` : ''}`,
     });
 
     return { ...packToDomain(updatedPack), added: toAdd.length, skippedExisting };

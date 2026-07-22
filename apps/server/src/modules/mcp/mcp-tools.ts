@@ -890,7 +890,8 @@ export class McpToolsService {
       server,
       'get_rule_entry',
       'Get a single rule entry (spell/monster/item/condition/etc.) by id, including its full body and structured ' +
-        'dataJson (e.g. a monster statblock\'s ability scores/hp/AC). Ids come from lookup_rule.',
+        'dataJson (e.g. a monster statblock\'s ability scores, HP, AC, traits, actions, reactions, and legendary actions). ' +
+        'Ids come from lookup_rule.',
       { entryId: Id.describe('Rule entry id — from lookup_rule') },
       async ({ entryId }) => this.rules.getEntryOrThrow(entryId as number),
     );

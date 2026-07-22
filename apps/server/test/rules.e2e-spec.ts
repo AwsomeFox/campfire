@@ -1,6 +1,9 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
+import { eq } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { ruleEntries } from '../src/db/schema';
 import {
   startFakeOpen5e,
   startFakeOpen5eWithBadPagination,
@@ -101,8 +104,27 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(listRes.body).toHaveLength(1);
     expect(listRes.body[0].id).toBe(packId);
 
-    // re-installing the same slug+sections is now an incremental no-op (round-2 finding
-    // #2): outcome 'updated' with added:0 (everything already present) rather than a 409.
+    // Simulate an entry installed by the pre-#621 importer, which had no action
+    // categories, and a user-selected icon. Re-importing Open5e must refresh the
+    // importer-owned data in place without losing the row id or icon override.
+    const oldSentinelSearch = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'fixture sentinel', type: 'monster' })
+      .set(dm);
+    const oldSentinel = oldSentinelSearch.body.find((e: { name: string }) => e.name === 'Fixture Sentinel');
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(ruleEntries)
+      .set({ dataJson: JSON.stringify({ ac: 16, hp: 52 }), updatedAt: new Date().toISOString() })
+      .where(eq(ruleEntries.id, oldSentinel.id))
+      .run();
+    const iconRes = await request(server)
+      .patch(`/api/v1/rules/entries/${oldSentinel.id}`)
+      .set(dm)
+      .send({ iconSlug: 'golem-head' });
+    expect(iconRes.status).toBe(200);
+
+    // Re-installing the same slug+sections is an in-place Open5e refresh: outcome
+    // 'updated' with added:0 (everything already exists) rather than a duplicate or 409.
     const reJob = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(reJob.status).toBe('completed');
     expect(reJob.outcome).toBe('updated');
@@ -117,11 +139,46 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(searchRes.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
 
     // search: type filter narrows to monsters only
-    const monsterSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'owlbear', type: 'monster' }).set(dm);
+    const monsterSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fixture sentinel', type: 'monster' }).set(dm);
     expect(monsterSearchRes.status).toBe(200);
     expect(monsterSearchRes.body.length).toBeGreaterThan(0);
     for (const e of monsterSearchRes.body) expect(e.type).toBe('monster');
-    expect(monsterSearchRes.body.some((e: { name: string }) => e.name === 'Owlbear')).toBe(true);
+    expect(monsterSearchRes.body.some((e: { name: string }) => e.name === 'Fixture Sentinel')).toBe(true);
+
+    // Issue #621 regression: live Open5e v2 combines regular, reaction and legendary
+    // entries in actions[] (partitioned by action_type) and calls passive abilities
+    // traits[]. The importer must preserve every category, raw description, and useful
+    // structured mechanics in the shared dataJson returned by search and entry reads.
+    const sentinel = monsterSearchRes.body.find((e: { name: string }) => e.name === 'Fixture Sentinel');
+    const sentinelData = JSON.parse(sentinel.dataJson);
+    expect(sentinelData.specialAbilities).toEqual([
+      expect.objectContaining({ name: 'Immutable Form', desc: expect.stringContaining('alter its form') }),
+    ]);
+    expect(sentinelData.actions.map((a: { name: string }) => a.name)).toEqual(['Multiattack', 'Arc Blade', 'Static Burst']);
+    expect(sentinelData.actions[1]).toMatchObject({
+      attackBonus: 6,
+      damage: [{ expression: '2d6 + 4', type: 'Lightning' }],
+      attacks: [expect.objectContaining({ attackBonus: 6, damage: [{ expression: '2d6 + 4', type: 'Lightning' }] })],
+    });
+    expect(sentinelData.actions[2]).toMatchObject({
+      desc: expect.stringContaining('DC 15 Dexterity saving throw'),
+      savingThrow: { dc: 15, ability: 'Dexterity' },
+      usage: { type: 'recharge', min: 5, max: 6, label: 'Recharge 5\u20136' },
+      usage_limits: { type: 'RECHARGE_ON_ROLL', param: 5 },
+    });
+    expect(sentinelData.reactions).toEqual([
+      expect.objectContaining({ name: 'Deflect', action_type: 'REACTION', desc: expect.stringContaining('one attack') }),
+    ]);
+    expect(sentinelData.legendaryActions).toEqual([
+      expect.objectContaining({ name: 'Sweep', action_type: 'LEGENDARY_ACTION', legendaryActionCost: 2 }),
+    ]);
+
+    const sentinelEntryRes = await request(server).get(`/api/v1/rules/entries/${sentinel.id}`).set(dm);
+    expect(sentinelEntryRes.status).toBe(200);
+    expect(sentinelEntryRes.body.dataJson).toBe(sentinel.dataJson);
+    expect(sentinelEntryRes.body.id).toBe(oldSentinel.id);
+    expect(sentinelEntryRes.body.iconSlug).toBe('golem-head');
+    expect(sentinelEntryRes.body.license).toBe('Creative Commons Attribution 4.0');
 
     // search: pack filter
     const packSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', pack: 'open5e-srd' }).set(dm);

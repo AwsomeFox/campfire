@@ -225,10 +225,155 @@ function mapSpell(row: Record<string, unknown>): ImportedEntry {
   };
 }
 
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+function nameOrString(v: unknown): string {
+  return nestedName(v) || asString(v);
+}
+
+function numberOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+function diceExpression(count: unknown, die: unknown, bonus: unknown): string | null {
+  const n = numberOrNull(count);
+  const rawDie = asString(die).toLowerCase();
+  if (n === null || !/^d\d+$/.test(rawDie)) return null;
+  const base = `${n}${rawDie}`;
+  const b = numberOrNull(bonus);
+  if (b === null || b === 0) return base;
+  return `${base} ${b > 0 ? '+' : '-'} ${Math.abs(b)}`;
+}
+
+function directDamageExpression(action: Record<string, unknown>): string | null {
+  const dice = asString(action.damage_dice);
+  if (!dice) return null;
+  const bonus = numberOrNull(action.damage_bonus);
+  if (bonus === null || bonus === 0 || /[+-]\s*\d+/.test(dice)) return dice;
+  return `${dice} ${bonus > 0 ? '+' : '-'} ${Math.abs(bonus)}`;
+}
+
+interface NormalizedDamage {
+  expression: string;
+  type: string | null;
+}
+
+function normalizedAttack(raw: unknown): Record<string, unknown> | null {
+  const attack = asRecord(raw);
+  if (!attack) return null;
+
+  const damage: NormalizedDamage[] = [];
+  const primary = diceExpression(attack.damage_die_count, attack.damage_die_type, attack.damage_bonus);
+  if (primary) damage.push({ expression: primary, type: nameOrString(attack.damage_type) || null });
+  const extra = diceExpression(attack.extra_damage_die_count, attack.extra_damage_die_type, attack.extra_damage_bonus);
+  if (extra) damage.push({ expression: extra, type: nameOrString(attack.extra_damage_type) || null });
+
+  return {
+    ...attack,
+    attackBonus: numberOrNull(attack.to_hit_mod ?? attack.attack_bonus),
+    damage,
+  };
+}
+
+function savingThrowFrom(action: Record<string, unknown>, desc: string): { dc: number; ability: string | null } | null {
+  const directDc = numberOrNull(action.save_dc ?? action.dc);
+  const directAbility = nameOrString(action.save_ability ?? action.saving_throw_ability);
+  if (directDc !== null) return { dc: directDc, ability: directAbility || null };
+
+  // Open5e v2 currently leaves saves embedded in `desc`, rather than exposing a
+  // structured save field. Capture the first DC/ability pair for at-a-glance UI while
+  // retaining the complete description below as the rules-text source of truth.
+  const match = desc.match(/\bDC\s+(\d+)\s+(Strength|Dexterity|Constitution|Intelligence|Wisdom|Charisma|STR|DEX|CON|INT|WIS|CHA)\b/i);
+  if (!match) return null;
+  return { dc: Number(match[1]), ability: match[2] };
+}
+
+function usageFrom(action: Record<string, unknown>): Record<string, unknown> | null {
+  const raw = asRecord(action.usage_limits ?? action.usage);
+  const type = asString(raw?.type).toUpperCase();
+  const param = numberOrNull(raw?.param ?? raw?.uses);
+  if (type === 'RECHARGE_ON_ROLL' && param !== null) {
+    return { ...raw, type: 'recharge', min: param, max: 6, label: `Recharge ${param}\u20136` };
+  }
+  if (type === 'PER_DAY' && param !== null) {
+    return { ...raw, type: 'perDay', uses: param, label: `${param}/Day` };
+  }
+  if (raw) {
+    const label = asString(raw.label);
+    return { ...raw, ...(label ? { label } : {}) };
+  }
+
+  const recharge = `${asString(action.name)} ${asString(action.desc)}`.match(/\bRecharge\s+(\d+)(?:\s*[-\u2013]\s*(\d+))?/i);
+  if (!recharge) return null;
+  const min = Number(recharge[1]);
+  const max = recharge[2] ? Number(recharge[2]) : 6;
+  return { type: 'recharge', min, max, label: `Recharge ${min}\u2013${max}` };
+}
+
+/**
+ * Keep every Open5e action object's source fields, then add a small canonical layer for
+ * shared Campfire consumers. In particular, `desc` is copied verbatim (apart from the
+ * importer's existing literal-newline cleanup), so imperfect upstream structured fields
+ * can never erase or rewrite rules text.
+ */
+function normalizeCreatureAction(raw: unknown): Record<string, unknown> | null {
+  const action = asRecord(raw);
+  if (!action) return null;
+  const name = asString(action.name);
+  const desc = asString(action.desc ?? action.description);
+  const attacks = Array.isArray(action.attacks) ? action.attacks.map(normalizedAttack).filter((v): v is Record<string, unknown> => v !== null) : [];
+  const attackBonus = numberOrNull(action.attack_bonus) ?? attacks.map((a) => numberOrNull(a.attackBonus)).find((v) => v !== null) ?? null;
+  const directDamage = directDamageExpression(action);
+  const damage = directDamage
+    ? [{ expression: directDamage, type: nameOrString(action.damage_type) || null }]
+    : attacks.flatMap((attack) => (Array.isArray(attack.damage) ? (attack.damage as NormalizedDamage[]) : []));
+
+  return {
+    ...action,
+    name,
+    desc,
+    actionType: asString(action.action_type) || null,
+    attackBonus,
+    damage,
+    savingThrow: savingThrowFrom(action, desc),
+    usage: usageFrom(action),
+    legendaryActionCost: numberOrNull(action.legendary_action_cost),
+    attacks,
+  };
+}
+
+function normalizedCreatureActions(v: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map(normalizeCreatureAction)
+    .filter((action): action is Record<string, unknown> => action !== null && Boolean(action.name || action.desc))
+    .sort((a, b) => (numberOrNull(a.order_in_statblock) ?? Number.MAX_SAFE_INTEGER) - (numberOrNull(b.order_in_statblock) ?? Number.MAX_SAFE_INTEGER));
+}
+
 function mapCreature(row: Record<string, unknown>): ImportedEntry {
   const type = nestedName(row.type);
   const size = nestedName(row.size);
   const cr = row.challenge_rating;
+  // Open5e v2 puts every active ability in one `actions[]` array and distinguishes
+  // regular/reaction/legendary entries with `action_type`; passive abilities live in
+  // `traits[]`. Older Open5e-compatible mirrors expose the four arrays separately.
+  // Support both shapes at the adapter boundary and store one stable camelCase shape.
+  const combinedActions = normalizedCreatureActions(row.actions);
+  const regularActions = combinedActions.filter((action) => !['LEGENDARY_ACTION', 'REACTION'].includes(asString(action.actionType).toUpperCase()));
+  const legendaryActions = [
+    ...combinedActions.filter((action) => asString(action.actionType).toUpperCase() === 'LEGENDARY_ACTION'),
+    ...normalizedCreatureActions(row.legendary_actions),
+  ];
+  const reactions = [
+    ...combinedActions.filter((action) => asString(action.actionType).toUpperCase() === 'REACTION'),
+    ...normalizedCreatureActions(row.reactions),
+  ];
+  const specialAbilities = [
+    ...normalizedCreatureActions(row.special_abilities),
+    ...normalizedCreatureActions(row.traits),
+  ];
   return {
     slug: asString(row.key) || asString(row.name),
     name: asString(row.name),
@@ -243,6 +388,10 @@ function mapCreature(row: Record<string, unknown>): ImportedEntry {
       hitPoints: row.hit_points ?? null,
       speed: row.speed ?? null,
       abilityScores: row.ability_scores ?? null,
+      specialAbilities,
+      actions: regularActions,
+      legendaryActions,
+      reactions,
     }),
     license: licenseOf(row),
     source: sourceOf(row),
