@@ -1159,7 +1159,7 @@ export class RulesService {
         updatedPack = freshPack ?? packRow;
         await this.audit.log({
           actor: auditActor(user),
-          actorRole: 'dm',
+          actorRole: auditActorRole(user),
           action: 'rulepack.install',
           entityType: 'rule_pack',
           entityId: updatedPack.id,
