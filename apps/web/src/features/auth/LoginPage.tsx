@@ -340,6 +340,11 @@ export function LoginPage() {
           </>
         ) : (
           <div className="w-full">
+            {!localLoginEnabled && (
+              <p className="text-muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
+                Local sign-in is restricted to server administrators.
+              </p>
+            )}
             <LocalLoginForm
               submitting={submitting}
               onSubmit={onSubmit}

@@ -157,6 +157,22 @@ test.describe('mobile login information architecture', () => {
     expect(accessibilityScan.violations).toEqual([]);
   });
 
+  test('discloses administrator-only local authentication when OIDC is unavailable', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSignedOutLogin(page, {
+      localLoginEnabled: false,
+      oidcEnabled: false,
+      oidcProviderName: null,
+    });
+    await page.goto('/login');
+
+    await expect(page.getByText('Local sign-in is restricted to server administrators.')).toBeVisible();
+    await expect(page.getByLabel('Username')).toBeVisible();
+    await expect(page.getByLabel('Password')).toBeVisible();
+    await expectInInitialViewport(page, page.getByRole('button', { name: 'Sign in', exact: true }));
+    await expectNoHorizontalOverflow(page);
+  });
+
   test('keeps signup, install guidance, password-manager fields, and validation feedback after applicable auth', async ({ browser, baseURL }) => {
     const mobile = await newMobilePage(browser, baseURL);
     const { page } = mobile;
