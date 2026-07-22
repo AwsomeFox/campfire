@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from 'react';
 import type {
   AiProviderConfigType,
   AiProviderConfigView,
+  AiProviderRemovalImpact,
   AiProviderTestRequest,
   AiProviderTestResult,
 } from '@campfire/schema';
@@ -77,6 +78,13 @@ export function ProviderForm({
   const draftRevision = useRef(0);
   const currentDraftFingerprint = useRef('');
   const [removing, setRemoving] = useState(false);
+  const [previewingRemoval, setPreviewingRemoval] = useState(false);
+  const [removalImpact, setRemovalImpact] = useState<AiProviderRemovalImpact | null>(null);
+  const [removalStatus, setRemovalStatus] = useState<{
+    kind: 'pending' | 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const removalTriggerRef = useRef<HTMLButtonElement>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
 
@@ -97,6 +105,8 @@ export function ProviderForm({
     setTestResult(null);
     setTestError(null);
     setTesting(false);
+    setRemovalImpact(null);
+    setRemovalStatus(null);
   }
 
   function editDraft(field: keyof ProviderDraft, value: string) {
@@ -208,16 +218,62 @@ export function ProviderForm({
     }
   }
 
+  async function previewRemoval() {
+    invalidateTestForAction();
+    setPreviewingRemoval(true);
+    setError(null);
+    setRemovalStatus({
+      kind: 'pending',
+      message: `Checking the current ${scope === 'server' ? 'server default' : 'campaign override'} removal impact…`,
+    });
+    try {
+      const impact = await api.get<AiProviderRemovalImpact>(`${API}${basePath}/removal-impact`);
+      setRemovalImpact(impact);
+      setRemovalStatus(null);
+    } catch (err) {
+      setRemovalStatus({
+        kind: 'error',
+        message: err instanceof ApiError ? err.message : "Couldn't preview provider removal.",
+      });
+      requestAnimationFrame(() => removalTriggerRef.current?.focus());
+    } finally {
+      setPreviewingRemoval(false);
+    }
+  }
+
   async function remove() {
+    if (!removalImpact) return;
     invalidateTestForAction();
     setRemoving(true);
     setError(null);
+    setRemovalStatus({
+      kind: 'pending',
+      message: `Removing the ${scope === 'server' ? 'server default' : 'campaign override'}…`,
+    });
     try {
-      await api.delete(`${API}${basePath}`);
+      await api.delete(`${API}${basePath}`, { impactRevision: removalImpact.impactRevision });
       hydrate(null);
       onChanged?.(null);
+      setRemovalImpact(null);
+      setRemovalStatus({
+        kind: 'success',
+        message: `${scope === 'server' ? 'Server default' : 'Campaign override'} removed successfully.`,
+      });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't remove the provider.");
+      if (err instanceof ApiError && err.status === 409) {
+        try {
+          setRemovalImpact(await api.get<AiProviderRemovalImpact>(`${API}${basePath}/removal-impact`));
+        } catch {
+          // Keep the last reviewed impact visible if the refresh itself fails.
+        }
+      }
+      setRemovalStatus({
+        kind: 'error',
+        message:
+          err instanceof ApiError
+            ? `${err.message} The current configuration is still active.`
+            : "Couldn't remove the provider. The current configuration is still active.",
+      });
     } finally {
       setRemoving(false);
     }
@@ -348,7 +404,17 @@ export function ProviderForm({
             fallback. A value tests or saves that new key.
           </p>
         </div>
-        {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+        {error && <p role="alert" className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+        {removalStatus && !removalImpact && (
+          <p
+            role={removalStatus.kind === 'error' ? 'alert' : 'status'}
+            aria-live={removalStatus.kind === 'error' ? 'assertive' : 'polite'}
+            className="text-sm"
+            style={{ margin: 0, color: removalStatus.kind === 'error' ? '#f87171' : undefined }}
+          >
+            {removalStatus.message}
+          </p>
+        )}
         {testError && <p role="alert" className="text-sm" style={{ color: '#f87171' }}>Test failed: {testError}</p>}
         {testResult && (
           <div
@@ -395,13 +461,13 @@ export function ProviderForm({
           </button>
           {provider && (
             <button
-              className="btn btn-danger"
-              style={{ fontSize: 12.5 }}
-              disabled={removing || clearing}
-              aria-busy={removing || undefined}
-              onClick={() => void remove()}
+              ref={removalTriggerRef}
+              className="btn btn-secondary"
+              style={{ fontSize: 12.5, minHeight: 44, color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
+              disabled={removing || clearing || previewingRemoval}
+              onClick={() => void previewRemoval()}
             >
-              {removing ? 'Removing…' : 'Remove'}
+              {previewingRemoval ? 'Checking impact…' : 'Review removal'}
             </button>
           )}
           {provider?.configured && (
@@ -433,6 +499,109 @@ export function ProviderForm({
           onCancel={() => setConfirmClear(false)}
         />
       )}
+      {removalImpact && provider && (
+        <ConfirmDialog
+          title={`Remove ${scope === 'server' ? 'server default' : 'campaign override'}?`}
+          body={<RemovalImpactSummary impact={removalImpact} status={removalStatus} />}
+          confirmLabel={`Remove ${scope === 'server' ? 'server default' : 'campaign override'}`}
+          busy={removing}
+          onConfirm={() => void remove()}
+          onCancel={() => {
+            setRemovalImpact(null);
+            setRemovalStatus(null);
+            requestAnimationFrame(() => removalTriggerRef.current?.focus());
+          }}
+        />
+      )}
     </>
+  );
+}
+
+function RemovalImpactSummary({
+  impact,
+  status,
+}: {
+  impact: AiProviderRemovalImpact;
+  status: { kind: 'pending' | 'success' | 'error'; message: string } | null;
+}) {
+  const credentialLabel: Record<AiProviderRemovalImpact['credentialSource'], string> = {
+    stored: 'stored encrypted key',
+    environment: 'environment credential',
+    server: 'server-default credential',
+    'not-required': 'no credential required',
+    none: 'no credential available',
+  };
+  return (
+    <div className="flex flex-col gap-3" data-testid="ai-provider-removal-impact">
+      <p style={{ margin: 0 }}>
+        You are removing the <strong>{impact.scope === 'server' ? 'server default' : 'campaign override'}</strong>{' '}
+        ({impact.providerType} / {impact.model}). Its current credential source is{' '}
+        {credentialLabel[impact.credentialSource]}.
+      </p>
+      <p style={{ margin: 0, color: '#fbbf24' }}>
+        <strong>Write-only key warning:</strong>{' '}
+        {impact.storedKeyWillBeLost
+          ? 'The stored API key will be permanently deleted. Campfire cannot display, restore, or recover it.'
+          : 'Any write-only key material removed by this action cannot be displayed, restored, or recovered.'}
+      </p>
+      {impact.affectedCampaignCount === 0 ? (
+        <p style={{ margin: 0 }}>No campaign&apos;s effective provider or runtime availability will change.</p>
+      ) : (
+        <div>
+          <p style={{ margin: '0 0 6px', fontWeight: 600 }}>
+            Affected campaigns ({impact.affectedCampaignCount})
+          </p>
+          <ul
+            style={{
+              margin: 0,
+              paddingLeft: 20,
+              maxHeight: 'min(42vh, 320px)',
+              overflowY: 'auto',
+            }}
+          >
+            {impact.affectedCampaigns.map((campaign) => (
+              <li key={campaign.campaignId} style={{ marginBottom: 10 }}>
+                <strong>{campaign.campaignName}</strong>
+                {campaign.trashed ? ' (trashed)' : campaign.campaignStatus !== 'active' ? ` (${campaign.campaignStatus})` : ''}
+                <br />
+                {campaign.result === 'fallback' ? (
+                  <span>
+                    Falls back to {campaign.after.source === 'server' ? 'the server default' : 'the campaign provider'}:{' '}
+                    {campaign.after.providerType} / {campaign.after.model} ({credentialLabel[campaign.after.credentialSource]}).
+                  </span>
+                ) : campaign.after.configured ? (
+                  <span>
+                    AI becomes disabled: {campaign.after.providerType} / {campaign.after.model} remains configured, but no
+                    usable credential will be available.
+                  </span>
+                ) : (
+                  <span>AI becomes disabled: no provider fallback will be configured.</span>
+                )}
+                <br />
+                <span style={{ fontSize: 12, color: '#cbd5e1' }}>
+                  Runtime: {campaign.runtime.mode} mode, {campaign.runtime.enabled ? 'seat enabled' : 'seat disabled'};{' '}
+                  {campaign.runtime.budgetRemaining.toLocaleString()} of{' '}
+                  {campaign.runtime.tokenBudget.toLocaleString()} tokens remain. Budget and usage are unchanged.
+                  {campaign.runtime.implication === 'enabled-seat-will-stop'
+                    ? ' This enabled AI seat will stop producing new output.'
+                    : campaign.runtime.implication === 'continues-with-fallback'
+                      ? ' New AI output can continue through the fallback, subject to existing runtime gates.'
+                      : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {status && (
+        <p
+          role={status.kind === 'error' ? 'alert' : 'status'}
+          aria-live={status.kind === 'error' ? 'assertive' : 'polite'}
+          style={{ margin: 0, color: status.kind === 'error' ? '#f87171' : undefined }}
+        >
+          {status.message}
+        </p>
+      )}
+    </div>
   );
 }
