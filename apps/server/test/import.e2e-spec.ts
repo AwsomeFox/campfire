@@ -134,7 +134,10 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     // Quests: giverNpcId remapped, status + objective preserved, fresh id.
     const importedQuests = await dmAgent.get(`/api/v1/campaigns/${imported.id}/quests`);
     expect(importedQuests.body.length).toBe(1);
-    const q = importedQuests.body[0];
+    const qListItem = importedQuests.body[0];
+    const importedQuest = await dmAgent.get(`/api/v1/quests/${qListItem.id}`);
+    expect(importedQuest.status).toBe(200);
+    const q = importedQuest.body;
     expect(q.id).not.toBe(questId);
     expect(q.status).toBe('active');
     expect(q.dmSecret).toBe('the vault is a trap');
