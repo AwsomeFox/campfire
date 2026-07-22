@@ -33,17 +33,7 @@ COPY packages/schema/package.json packages/schema/package.json
 # app (healthz, DB migration guard, MCP server-info) reports the right version
 # without requiring a version-bump commit in the repo.
 ARG APP_VERSION
-RUN node -e '
-  const fs = require("fs");
-  const v = process.env.APP_VERSION;
-  if (v && v !== "0.0.0-dev") {
-    for (const f of ["package.json","apps/server/package.json","apps/web/package.json","packages/schema/package.json"]) {
-      const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
-      pkg.version = v;
-      fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + "\n");
-    }
-  }
-'
+RUN node -e 'const fs=require("fs"),v=process.env.APP_VERSION;if(v&&v!=="0.0.0-dev"){for(const f of["package.json","apps/server/package.json","apps/web/package.json","packages/schema/package.json"]){const p=JSON.parse(fs.readFileSync(f,"utf8"));p.version=v;fs.writeFileSync(f,JSON.stringify(p,null,2)+"\n")}}'
 
 RUN npm ci
 
