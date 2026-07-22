@@ -4,6 +4,7 @@ import path from 'node:path';
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { AttachmentsService } from '../src/modules/attachments/attachments.service';
+import { DB_HOLDER } from '../src/db/db.module';
 
 // --- Test-only PNG builder: produces a real WxH 8-bit RGB PNG so we can exercise
 // the server's thumbnail downscaler on an image larger than the thumb cap. ---
@@ -150,7 +151,7 @@ describe('attachments (e2e)', () => {
 
   it('oversize upload is rejected (413)', async () => {
     const server = ctx.app.getHttpServer();
-    const big = Buffer.alloc(9 * 1024 * 1024, 1); // 9MB > 8MB limit
+    const big = Buffer.alloc(33 * 1024 * 1024, 1); // 33MB > 32MB limit
     const res = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/attachments`)
       .set(dm)
@@ -549,6 +550,100 @@ describe('attachments (e2e)', () => {
 
       const getRes = await request(server).get(`/api/v1/characters/${characterId}`).set(player);
       expect(getRes.body.portraitUrl).toBe(keepUrl);
+    });
+  });
+
+  // Issue #695 — deleting an attachment must clear any encounter.mapAttachmentId
+  // pointing at it, otherwise the encounter keeps rendering a now-404ing battle map.
+  // One attachment can back several encounters, so all of them must be cleared in the
+  // same transaction. Mirrors the campaign map / portrait cleanup already in remove().
+  describe('encounter map wiring (issue #695)', () => {
+    it('deleting the attachment set as an encounter battle map clears encounter.mapAttachmentId', async () => {
+      const server = ctx.app.getHttpServer();
+      const uploadRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'dangle-encounter-map.png', contentType: 'image/png' });
+      expect(uploadRes.status).toBe(201);
+      const attachmentId = uploadRes.body.id;
+
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Map Cleanup Fight' });
+      expect(encRes.status).toBe(201);
+      const encounterId = encRes.body.id;
+
+      const patchRes = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ mapAttachmentId: attachmentId });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.mapAttachmentId).toBe(attachmentId);
+
+      // Disable SQLite's ON DELETE SET NULL cascade so the test exercises the
+      // service-layer manual cleanup in AttachmentsService.remove (the path that
+      // protects pre-FK databases — see db.module.ts). On a fresh test DB the FK
+      // would otherwise null the pointer for us and hide the regression.
+      ctx.app.get<import('../src/db/db.module').DbHolder>(DB_HOLDER).raw.pragma('foreign_keys = OFF');
+
+      const deleteRes = await request(server).delete(`/api/v1/attachments/${attachmentId}`).set(dm);
+      expect(deleteRes.status).toBe(200);
+
+      // After the attachment is gone, the encounter's battle map pointer must be null
+      // so the VTT does not render a broken/missing map.
+      const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.mapAttachmentId).toBeNull();
+    });
+
+    it('deleting an attachment shared as the battle map for multiple encounters clears all of them', async () => {
+      const server = ctx.app.getHttpServer();
+      const uploadRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'shared-encounter-map.png', contentType: 'image/png' });
+      expect(uploadRes.status).toBe(201);
+      const attachmentId = uploadRes.body.id;
+
+      const encA = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Shared Map A' });
+      const encB = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Shared Map B' });
+      expect(encA.status).toBe(201);
+      expect(encB.status).toBe(201);
+
+      await request(server).patch(`/api/v1/encounters/${encA.body.id}`).set(dm).send({ mapAttachmentId: attachmentId });
+      await request(server).patch(`/api/v1/encounters/${encB.body.id}`).set(dm).send({ mapAttachmentId: attachmentId });
+
+      const deleteRes = await request(server).delete(`/api/v1/attachments/${attachmentId}`).set(dm);
+      expect(deleteRes.status).toBe(200);
+
+      const getA = await request(server).get(`/api/v1/encounters/${encA.body.id}`).set(dm);
+      const getB = await request(server).get(`/api/v1/encounters/${encB.body.id}`).set(dm);
+      expect(getA.body.mapAttachmentId).toBeNull();
+      expect(getB.body.mapAttachmentId).toBeNull();
+    });
+
+    it('deleting an unrelated attachment does not touch an encounter mapAttachmentId pointing elsewhere', async () => {
+      const server = ctx.app.getHttpServer();
+      const keepUpload = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'keep-encounter-map.png', contentType: 'image/png' });
+      const keepId = keepUpload.body.id;
+
+      const otherUpload = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'other-encounter-map.png', contentType: 'image/png' });
+      const otherId = otherUpload.body.id;
+
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Keep Map Fight' });
+      const encounterId = encRes.body.id;
+      await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ mapAttachmentId: keepId });
+
+      const deleteRes = await request(server).delete(`/api/v1/attachments/${otherId}`).set(dm);
+      expect(deleteRes.status).toBe(200);
+
+      const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      expect(getRes.body.mapAttachmentId).toBe(keepId);
     });
   });
 

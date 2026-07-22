@@ -46,7 +46,7 @@ export class CampaignInvitesController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: "List a campaign's live invite links", description: 'dm role required. Expired/exhausted invites are purged, not listed.' })
+  @ApiOperation({ summary: "List a campaign's live invite links", description: 'dm role required. Expired/exhausted invites are retained but not listed.' })
   @ApiResponse({ status: 200, description: 'Live invites, including their join codes.' })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<CampaignInvite[]> {
     await this.access.requireRole(user, campaignId, 'dm');

@@ -78,14 +78,14 @@ describe('membership integrity (#849, real SQLite, REST + MCP)', () => {
     // tools without granting its owner implicit access to any campaign.
     const dmBootstrap = await primaryDm.post('/api/v1/campaigns').send({ name: 'Integrity MCP bootstrap' });
     expect(dmBootstrap.status).toBe(201);
-    const dmToken = await primaryDm.post('/api/v1/tokens').send({ name: 'integrity-dm', scope: 'dm' });
+    const dmToken = await primaryDm.post('/api/v1/tokens').send({ name: 'integrity-dm', scope: 'dm', writeScope: 'direct' });
     expect(dmToken.status).toBe(201);
 
     const adminCampaign = await admin.post('/api/v1/campaigns').send({ name: 'Integrity admin token bootstrap' });
     expect(adminCampaign.status).toBe(201);
     const adminToken = await admin
       .post('/api/v1/tokens')
-      .send({ name: 'integrity-admin', scope: 'viewer', adminEnabled: true });
+      .send({ name: 'integrity-admin', scope: 'viewer', adminEnabled: true, writeScope: 'direct' });
     expect(adminToken.status).toBe(201);
 
     dmClient = new Client({ name: 'membership-integrity-dm', version: '0.0.1' });

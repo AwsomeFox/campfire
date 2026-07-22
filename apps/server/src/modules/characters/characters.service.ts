@@ -1,7 +1,7 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
 import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog, campaigns, characters, combatants, encounters } from '../../db/schema';
@@ -10,6 +10,7 @@ import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, type DdbFetch } from './ddb-importer';
@@ -81,6 +82,13 @@ export class CharactersService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    // Shared optimistic-concurrency guard (issue #157). Characters only consume the
+    // `assertNotStale` tier here — the prose revision-history tier (record/list/restore)
+    // does not apply, since a character sheet has no single prose column the way
+    // quests/npcs/locations/sessions do. The CAS invariant alone closes the issue's
+    // headline failure: a stale full-snapshot save can no longer silently clobber a
+    // fresher edit (a live HP/level change, a DM-secret edit) from another tab/device.
+    private readonly revisions: RevisionsService,
   ) {}
 
   async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
@@ -105,6 +113,22 @@ export class CharactersService {
     if (role === 'dm') return;
     if (row.ownerUserId && row.ownerUserId === user.id) return;
     throw new ForbiddenException('Only dm or the owning player may modify this character');
+  }
+
+  /**
+   * Resolve the campaign's RuleSystemAdapter (issue #535). `levelUp` reads the adapter's
+   * `maxLevel` so the ceiling is sourced from the rule system (5e=20, 13th Age=10, an uncapped
+   * OSR/Open Legend game=Infinity) instead of a hardcoded 5e `20`. Same resolution pattern as
+   * the encounters service; falls back to the 5e adapter for an unrecognized/empty slug, so every
+   * existing campaign keeps exactly the level-20 cap it had before.
+   */
+  private async adapterForCampaign(campaignId: number) {
+    const [row] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return ruleSystemAdapter(row?.ruleSystem);
   }
 
   /**
@@ -236,8 +260,33 @@ export class CharactersService {
     return redactSecret(toDomain(row), role);
   }
 
-  async update(id: number, input: CharacterUpdateInput, user: RequestUser, role: Role): Promise<Character> {
+  /**
+   * dm or the owning player may write; other players get 403. Only fields present in
+   * `input` are written (a field-level patch, not a full-snapshot replace), and
+   * dmSecret/ownerUserId narrow further to dm-only.
+   *
+   * Optimistic concurrency (issue #746): a character sheet is the classic blind
+   * last-write-wins clobber victim — two tabs (or a player tab + a DM tab, or a
+   * connected AI over MCP) both load the sheet, one applies a live HP/level change
+   * or a DM-secret edit, and the other's stale full-snapshot save silently restores
+   * the old HP max, level, status, or ability scores. Mirroring the quests/npcs/
+   * locations/sessions/encounters CAS invariant (#157/#532), when the caller
+   * supplies an `expectedUpdatedAt` that no longer matches the row's current
+   * `updatedAt` the write is rejected with 409 Conflict before any mutation — so the
+   * stale client can refetch and reapply instead of destroying the fresher edit.
+   * Omitted => unconditional write (unchanged back-compat for any client that hasn't
+   * opted in, including the proposal-applied path which never sends a guard).
+   */
+  async update(
+    id: number,
+    input: CharacterUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
+    // Optimistic concurrency (#746): 409 on a stale expectedUpdatedAt before any write.
+    this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
     this.assertCanWrite(existing, user, role);
     // Editing xp/level through the general PATCH is progression too — gate it the same
     // way as patchXp/levelUp so dmControlsProgression can't be bypassed here (issue #270).
@@ -518,17 +567,30 @@ export class CharactersService {
   }
 
   /**
-   * Guided level-up: +1 level (never past 20), optionally raising hpMax; the
-   * hit points gained are added to hpCurrent too (existing damage is kept),
-   * then clamped to [0, newHpMax] like every other HP-writing path.
-   * Deliberately not gated on XP thresholds — milestone campaigns level
-   * without XP; the web UI surfaces the threshold advisory instead.
+   * Guided level-up: +1 level (never past the rule system's cap), optionally raising hpMax;
+   * the hit points gained are added to hpCurrent too (existing damage is kept), then clamped to
+   * [0, newHpMax] like every other HP-writing path. Deliberately not gated on XP thresholds —
+   * milestone campaigns level without XP; the web UI surfaces the threshold advisory instead.
+   *
+   * The cap is read from the campaign's RuleSystemAdapter (`adapter.maxLevel`, issue #535), so
+   * 5e stays capped at 20, 13th Age caps at 10, and an uncapped system (Open Legend, an OSR
+   * retroclone) reports `Infinity` and never rejects on the cap. Previously the 5e `20` was
+   * hardcoded here, which wrongly capped every non-5e campaign at level 20.
    */
   async levelUp(id: number, input: LevelUpInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
     await this.assertProgressionAllowed(existing.campaignId, role);
-    if (existing.level >= 20) throw new BadRequestException('Already at level 20 — there is no level 21');
+    const maxLevel = (await this.adapterForCampaign(existing.campaignId)).maxLevel;
+    if (existing.level >= maxLevel) {
+      // Name the system's actual ceiling in the message (e.g. "level 20" for 5e, "level 10"
+      // for 13th Age). An Infinity cap (Open Legend, OSR retroclones) never reaches this branch.
+      throw new BadRequestException(
+        Number.isFinite(maxLevel)
+          ? `Already at level ${maxLevel} — there is no level ${maxLevel + 1}`
+          : 'Already at the maximum level for this rule system',
+      );
+    }
 
     const update: Partial<typeof characters.$inferInsert> = { level: existing.level + 1, updatedAt: nowIso() };
     if (input.hpMax !== undefined) {

@@ -1,8 +1,16 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { and, asc, eq, inArray, max } from 'drizzle-orm';
+import { and, asc, eq, inArray, max, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { QuestCreate, QuestUpdate, QuestStatusPatch, ObjectiveCreate, ObjectivePatch, ObjectiveReorder } from '@campfire/schema';
-import type { Quest, QuestObjective, Role } from '@campfire/schema';
+import {
+  QuestCreate,
+  QuestUpdate,
+  QuestStatusPatch,
+  ObjectiveCreate,
+  ObjectivePatch,
+  ObjectiveReorder,
+  QuestListObjective,
+} from '@campfire/schema';
+import type { Quest, QuestListItem, QuestObjective, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { quests, questObjectives, npcs, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -115,12 +123,61 @@ export class QuestsService {
   }
 
   /**
-   * Same shape as the summary endpoint's quest list (each quest embeds its
-   * objectives) — the quest board in the design needs objectives inline, so
-   * this reuses the summary's embed pattern rather than duplicating it.
+   * Bounded quest-board projection (#786): counts every objective in SQL but
+   * returns only the first incomplete objective body in (sortOrder, id) order.
+   * Hidden filtering and dmSecret redaction happen in listForCampaignByStatus
+   * before objective ids are queried, so a non-DM cannot infer a hidden quest or
+   * receive one of its objective texts.
    */
-  async listForCampaignByStatusWithObjectives(campaignId: number, status: string | undefined, role: Role) {
-    return this.embedObjectives(await this.listForCampaignByStatus(campaignId, status, role));
+  async listForCampaignByStatusWithProgress(
+    campaignId: number,
+    status: string | undefined,
+    role: Role,
+  ): Promise<QuestListItem[]> {
+    const questList = await this.listForCampaignByStatus(campaignId, status, role);
+    if (questList.length === 0) return [];
+
+    // Drizzle emits an unqualified column name when a schema column is interpolated
+    // inside a scalar subquery. SQLite would then resolve `id` to the inner objective
+    // row, not the outer quest, so keep the static outer identifier qualified.
+    const outerQuestId = sql`${sql.identifier('quests')}.${sql.identifier('id')}`;
+    const progressRows = await this.db
+      .select({
+        questId: quests.id,
+        total: sql<number>`count(${questObjectives.id})`,
+        completed: sql<number>`coalesce(sum(case when ${questObjectives.done} = 1 then 1 else 0 end), 0)`,
+        // Return id + text from one ordered lookup instead of repeating the same
+        // correlated subquery for each field. Counts are computed by the grouped
+        // join, so the poll performs only this one per-quest lookup.
+        nextObjectiveJson: sql<string | null>`(
+          select json_object('id', next_objective.id, 'text', next_objective.text)
+          from quest_objectives as next_objective
+          where next_objective.quest_id = ${outerQuestId}
+            and next_objective.done = 0
+          order by next_objective.sort_order asc, next_objective.id asc
+          limit 1
+        )`,
+      })
+      .from(quests)
+      .leftJoin(questObjectives, eq(questObjectives.questId, quests.id))
+      .where(inArray(quests.id, questList.map((q) => q.id)))
+      .groupBy(quests.id);
+
+    const progressByQuest = new Map(progressRows.map((row) => [row.questId, row]));
+    return questList.map((quest) => {
+      const progress = progressByQuest.get(quest.id);
+      const nextObjective = progress?.nextObjectiveJson
+        ? QuestListObjective.parse(JSON.parse(progress.nextObjectiveJson) as unknown)
+        : null;
+      return {
+        ...quest,
+        objectiveProgress: {
+          completed: progress?.completed ?? 0,
+          total: progress?.total ?? 0,
+        },
+        nextObjective,
+      };
+    });
   }
 
   /**

@@ -1,10 +1,10 @@
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InviteCreate } from '@campfire/schema';
 import type { CampaignInvite, InvitePreview, InviteRole, Me } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignInvites, campaignMembers, campaigns } from '../../db/schema';
+import { campaignInvites, campaignMembers, campaigns, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateInviteCode } from '../../common/crypto';
 import { auditActor, type RequestUser } from '../../common/user.types';
@@ -17,6 +17,9 @@ type InviteCreateInput = z.infer<typeof InviteCreate>;
 type InviteAcceptInput = { username: string; password: string; displayName?: string };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Uniform 404 for spent/expired/exhausted/missing invites — never leak which state. */
+const INVITE_NO_LONGER_ACTIVE = 'This invite link is invalid or no longer active';
 
 /**
  * DM invite links / join codes (issue #7): a DM generates a shareable
@@ -62,18 +65,19 @@ export class InvitesService {
     return false;
   }
 
-  /** Lists a campaign's live invites, purging expired/exhausted rows as it goes (lazy sweep — no timer needed). */
+  /**
+   * Lists a campaign's live invites without mutating retained invite history.
+   * Expired/exhausted rows remain available to whole-server backups and direct
+   * operator diagnostics until an explicit revoke or campaign deletion removes them.
+   * Campaign exports intentionally omit invite codes altogether.
+   */
   async listForCampaign(campaignId: number): Promise<CampaignInvite[]> {
-    const rows = await this.db.select().from(campaignInvites).where(eq(campaignInvites.campaignId, campaignId));
-    const live: CampaignInvite[] = [];
-    for (const row of rows) {
-      if (this.isSpent(row)) {
-        await this.db.delete(campaignInvites).where(eq(campaignInvites.id, row.id));
-      } else {
-        live.push(this.toDomain(row));
-      }
-    }
-    return live;
+    const rows = await this.db
+      .select()
+      .from(campaignInvites)
+      .where(eq(campaignInvites.campaignId, campaignId))
+      .orderBy(asc(campaignInvites.id));
+    return rows.filter((row) => !this.isSpent(row)).map((row) => this.toDomain(row));
   }
 
   async create(campaignId: number, input: InviteCreateInput, actor: RequestUser): Promise<CampaignInvite> {
@@ -135,11 +139,11 @@ export class InvitesService {
   private async getValidInvite(code: string) {
     const [row] = await this.db.select().from(campaignInvites).where(eq(campaignInvites.code, code)).limit(1);
     if (!row || this.isSpent(row)) {
-      throw new NotFoundException('This invite link is invalid or no longer active');
+      throw new NotFoundException(INVITE_NO_LONGER_ACTIVE);
     }
     const [campaign] = await this.db.select().from(campaigns).where(eq(campaigns.id, row.campaignId)).limit(1);
     if (!campaign) {
-      throw new NotFoundException('This invite link is invalid or no longer active');
+      throw new NotFoundException(INVITE_NO_LONGER_ACTIVE);
     }
     return { invite: row, campaign };
   }
@@ -176,7 +180,7 @@ export class InvitesService {
       serverRole: 'user',
     }); // 409 if the username is taken
 
-    await this.addMembership(invite, user.id);
+    this.addMembership(invite, user.id);
 
     await this.audit.log({
       actor: String(user.id),
@@ -202,14 +206,11 @@ export class InvitesService {
 
     const { invite, campaign } = await this.getValidInvite(code);
 
-    const [existing] = await this.db
-      .select()
-      .from(campaignMembers)
-      .where(and(eq(campaignMembers.campaignId, campaign.id), eq(campaignMembers.userId, userId)))
-      .limit(1);
-    if (existing) throw new ConflictException('You are already a member of this campaign');
-
-    await this.addMembership(invite, userId);
+    // The already-a-member check is folded into addMembership's transaction so a
+    // concurrent accept/join can't slip a membership in between this read and the
+    // insert below (the UNIQUE(campaign_id, user_id) index is the final backstop,
+    // but surfacing a clean 409 here avoids relying on a raw constraint error).
+    await this.addMembership(invite, userId, { rejectIfMember: true });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -225,26 +226,106 @@ export class InvitesService {
     return { ...me, campaignId: campaign.id };
   }
 
-  private async addMembership(invite: typeof campaignInvites.$inferSelect, userId: number): Promise<void> {
-    // Authenticated invite acceptance normally guarantees this already, but keep
-    // the direct membership insert honest too: a stale/concurrent caller may not
-    // attach a disabled or missing account (#849). The database FK is the final
-    // missing-user backstop.
-    const target = await this.users.getRowOrThrow(userId);
-    if (target.disabled) throw new ForbiddenException('This account is disabled');
+  /**
+   * Atomically seats a user against an invite: re-reads the (locked) invite row,
+   * re-checks the cap + expiry, inserts the membership, and conditionally
+   * increments useCount — all inside ONE synchronous better-sqlite3 transaction
+   * (BEGIN IMMEDIATE). This closes the issue #655 TOCTOU: the prior code read the
+   * invite in getValidInvite, returned it to the caller, and only then inserted
+   * the membership + bumped useCount as two separate awaits, so two concurrent
+   * accepts both passed `useCount < maxUses` before either insert committed and
+   * both seated.
+   *
+   * BEGIN IMMEDIATE reserves the writer slot before the invite read, so concurrent
+   * in-process acceptors (and a second Campfire process on the same SQLite file)
+   * serialize on the same invariant — mirroring the first-run admin claim in
+   * auth.service. The conditional UPDATE (`WHERE useCount < maxUses`) is the
+   * belt-and-suspenders guard inside the lock: if 0 rows updated, another
+   * acceptor consumed the last seat first and this transaction rolls back with
+   * the same uniform 404 a sequential latecomer would see (so the response never
+   * leaks whether the invite exists, expired, or was just exhausted by a race).
+   * Unlimited invites (maxUses NULL) always pass the guard.
+   */
+  private addMembership(
+    invite: typeof campaignInvites.$inferSelect,
+    userId: number,
+    opts: { rejectIfMember?: boolean } = {},
+  ): void {
     const ts = nowIso();
-    await this.db.insert(campaignMembers).values({
-      campaignId: invite.campaignId,
-      userId,
-      role: invite.role,
-      characterId: null,
-      createdAt: ts,
-      updatedAt: ts,
-    });
-    // SQL-side increment (not read-modify-write) so concurrent accepts can't lose a count.
-    await this.db
-      .update(campaignInvites)
-      .set({ useCount: sql`${campaignInvites.useCount} + 1`, updatedAt: ts })
-      .where(eq(campaignInvites.id, invite.id));
+    this.db.transaction(
+      (tx) => {
+        // Re-read the invite INSIDE the transaction: BEGIN IMMEDIATE has already
+        // acquired the write lock, so this row is stable for the duration of the
+        // callback. The outer getValidInvite read could be stale by now (another
+        // acceptor exhausted the cap, the DM revoked the row, or the clock crossed
+        // the expiry) — re-check here and fail closed with the uniform 404.
+        const current = tx
+          .select()
+          .from(campaignInvites)
+          .where(eq(campaignInvites.id, invite.id))
+          .limit(1)
+          .get();
+        if (!current || this.isSpent(current)) {
+          throw new NotFoundException(INVITE_NO_LONGER_ACTIVE);
+        }
+
+        // Authenticated invite acceptance normally guarantees the user exists, but
+        // keep the direct membership insert honest too: a stale/concurrent caller
+        // may not attach a disabled or missing account (#849). The database FK is
+        // the final missing-user backstop.
+        const target = tx.select().from(users).where(eq(users.id, userId)).limit(1).get();
+        if (!target) throw new NotFoundException(`User ${userId} not found`);
+        if (target.disabled) throw new ForbiddenException('This account is disabled');
+
+        if (opts.rejectIfMember) {
+          const existing = tx
+            .select({ id: campaignMembers.id })
+            .from(campaignMembers)
+            .where(
+              and(eq(campaignMembers.campaignId, invite.campaignId), eq(campaignMembers.userId, userId)),
+            )
+            .limit(1)
+            .get();
+          if (existing) throw new ConflictException('You are already a member of this campaign');
+        }
+
+        tx.insert(campaignMembers)
+          .values({
+            campaignId: invite.campaignId,
+            userId,
+            role: invite.role,
+            characterId: null,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
+
+        // Conditional increment: only consumes a seat if one is still available.
+        // 0 rows updated means another acceptor (serialized ahead of us by BEGIN
+        // IMMEDIATE) took the last seat between our isSpent re-check and this
+        // UPDATE — roll back. The 404 here is deliberate: a concurrent loser must
+        // see the SAME response as a sequential latecomer (see the existing
+        // maxUses=1 test — second accept is 404), so the response never leaks
+        // whether the invite exists, expired, or was just exhausted by a race.
+        // maxUses NULL (unlimited) always matches the guard.
+        const consumed = tx
+          .update(campaignInvites)
+          .set({ useCount: sql`${campaignInvites.useCount} + 1`, updatedAt: ts })
+          .where(
+            and(
+              eq(campaignInvites.id, invite.id),
+              sql`${campaignInvites.maxUses} IS NULL OR ${campaignInvites.useCount} < ${campaignInvites.maxUses}`,
+            ),
+          )
+          .run();
+        if (consumed.changes === 0) {
+          throw new NotFoundException(INVITE_NO_LONGER_ACTIVE);
+        }
+      },
+      // BEGIN IMMEDIATE reserves the writer slot before the invite read, so
+      // concurrent accepts serialize on the same invariant instead of racing
+      // through the read-then-write window the issue #655 repro exploited.
+      { behavior: 'immediate' },
+    );
   }
 }

@@ -806,16 +806,23 @@ export class McpToolsService {
       },
     );
 
-    this.tool(
+    // write-gated (#522): files a pending proposal + spends the AI seat budget, so a
+    // read-only/propose PAT must NOT trigger it. Registered via writeTool so the wrapper runs
+    // assertDirectWriteAllowed(user) and tags mutating:true — the same tier as the REST
+    // POST /campaigns/:id/scribe/run endpoint (no @Proposable path: a propose token can't
+    // route it through review either, so it is direct-write gated, not propose-capable).
+    this.writeTool(
       server,
+      user,
       'run_scribe',
       'DM only: run the automatic AI scribe now. Unlike draft_session_recap (which hands YOU the source material to write ' +
         'from), this has the campaign\'s CONFIGURED provider write the recap prose server-side, then files it as a PENDING ' +
         'PROPOSAL for DM approval — nothing is published to canon. Gated like an AI-DM turn: the server experimentalAiDm flag ' +
-        'must be on, the AI-DM seat enabled, and token budget must remain (the cost is metered against it). Idempotent: a ' +
-        're-run over unchanged material, or while a scribe recap proposal is still pending, is a no-op that returns the ' +
-        'existing proposal. Pass dryRun:true to generate a preview without filing anything. Returns the recorded job + any ' +
-        'filed proposal ids.',
+        'must be on, the AI-DM seat enabled, and token budget must remain (the cost is metered against it). Write-gated: a ' +
+        'propose/none writeScope token is refused (this spends the AI budget + files a proposal) — only a direct-write token ' +
+        '(or a session) may trigger it. Idempotent: a re-run over unchanged material, or while a scribe recap proposal is ' +
+        'still pending, is a no-op that returns the existing proposal. Pass dryRun:true to generate a preview without filing ' +
+        'anything. Returns the recorded job + any filed proposal ids.',
       { campaignId: CampaignIdArg, dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal') },
       async ({ campaignId, dryRun }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
@@ -883,7 +890,8 @@ export class McpToolsService {
       server,
       'get_rule_entry',
       'Get a single rule entry (spell/monster/item/condition/etc.) by id, including its full body and structured ' +
-        'dataJson (e.g. a monster statblock\'s ability scores/hp/AC). Ids come from lookup_rule.',
+        'dataJson (e.g. a monster statblock\'s ability scores, HP, AC, traits, actions, reactions, and legendary actions). ' +
+        'Ids come from lookup_rule.',
       { entryId: Id.describe('Rule entry id — from lookup_rule') },
       async ({ entryId }) => this.rules.getEntryOrThrow(entryId as number),
     );
@@ -1999,14 +2007,17 @@ export class McpToolsService {
         'character; dm may create/update any character in the campaign, incl. reassigning ownerUserId. The dmSecret ' +
         'field (DM-only text, stripped from non-DM reads) is only writable as dm — ignored otherwise. Set status to ' +
         "active|dead|retired|inactive to mark a PC's lifecycle — only active PCs are auto-added to new encounters. With propose:true " +
-        'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly.',
+        'any member may submit the create/update as a pending proposal for a dm to approve instead of writing directly. ' +
+        'Pass expectedUpdatedAt (the updatedAt you last read) on an update to opt into optimistic concurrency (issue #746): ' +
+        'a stale value returns 409 Conflict instead of silently clobbering a fresher edit from another tab or a connected AI.',
       {
         campaignId: CampaignIdArg,
         characterId: Id.optional().describe('Existing character id (update); omit to create'),
         propose: ProposeArg,
+        expectedUpdatedAt: ExpectedUpdatedAt,
         ...CharacterUpdate.shape,
       },
-      async ({ campaignId, characterId, propose, ...fields }) => {
+      async ({ campaignId, characterId, propose, expectedUpdatedAt, ...fields }) => {
         if (characterId !== undefined) {
           const row = await this.characters.getRowOrThrow(characterId as number);
           if (row.campaignId !== (campaignId as number)) {
@@ -2019,7 +2030,9 @@ export class McpToolsService {
             return { proposal };
           }
           const role = await this.access.requireRole(user, row.campaignId, 'player');
-          return this.characters.update(characterId as number, validated, user, role);
+          return this.characters.update(characterId as number, validated, user, role, {
+            expectedUpdatedAt: expectedUpdatedAt as string | undefined,
+          });
         }
         const validated = CharacterCreate.parse(fields); // name required on create
         if (requireWriteMode(user, propose)) {
@@ -2514,7 +2527,7 @@ export class McpToolsService {
         'the roll is audited (action "dice.roll") and appears in the campaign-shared dice log.',
       {
         campaignId: CampaignIdArg,
-        expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3" or "2d20kh1"'),
+        expr: RollRequest.shape.expr.describe('Dice expression: a sum of die terms (NdM) and modifiers, e.g. "1d20+3", "2d20kh1", or "1d20+1d4+3"'),
         label: RollRequest.shape.label.describe('Optional check label, e.g. "DEX save"'),
         dc: RollRequest.shape.dc.describe('Optional difficulty class; success is computed as total >= dc'),
       },
@@ -2566,13 +2579,17 @@ export class McpToolsService {
         '(issue #39: mapAttachmentId = an uploaded image attachment id, kind map|image, rendered as the run-session ' +
         'background; combatant token positions are set with update_combatant tokenX/tokenY, 0–100). Toggle hidden to ' +
         'hide/reveal the encounter as DM-only prep (issue #262: hidden=true withholds its roster + difficulty from ' +
-        'players; hidden=false reveals it). Pass null to clear a link or the map; omit a field to leave it unchanged.',
-      { encounterId: Id.describe('Encounter id — from list_encounters'), ...EncounterUpdate.shape },
-      async ({ encounterId, ...fields }) => {
+        'players; hidden=false reveals it). Pass null to clear a link or the map; omit a field to leave it unchanged. ' +
+        'Pass expectedUpdatedAt (the updatedAt you last read for this encounter) to opt into optimistic concurrency ' +
+        '(issue #532): a stale value 409s rather than silently clobbering a co-DM\'s fresher edit.',
+      { encounterId: Id.describe('Encounter id — from list_encounters'), expectedUpdatedAt: ExpectedUpdatedAt, ...EncounterUpdate.shape },
+      async ({ encounterId, expectedUpdatedAt, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         const validated = EncounterUpdate.parse(fields);
-        return this.encounters.updateEncounter(encounterId as number, validated, user, role);
+        return this.encounters.updateEncounter(encounterId as number, validated, user, role, {
+          expectedUpdatedAt: expectedUpdatedAt as string | undefined,
+        });
       },
     );
 
@@ -2670,10 +2687,12 @@ export class McpToolsService {
       'update_combatant',
       'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
-        'successes = stable), addConditions/removeConditions. DM-only fields: initiative, and the identity edits ' +
-        'name / hpMax / initMod (rename a duplicate, fix a mistyped stat). Battle-map token position tokenX/tokenY ' +
-        '(0–100 percent overlay, clamped) moves the combatant\'s token on the encounter map. DM may modify any ' +
-        'combatant; a player may only touch hp/temp-hp/death-saves/conditions/token on a combatant linked to a character they own.',
+        'successes = stable), deathSaveRoll (a d20 death-save result; 5e crit/fumble rules: nat 1 = two failures, ' +
+        'nat 20 = revive at 1 HP, 10–19 = one success, 2–9 = one failure), addConditions/removeConditions. DM-only ' +
+        'fields: initiative, and the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat). ' +
+        'Battle-map token position tokenX/tokenY (0–100 percent overlay, clamped) moves the combatant\'s token on the ' +
+        'encounter map. DM may modify any combatant; a player may only touch hp/temp-hp/death-saves/conditions/token ' +
+        'on a combatant linked to a character they own.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantUpdate.shape },
       async ({ encounterId, combatantId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

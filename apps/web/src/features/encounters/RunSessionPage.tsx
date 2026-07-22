@@ -11,7 +11,7 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   AoeShape,
@@ -52,6 +52,12 @@ import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
+import {
+  advanceCombatLogAnnouncements,
+  formatCombatLogAnnouncementBatch,
+  formatCombatLogEventSummary,
+  type CombatLogAnnouncementCursor,
+} from './combatLogAccessibility';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -329,6 +335,11 @@ const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Sta
  * 5e death-save tracker (issue #57): three success pips + three failure pips for a
  * character at 0 HP. Clicking a pip sets the count to that position (clicking the
  * highest-lit pip clears it back down), committing via onSet. Read-only unless canEdit.
+ *
+ * Roll button (issue #619): rolls a d20 and posts `deathSaveRoll` to the server, which
+ * applies the 5e crit/fumble rules — nat 1 = two failure pips, nat 20 = revive at 1 HP
+ * (saves cleared), 10–19 = one success, 2–9 = one failure. The server's response is the
+ * source of truth for the counters + HP; the button just supplies the d20 face.
  */
 function DeathSaveTracker({
   successes,
@@ -336,12 +347,14 @@ function DeathSaveTracker({
   canEdit,
   busy,
   onSet,
+  onRoll,
 }: {
   successes: number;
   failures: number;
   canEdit: boolean;
   busy: boolean;
   onSet: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
+  onRoll: () => void;
 }) {
   function Pips({ kind, count, color }: { kind: 'deathSaveSuccesses' | 'deathSaveFailures'; count: number; color: string }) {
     return (
@@ -382,6 +395,19 @@ function DeathSaveTracker({
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Fails</span>
         <Pips kind="deathSaveFailures" count={failures} color="#e5484d" />
       </span>
+      {canEdit && (
+        <button
+          type="button"
+          className="btn btn-ghost"
+          aria-label="Roll a death save"
+          title="Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)"
+          disabled={busy}
+          onClick={onRoll}
+          style={{ fontSize: 10, minHeight: 20, padding: '1px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+        >
+          Roll
+        </button>
+      )}
     </div>
   );
 }
@@ -574,38 +600,38 @@ export default function RunSessionPage() {
     onReconnect: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
   });
 
-  // Announce turn/round changes and HP mutations for screen readers (issue #93).
-  // Diffing the encounter (rather than hooking each action) covers every source —
-  // own edits, other members' edits, and SSE-pushed updates — with one code path.
-  const prevAnnounceRef = useRef<{ hp: Map<number, number | null>; turnKey: string } | null>(null);
+  // The persisted event stream is the single announcement source for turn, HP,
+  // condition, death, note, override, and correction updates. ID-based tracking
+  // suppresses duplicate SSE/mutation/poll refetches; initial history is a silent
+  // baseline, while reconnect bursts are announced together so no entry is lost.
+  const combatLogAnnouncementRef = useRef<{
+    encounterId: number;
+    cursor: CombatLogAnnouncementCursor;
+  } | null>(null);
+  useEffect(() => {
+    if (!eventsQuery.data) return;
+
+    const previous = combatLogAnnouncementRef.current;
+    const cursor = previous?.encounterId === eid ? previous.cursor : null;
+    const advanced = advanceCombatLogAnnouncements(eventsQuery.data, cursor);
+    combatLogAnnouncementRef.current = { encounterId: eid, cursor: advanced.cursor };
+
+    const message = formatCombatLogAnnouncementBatch(advanced.appendedEvents);
+    if (message) announce(message);
+  }, [eid, eventsQuery.data, announce]);
+
+  // Ending an encounter does not currently append a combat-log row. Retain that
+  // useful status announcement without restoring the old turn/HP diff path, which
+  // would duplicate the persisted-event announcements above.
+  const previousEncounterStatusRef = useRef<{ encounterId: number; status: EncounterWithCombatants['status'] } | null>(null);
   useEffect(() => {
     if (!encounter) return;
-    const currentId = encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
-    const turnKey =
-      encounter.status === 'running' ? `${encounter.round}:${currentId}` : encounter.status;
-    const hp = new Map(encounter.combatants.map((c) => [c.id, c.hpCurrent]));
-    const prev = prevAnnounceRef.current;
-
-    if (prev) {
-      if (turnKey !== prev.turnKey) {
-        if (encounter.status === 'running') {
-          const current = encounter.combatants.find((c) => c.id === currentId);
-          announce(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
-        } else if (encounter.status === 'ended') {
-          announce('Encounter ended');
-        }
-      }
-      for (const c of encounter.combatants) {
-        const before = prev.hp.get(c.id);
-        // Only announce concrete HP changes — skip when either value is null
-        // (a monster whose exact HP is redacted from this viewer, issue #43).
-        if (before != null && c.hpCurrent != null && before !== c.hpCurrent) {
-          announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
-        }
-      }
+    const previous = previousEncounterStatusRef.current;
+    if (previous?.encounterId === eid && previous.status !== encounter.status && encounter.status === 'ended') {
+      announce('Encounter ended');
     }
-    prevAnnounceRef.current = { hp, turnKey };
-  }, [encounter, announce]);
+    previousEncounterStatusRef.current = { encounterId: eid, status: encounter.status };
+  }, [eid, encounter, announce]);
 
   const myUserId = me?.user.id;
   const ownedCharacterIds = useMemo(
@@ -715,6 +741,28 @@ export default function RunSessionPage() {
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
     [combatantPatch],
+  );
+
+  /**
+   * Roll a death save (issue #619): roll a d20 client-side, POST it to the campaign's
+   * shared dice log so the whole table sees the roll, then PATCH the combatant with
+   * `deathSaveRoll`. The SERVER is the source of truth for the outcome (nat 1 = two
+   * failures, nat 20 = revive at 1 HP, 10–19 = one success, 2–9 = one failure) — its
+   * response drives the pips + HP, and the combatantPatch invalidation re-renders this
+   * row immediately. The dice-log post is fire-and-forget for table visibility; if it
+   * fails we still apply the roll outcome (the combat-log event records provenance too).
+   */
+  const rollDeathSave = useCallback(
+    (combatant: Combatant) => {
+      const face = 1 + Math.floor(Math.random() * 20); // 1–20, uniform
+      const label = `${combatant.name} · death save`;
+      // Visible in the shared dice tray. A plain 1d20 expr so crit/fumble flavor lights up.
+      void api.post(`${API}/campaigns/${cid}/roll`, { expr: '1d20', label }).catch(() => {
+        /* table-visibility best-effort; outcome is driven by the combatant PATCH below */
+      });
+      patchCombatant(combatant.id, { deathSaveRoll: face });
+    },
+    [cid, patchCombatant],
   );
 
   const rollInitiative = () => runControl.mutate('roll-initiative');
@@ -1064,6 +1112,7 @@ export default function RunSessionPage() {
               onHpDelta={(delta) => hpDelta.mutate({ combatantId: c.id, delta })}
               onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
               onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
+              onRollDeathSave={() => rollDeathSave(c)}
               onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
               onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
               onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
@@ -2306,6 +2355,7 @@ function CombatantRow({
   onHpDelta,
   onSetTempHp,
   onSetDeathSaves,
+  onRollDeathSave,
   onSetInitiative,
   onAddCondition,
   onRemoveCondition,
@@ -2338,6 +2388,8 @@ function CombatantRow({
   onHpDelta: (delta: number) => void;
   onSetTempHp: (value: number) => void;
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
+  /** Roll a death save (issue #619) — rolls d20, posts to the dice log, drives the server outcome. */
+  onRollDeathSave: () => void;
   onSetInitiative: (value: number) => void;
   onAddCondition: (cond: string) => void;
   onRemoveCondition: (cond: string) => void;
@@ -2556,6 +2608,7 @@ function CombatantRow({
               canEdit={canEdit}
               busy={busy}
               onSet={onSetDeathSaves}
+              onRoll={onRollDeathSave}
             />
           )}
         {combatant.conditions.length > 0 && (
@@ -2813,50 +2866,66 @@ const EVENT_ICON: Record<string, string> = {
   turn: 'stopwatch',
   roll: 'rolling-dices',
   note: 'quill-ink',
+  override: 'tabletop-players',
+  correction: 'quill-ink',
 };
 
 /**
  * Persistent per-encounter combat log (issue #61). Renders the server-stored event
- * trail (damage/heal, conditions, deaths, turns) in chronological order — it survives
- * reload and updates live with the rest of the tracker. Scrollable so a long fight
- * doesn't push the page down.
+ * trail (damage/heal, conditions, deaths, rolls, turns, notes, overrides, and
+ * corrections) in chronological order — it survives reload and updates live with
+ * the rest of the tracker. Scrollable so a long fight doesn't push the page down.
  */
 function CombatLog({ events }: { events: EncounterEvent[] }) {
+  const headingId = 'combat-log-heading';
+  const logRef = useRef<HTMLDivElement>(null);
+  const preservedScrollTopRef = useRef(0);
+
+  // React's list append can invoke browser scroll anchoring around the focused
+  // container. Snapshot before the commit and restore in the layout phase so a
+  // remote event never moves someone away from the history they were reading.
+  useLayoutEffect(() => {
+    const log = logRef.current;
+    if (!log) return;
+    log.scrollTop = preservedScrollTopRef.current;
+    return () => {
+      preservedScrollTopRef.current = log.scrollTop;
+    };
+  }, [events]);
+
   return (
     <Card className="space-y-2">
-      <span className="card-kicker">Combat log</span>
-      {events.length === 0 ? (
-        <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-          Nothing yet — damage, conditions, deaths and turns will show here as the fight unfolds.
-        </p>
-      ) : (
-        <div style={{ maxHeight: 260, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {events.map((ev) => (
-            <div key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5, lineHeight: 1.4 }}>
-              <span aria-hidden="true" style={{ flex: 'none' }}>
-                {EVENT_ICON[ev.type] ? <GameIcon slug={EVENT_ICON[ev.type]} size={13} /> : '•'}
-              </span>
-              {ev.round > 0 && (
-                <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>
-                  R{ev.round}
+      <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>Combat log</h2>
+      <div
+        ref={logRef}
+        role="log"
+        aria-labelledby={headingId}
+        aria-live="off"
+        tabIndex={0}
+        style={{ maxHeight: 260, overflowY: 'auto', overflowAnchor: 'none' }}
+      >
+        {events.length === 0 ? (
+          <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+            Nothing yet — damage, healing, conditions, deaths, rolls, turns, notes, overrides and corrections will show here as the fight unfolds.
+          </p>
+        ) : (
+          <ol style={{ display: 'flex', flexDirection: 'column', gap: 4, listStyle: 'none', margin: 0, padding: 0 }}>
+            {events.map((ev) => (
+              <li key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5, lineHeight: 1.4 }}>
+                <span aria-hidden="true" style={{ flex: 'none' }}>
+                  {EVENT_ICON[ev.type] ? <GameIcon slug={EVENT_ICON[ev.type]} size={13} /> : '•'}
                 </span>
-              )}
-              <span style={{ minWidth: 0 }}>
-                {ev.type === 'turn' ? (
-                  <span>{ev.detail}</span>
-                ) : (
-                  <>
-                    {ev.target && <span style={{ fontWeight: 600 }}>{ev.target}</span>}{' '}
-                    <span className="text-muted" style={{ color: 'var(--color-text)' }}>
-                      {ev.detail}
-                    </span>
-                  </>
+                {ev.round > 0 && (
+                  <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>
+                    R{ev.round}
+                  </span>
                 )}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
+                <span style={{ minWidth: 0 }}>{formatCombatLogEventSummary(ev)}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
     </Card>
   );
 }

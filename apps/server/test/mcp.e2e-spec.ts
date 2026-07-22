@@ -190,11 +190,17 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Campaign' });
     campaignId = campRes.body.id;
 
-    const dmTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-dm-token', scope: 'dm' });
+    // writeScope: 'direct' is explicit — the safe default is 'propose' now
+    // (issue #575), but this suite exercises MCP WRITE tools (create_quest,
+    // award_xp, add_member…) against CANON, so we opt the fixture token in.
+    const dmTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-dm-token', scope: 'dm', writeScope: 'direct' });
     expect(dmTokenRes.status).toBe(201);
     dmToken = dmTokenRes.body.token;
 
-    const viewerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-viewer-token', scope: 'viewer' });
+    // writeScope: 'direct' explicit (issue #575 default is 'propose') — this
+    // fixture asserts viewer scope GATES direct writes (RSVP allowed, create_quest
+    // denied). Under the propose default those would route differently, so opt in.
+    const viewerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-viewer-token', scope: 'viewer', writeScope: 'direct' });
     expect(viewerTokenRes.status).toBe(201);
     viewerToken = viewerTokenRes.body.token;
 
@@ -1183,8 +1189,36 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(discoverResult.isError).toBeFalsy();
     expect((parseResult(discoverResult) as { status: string }).status).toBe('current');
 
+    const replacementResult = await client.callTool({
+      name: 'upsert_location',
+      arguments: { campaignId, name: 'MCP Keep' },
+    });
+    const replacement = parseResult(replacementResult) as { id: number };
+    const replaceCurrentResult = await client.callTool({
+      name: 'set_location_discovery',
+      arguments: { locationId: replacement.id, status: 'current' },
+    });
+    expect(replaceCurrentResult.isError).toBeFalsy();
+
+    const locationListResult = await client.callTool({ name: 'list_locations', arguments: { campaignId } });
+    const locationRows = parseResult(locationListResult) as Array<{ id: number; status: string }>;
+    expect(locationRows.find((row) => row.id === location.id)?.status).toBe('explored');
+    expect(locationRows.find((row) => row.id === replacement.id)?.status).toBe('current');
+    const summaryResult = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
+    const summary = parseResult(summaryResult) as {
+      campaign: { currentLocationId: number | null };
+      currentLocation: { id: number } | null;
+    };
+    expect(summary.campaign.currentLocationId).toBe(replacement.id);
+    expect(summary.currentLocation?.id).toBe(replacement.id);
+
     const deleteLocResult = await client.callTool({ name: 'delete_location', arguments: { locationId: location.id } });
     expect(deleteLocResult.isError).toBeFalsy();
+    const deleteReplacementResult = await client.callTool({
+      name: 'delete_location',
+      arguments: { locationId: replacement.id },
+    });
+    expect(deleteReplacementResult.isError).toBeFalsy();
 
     const npcResult = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'MCP Blacksmith' } });
     const npc = parseResult(npcResult) as { id: number };
@@ -1515,7 +1549,12 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const entryResult = await dmClient.callTool({ name: 'get_rule_entry', arguments: { entryId: goblin.id } });
     expect(entryResult.isError).toBeFalsy();
-    expect((parseResult(entryResult) as { name: string }).name).toBe('Goblin');
+    const goblinEntry = parseResult(entryResult) as { name: string; dataJson: string };
+    expect(goblinEntry.name).toBe('Goblin');
+    expect(JSON.parse(goblinEntry.dataJson)).toMatchObject({
+      specialAbilities: [expect.objectContaining({ name: 'Nimble Escape' })],
+      actions: [expect.objectContaining({ name: 'Scimitar', attackBonus: 4 })],
+    });
 
     // install_rule_pack: non-admin (viewer PAT belongs to the same admin user, but scope caps
     // don't affect serverRole — use a real non-admin user instead, minted via the headless
@@ -1931,7 +1970,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     ).toBe(true);
 
     // An adminEnabled token minted by the server admin DOES carry server-admin power.
-    const adminTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-admin-enabled', scope: 'dm', adminEnabled: true });
+    // writeScope: 'direct' explicit (issue #575 default is 'propose') — this
+    // token uninstalls a rule pack, a direct-only admin write with no proposal
+    // path, which a propose-mode token cannot drive.
+    const adminTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-admin-enabled', scope: 'dm', adminEnabled: true, writeScope: 'direct' });
     expect(adminTokenRes.status).toBe(201);
     expect(adminTokenRes.body.apiToken.adminEnabled).toBe(true);
     const adminClient = await mcpClient(adminTokenRes.body.token);

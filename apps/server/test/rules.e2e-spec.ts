@@ -1,6 +1,9 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
+import { eq } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { ruleEntries } from '../src/db/schema';
 import {
   startFakeOpen5e,
   startFakeOpen5eWithBadPagination,
@@ -101,8 +104,27 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(listRes.body).toHaveLength(1);
     expect(listRes.body[0].id).toBe(packId);
 
-    // re-installing the same slug+sections is now an incremental no-op (round-2 finding
-    // #2): outcome 'updated' with added:0 (everything already present) rather than a 409.
+    // Simulate an entry installed by the pre-#621 importer, which had no action
+    // categories, and a user-selected icon. Re-importing Open5e must refresh the
+    // importer-owned data in place without losing the row id or icon override.
+    const oldSentinelSearch = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'fixture sentinel', type: 'monster' })
+      .set(dm);
+    const oldSentinel = oldSentinelSearch.body.find((e: { name: string }) => e.name === 'Fixture Sentinel');
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(ruleEntries)
+      .set({ dataJson: JSON.stringify({ ac: 16, hp: 52 }), updatedAt: new Date().toISOString() })
+      .where(eq(ruleEntries.id, oldSentinel.id))
+      .run();
+    const iconRes = await request(server)
+      .patch(`/api/v1/rules/entries/${oldSentinel.id}`)
+      .set(dm)
+      .send({ iconSlug: 'golem-head' });
+    expect(iconRes.status).toBe(200);
+
+    // Re-installing the same slug+sections is an in-place Open5e refresh: outcome
+    // 'updated' with added:0 (everything already exists) rather than a duplicate or 409.
     const reJob = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(reJob.status).toBe('completed');
     expect(reJob.outcome).toBe('updated');
@@ -117,11 +139,46 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(searchRes.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
 
     // search: type filter narrows to monsters only
-    const monsterSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'owlbear', type: 'monster' }).set(dm);
+    const monsterSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fixture sentinel', type: 'monster' }).set(dm);
     expect(monsterSearchRes.status).toBe(200);
     expect(monsterSearchRes.body.length).toBeGreaterThan(0);
     for (const e of monsterSearchRes.body) expect(e.type).toBe('monster');
-    expect(monsterSearchRes.body.some((e: { name: string }) => e.name === 'Owlbear')).toBe(true);
+    expect(monsterSearchRes.body.some((e: { name: string }) => e.name === 'Fixture Sentinel')).toBe(true);
+
+    // Issue #621 regression: live Open5e v2 combines regular, reaction and legendary
+    // entries in actions[] (partitioned by action_type) and calls passive abilities
+    // traits[]. The importer must preserve every category, raw description, and useful
+    // structured mechanics in the shared dataJson returned by search and entry reads.
+    const sentinel = monsterSearchRes.body.find((e: { name: string }) => e.name === 'Fixture Sentinel');
+    const sentinelData = JSON.parse(sentinel.dataJson);
+    expect(sentinelData.specialAbilities).toEqual([
+      expect.objectContaining({ name: 'Immutable Form', desc: expect.stringContaining('alter its form') }),
+    ]);
+    expect(sentinelData.actions.map((a: { name: string }) => a.name)).toEqual(['Multiattack', 'Arc Blade', 'Static Burst']);
+    expect(sentinelData.actions[1]).toMatchObject({
+      attackBonus: 6,
+      damage: [{ expression: '2d6 + 4', type: 'Lightning' }],
+      attacks: [expect.objectContaining({ attackBonus: 6, damage: [{ expression: '2d6 + 4', type: 'Lightning' }] })],
+    });
+    expect(sentinelData.actions[2]).toMatchObject({
+      desc: expect.stringContaining('DC 15 Dexterity saving throw'),
+      savingThrow: { dc: 15, ability: 'Dexterity' },
+      usage: { type: 'recharge', min: 5, max: 6, label: 'Recharge 5\u20136' },
+      usage_limits: { type: 'RECHARGE_ON_ROLL', param: 5 },
+    });
+    expect(sentinelData.reactions).toEqual([
+      expect.objectContaining({ name: 'Deflect', action_type: 'REACTION', desc: expect.stringContaining('one attack') }),
+    ]);
+    expect(sentinelData.legendaryActions).toEqual([
+      expect.objectContaining({ name: 'Sweep', action_type: 'LEGENDARY_ACTION', legendaryActionCost: 2 }),
+    ]);
+
+    const sentinelEntryRes = await request(server).get(`/api/v1/rules/entries/${sentinel.id}`).set(dm);
+    expect(sentinelEntryRes.status).toBe(200);
+    expect(sentinelEntryRes.body.dataJson).toBe(sentinel.dataJson);
+    expect(sentinelEntryRes.body.id).toBe(oldSentinel.id);
+    expect(sentinelEntryRes.body.iconSlug).toBe('golem-head');
+    expect(sentinelEntryRes.body.license).toBe('Creative Commons Attribution 4.0');
 
     // search: pack filter
     const packSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', pack: 'open5e-srd' }).set(dm);
@@ -751,23 +808,41 @@ describe('rules / rule packs — install permission gating (e2e, real sessions)'
     await adminAgent.delete(`/api/v1/rules/packs/${job.pack.id}`);
   });
 
-  it('a DM of a campaign (not a server admin) can install a pack (issue #20)', async () => {
-    // The DM user creates a campaign — the creator is auto-inserted as its DM.
+  it('a DM of a campaign (not a server admin) is FORBIDDEN from every server-scoped rule-pack mutation (issue #736)', async () => {
+    // Rule packs are server-wide: installing/uploading/uninstalling/editing one affects
+    // EVERY campaign on the server, not just the caller's. Issue #736 closed the hole
+    // where a DM of any campaign could mutate these global packs (the old #20 policy).
+    // The DM user creates a campaign — the creator is auto-inserted as its DM, so they
+    // really do hold a campaign-DM role — but that must NOT grant server-wide pack powers.
     const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'DM Install Campaign' });
     expect(campRes.status).toBe(201);
 
     const installRes = await dmAgent
       .post('/api/v1/rules/packs/install')
       .send({ source: 'open5e', url: fake.baseUrl, sections: ['conditions'] });
-    expect(installRes.status).toBe(202);
-    const job = await pollWithAgent(dmAgent, installRes.body.id);
-    expect(job.status).toBe('completed');
-    expect(job.pack.slug).toBe('open5e-srd');
+    expect(installRes.status).toBe(403);
 
-    // A DM may install, but uninstall stays server-admin only.
-    const dmUninstall = await dmAgent.delete(`/api/v1/rules/packs/${job.pack.id}`);
-    expect(dmUninstall.status).toBe(403);
-    await adminAgent.delete(`/api/v1/rules/packs/${job.pack.id}`);
+    const uploadRes = await dmAgent.post('/api/v1/rules/packs/upload').send({
+      source: 'upload',
+      pack: { slug: 'dm-upload', name: 'DM Upload', license: 'CC-BY-4.0' },
+      entries: [{ slug: 'a', name: 'A', type: 'other' }],
+    });
+    expect(uploadRes.status).toBe(403);
+
+    // Uninstall was already server-admin-only; it stays that way.
+    const uninstallRes = await dmAgent.delete('/api/v1/rules/packs/1');
+    expect(uninstallRes.status).toBe(403);
+
+    // The entry icon override is gated identically (editing an entry affects every
+    // campaign using the pack).
+    const entryRes = await dmAgent.patch('/api/v1/rules/entries/1').send({ iconSlug: 'fire' });
+    expect(entryRes.status).toBe(403);
+
+    // ...but campaign-DM reads remain open, same as any authenticated user.
+    const listRes = await dmAgent.get('/api/v1/rules/packs');
+    expect(listRes.status).toBe(200);
+    const searchRes = await dmAgent.get('/api/v1/rules/search').query({ q: 'anything' });
+    expect(searchRes.status).toBe(200);
   });
 });
 
@@ -1298,12 +1373,13 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
     expect(res.status).toBe(200);
     const bySource = Object.fromEntries(res.body.map((m: { source: string }) => [m.source, m]));
     // Every install source is described.
-    for (const s of ['open5e', 'pf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'other']) {
+    for (const s of ['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'other']) {
       expect(bySource[s]).toBeDefined();
     }
     // Wired live sources install without a url.
     expect(bySource['open-legend']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
     expect(bySource['open5e']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
+    expect(bySource['sf2e']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
     // Systems with no open source are honestly flagged manual-upload (and carry a note + license).
     for (const s of ['pf1e', 'starfinder', 'archmage', 'osr']) {
       expect(bySource[s]).toMatchObject({ sourceKind: 'manual-upload', installableWithoutUrl: false });
@@ -1311,6 +1387,35 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(bySource[s].note.length).toBeGreaterThan(0);
       expect(typeof bySource[s].license).toBe('string');
     }
+  });
+});
+
+describe('rules / rule packs — Starfinder 2e install (e2e, fake AoN server)', () => {
+  let ctx: TestAppContext;
+  let pf2e: import('./fake-pf2e').FakePf2e;
+  let server: Server;
+
+  beforeAll(async () => {
+    const { startFakePf2e } = await import('./fake-pf2e');
+    ctx = await createTestApp();
+    pf2e = await startFakePf2e();
+    server = ctx.app.getHttpServer();
+  });
+
+  afterAll(async () => {
+    await pf2e.close();
+    await closeTestApp(ctx);
+  });
+
+  it('installs under the sf2e-srd slug and maps sections onto Campfire rule-entry types', async () => {
+    const res = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'sf2e', url: pf2e.baseUrl });
+    expect(res.status).toBe(202);
+    expect(res.body.source).toBe('sf2e');
+    const job = await pollJob(server, dm, res.body.id);
+    expect(job.status).toBe('completed');
+    expect(job.pack.slug).toBe('sf2e-srd');
+    expect(job.pack.name).toMatch(/Starfinder 2e/);
+    expect(job.pack.license).toMatch(/ORC/);
   });
 });
 
@@ -1345,5 +1450,184 @@ liveSmoke('rules / rule packs — Open Legend live default source smoke (issue #
     expect(boon.body.some((e: { name: string }) => e.name === 'Haste')).toBe(true);
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+  });
+});
+
+/**
+ * Issue #734: rule-pack licensing. Upload accepts per-entry license/attribution/author/
+ * sourceUrl, but install validated only the pack license, persistence dropped each entry's
+ * license, and the reader labelled every entry with the pack license. These tests pin the
+ * per-entry contract: a mixed-license pack preserves each entry's OWN license (and its
+ * attribution/author/sourceUrl), entries without a per-entry license inherit the pack's,
+ * and an incompatible (non-open) entry is rejected with an indexed 400 BEFORE any mutation.
+ */
+describe('rules / rule packs — per-entry licensing (issue #734)', () => {
+  let ctx: TestAppContext;
+  const uploader = { 'x-dev-role': 'dm', 'x-dev-user': 'license-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function uploadPack(body: Record<string, unknown>) {
+    return request(ctx.app.getHttpServer()).post('/api/v1/rules/packs/upload').set(uploader).send(body);
+  }
+
+  // A mixed-license pack: open pack license (CC-BY-4.0), but each entry carries its OWN
+  // open license — OGL, ORC, CC0 — exactly the "mixed OGL/ORC/CC entries in an otherwise
+  // open pack" case the issue calls out. Attribution/author/sourceUrl ride along per entry.
+  const mixedPack = {
+    source: 'upload' as const,
+    pack: {
+      slug: 'mixed-licensing-pack',
+      name: 'Mixed Licensing Anthology',
+      version: '1.0',
+      license: 'CC-BY-4.0',
+      sourceUrl: 'https://example.com/mixed',
+    },
+    entries: [
+      {
+        slug: 'ogl-fireball',
+        name: 'OGL Fireball',
+        type: 'spell',
+        body: 'A ball of fire.',
+        license: 'OGL 1.0a',
+        attribution: 'OGL Fireball, © Open Author, Open Game Content (OGL 1.0a).',
+        author: 'Open Author',
+        sourceUrl: 'https://example.com/mixed/ogl-fireball',
+      },
+      {
+        slug: 'orc-goblin',
+        name: 'ORC Goblin',
+        type: 'monster',
+        dataJson: JSON.stringify({ hp: 7 }),
+        license: 'ORC',
+        attribution: 'ORC Goblin, Open RPG Creative License.',
+        author: 'ORC Studio',
+      },
+      {
+        slug: 'cc0-sword',
+        name: 'CC0 Sword',
+        type: 'item',
+        body: 'A public-domain sword.',
+        license: 'CC0',
+        // attribution/author/sourceUrl intentionally omitted → inherit pack-level fallbacks.
+      },
+    ],
+  };
+
+  it('preserves each entry\u2019s OWN license (mixed OGL/ORC/CC0 in an open pack)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const res = await uploadPack(mixedPack);
+    expect(res.status).toBe(202);
+    const job = await pollJob(server, uploader, res.body.id);
+    expect(job.status).toBe('completed');
+    expect(job.outcome).toBe('created');
+    expect(job.pack.license).toBe('CC-BY-4.0');
+
+    // Each entry surfaces its OWN license — NOT the pack's CC-BY-4.0 blanket.
+    const oglRes = await request(server).get('/api/v1/rules/search').query({ q: 'OGL Fireball', pack: 'mixed-licensing-pack' }).set(uploader);
+    const ogl = oglRes.body.find((e: { name: string }) => e.name === 'OGL Fireball');
+    expect(ogl).toBeTruthy();
+    const oglEntry = await request(server).get(`/api/v1/rules/entries/${ogl.id}`).set(uploader);
+    expect(oglEntry.status).toBe(200);
+    expect(oglEntry.body.license).toBe('OGL 1.0a'); // entry's own license, not the pack's CC-BY-4.0
+    expect(oglEntry.body.attribution).toBe('OGL Fireball, © Open Author, Open Game Content (OGL 1.0a).');
+    expect(oglEntry.body.author).toBe('Open Author');
+    expect(oglEntry.body.sourceUrl).toBe('https://example.com/mixed/ogl-fireball');
+
+    const orcRes = await request(server).get('/api/v1/rules/search').query({ q: 'ORC Goblin', pack: 'mixed-licensing-pack' }).set(uploader);
+    const orc = orcRes.body.find((e: { name: string }) => e.name === 'ORC Goblin');
+    expect(orc).toBeTruthy();
+    const orcEntry = await request(server).get(`/api/v1/rules/entries/${orc.id}`).set(uploader);
+    expect(orcEntry.body.license).toBe('ORC');
+    expect(orcEntry.body.author).toBe('ORC Studio');
+
+    const cc0Res = await request(server).get('/api/v1/rules/search').query({ q: 'CC0 Sword', pack: 'mixed-licensing-pack' }).set(uploader);
+    const cc0 = cc0Res.body.find((e: { name: string }) => e.name === 'CC0 Sword');
+    expect(cc0).toBeTruthy();
+    const cc0Entry = await request(server).get(`/api/v1/rules/entries/${cc0.id}`).set(uploader);
+    expect(cc0Entry.body.license).toBe('CC0');
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(uploader);
+  });
+
+  it('entries without a per-entry license inherit the pack license (explicit inherited provenance)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const res = await uploadPack({
+      source: 'upload',
+      pack: { slug: 'uniform-ogl-pack', name: 'Uniform OGL Pack', license: 'OGL 1.0a', sourceUrl: 'https://example.com/u' },
+      entries: [
+        { slug: 'uniform-magic-missile', name: 'Uniform Magic Missile', type: 'spell', body: 'A dart of force.' },
+      ],
+    });
+    expect(res.status).toBe(202);
+    const job = await pollJob(server, uploader, res.body.id);
+    expect(job.status).toBe('completed');
+
+    const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'Uniform Magic Missile', pack: 'uniform-ogl-pack' }).set(uploader);
+    const found = searchRes.body.find((e: { name: string }) => e.name === 'Uniform Magic Missile');
+    const entry = await request(server).get(`/api/v1/rules/entries/${found.id}`).set(uploader);
+    // The entry's effective license is the pack's OGL — stored ON the entry so the reader
+    // can trust entry.license without needing the pack row (the pre-#734 reader labelled
+    // every entry with the pack license by reading pack.license; now the entry carries it).
+    expect(entry.body.license).toBe('OGL 1.0a');
+    // attribution falls back to the pack name (a reasonable default credit line).
+    expect(entry.body.attribution).toBe('Uniform OGL Pack');
+    expect(entry.body.sourceUrl).toBe('https://example.com/u');
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(uploader);
+  });
+
+  it('rejects a non-open entry in an otherwise-open pack with an indexed 400 — no mutation', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Pack license is open (CC-BY-4.0), but one entry carries "All Rights Reserved" — the
+    // exact smuggling vector: a pack-level open check would miss it. The whole upload is
+    // rejected with a single indexed error naming the offending entry, and NOTHING is
+    // installed (no partial mutation).
+    const res = await uploadPack({
+      source: 'upload',
+      pack: { slug: 'smuggler-pack', name: 'Smuggler Pack', license: 'CC-BY-4.0' },
+      entries: [
+        { slug: 'open-one', name: 'Open One', type: 'spell', body: 'fine', license: 'CC-BY-4.0' },
+        { slug: 'proprietary-boss', name: 'Proprietary Boss', type: 'monster', body: 'not fine', license: 'All Rights Reserved' },
+        { slug: 'open-two', name: 'Open Two', type: 'item', body: 'also fine', license: 'CC0' },
+      ],
+    });
+    expect(res.status).toBe(400);
+    const message = String(res.body.message);
+    expect(message).toMatch(/non-open effective license/i);
+    // the offending entry is named (slug + the offending license + its input index) so the
+    // uploader can fix and resubmit.
+    expect(message).toContain('proprietary-boss');
+    expect(message).toContain('All Rights Reserved');
+    expect(message).toMatch(/entry\[1\]/); // 0-based index of the offending entry
+
+    // Nothing was installed — no partial mutation (the rejection is before persistPack).
+    const listRes = await request(server).get('/api/v1/rules/packs').set(uploader);
+    expect(listRes.body.some((p: { slug: string }) => p.slug === 'smuggler-pack')).toBe(false);
+    const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'Proprietary Boss' }).set(uploader);
+    expect(searchRes.body.some((e: { name: string }) => e.name === 'Proprietary Boss')).toBe(false);
+  });
+
+  it('rejects an entry that has no per-entry license when the pack license itself is non-open', async () => {
+    // Defense-in-depth on top of the pack-level check: even though assertOpenLicense(pack)
+    // already rejects a non-open PACK, per-entry validation independently flags an entry
+    // whose effective license (pack fallback) is non-open. This pins the per-entry path.
+    const res = await uploadPack({
+      source: 'upload',
+      pack: { slug: 'bad-pack-license', name: 'Bad Pack License', license: 'Proprietary' },
+      entries: [
+        { slug: 'inherited-bad', name: 'Inherited Bad', type: 'spell', body: 'inherits pack license' },
+      ],
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body.message)).toMatch(/open license/i);
   });
 });

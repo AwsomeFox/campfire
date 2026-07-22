@@ -160,6 +160,8 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   // creature and live in the statblock's stored init, not this base derivation) — same die
   // and same governing ability as 5e.
   initiativeDie: 20,
+  // Pathfinder 1e caps at character level 20 (Core Rulebook), matching the 5e ceiling.
+  maxLevel: 20,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     const dex = pf1eDexScore(abilities);
     return dex === null ? 0 : pf1eAbilityModifier(dex);

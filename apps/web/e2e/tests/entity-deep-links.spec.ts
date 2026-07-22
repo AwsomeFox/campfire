@@ -106,6 +106,70 @@ test.describe('cross-entity deep links', () => {
   });
 });
 
+// Issue #739: identity persistence + rename tolerance + same-name disambiguation.
+// A typed mention token binds a link to a specific record by id; the renderer
+// resolves it through the canonical entity URL, refreshes a stale label to the
+// entity's current name, degrades to plain text when the target is gone, and
+// refuses to silently pick one of two same-named targets.
+test.describe('typed mention identity (issue #739)', () => {
+  test.use({ storageState: stateFor('dm') });
+
+  test('a typed mention resolves to the canonical entity URL by id', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const { renamedNpcId } = navigation.identity;
+    await page.goto(`/c/${campaignId}/quests/${navigation.identity.questId}`);
+    const href = `/c/${campaignId}/npcs/${renamedNpcId}#entity-npc-${renamedNpcId}`;
+    await expect(page.locator(`a[data-mention="npc:${renamedNpcId}"]`)).toHaveAttribute('href', href);
+  });
+
+  test('a stale typed-link label is refreshed to the entity current name (rename tolerance)', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    await page.goto(`/c/${campaignId}/quests/${navigation.identity.questId}`);
+    // The authored label was "DLRNAV Twiceborn"; the NPC was renamed to
+    // "DLRNAV Reborn" after seeding. The visible text must follow the rename.
+    const anchor = page.locator(`a[data-mention="npc:${navigation.identity.renamedNpcId}"]`);
+    await expect(anchor).toHaveText('DLRNAV Reborn');
+    await expect(anchor).not.toHaveText('DLRNAV Twiceborn');
+  });
+
+  test('two same-named targets each resolve via their own typed token', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const { twinAId, twinBId } = navigation.identity;
+    await page.goto(`/c/${campaignId}/quests/${navigation.identity.questId}`);
+    // Each typed token binds to its own id, so the two "Bob" links land on
+    // different NPCs despite the shared name — no silent collapse.
+    await expect(page.locator(`a[data-mention="npc:${twinAId}"]`)).toHaveAttribute(
+      'href',
+      `/c/${campaignId}/npcs/${twinAId}#entity-npc-${twinAId}`,
+    );
+    await expect(page.locator(`a[data-mention="npc:${twinBId}"]`)).toHaveAttribute(
+      'href',
+      `/c/${campaignId}/npcs/${twinBId}#entity-npc-${twinBId}`,
+    );
+  });
+
+  test('plain-text mentions of a shared name are NOT auto-linked (disambiguation)', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    await page.goto(`/c/${campaignId}/quests/${navigation.identity.questId}`);
+    // "DLRNAV Twin Bob" appears twice as plain text. The auto-linker must NOT
+    // wrap either occurrence in a cf-mention anchor — silently picking the first
+    // same-named NPC is exactly the collision the typed token exists to resolve.
+    const autoLinks = page.locator('a.cf-mention:has-text("DLRNAV Twin Bob")');
+    await expect(autoLinks).toHaveCount(0);
+  });
+
+  test('a typed token whose target was deleted degrades to plain text (no broken link)', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const { deletedNpcId } = navigation.identity;
+    await page.goto(`/c/${campaignId}/quests/${navigation.identity.questId}`);
+    // The soft-deleted NPC is absent from the DM mention list, so its token
+    // cannot resolve: the anchor is replaced by its authored plain-text label
+    // and no cf-mention link to a missing record is emitted.
+    await expect(page.locator(`a[data-mention="npc:${deletedNpcId}"]`)).toHaveCount(0);
+    await expect(page.getByText('DLRNAV Ghosttarget')).toBeVisible();
+  });
+});
+
 test.describe('notification deep links', () => {
   test.use({ storageState: stateFor('player') });
 

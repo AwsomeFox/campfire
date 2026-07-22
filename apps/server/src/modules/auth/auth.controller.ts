@@ -9,6 +9,7 @@ import type { RequestUser } from '../../common/user.types';
 import { AuthService } from './auth.service';
 import { OidcService } from './oidc.service';
 import { SettingsService } from '../settings/settings.service';
+import { ServerMetaService } from '../server-meta/server-meta.service';
 import { UsersService } from '../users/users.service';
 import { TokensService } from '../tokens/tokens.service';
 import { PasswordResetService } from './password-reset.service';
@@ -84,9 +85,9 @@ export class AuthController {
   @Public()
   @AUTH_THROTTLE
   @Post('setup')
-  @ApiOperation({ summary: 'First-run setup', description: 'Creates the first (admin) user and starts a session. Only available while no users exist yet — 409 afterward.' })
+  @ApiOperation({ summary: 'First-run setup', description: 'Atomically claims first-run initialization, creates the first (admin) user, and starts a session. Only available while no users exist yet — concurrent callers and later attempts receive 409.' })
   @ApiResponse({ status: 201, description: 'Admin user created; session cookie set.' })
-  @ApiResponse({ status: 409, description: 'Setup already completed.' })
+  @ApiResponse({ status: 409, description: 'Setup already completed (including when another concurrent request won initialization).' })
   async setup(@Body() body: SetupRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
     const { token, me } = await this.auth.setup(body);
     res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
@@ -217,6 +218,7 @@ export class MeController {
   constructor(
     private readonly auth: AuthService,
     private readonly usersService: UsersService,
+    private readonly serverMeta: ServerMetaService,
   ) {}
 
   @Get()
@@ -229,7 +231,11 @@ export class MeController {
   @ApiResponse({ status: 200, description: 'Current user and memberships.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   async me(@CurrentUser() user: RequestUser): Promise<Me> {
-    // dev:* header users have no DB row; synthesize a Me shape for them.
+    // dev:* header users have no DB row; synthesize a Me shape for them. The
+    // instance identity still comes from the live server_meta row so the PWA
+    // cache namespacing (issue #723) works in dev too — dev auth talks to the
+    // same server/DB as a real session, so a restore in dev must still
+    // invalidate the cache.
     if (user.id.startsWith('dev:')) {
       return {
         user: {
@@ -244,6 +250,7 @@ export class MeController {
           updatedAt: new Date(0).toISOString(),
         },
         memberships: [],
+        instance: await this.serverMeta.getInstance(),
       };
     }
     return this.auth.buildMe(Number(user.id), user.tokenContext);

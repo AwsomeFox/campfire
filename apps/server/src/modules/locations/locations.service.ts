@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { LocationCreate, LocationUpdate } from '@campfire/schema';
 import type { Location, Role } from '@campfire/schema';
@@ -258,35 +258,49 @@ export class LocationsService {
    * campaign.currentLocationId to this location.
    */
   async discover(id: number, status: Location['status'], user: RequestUser, role: Role): Promise<Location> {
-    const existing = await this.getRowOrThrow(id);
+    const ts = nowIso();
+    let row!: typeof locations.$inferSelect;
 
-    if (status === 'current') {
-      const previousCurrent = await this.db
+    // better-sqlite3 serializes this synchronous callback, so two racing
+    // promotions cannot interleave their demotion, promotion, and pointer
+    // writes. A failure in any statement rolls the whole state change back.
+    this.db.transaction((tx) => {
+      const [existing] = tx
         .select()
         .from(locations)
-        .where(and(eq(locations.campaignId, existing.campaignId), eq(locations.status, 'current'), notDeleted(locations.deletedAt)));
-      for (const prev of previousCurrent) {
-        if (prev.id !== id) {
-          await this.db
-            .update(locations)
-            .set({ status: 'explored', updatedAt: nowIso() })
-            .where(eq(locations.id, prev.id));
-        }
+        .where(and(eq(locations.id, id), notDeleted(locations.deletedAt)))
+        .limit(1)
+        .all();
+      if (!existing) throw new NotFoundException(`Location ${id} not found`);
+
+      if (status === 'current') {
+        tx.update(locations)
+          .set({ status: 'explored', updatedAt: ts })
+          .where(
+            and(
+              eq(locations.campaignId, existing.campaignId),
+              eq(locations.status, 'current'),
+              ne(locations.id, id),
+              notDeleted(locations.deletedAt),
+            ),
+          )
+          .run();
       }
-    }
 
-    const [row] = await this.db
-      .update(locations)
-      .set({ status, updatedAt: nowIso() })
-      .where(eq(locations.id, id))
-      .returning();
+      [row] = tx
+        .update(locations)
+        .set({ status, updatedAt: ts })
+        .where(and(eq(locations.id, id), notDeleted(locations.deletedAt)))
+        .returning()
+        .all();
 
-    if (status === 'current') {
-      await this.db
-        .update(campaigns)
-        .set({ currentLocationId: id, updatedAt: nowIso() })
-        .where(eq(campaigns.id, existing.campaignId));
-    }
+      if (status === 'current') {
+        tx.update(campaigns)
+          .set({ currentLocationId: id, updatedAt: ts })
+          .where(eq(campaigns.id, existing.campaignId))
+          .run();
+      }
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -294,7 +308,7 @@ export class LocationsService {
       action: 'location.discover',
       entityType: 'location',
       entityId: id,
-      campaignId: existing.campaignId,
+      campaignId: row.campaignId,
       detail: status,
     });
 

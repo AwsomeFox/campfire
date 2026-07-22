@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,
+  ics_token_expires_at TEXT,
   storage_quota_bytes INTEGER,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
@@ -311,6 +312,12 @@ CREATE TABLE IF NOT EXISTS comments (
   -- never the thing that destroys replies.
   deleted_at TEXT,
   deleted_by TEXT,
+  -- Editor provenance for the trust case (issue #783). NULL on a live row a user
+  -- only ever self-edits; stamped ONLY when a non-author (a DM moderating) edits
+  -- the body, so the original author is never the apparent writer of rewritten
+  -- prose. See db/schema.ts for the full column docs.
+  edited_at TEXT,
+  edited_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -389,6 +396,20 @@ CREATE TABLE IF NOT EXISTS password_reset_requests (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+-- Single-row install-identity table (issue #723): the per-install UUID
+-- (stable across backup/restore — it lives INSIDE the restored DB) and a
+-- monotonic data_generation the server bumps on every restore. Surfaced on
+-- /me (Me.instance) so the PWA namespaces its SW runtime cache by
+-- instance_id:data_generation and a restore invalidates stale bytes.
+-- The row is seeded lazily by ServerMetaService; this DDL just guarantees the
+-- table exists. See db/schema.ts serverMeta + modules/server-meta.
+CREATE TABLE IF NOT EXISTS server_meta (
+  key TEXT PRIMARY KEY,
+  instance_id TEXT NOT NULL,
+  data_generation INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS campaign_members (
@@ -517,6 +538,10 @@ CREATE TABLE IF NOT EXISTS rule_entries (
   body TEXT NOT NULL DEFAULT '',
   data_json TEXT,
   source TEXT NOT NULL DEFAULT '',
+  license TEXT NOT NULL DEFAULT '',
+  attribution TEXT NOT NULL DEFAULT '',
+  author TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
   icon_slug TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -589,6 +614,9 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   total INTEGER NOT NULL,
   label TEXT,
   dc INTEGER,
+  -- Per-term breakdown for compound expressions (issue #536), JSON text — null for a
+  -- classic single-term roll (no breakdown). Mirrors the kept column's nullable-JSON shape.
+  terms TEXT,
   created_at TEXT NOT NULL
 );
 

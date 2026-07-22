@@ -94,12 +94,17 @@ describe('Issue #393: mutating MCP tools honor token write-mode (e2e)', () => {
 
   // The formerly-leaky DIRECT-ONLY writes (no proposal path). Each is now a writeTool, so its
   // handler runs assertDirectWriteAllowed FIRST — a propose/none token is 403'd before the write.
+  // run_scribe (#522): files a pending proposal + spends the AI seat budget, so it was re-registered
+  // via writeTool (was this.tool) — same defect class as the b3af808 sweep. It is direct-write gated
+  // (no propose arg / no @Proposable path on the REST endpoint), so a propose token can't route it
+  // through review either.
   const directOnlyCalls: { name: string; args: () => Record<string, unknown> }[] = [
     { name: 'update_campaign', args: () => ({ campaignId, name: 'Hijacked Name' }) },
     { name: 'uninstall_rule_pack', args: () => ({ packId: 999_999 }) },
     { name: 'withdraw_proposal', args: () => ({ proposalId: 999_999 }) },
     { name: 'whisper_to_player', args: () => ({ campaignId, recipientUserId: 'nobody', body: 'a secret' }) },
     { name: 'set_session_attendance', args: () => ({ sessionId, characterIds: [] }) },
+    { name: 'run_scribe', args: () => ({ campaignId }) },
   ];
 
   describe('a propose-scoped token is refused a direct call to each formerly-leaky tool', () => {
@@ -164,6 +169,47 @@ describe('Issue #393: mutating MCP tools honor token write-mode (e2e)', () => {
       expect(result.isError).toBeFalsy();
       const camp = await dmAgent.get(`/api/v1/campaigns/${campaignId}`);
       expect(camp.body.name).toBe('Renamed Directly');
+    });
+  });
+
+  // Issue #522 — run_scribe was registered with this.tool(...) (the read path) instead of
+  // writeTool(...), so a writeScope:'none' PAT could trigger it: the handler invoked
+  // scribe.run(...), which writes a PENDING recap proposal AND meters tokens against the
+  // campaign's AI-DM seat budget. Same defect class as the b3af808 sweep — run_scribe was
+  // added afterward and missed it. Now a writeTool, so the wrapper runs
+  // assertDirectWriteAllowed(user) + tags mutating:true. It has no `propose` arg and the REST
+  // POST /campaigns/:id/scribe/run endpoint carries no @Proposable() path, so it is DIRECT-WRITE
+  // gated: both 'none' and 'propose' tokens are refused (a propose token can't route an AI-budget
+  // spend through review), exactly like update_campaign above.
+  describe('Issue #522: run_scribe is write-gated (files a proposal + spends the AI budget)', () => {
+    it('a none-scoped (read-only) token is refused run_scribe BEFORE the handler runs', async () => {
+      const client = await mcpClient(noneToken);
+      const result = await client.callTool({ name: 'run_scribe', arguments: { campaignId } });
+      const err = errorOf(result);
+      expect(err).not.toBeNull();
+      expect(err!.status).toBe(403);
+      expect(err!.message).toMatch(/read-only|cannot perform writes/i);
+    });
+
+    it('a propose-scoped token is refused run_scribe (no proposal path — direct-write tier)', async () => {
+      const client = await mcpClient(proposeToken);
+      const result = await client.callTool({ name: 'run_scribe', arguments: { campaignId } });
+      const err = errorOf(result);
+      expect(err).not.toBeNull();
+      expect(err!.status).toBe(403);
+      expect(err!.message).toMatch(/only submit proposals|cannot be performed directly/i);
+    });
+
+    it('a direct-scoped token passes the write-mode gate and reaches scribe.run (not a 403)', async () => {
+      const client = await mcpClient(directToken);
+      const result = await client.callTool({ name: 'run_scribe', arguments: { campaignId } });
+      // The write-mode gate passed (no 403). scribe.run returns a normal result — the suite's
+      // app has experimentalAiDm off, so the run is recorded as 'disabled' rather than spending
+      // budget; what matters here is that the write-mode refusal did NOT fire for a direct token.
+      expect(result.isError).toBeFalsy();
+      const body = parseResult(result) as { job?: { status: string } };
+      expect(body.job).toBeDefined();
+      expect(body.job!.status).toBe('disabled');
     });
   });
 });

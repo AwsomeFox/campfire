@@ -117,13 +117,16 @@ export class CharactersController {
   @ApiOperation({
     summary: 'Update a character',
     description:
-      'dm or the owning player may write; other players get 403. dmSecret is dm-writable only (silently ignored for the owning player). With `?proposed=true` any member may submit the change as a pending proposal instead of writing directly.',
+      'dm or the owning player may write; other players get 403. dmSecret is dm-writable only (silently ignored for the owning player). With `?proposed=true` any member may submit the change as a pending proposal instead of writing directly. ' +
+      'Optionally pass `expectedUpdatedAt` (the updatedAt you last read) to opt into optimistic concurrency (issue #746): ' +
+      'a stale value returns 409 Conflict instead of silently clobbering a fresher edit (a live HP/level change, a DM-secret edit) from another tab or a connected AI.',
   })
   @ApiQuery({ name: 'proposed', required: false, type: Boolean, description: 'If true, creates a pending proposal instead of writing directly.' })
   @ApiResponse({ status: 200, description: 'Updated character.' })
   @ApiResponse({ status: 202, description: 'Pending proposal created (proposed=true).' })
-  @Proposable()
   @ApiResponse({ status: 403, description: 'Not the dm or owning player.' })
+  @ApiResponse({ status: 409, description: 'Stale expectedUpdatedAt — another tab/device or a connected AI saved this character since you loaded it. Reload the latest before reapplying.' })
+  @Proposable()
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: CharacterUpdateDto,
@@ -132,15 +135,20 @@ export class CharactersController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const row = await this.characters.getRowOrThrow(id);
+    // Split off the optimistic-concurrency guard (#746) from the entity fields, mirroring
+    // npcs.controller.ts / quests.controller.ts / encounters.controller.ts. The proposal
+    // path intentionally never forwards the guard: a queued/proposed edit is applied later
+    // by the DM, so the caller's `expectedUpdatedAt` would be stale-by-design.
+    const { expectedUpdatedAt, ...fields } = body;
     if (requireWriteMode(user, proposed)) {
       const role = await this.access.requireMember(user, row.campaignId, { write: true });
-      const validated = CharacterUpdate.parse(body);
+      const validated = CharacterUpdate.parse(fields);
       const proposal = await this.proposals.create(row.campaignId, 'character', id, 'update', validated, user, role);
       res.status(202);
       return { proposal };
     }
     const role = await this.access.requireRole(user, row.campaignId, 'player');
-    return this.characters.update(id, body, user, role);
+    return this.characters.update(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Delete(':id')

@@ -411,6 +411,21 @@ export const ObjectivePatch = z.object({ text: z.string().min(1).max(500).option
 export const ObjectiveReorder = z.object({ objectiveIds: z.array(Id).min(1) });
 export type ObjectiveReorder = z.infer<typeof ObjectiveReorder>;
 
+// Bounded quest-board projection (issue #786). The list endpoint exposes objective
+// progress and at most one objective body: the first incomplete objective in the
+// DM-controlled order. Full objective collections remain on the quest detail and
+// campaign-summary contracts, so a large quest cannot inflate every board load.
+export const QuestListObjective = QuestObjective.pick({ id: true, text: true });
+export type QuestListObjective = z.infer<typeof QuestListObjective>;
+export const QuestListItem = Quest.extend({
+  objectiveProgress: z.object({
+    completed: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+  nextObjective: QuestListObjective.nullable(),
+});
+export type QuestListItem = z.infer<typeof QuestListItem>;
+
 // "What changed since last session" (issue #66). `since` is the reference instant
 // the diff was taken against — by default the campaign's latest session date
 // (max of each session's playedAt, falling back to its createdAt), or the caller's
@@ -739,9 +754,16 @@ export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
 // may read it (the feed only exposes schedule data members already see);
 // enable/rotate/disable is DM-only.
+//
+// Issue #554: every issued token carries an `expiresAt` (ISO UTC). After it
+// passes, the public .ics endpoint stops serving that token (404) — a leaked
+// URL self-destructs on a schedule rather than living forever. Members see the
+// expiry so the UI can nudge the DM to rotate before it lapses. Null on legacy
+// rows written before #554 (no expiry) and after disable (no live token).
 export const CalendarFeed = z.object({
   token: z.string().nullable(),
   url: z.string().nullable(), // relative feed path, e.g. /api/v1/calendar/<token>.ics
+  expiresAt: z.string().nullable(), // ISO UTC when the current token stops authorizing the feed
 });
 export type CalendarFeed = z.infer<typeof CalendarFeed>;
 
@@ -970,6 +992,16 @@ export const Comment = z.object({
   // by author]" from a DM removal. It is cleared on restore, so durable
   // provenance of a past tombstone (who/when) lives in the AUDIT LOG, not here.
   deletedBy: z.string().max(120).nullable().default(null),
+  // Editor provenance for the trust case (issue #783): null on a comment whose
+  // only edits are by its own author. Stamped ONLY when a non-author (a DM
+  // moderating) edits the body — edited_at then and edited_by (same identity
+  // space as authorUserId / deletedBy) record that editor. The original
+  // authorUserId/authorName are NEVER overwritten, so the player who wrote the
+  // comment stays its author of record and the UI can render "Author: X (edited
+  // by DM Y)". A self-edit leaves both null (the usual updated_at "edited" badge
+  // already covers the author touching their own prose).
+  editedAt: IsoDate.nullable().default(null),
+  editedBy: z.string().max(120).nullable().default(null),
   ...timestamps,
 });
 export type Comment = z.infer<typeof Comment>;
@@ -980,6 +1012,8 @@ export const CommentCreate = Comment.omit({
   authorName: true,
   deletedAt: true,
   deletedBy: true,
+  editedAt: true,
+  editedBy: true,
   createdAt: true,
   updatedAt: true,
 })
@@ -1075,6 +1109,25 @@ export const RuleEntry = z.object({
   // distinguishable and the reader can attribute the real source/license (issue #143).
   // '' for older imports/uploads that predate the column — the reader falls back to the pack name.
   source: z.string().max(200).default(''),
+  // Per-entry provenance (issue #734): a pack may mix licenses (an OGL pack with a CC-BY
+  // spell, a community feat under ORC). Previously the entry's license was dropped on
+  // import and the reader labelled every entry with the PACK license — losing attribution
+  // the licence legally requires. These four fields capture what the entry ACTUALLY came
+  // under, falling back to the pack's value when the source data doesn't say otherwise
+  // (see effectiveLicense/effectiveAttribution). '' for rows written before the columns
+  // existed (migration 0050) — callers treat '' as "inherit the pack's value".
+  //   - license: the SPDX-ish/open-license string the entry is distributed under
+  //     ("OGL 1.0a", "CC-BY-4.0", "ORC"). Validated open by the importer/upload path.
+  //   - attribution: the credit line the licence obliges us to show (author + title +
+  //     copyright statement), e.g. "Fireball, © WotC, Open Game Content under the OGL 1.0a".
+  //   - author: the creator/rights-holder name to credit, when separable from the
+  //     attribution line ("Chris Gonnerman", "Archives of Nethys").
+  //   - sourceUrl: a deep link back to the entry on its origin site (CC-BY(-SA) requires
+  //     a link; also useful for the reader's "view original" affordance).
+  license: z.string().max(160).default(''),
+  attribution: z.string().max(500).default(''),
+  author: z.string().max(200).default(''),
+  sourceUrl: z.string().max(500).default(''),
   // Optional manual icon override (issue #305): the slug of a bundled game-icons.net
   // entity icon (see apps/web/src/lib/icons) shown in the compendium list + reader in
   // place of the type/school-derived default. '' means "no override — the web app
@@ -1106,6 +1159,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  * family so every shipped importer is reachable from the endpoint:
  *   - 'open5e'      — D&D 5e SRD (default, the built-in API importer)
  *   - 'pf2e'        — Pathfinder 2e (Archives of Nethys, issue #295)
+ *   - 'sf2e'        — Starfinder 2e (Archives of Nethys, issue #400)
  *   - 'pf1e'        — Pathfinder 1e SRD (issue #296)
  *   - 'starfinder'  — Starfinder 1e SRD (issue #297)
  *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)
@@ -1118,6 +1172,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
 export const RulePackInstallSource = z.enum([
   'open5e',
   'pf2e',
+  'sf2e',
   'pf1e',
   'starfinder',
   'archmage',
@@ -1239,6 +1294,15 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     note: 'Live import from the Archives of Nethys 2e Elasticsearch backend.',
     candidateSourceUrl: 'https://elasticsearch.aonprd.com',
   },
+  sf2e: {
+    source: 'sf2e',
+    label: 'Starfinder 2e (Archives of Nethys)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'ORC / OGL',
+    note: 'Live import from the Archives of Nethys SF2e Elasticsearch backend (aonsf index).',
+    candidateSourceUrl: 'https://elasticsearch.aonprd.com',
+  },
   'open-legend': {
     source: 'open-legend',
     label: 'Open Legend',
@@ -1263,8 +1327,8 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     sourceKind: 'manual-upload',
     installableWithoutUrl: false,
     license: 'Open Game License v1.0a',
-    note: 'No live open source: unlike PF2e, the Archives of Nethys Starfinder site exposes no Elasticsearch backend, and the community Starjammer SRD (HTTP 410) and Dragonlash API are offline. Upload an OGL JSON pack, or pass `url`.',
-    candidateSourceUrl: null,
+    note: 'Foundry system pack data is stored as multi-file JSON and LevelDB databases. Upload an OGL-licensed JSON pack (or pass an explicit `url`).',
+    candidateSourceUrl: 'https://github.com/foundryvtt-starfinder/foundryvtt-starfinder',
   },
   archmage: {
     source: 'archmage',
@@ -1329,6 +1393,9 @@ export interface MonsterStatblockData {
   abilityScores: Record<string, unknown> | undefined;
   specialAbilities: unknown;
   actions: unknown;
+  /** Optional action categories used by systems that distinguish them in a statblock. */
+  legendaryActions?: unknown;
+  reactions?: unknown;
 }
 
 export interface RuleSystemAdapter {
@@ -1340,6 +1407,14 @@ export interface RuleSystemAdapter {
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
   readonly initiativeDie: number;
+  /**
+   * Hard level cap for this system, sourced from the adapter so `levelUp` doesn't bake in 5e's
+   * 20 (issue #535). 5e/PF1e/PF2e/Starfinder are 20; 13th Age is 10. A system with no hard cap
+   * (Open Legend, OSR retroclones) uses `Infinity`, so a `levelUp` check of
+   * `existing.level >= maxLevel` is never true and the character may advance without bound.
+   * Always read via comparison (never `level + 1 === maxLevel`): Infinity + 1 is still Infinity.
+   */
+  readonly maxLevel: number;
   /**
    * Derive a combatant's initiative modifier from an ability-score map (5e: the DEX
    * modifier). Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster
@@ -1395,6 +1470,9 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
+  // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
+  maxLevel: 20,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     const dex = dnd5eDexScore(abilities);
     return dex === null ? 0 : this.abilityModifier(dex);
@@ -1415,6 +1493,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
+      legendaryActions: d.legendaryActions ?? d.legendary_actions,
+      reactions: d.reactions,
     };
   },
   monsterHitPoints(d: Record<string, unknown>): number | null {
@@ -1571,6 +1651,10 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   // roller is d20 + Agility — the full exploding pool is available via attributeDicePool for
   // action resolution, but initiative only needs an Agility-monotonic ordering.
   initiativeDie: 20,
+  // Open Legend has no class/level framework and no published hard character-level cap, so the
+  // adapter reports Infinity — `levelUp` never rejects on the cap (issue #535). A campaign that
+  // models "level" as a loose progression tier is free to advance without a synthetic 5e ceiling.
+  maxLevel: Infinity,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     return openLegendAgility(abilities);
   },
@@ -1823,6 +1907,8 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
+  maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
   // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
   // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
@@ -1877,6 +1963,19 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   degreeOfSuccess: pf2eDegreeOfSuccess,
 };
 
+/** Stable family id of the Starfinder 2e adapter. */
+export const SF2E_ADAPTER_ID = 'sf2e';
+/** Pack slug the SF2e importer installs under. */
+export const SF2E_PACK_SLUG = 'sf2e-srd';
+
+export type Sf2eRuleSystemAdapter = Pf2eRuleSystemAdapter;
+
+export const Sf2eAdapter: Sf2eRuleSystemAdapter = {
+  ...Pf2eAdapter,
+  id: SF2E_ADAPTER_ID,
+  label: 'Starfinder 2e',
+};
+
 // Sibling ruleset adapters (issues #296-300) live in their own files (type-only imports
 // from here, so no runtime cycle) and register below. Adding a system is one import + one
 // ADAPTERS entry, never a sweep across the combat code.
@@ -1905,6 +2004,8 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [PF2E_ADAPTER_ID]: Pf2eAdapter,
   // Pack slug the PF2e importer installs under — campaigns store the slug in `ruleSystem`.
   [PF2E_PACK_SLUG]: Pf2eAdapter,
+  [SF2E_ADAPTER_ID]: Sf2eAdapter,
+  [SF2E_PACK_SLUG]: Sf2eAdapter,
   [PF1E_PACK_SLUG]: Pathfinder1eAdapter, // Pathfinder 1e (issue #296)
   [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
   [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
@@ -1986,8 +2087,15 @@ export const RulePackUploadEntry = z.object({
   summary: z.string().max(1000).optional(),
   body: z.string().max(50_000).optional(), // markdown
   dataJson: z.string().max(100_000).nullable().optional(), // raw structured fields, JSON-encoded
-  license: z.string().max(120).optional(), // per-entry license; falls back to the pack license
+  license: z.string().max(120).optional(), // per-entry license; falls back to the pack license (validated open, issue #734)
   source: z.string().max(200).optional(), // per-entry source/document label; falls back to the pack name
+  // Per-entry attribution/authorship provenance (issue #734): captured so a pack can mix
+  // licenses/sources and the reader credits each entry correctly. Each falls back to the
+  // pack-level value when omitted (attribution to the pack name, author to '', sourceUrl
+  // to the pack's sourceUrl).
+  attribution: z.string().max(500).optional(), // credit line the licence obliges us to show
+  author: z.string().max(200).optional(), // creator/rights-holder name to credit
+  sourceUrl: z.string().max(500).optional(), // deep link back to the entry on its origin site
   iconSlug: z.string().max(80).optional(), // optional bundled game-icons.net slug to seed the entry's icon (issue #305)
 });
 export type RulePackUploadEntry = z.infer<typeof RulePackUploadEntry>;
@@ -2025,7 +2133,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),
@@ -2420,6 +2528,51 @@ export const MeToken = z.object({
 });
 export type MeToken = z.infer<typeof MeToken>;
 
+/**
+ * Server instance + data-generation identity (issue #723).
+ *
+ * A whole-server backup restore reuses the same numeric user/campaign IDs but
+ * swaps out the entire dataset (DB rows + uploads) underneath. The PWA's
+ * `/api` runtime cache (Workbox, 7-day TTL) is keyed only by URL, so after a
+ * restore a cached GET for, say, `/api/v1/campaigns/3` would still serve the
+ * PRE-restore bytes offline — leaking data the operator just rolled back.
+ * Numeric IDs alone can't detect that; we need a token that changes whenever
+ * the underlying data is replaced.
+ *
+ *   - `instanceId`  is a per-install UUID generated once and persisted in the
+ *                   DB (server_meta). It differs across physically distinct
+ *                   installs (two homelabs, or a dev vs prod box) so an SW that
+ *                   somehow pointed at the wrong origin can never serve one
+ *                   install's cached data for another. It is STABLE across a
+ *                   backup/restore (it travels inside the restored DB), so it
+ *                   alone is not enough to invalidate on restore.
+ *   - `dataGeneration` is a monotonic integer (also persisted) that the server
+ *                   bumps on every whole-server restore. It is the actual
+ *                   "the bytes under these IDs have changed" signal: a restore
+ *                   bumps it, so a client that cached responses against the
+ *                   prior generation sees a mismatch and wipes them.
+ *
+ * Both fields ride on `/me` (already proven-live — see vite.config.ts) so the
+ * web client learns the current identity from a response that did NOT come
+ * from the SW cache, then namespaces its cached responses by
+ * `${instanceId}:${dataGeneration}`. On a restore the next proven-live `/me`
+ * carries a new generation; the client notices the change and purges the old
+ * cache, so stale pre-restore bytes can never render as truth (online or
+ * offline). The server itself does not need to know the client's cache key —
+ * the contract is just "this is who I am right now".
+ *
+ * The combined token is also surfaced as the response header
+ * `cf-data-generation` on `/me` so a non-/me caller that needs the current
+ * generation (e.g. a diagnostic) can read it without parsing JSON.
+ */
+export const ServerInstance = z.object({
+  /** Stable per-install UUID; travels inside a backup so the same box keeps it. */
+  instanceId: z.string().min(1),
+  /** Monotonic integer bumped on every whole-server restore. */
+  dataGeneration: z.number().int().nonnegative(),
+});
+export type ServerInstance = z.infer<typeof ServerInstance>;
+
 export const Me = z.object({
   user: User,
   // When `token` is present (PAT auth), memberships reflect the token's
@@ -2427,6 +2580,12 @@ export const Me = z.object({
   // campaign-bound token only lists that campaign. Cookie sessions see raw
   // membership roles and no `token` field.
   memberships: z.array(z.object({ campaignId: Id, role: Role, characterId: Id.nullable() })),
+  // Server instance + data-generation identity (issue #723) — see
+  // ServerInstance. Always present on a proven-live /me; the web client
+  // namespaces the SW runtime cache by this so a restore invalidates stale
+  // bytes. /me is excluded from the SW cache (vite.config.ts), so this value
+  // is always authoritative, never a cached copy.
+  instance: ServerInstance,
   token: MeToken.optional(),
 });
 export type Me = z.infer<typeof Me>;
@@ -2440,9 +2599,11 @@ export const ApiToken = z.object({
   name: z.string().min(1).max(80),
   scope: TokenScope,
   // Server-enforced write authority, independent of `scope` — see WriteScope.
-  // Defaults 'direct' (back-compat: existing tokens write exactly as before).
-  // Existing DBs get the column added defaulting to 'direct' via
-  // migrateApiTokensTableForWriteScope() (db.module.ts).
+  // DB ROW default 'direct' (back-compat: pre-existing rows write exactly as
+  // before). This is NOT the minting default — newly MINTED tokens omitting
+  // writeScope are defaulted to 'propose' server-side (issue #575, see
+  // TokensService). Existing DBs get the column added defaulting to 'direct'
+  // via migrateApiTokensTableForWriteScope() (db.module.ts).
   writeScope: WriteScope.default('direct'),
   campaignId: Id.nullable().default(null), // null = all campaigns the owner can access
   // Whether this token may exercise SERVER-admin powers (ServerRolesGuard-gated routes,
@@ -2465,10 +2626,12 @@ export const ApiTokenCreate = z.object({
   // token can only mint tokens bound to that same campaign — a scoped-down token can
   // never mint a broader sibling.
   scope: TokenScope,
-  // Server-enforced write authority (default 'direct'). When the caller is itself
+  // Server-enforced write authority (omitted → server defaults to 'propose',
+  // issue #575: newly-issued tokens funnel mutations through the DM proposal
+  // queue rather than writing canon directly). When the caller is itself
   // authenticated via a PAT, this is additionally capped to the calling token's
-  // writeScope (min in the direct>propose>none order) — a propose-only token can
-  // never mint a direct-write sibling. See WriteScope / TokensService.create.
+  // writeScope (min in the direct>propose>none order) — a propose-only token
+  // can never mint a direct-write sibling. See WriteScope / TokensService.create.
   writeScope: WriteScope.optional(),
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // requires the caller to currently hold real server-admin power; silently forced false otherwise
@@ -2483,7 +2646,7 @@ export const AuthTokenRequest = z.object({
   password: z.string().min(1).max(200), // same cap as LoginRequest.password — scrypt DoS guard on an unauthenticated path
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer' (least privilege) — see TokensService.mintFor
-  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
+  writeScope: WriteScope.optional(), // omitted → server defaults to 'propose' (issue #575); see WriteScope
   campaignId: Id.nullable().optional(),
   adminEnabled: z.boolean().optional(), // caller (the just-authenticated user) must currently be a server admin — see TokensService.create
 });
@@ -2495,7 +2658,7 @@ export type AuthTokenRequest = z.infer<typeof AuthTokenRequest>;
 export const AdminTokenCreate = z.object({
   tokenName: z.string().min(1).max(80),
   scope: TokenScope.optional(), // default: 'viewer'
-  writeScope: WriteScope.optional(), // default: 'direct' — server-enforced write authority (see WriteScope)
+  writeScope: WriteScope.optional(), // omitted → server defaults to 'propose' (issue #575); see WriteScope
   campaignId: Id.nullable().optional(),
   // May only be set true when the TARGET user (owner of the minted token) is themself
   // a server admin, AND the calling admin currently holds real (non-token-capped)
@@ -3554,6 +3717,12 @@ export const CombatantUpdate = z.object({
   // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
   deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
   deathSaveFailures: z.number().int().min(0).max(3).optional(),
+  // A death-save d20 roll result (issue #619). Mutually exclusive in spirit with the
+  // manual counter sets above: instead of a DM clicking pips, a rolled death save drives
+  // the outcome per the 5e crit/fumble rules — nat 1 = two failures, nat 20 = revive at
+  // 1 HP (clears the dying slate), 10–19 = one success, 2–9 = one failure. The server's
+  // 5e HP engine (applyCombatantHp) applies the roll to the combatant's death-save state.
+  deathSaveRoll: z.number().int().min(1).max(20).optional(),
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
   initiative: z.number().int().optional(), // dm only, enforced server-side
@@ -3582,10 +3751,11 @@ export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 // ---------- persistent per-encounter combat log (issue #61) ----------
 // The in-encounter dice/turn history used to be client-only React state, capped and
 // lost on reload. `encounter_events` persists a per-encounter trail written by the
-// encounters service on the meaningful combat mutations (HP damage/heal, condition
-// add/remove, death, next-turn/round), so the DM can reconstruct "round 2: Ember
-// Hound took 8 damage" for a recap and a refresh no longer wipes it.
-export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note']);
+// encounters service on meaningful combat activity (HP damage/heal, condition
+// add/remove, death, rolls, next-turn/round, notes, overrides, and corrections), so
+// the DM can reconstruct "round 2: Ember Hound took 8 damage" for a recap and a
+// refresh no longer wipes it.
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction']);
 export type EncounterEventType = z.infer<typeof EncounterEventType>;
 
 export const EncounterEvent = z.object({
@@ -3643,6 +3813,14 @@ export const Treasury = z.object({
 export type Treasury = z.infer<typeof Treasury>;
 // Union like HpPatch: { delta } (relative, may be negative but result must stay >= 0)
 // or { set } (absolute). Omitted denominations are left untouched.
+//
+// Issue #582: the `set` path is a full reconciliation, so it carries an optional
+// `expectedUpdatedAt` compare-and-swap token. The server returns 409 when the token
+// doesn't match the row's current updatedAt (someone else wrote in between), attaching
+// the fresh server values so the client can merge. The `delta` path never needs CAS —
+// two players spending different coins compose atomically and never conflict, and even
+// spending the SAME coin just composes (a spend that would go negative still 400s), so
+// deltas are the preferred write shape for add/spend flows.
 export const TreasuryPatch = z.union([
   z.object({
     delta: z.object({
@@ -3655,25 +3833,48 @@ export const TreasuryPatch = z.union([
   }),
   z.object({
     set: z.object({ cp: Coin.optional(), sp: Coin.optional(), ep: Coin.optional(), gp: Coin.optional(), pp: Coin.optional() }),
+    expectedUpdatedAt: IsoDate.optional(),
   }),
 ]);
 export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
 
 // ---------- dice rolling ----------
-// Safe, restricted dice expression: NdM, optionally followed by a keep/drop clause
-// (khN/klN/dhN/dlN) and then +K or -K. Keep/drop lets a single roll express D&D-style
-// advantage/disadvantage and stat-gen: "2d20kh1" (advantage), "2d20kl1" (disadvantage),
-// "4d6kh3" / "4d6dl1" (drop-lowest stat roll). Examples: "1d20+3", "2d6-1", "d20",
-// "4d6dl1+2". Capture groups: 1=count, 2=sides, 3=keep/drop clause, 4=modifier.
-export const DiceExprPattern = /^\s*(\d{1,2})?d(\d{1,3})\s*((?:kh|kl|dh|dl)\s*\d{1,2})?\s*([+-]\s*\d{1,3})?\s*$/i;
+// Safe, restricted dice expression. A SUM of terms joined by + / -, where each term is
+// either a die (NdM, optionally with a keep/drop clause khN/klN/dhN/dlN — advantage,
+// disadvantage, stat-gen) or a bare integer modifier K. Keep/drop lets a single die term
+// express D&D-style advantage/disadvantage and stat-gen: "2d20kh1" (advantage),
+// "2d20kl1" (disadvantage), "4d6kh3" / "4d6dl1" (drop-lowest stat roll). A leading sign
+// is allowed ("-1d4", "+5"). Examples: "1d20+3", "2d6-1", "d20", "4d6dl1+2",
+// "1d20+1d4+3", "2d6-1d4-2". The regex only fixes SHAPE — count/sides/modifier bounds
+// are enforced in apps/server/src/common/dice.ts (parseCompoundDiceExpr), so a shape
+// match is never sufficient on its own.
+export const DiceExprPattern =
+  /^\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))(?:\s*[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))*\s*$/i;
 export const RollRequest = z.object({
-  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected NdM(kh/kl/dh/dlN)(+/-K), e.g. "1d20+3" or "2d20kh1"'),
+  expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected a sum of die terms (NdM) and modifiers, e.g. "1d20+3", "2d20kh1", or "1d20+1d4+3"'),
   // Optional check context (issue #130): a human label ("DEX save") and a difficulty
   // class. When dc is present the server computes success (total >= dc) into the result.
   label: z.string().max(120).optional(),
   dc: z.number().int().min(1).max(99).optional(),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
+// Per-term breakdown entry for a compound dice expression (issue #536). Named so the
+// roller, the persistence layer, and the web UI all share one shape. A die term carries
+// its rolls + the kept subset; a modifier term carries only its signed value.
+export const RollResultTerm = z.object({
+  // The original term text, e.g. "1d20", "1d4", "+3", "-2".
+  term: z.string(),
+  // Net contribution of this term to the total. For a die term, the sum of the KEPT dice;
+  // for a modifier, the signed value itself.
+  value: z.number().int(),
+  // Die terms only: every die rolled for this term, in roll order. Absent for a bare
+  // modifier term.
+  rolls: z.array(z.number().int()).optional(),
+  // Die terms only: the subset of this term's `rolls` that counted (present when a
+  // keep/drop clause applied to THIS term). Absent otherwise.
+  kept: z.array(z.number().int()).optional(),
+});
+export type RollResultTerm = z.infer<typeof RollResultTerm>;
 export const RollResult = z.object({
   expr: z.string(),
   rolls: z.array(z.number().int()), // every die rolled, in roll order — attestable
@@ -3681,6 +3882,10 @@ export const RollResult = z.object({
   // clause applied (e.g. advantage keeps 1 of 2 d20s). Absent == all dice counted.
   kept: z.array(z.number().int()).optional(),
   total: z.number().int(),
+  // Per-term breakdown for display (issue #536): present ONLY for a compound expression
+  // (more than one term) — each entry describes one evaluated term, so the UI can render
+  // "1d20: 14, 1d4: 2, +3 = 19". Absent for a single-term roll (backward compat).
+  terms: z.array(RollResultTerm).optional(),
   // Echoed check context (issue #130). success is server-computed (total >= dc).
   label: z.string().max(120).optional(),
   dc: z.number().int().optional(),
@@ -3704,7 +3909,9 @@ export const CampaignEventType = z.enum([
   'encounter.updated',
   'encounter.deleted',
   'encounter.ping',
+  'schedule.updated',
   'membership.revoked',
+  'treasury.updated',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -3731,6 +3938,16 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     at: IsoDate,
   }),
   z.object({
+    // Issue #790: a scheduled session was created, edited, cancelled, or received
+    // an RSVP. This remains an id-only invalidation signal: clients refetch the
+    // permission-checked campaign projection so a reschedule replaces every detail
+    // together and a cancellation clears the card instead of merging stale fields.
+    type: z.literal('schedule.updated'),
+    campaignId: Id,
+    scheduleId: Id,
+    at: IsoDate,
+  }),
+  z.object({
     // Issue #527: a member was removed (or self-left) from the campaign. The affected
     // user's open SSE stream completes on receipt; other members' streams ignore it (they
     // are not the revokee). `userId` is String(users.id) — the same identity space as
@@ -3740,6 +3957,20 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     userId: z.string().max(120),
     memberId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #582: the party treasury changed. A thin invalidation signal like the
+    // encounter.* ticks: no coin payload (permission-checked REST read is authoritative),
+    // so an open editor that snapshotted stale balances can mark itself stale and refetch
+    // instead of silently overwriting another player's concurrent spend on save. `userId`
+    // is String(users.id) of the actor (same identity space as RequestUser.id) so the
+    // editor can show "changed by <player>" without a second lookup — and so the editor's
+    // OWN write doesn't re-mark itself stale when it round-trips through the SSE stream
+    // (the client compares userId against the local session and ignores its own echo).
+    type: z.literal('treasury.updated'),
+    campaignId: Id,
+    userId: z.string().max(120),
     at: IsoDate,
   }),
 ]);

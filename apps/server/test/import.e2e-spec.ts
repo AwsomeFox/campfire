@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { MembersService } from '../src/modules/membership/members.service';
 
 // Minimal valid 1x1 PNG — same fixture as attachments/export specs.
 const TINY_PNG = Buffer.from(
@@ -134,7 +137,10 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     // Quests: giverNpcId remapped, status + objective preserved, fresh id.
     const importedQuests = await dmAgent.get(`/api/v1/campaigns/${imported.id}/quests`);
     expect(importedQuests.body.length).toBe(1);
-    const q = importedQuests.body[0];
+    const qListItem = importedQuests.body[0];
+    const importedQuest = await dmAgent.get(`/api/v1/quests/${qListItem.id}`);
+    expect(importedQuest.status).toBe(200);
+    const q = importedQuest.body;
     expect(q.id).not.toBe(questId);
     expect(q.status).toBe('active');
     expect(q.dmSecret).toBe('the vault is a trap');
@@ -418,7 +424,10 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     characterId = charRes.body.id;
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Guild Signet', qty: 1, ownerType: 'party' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Vesper’s Daggers', qty: 2, ownerType: 'character', characterId });
-    await dmAgent.patch(`/api/v1/campaigns/${campaignId}/treasury`).send({ set: { gp: 150, sp: 40 } });
+    // Issue #582: absolute { set } now requires expectedUpdatedAt (CAS). Fetch the
+    // current row version first so this setup write is accepted.
+    const treasuryBefore = await dmAgent.get(`/api/v1/campaigns/${campaignId}/treasury`);
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}/treasury`).send({ set: { gp: 150, sp: 40 }, expectedUpdatedAt: treasuryBefore.body.updatedAt });
 
     const exportRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
     exportDoc = exportRes.body;
@@ -515,3 +524,199 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     expect(sourceFacs.body[0].id).toBe(factionId);
   });
 });
+
+/**
+ * Issue #725 — atomic staged import. A failure at ANY commit boundary must roll
+ * the whole import back: no campaign row, no child rows, no audit row, no
+ * orphaned attachment files, and no leftover staging directory. The old code
+ * wrote DB rows in one transaction but then wrote files / added membership /
+ * logged audit AFTER the commit with errors swallowed — so a membership or disk
+ * failure could strand a fully-written campaign the importer couldn't even see
+ * (no member row) and/or report success with missing maps.
+ *
+ * This suite injects a deterministic failure at the membership insert (now part
+ * of the atomic transaction) and asserts the rollback is total, across both the
+ * JSON import (no attachments) and the ZIP import (attachments staged + must be
+ * cleaned up). It also confirms the happy path now leaves NO staging directory
+ * behind (the publish step consumed it).
+ */
+describe('campaign import — atomic staged commit (issue #725)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let dataDir: string;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    dataDir = ctx.dataDir;
+    const server = ctx.app.getHttpServer();
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'atomic-dm', password: 'dm-password-1' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  /** Upload dir entries that exist for `campaignId` (or none when absent). */
+  function campaignUploadDir(campaignId: number): string {
+    return path.join(dataDir, 'uploads', String(campaignId));
+  }
+
+  /** The staging root every import parks bytes under before commit. */
+  function stagingRoot(): string {
+    return path.join(dataDir, 'uploads', '.staging');
+  }
+
+  /** Count campaign rows the DM can list (excludes trashed). */
+  async function listCampaignIds(): Promise<number[]> {
+    const res = await dmAgent.get('/api/v1/campaigns');
+    return (res.body as { id: number }[]).map((c) => c.id);
+  }
+
+  it('rolls back the entire import when the membership insert fails (JSON import, no attachments)', async () => {
+    // A baseline campaign so the "no new campaign" assertion is meaningful.
+    const baseline = await dmAgent.post('/api/v1/campaigns').send({ name: 'Baseline' });
+    const idsBefore = await listCampaignIds();
+    expect(idsBefore).toContain(baseline.body.id);
+
+    // Inject a failure into the membership commit boundary: the import's
+    // addCreatorAsDmTx (now called inside the import transaction) throws, which
+    // must roll back every row the transaction inserted. Restored in finally.
+    const members = ctx.app.get(MembersService);
+    const real = members.addCreatorAsDmTx.bind(members);
+    let threw = false;
+    members.addCreatorAsDmTx = () => {
+      threw = true;
+      throw new Error('simulated membership failure at commit boundary');
+    };
+    try {
+      const res = await dmAgent
+        .post('/api/v1/campaigns/import')
+        .send({ campaign: { name: 'Should Roll Back', description: 'must not persist' }, quests: [], npcs: [], locations: [] });
+      // The injected throw surfaces as a 500 (Nest's default for an unhandled Error).
+      expect(res.status).toBe(500);
+      expect(threw).toBe(true);
+
+      // No new campaign row: the id set is unchanged from before the import.
+      const idsAfter = await listCampaignIds();
+      expect(idsAfter.sort()).toEqual(idsBefore.sort());
+
+      // No audit row for a rolled-back import (the audit insert shared the tx).
+      const audit = await dmAgent.get('/api/v1/campaigns/999999/audit');
+      // 404 is fine — we only care that no 'campaign.import' row leaked; check by
+      // confirming the campaigns table itself gained no row named "Should Roll Back".
+      const all = await dmAgent.get('/api/v1/campaigns');
+      const leaked = (all.body as { name: string }[]).find((c) => c.name === 'Should Roll Back');
+      expect(leaked).toBeUndefined();
+    } finally {
+      members.addCreatorAsDmTx = real;
+    }
+  });
+
+  it('stages attachments, and on a mid-commit failure leaves NO campaign rows, NO orphaned files, and NO staging dir', async () => {
+    // Build a source campaign with a map, export it as a mdzip, so the import
+    // has real attachment bytes to stage.
+    const src = await dmAgent.post('/api/v1/campaigns').send({ name: 'Zip Source For Rollback' });
+    const srcId = src.body.id;
+    const mapUpload = await dmAgent
+      .post(`/api/v1/campaigns/${srcId}/attachments`)
+      .field('kind', 'map')
+      .attach('file', TINY_PNG, { filename: 'overworld.png', contentType: 'image/png' });
+    await dmAgent.patch(`/api/v1/campaigns/${srcId}`).send({ mapAttachmentId: mapUpload.body.id });
+
+    const zipRes = await getBuffer(dmAgent, `/api/v1/campaigns/${srcId}/export?format=mdzip`);
+    expect(zipRes.status).toBe(200);
+    const zipBuffer = zipRes.body as Buffer;
+
+    const idsBefore = await listCampaignIds();
+    // Snapshot which campaign upload dirs exist before the import, so we can
+    // prove no NEW dir was created (no orphaned files for a rolled-back campaign).
+    const dirsBefore = new Set(
+      fs.existsSync(path.join(dataDir, 'uploads'))
+        ? fs.readdirSync(path.join(dataDir, 'uploads'))
+        : [],
+    );
+
+    // Inject the membership failure again — this time with staged attachment
+    // bytes in play. The rollback must clean up BOTH the DB rows AND the
+    // staging directory.
+    const members = ctx.app.get(MembersService);
+    const real = members.addCreatorAsDmTx.bind(members);
+    members.addCreatorAsDmTx = () => {
+      throw new Error('simulated membership failure at commit boundary (zip)');
+    };
+    try {
+      const res = await dmAgent
+        .post('/api/v1/campaigns/import/archive')
+        .attach('file', zipBuffer, { filename: 'export.zip', contentType: 'application/zip' });
+      expect(res.status).toBe(500);
+
+      // No new campaign row.
+      const idsAfter = await listCampaignIds();
+      expect(idsAfter.sort()).toEqual(idsBefore.sort());
+
+      // No new campaign upload directory was created (the staged bytes were
+      // cleaned up, never published, because the tx rolled back).
+      const dirsAfter = new Set(
+        fs.existsSync(path.join(dataDir, 'uploads'))
+          ? fs.readdirSync(path.join(dataDir, 'uploads'))
+          : [],
+      );
+      const newDirs = [...dirsAfter].filter((d) => !dirsBefore.has(d));
+      // The only acceptable "new" dir is the staging root itself; it must be EMPTY
+      // (cleanup removed the nonce subdir).
+      for (const d of newDirs) {
+        if (d === '.staging') {
+          const entries = fs.existsSync(stagingRoot()) ? fs.readdirSync(stagingRoot()) : [];
+          expect(entries.length).toBe(0);
+        } else {
+          // No new <campaignId> upload dir — that would mean files were published
+          // for a campaign whose rows just rolled back.
+          expect(Number.isInteger(Number(d))).toBe(false);
+        }
+      }
+
+      // The staging directory itself should be empty (every nonce subdir removed).
+      if (fs.existsSync(stagingRoot())) {
+        expect(fs.readdirSync(stagingRoot()).length).toBe(0);
+      }
+    } finally {
+      members.addCreatorAsDmTx = real;
+    }
+
+    // Sanity: the source campaign's own upload dir is untouched by the failed import.
+    expect(fs.existsSync(campaignUploadDir(srcId))).toBe(true);
+  });
+
+  it('on a SUCCESSFUL zip import, publishes staged files and leaves NO staging directory behind', async () => {
+    const src = await dmAgent.post('/api/v1/campaigns').send({ name: 'Zip Source For Success' });
+    const srcId = src.body.id;
+    const mapUpload = await dmAgent
+      .post(`/api/v1/campaigns/${srcId}/attachments`)
+      .field('kind', 'map')
+      .attach('file', TINY_PNG, { filename: 'overworld.png', contentType: 'image/png' });
+    await dmAgent.patch(`/api/v1/campaigns/${srcId}`).send({ mapAttachmentId: mapUpload.body.id });
+
+    const zipRes = await getBuffer(dmAgent, `/api/v1/campaigns/${srcId}/export?format=mdzip`);
+    const zipBuffer = zipRes.body as Buffer;
+
+    const importRes = await dmAgent
+      .post('/api/v1/campaigns/import/archive')
+      .attach('file', zipBuffer, { filename: 'export.zip', contentType: 'application/zip' });
+    expect(importRes.status).toBe(201);
+    const imported = importRes.body;
+    expect(imported.id).not.toBe(srcId);
+
+    // The map file was published (staged -> renamed into the campaign's uploads dir).
+    const mapFile = await getBuffer(dmAgent, `/api/v1/attachments/${imported.mapAttachmentId}/file`);
+    expect(mapFile.status).toBe(200);
+    expect(Buffer.compare(mapFile.body as Buffer, TINY_PNG)).toBe(0);
+
+    // The staging directory is empty / gone after a successful publish — every
+    // staged file was renamed away (consumed), then the dir was swept.
+    if (fs.existsSync(stagingRoot())) {
+      expect(fs.readdirSync(stagingRoot()).length).toBe(0);
+    }
+  });
+});
+

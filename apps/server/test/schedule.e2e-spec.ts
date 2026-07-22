@@ -1,11 +1,15 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import ICAL from 'ical.js';
+import { eq } from 'drizzle-orm';
 import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/main';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { campaigns } from '../src/db/schema';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
@@ -139,7 +143,7 @@ describe('session scheduling (e2e)', () => {
 
       const initial = await request(server).get(`/api/v1/campaigns/${campaignId}/calendar-feed`).set(player);
       expect(initial.status).toBe(200);
-      expect(initial.body).toEqual({ token: null, url: null });
+      expect(initial.body).toEqual({ token: null, url: null, expiresAt: null });
 
       const playerEnable = await request(server).post(`/api/v1/campaigns/${campaignId}/calendar-feed`).set(player);
       expect(playerEnable.status).toBe(403);
@@ -148,11 +152,19 @@ describe('session scheduling (e2e)', () => {
       expect(enable.status).toBe(201);
       expect(enable.body.token).toMatch(/^cf_ics_[0-9a-f]{48}$/);
       expect(enable.body.url).toBe(`/api/v1/calendar/${enable.body.token}.ics`);
+      // Issue #554: every issued token carries an absolute expiry the feed enforces.
+      expect(enable.body.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      const expiresInDays =
+        (new Date(enable.body.expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+      // Default window is 90 days; allow generous slack so wall-clock drift never flakes this.
+      expect(expiresInDays).toBeGreaterThan(80);
+      expect(expiresInDays).toBeLessThan(100);
       token = enable.body.token;
 
       // Members can re-read the token/URL (calendar URLs must be re-displayable).
       const asPlayer = await request(server).get(`/api/v1/campaigns/${campaignId}/calendar-feed`).set(player);
       expect(asPlayer.body.token).toBe(token);
+      expect(asPlayer.body.expiresAt).toBe(enable.body.expiresAt);
     });
 
     it('serves a valid ICS document to an unauthenticated client holding the token', async () => {
@@ -186,6 +198,36 @@ describe('session scheduling (e2e)', () => {
       await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
     });
 
+    it('serves parser-valid Unicode content folded to at most 75 UTF-8 octets', async () => {
+      const server = ctx.app.getHttpServer();
+      const title = 'ليلة النجوم 星の夜 👩‍🚀🇺🇳 ' + 'é'.repeat(70);
+      const location = 'https://example.test/مكان/星?' + 'crew=👨‍👩‍👧‍👦'.repeat(8);
+      const notes = `RTL العربية، CJK 漢字; combining ${'e\u0301'.repeat(45)}\n${'🚀'.repeat(60)}`;
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/schedule`)
+        .set(dm)
+        .send({ scheduledAt: '2099-09-02T18:00:00Z', title, location, notes });
+      expect(created.status).toBe(201);
+
+      const res = await request(server).get(`/api/v1/calendar/${token}.ics`);
+      expect(res.status).toBe(200);
+      expect(res.text.endsWith('\r\n')).toBe(true);
+      expect(res.text.replace(/\r\n/g, '')).not.toMatch(/[\r\n]/);
+      for (const line of res.text.split('\r\n').slice(0, -1)) {
+        expect(Buffer.byteLength(line, 'utf8')).toBeLessThanOrEqual(75);
+      }
+
+      const calendar = new ICAL.Component(ICAL.parse(res.text));
+      const event = calendar
+        .getAllSubcomponents('vevent')
+        .find((candidate) => candidate.getFirstPropertyValue('summary') === title);
+      expect(event).toBeDefined();
+      expect(event!.getFirstPropertyValue('location')).toBe(location);
+      expect(event!.getFirstPropertyValue('description')).toBe(notes);
+
+      await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
+    });
+
     it('unknown or malformed tokens 404', async () => {
       const server = ctx.app.getHttpServer();
       const wrong = await request(server).get(`/api/v1/calendar/cf_ics_${'0'.repeat(48)}.ics`);
@@ -195,12 +237,44 @@ describe('session scheduling (e2e)', () => {
       expect(malformed.status).toBe(404);
     });
 
-    it('rotating invalidates the old token; the new one works', async () => {
+    it('issue #554: an expired token is rejected with 404 (leaked URL self-destructs)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Sanity: the current token still works before time-travel.
+      const before = await request(server).get(`/api/v1/calendar/${token}.ics`);
+      expect(before.status).toBe(200);
+
+      // Time-travel the token's expiry into the past, exactly like the invite-expiry
+      // e2e (invites.e2e-spec.ts) does — direct DB write via the app's Drizzle handle.
+      const db = ctx.app.get<DrizzleDb>(DB);
+      await db
+        .update(campaigns)
+        .set({ icsTokenExpiresAt: new Date(Date.now() - 1000).toISOString() })
+        .where(eq(campaigns.id, campaignId));
+
+      // The public feed stops serving the expired token — same 404 as
+      // unknown/rotated/disabled, so a probing caller learns nothing extra.
+      const expired = await request(server).get(`/api/v1/calendar/${token}.ics`);
+      expect(expired.status).toBe(404);
+
+      // Settings still report the token + the (now-past) expiry so the DM can see
+      // WHY the feed died and rotate to bring it back.
+      const settings = await request(server).get(`/api/v1/campaigns/${campaignId}/calendar-feed`).set(dm);
+      expect(settings.status).toBe(200);
+      expect(settings.body.token).toBe(token);
+      expect(new Date(settings.body.expiresAt).getTime()).toBeLessThan(Date.now());
+    });
+
+    it('rotating invalidates the old token; the new one works and gets a fresh expiry', async () => {
       const server = ctx.app.getHttpServer();
       const rotate = await request(server).post(`/api/v1/campaigns/${campaignId}/calendar-feed`).set(dm);
       expect(rotate.status).toBe(201);
       const newToken = rotate.body.token;
       expect(newToken).not.toBe(token);
+      expect(rotate.body.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      // A rotation after the previous test backdated the expiry must mint a new
+      // token whose expiry is back in the future (default ~90d window).
+      expect(new Date(rotate.body.expiresAt).getTime()).toBeGreaterThan(Date.now());
 
       const old = await request(server).get(`/api/v1/calendar/${token}.ics`);
       expect(old.status).toBe(404);
@@ -218,13 +292,13 @@ describe('session scheduling (e2e)', () => {
 
       const disable = await request(server).delete(`/api/v1/campaigns/${campaignId}/calendar-feed`).set(dm);
       expect(disable.status).toBe(200);
-      expect(disable.body).toEqual({ token: null, url: null });
+      expect(disable.body).toEqual({ token: null, url: null, expiresAt: null });
 
       const feed = await request(server).get(`/api/v1/calendar/${token}.ics`);
       expect(feed.status).toBe(404);
 
       const settings = await request(server).get(`/api/v1/campaigns/${campaignId}/calendar-feed`).set(dm);
-      expect(settings.body).toEqual({ token: null, url: null });
+      expect(settings.body).toEqual({ token: null, url: null, expiresAt: null });
     });
   });
 });

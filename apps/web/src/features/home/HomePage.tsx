@@ -6,7 +6,7 @@
  * -> POST + PATCH ruleSystem). Any user may create a campaign.
  */
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, ApiError, API } from '../../lib/api';
@@ -319,8 +319,8 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
               {busyId === c.id ? 'Working…' : 'Restore'}
             </button>
             <button
-              className="btn btn-ghost"
-              style={{ fontSize: 12.5, color: '#f87171' }}
+              className="btn btn-ghost btn-danger"
+              style={{ fontSize: 12.5 }}
               disabled={busyId === c.id}
               onClick={() => setPurgeTarget(c)}
             >
@@ -353,9 +353,19 @@ export function HomePage() {
   const { roleIn, refresh: refreshAuth } = useAuth();
   const { campaigns, loading, error, refresh } = useCampaigns();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [justCreated, setJustCreated] = useState<Campaign[]>([]);
-  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardOpen, setWizardOpen] = useState(() => searchParams.get('newCampaign') === '1');
   const [importError, setImportError] = useState<string | null>(null);
+
+  function closeWizard() {
+    setWizardOpen(false);
+    if (searchParams.get('newCampaign') === '1') {
+      const next = new URLSearchParams(searchParams);
+      next.delete('newCampaign');
+      setSearchParams(next, { replace: true });
+    }
+  }
 
   const allCampaigns = [...campaigns, ...justCreated.filter((c) => !campaigns.some((x) => x.id === c.id))];
   // Archived (paused/completed) campaigns are read-only server-side — keep them
@@ -373,12 +383,12 @@ export function HomePage() {
     // refresh (issue #103). allSettled so an API hiccup on one refresh still
     // lets us proceed rather than trapping the user on the wizard.
     await Promise.allSettled([refresh(), refreshAuth()]);
-    setWizardOpen(false);
+    closeWizard();
     navigate(`/c/${c.id}`);
   }
 
   if (wizardOpen) {
-    return <NewCampaignWizard onClose={() => setWizardOpen(false)} onCreated={onCampaignCreated} />;
+    return <NewCampaignWizard onClose={closeWizard} onCreated={onCampaignCreated} />;
   }
 
   return (

@@ -3,6 +3,9 @@ import {
   PF2E_ADAPTER_ID,
   PF2E_PACK_SLUG,
   PF2E_CONDITIONS,
+  Sf2eAdapter,
+  SF2E_ADAPTER_ID,
+  SF2E_PACK_SLUG,
   ruleSystemAdapter,
   pf2eProficiencyBonus,
   pf2eLevelBasedDC,
@@ -31,6 +34,23 @@ describe('Pf2eAdapter — identity + registry resolution', () => {
 
   it('resolves from the PF2e family id', () => {
     expect(ruleSystemAdapter('pf2e')).toBe(Pf2eAdapter);
+  });
+});
+
+describe('Sf2eAdapter — identity + registry resolution', () => {
+  it('has the SF2e family id and label', () => {
+    expect(Sf2eAdapter.id).toBe('sf2e');
+    expect(SF2E_ADAPTER_ID).toBe('sf2e');
+    expect(Sf2eAdapter.label).toBe('Starfinder 2e');
+  });
+
+  it('resolves from the SF2e pack slug a campaign stores in ruleSystem', () => {
+    expect(ruleSystemAdapter(SF2E_PACK_SLUG)).toBe(Sf2eAdapter);
+    expect(ruleSystemAdapter('sf2e-srd')).toBe(Sf2eAdapter);
+  });
+
+  it('resolves from the SF2e family id', () => {
+    expect(ruleSystemAdapter('sf2e')).toBe(Sf2eAdapter);
   });
 });
 

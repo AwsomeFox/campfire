@@ -91,6 +91,12 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
 
     const demoteRes = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${dmMember.id}`).send({ role: 'player' });
     expect(demoteRes.status).toBe(409);
+
+    const demoteWithBadCharacter = await userA
+      .patch(`/api/v1/campaigns/${campaignId}/members/${dmMember.id}`)
+      .send({ role: 'player', characterId: 999999 });
+    expect(demoteWithBadCharacter.status).toBe(409);
+    expect(demoteWithBadCharacter.body.message).toBe('Cannot demote the last dm of this campaign');
   });
 
   it('GET /campaigns scoping: everyone — the server admin included — sees only campaigns they are a member of', async () => {

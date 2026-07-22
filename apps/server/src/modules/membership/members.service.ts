@@ -105,6 +105,24 @@ export class MembersService {
   }
 
   /**
+   * Issue #725: the transaction-aware variant of addCreatorAsDm, for callers that
+   * must commit the dm membership IN THE SAME transaction as the rest of their
+   * writes (currently CampaignsService.importCampaign — so the importer's access
+   * and every imported row commit atomically; a failure here rolls the whole
+   * import back instead of stranding an inaccessible campaign). Runs the SAME
+   * assignableUserTx validation (missing/disabled user throws) so the import
+   * cannot silently grant a disabled account a dm seat. `ts` is supplied by the
+   * caller so every row in the import shares one timestamp.
+   */
+  addCreatorAsDmTx(tx: SyncDb, campaignId: number, userId: number, ts: string): void {
+    this.assignableUserTx(tx, userId);
+    tx.insert(campaignMembers)
+      .values({ campaignId, userId, role: 'dm', characterId: null, createdAt: ts, updatedAt: ts })
+      .onConflictDoNothing()
+      .run();
+  }
+
+  /**
    * characterId is an FK-shaped field that previously accepted any integer with no
    * existence/campaign check — a nonexistent id, or another campaign's character id,
    * would silently pass through and get denormalized-joined against on listForCampaign.

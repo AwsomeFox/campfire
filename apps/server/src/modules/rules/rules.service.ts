@@ -3,6 +3,7 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from '@nes
 import { and, eq, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
+  SF2E_PACK_SLUG,
   PF1E_PACK_SLUG,
   STARFINDER_ADAPTER_ID,
   isOpenLicense,
@@ -43,7 +44,11 @@ import {
   PF2E_DEFAULT_BASE_URL,
   PF2E_DEFAULT_LICENSE,
   PF2E_PACK_NAME,
+  SF2E_DEFAULT_BASE_URL,
+  SF2E_DEFAULT_LICENSE,
+  SF2E_PACK_NAME,
   fetchPf2eSection,
+  fetchSf2eSection,
   type Pf2eSection,
 } from './pf2e-importer';
 import {
@@ -116,9 +121,39 @@ function entryToDomain(row: typeof ruleEntries.$inferSelect): RuleEntry {
     body: row.body,
     dataJson: row.dataJson,
     source: row.source ?? '',
+    // Per-entry provenance (issue #734). '' on rows written before migration 0050 means
+    // "inherit the pack's value"; the reader resolves that fallback (entry.license || pack.license).
+    license: row.license ?? '',
+    attribution: row.attribution ?? '',
+    author: row.author ?? '',
+    sourceUrl: row.sourceUrl ?? '',
     iconSlug: row.iconSlug ?? '',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+/**
+ * Resolve an imported entry's per-entry provenance against the pack-level fallbacks
+ * (issue #734). Importers know the license/source for every entry but may leave
+ * attribution/author/sourceUrl unset ('' → "inherit the pack's value"). This centralizes
+ * the fallback rule so both the fresh-install and incremental-add insert paths stamp the
+ * SAME effective values, and the reader can trust entry.license as the entry's real license
+ * rather than a dropped/blank field. The pack fallbacks are the installer's `meta`
+ * (license/sourceUrl/name): attribution falls back to the pack name (a reasonable default
+ * credit line), and license to the pack license.
+ */
+function effectiveEntryProvenance(
+  entry: ImportedEntry,
+  packLicense: string,
+  packSourceUrl: string,
+  packName: string,
+): { license: string; attribution: string; author: string; sourceUrl: string } {
+  return {
+    license: (entry.license ?? '').trim() || packLicense,
+    attribution: (entry.attribution ?? '').trim() || packName,
+    author: (entry.author ?? '').trim(),
+    sourceUrl: (entry.sourceUrl ?? '').trim() || packSourceUrl,
   };
 }
 
@@ -289,13 +324,15 @@ export class RulesService {
    * The section vocabulary each `source` accepts (issue #345). A caller-supplied section
    * that isn't in the chosen source's set is rejected 400 synchronously, before a job is
    * enqueued (acceptance criteria) — the widened `RulePackInstallSection` enum lets a name
-   * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e keeps the
-   * historical 5e-shaped set (it ignores the filter at import but still rejects foreign
-   * names); 'other' rides the Open5e path for back-compat.
+   * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e and SF2e
+   * accept both 5e-shaped section names and native PF2e/SF2e section keys (e.g., 'creatures',
+   * 'equipment'); 'other' rides the Open5e path for back-compat.
    */
   private static readonly SECTIONS_BY_SOURCE: Record<RulePackInstallSource, readonly string[]> = {
     open5e: ALL_OPEN5E_SECTIONS,
-    pf2e: ALL_OPEN5E_SECTIONS,
+    // PF2e / SF2e accept both 5e-shaped section names and native PF2e/SF2e section keys
+    pf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
+    sf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
     pf1e: ALL_PF1E_SECTIONS,
     starfinder: ALL_STARFINDER_SECTIONS,
     archmage: ALL_ARCHMAGE_SECTIONS,
@@ -354,6 +391,8 @@ export class RulesService {
     switch (input.source) {
       case 'pf2e':
         return this.enqueuePf2eInstall(input, user);
+      case 'sf2e':
+        return this.enqueueSf2eInstall(input, user);
       case 'pf1e':
         return this.enqueuePf1eInstall(input, user);
       case 'starfinder':
@@ -387,6 +426,8 @@ export class RulesService {
     switch (input.source) {
       case 'pf2e':
         return this.installFromPf2e(input, user, onSectionDone);
+      case 'sf2e':
+        return this.installFromSf2e(input, user, onSectionDone);
       case 'pf1e':
         return this.installFromPf1e(input, user, onSectionDone);
       case 'starfinder':
@@ -436,6 +477,16 @@ export class RulesService {
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  enqueueSf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const job = this.newJob('sf2e', ALL_PF2E_SECTIONS);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromSf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
       ),
     );
     return this.getJobOrThrow(job.id);
@@ -537,7 +588,13 @@ export class RulesService {
    * clean 400 at the POST rather than a failed job the caller must poll to discover.
    */
   enqueueUploadInstall(input: RulePackUpload, user: RequestUser): RulePackInstallJob {
+    // License open-ness is validated synchronously here so a bad-license upload gets a
+    // clean 400 at the POST rather than a failed job the caller must poll to discover.
+    // BOTH the pack license AND every entry's effective license (entry license or pack
+    // fallback) are checked up front — a non-open entry in an otherwise-open pack is
+    // rejected with an indexed error naming the offender, before any job/mutation (#734).
     this.assertOpenLicense(input.pack.license);
+    this.assertEntriesOpenLicensed(input);
     const types = [...new Set(input.entries.map((e) => e.type))];
     const job = this.newJob('upload', types);
     queueMicrotask(() =>
@@ -552,6 +609,33 @@ export class RulesService {
     if (!isOpenLicense(license)) {
       throw new BadRequestException(
         `License "${license}" is not a recognized open license. Uploaded rule packs must be OGL, ORC, Creative Commons, or public domain — copyrighted or purchased content cannot be uploaded.`,
+      );
+    }
+  }
+
+  /**
+   * Per-entry effective-license validation (issue #734). The pack-level check
+   * (assertOpenLicense) only validates the PACK license; a non-open entry ("All Rights
+   * Reserved") could otherwise smuggle into an open-licensed pack. Each entry's effective
+   * license is its own, falling back to the pack's, and ALL must be open. Throws a single
+   * indexed BadRequestException naming every offending entry (input index + slug + license)
+   * so the uploader can fix and resubmit — called synchronously at enqueue so the caller
+   * gets a 400 at the POST, not a failed job to poll for.
+   */
+  private assertEntriesOpenLicensed(input: RulePackUpload): void {
+    const offenders: Array<{ index: number; slug: string; license: string }> = [];
+    input.entries.forEach((entry, index) => {
+      const effectiveLicense = (entry.license ?? '').trim() || input.pack.license;
+      if (!isOpenLicense(effectiveLicense)) {
+        offenders.push({ index, slug: entry.slug, license: effectiveLicense });
+      }
+    });
+    if (offenders.length > 0) {
+      const detail = offenders
+        .map((o) => `entry[${o.index}] "${o.slug}" (license "${o.license}")`)
+        .join('; ');
+      throw new BadRequestException(
+        `Uploaded pack contains ${offenders.length} entr${offenders.length === 1 ? 'y' : 'ies'} with a non-open effective license. Each entry must be OGL, ORC, Creative Commons, or public domain (entry license falls back to the pack license). Offending ${offenders.length === 1 ? 'entry' : 'entries'}: ${detail}.`,
       );
     }
   }
@@ -619,16 +703,17 @@ export class RulesService {
 
   /**
    * Installs a rule pack from Open5e, or — if "open5e-srd" is already installed —
-   * incrementally adds whatever entries from the requested sections aren't present yet
-   * (round-2 finding #2). Dedupe key is (slug, type): an entry already in the pack with
-   * the same slug+type is skipped rather than duplicated or overwritten.
+   * refreshes entries from the requested sections in place and incrementally adds any
+   * that aren't present yet. Dedupe key is (slug, type); refreshing keeps stable entry
+   * ids and manual icon overrides while replacing importer-owned content. This matters
+   * when a newer importer starts retaining additional upstream fields (issue #621).
    *
    * Fresh install: 201, returns the RulePack as before.
    * Incremental install (pack already exists): 200, returns
    * `RulePack & { added: number; skippedExisting: number }`. We deliberately never 409
    * here even if every requested entry already existed (added:0, skippedExisting:N) —
    * simpler UX than forcing the caller to pre-check section coverage, and idempotent:
-   * calling install repeatedly with the same sections converges to a 200 no-op rather
+   * calling install repeatedly with the same sections converges to a 200 refresh rather
    * than an error the caller has to special-case.
    *
    * Concurrency (round-2 finding #3): two concurrent *fresh* installs can both pass the
@@ -675,6 +760,7 @@ export class RulesService {
       allEntries,
       user,
       `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { refreshExisting: true },
     );
   }
 
@@ -713,6 +799,38 @@ export class RulesService {
 
     return this.persistPack(
       { slug: PF2E_PACK_SLUG, name: PF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
+      allEntries,
+      user,
+      `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  async installFromSf2e(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? SF2E_DEFAULT_BASE_URL;
+    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchSf2eSection(baseUrl, s);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Starfinder 2e import returned no entries for the requested sections');
+    }
+
+    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
+    const license = licenses.size > 0 ? [...licenses].join(', ') : SF2E_DEFAULT_LICENSE;
+
+    return this.persistPack(
+      { slug: SF2E_PACK_SLUG, name: SF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
@@ -951,8 +1069,8 @@ export class RulesService {
    * for any system (Pathfinder 2e ORC, other OGL/CC content, homebrew), not just
    * Open5e. Reuses the same persistence path as the Open5e importer, so multi-pack
    * coexistence, incremental adds, and the concurrent-install race guard all apply
-   * identically. License open-ness is (re)validated here as defense-in-depth; the
-   * enqueue path already rejected a non-open license with a 400.
+   * identically. License open-ness (pack + per-entry effective) is re-validated here as
+   * defense-in-depth; the enqueue path already rejected a non-open license with a 400.
    */
   async installFromUpload(
     input: RulePackUpload,
@@ -960,6 +1078,7 @@ export class RulesService {
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     this.assertOpenLicense(input.pack.license);
+    this.assertEntriesOpenLicensed(input);
 
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence — the
     // (pack_id, type, slug) unique index (issue #143) would otherwise reject an upload that
@@ -981,6 +1100,11 @@ export class RulesService {
         dataJson: e.dataJson ?? null,
         license: e.license ?? input.pack.license,
         source: e.source ?? input.pack.name,
+        // Per-entry provenance (issue #734): fall back to pack-level values so every row has
+        // explicit, attributable provenance rather than a dropped/blank field.
+        attribution: e.attribution ?? input.pack.name,
+        author: e.author ?? '',
+        sourceUrl: e.sourceUrl ?? input.pack.sourceUrl ?? '',
         iconSlug: e.iconSlug ?? '',
       }));
 
@@ -1018,6 +1142,7 @@ export class RulesService {
     rawEntries: ImportedEntry[],
     user: RequestUser,
     detailSuffix: string,
+    options: { refreshExisting?: boolean } = {},
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence. Importers
     // only de-dupe WITHIN a section, but several sources map two sections onto one entry
@@ -1036,7 +1161,7 @@ export class RulesService {
 
     const [existing] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
     if (existing) {
-      return this.addEntriesToExistingPack(existing, entries, meta.sectionLabels, user);
+      return this.addEntriesToExistingPack(existing, entries, meta.sectionLabels, user, options);
     }
 
     const ts = nowIso();
@@ -1058,6 +1183,7 @@ export class RulesService {
           .all();
 
         for (const entry of entries) {
+          const prov = effectiveEntryProvenance(entry, meta.license, meta.sourceUrl, meta.name);
           tx.insert(ruleEntries)
             .values({
               packId: packRow.id,
@@ -1068,6 +1194,10 @@ export class RulesService {
               body: entry.body,
               dataJson: entry.dataJson,
               source: entry.source,
+              license: prov.license,
+              attribution: prov.attribution,
+              author: prov.author,
+              sourceUrl: prov.sourceUrl,
               iconSlug: entry.iconSlug ?? '',
               createdAt: ts,
               updatedAt: ts,
@@ -1084,7 +1214,7 @@ export class RulesService {
       // incremental path against it instead of surfacing a raw 500.
       const [raced] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
       if (!raced) throw err; // shouldn't happen, but don't swallow a genuine failure
-      return this.addEntriesToExistingPack(raced, entries, meta.sectionLabels, user);
+      return this.addEntriesToExistingPack(raced, entries, meta.sectionLabels, user, options);
     }
 
     await this.audit.log({
@@ -1101,32 +1231,59 @@ export class RulesService {
 
   /**
    * Adds whichever of `fetchedEntries` aren't already present (by slug+type) in
-   * `packRow`'s entries, bumping entryCount/version. Wrapped in a transaction so a
-   * partial write never happens; also absorbs a UNIQUE-constraint race between two
-   * concurrent incremental installs targeting the same pack (one retries against the
-   * fresh entry list rather than 500ing).
+   * `packRow`'s entries, bumping entryCount/version. Callers may additionally refresh
+   * importer-owned fields on matching rows while preserving row ids, createdAt, and
+   * user-selected iconSlug. Wrapped in a transaction so a partial write never happens;
+   * also absorbs a UNIQUE-constraint race between concurrent incremental installs.
    */
   private async addEntriesToExistingPack(
     packRow: typeof rulePacks.$inferSelect,
     fetchedEntries: ImportedEntry[],
     sections: string[],
     user: RequestUser,
+    options: { refreshExisting?: boolean } = {},
   ): Promise<RulePack & { added: number; skippedExisting: number }> {
     const existingRows = await this.db
-      .select({ slug: ruleEntries.slug, type: ruleEntries.type })
+      .select({ id: ruleEntries.id, slug: ruleEntries.slug, type: ruleEntries.type })
       .from(ruleEntries)
       .where(eq(ruleEntries.packId, packRow.id));
     const existingKeys = new Set(existingRows.map((r) => `${r.type}::${r.slug}`));
+    const existingIds = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r.id]));
 
     const toAdd = fetchedEntries.filter((e) => !existingKeys.has(`${e.type}::${e.slug}`));
+    const toRefresh = options.refreshExisting
+      ? fetchedEntries.flatMap((entry) => {
+          const id = existingIds.get(`${entry.type}::${entry.slug}`);
+          return id === undefined ? [] : [{ id, entry }];
+        })
+      : [];
     const skippedExisting = fetchedEntries.length - toAdd.length;
     const ts = nowIso();
 
     let updatedPack = packRow;
-    if (toAdd.length > 0) {
+    if (toAdd.length > 0 || toRefresh.length > 0) {
       try {
         updatedPack = this.db.transaction((tx) => {
+          for (const { id, entry } of toRefresh) {
+            const prov = effectiveEntryProvenance(entry, packRow.license, packRow.sourceUrl, packRow.name);
+            tx.update(ruleEntries)
+              .set({
+                name: entry.name,
+                summary: entry.summary,
+                body: entry.body,
+                dataJson: entry.dataJson,
+                source: entry.source,
+                license: prov.license,
+                attribution: prov.attribution,
+                author: prov.author,
+                sourceUrl: prov.sourceUrl,
+                updatedAt: ts,
+              })
+              .where(eq(ruleEntries.id, id))
+              .run();
+          }
           for (const entry of toAdd) {
+            const prov = effectiveEntryProvenance(entry, packRow.license, packRow.sourceUrl, packRow.name);
             tx.insert(ruleEntries)
               .values({
                 packId: packRow.id,
@@ -1137,6 +1294,11 @@ export class RulesService {
                 body: entry.body,
                 dataJson: entry.dataJson,
                 source: entry.source,
+                license: prov.license,
+                attribution: prov.attribution,
+                author: prov.author,
+                sourceUrl: prov.sourceUrl,
+                iconSlug: entry.iconSlug ?? '',
                 createdAt: ts,
                 updatedAt: ts,
               })
@@ -1175,7 +1337,7 @@ export class RulesService {
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: updatedPack.id,
-      detail: `incremental install for pack "${packRow.slug}": +${toAdd.length} entries from sections ${sections.join(',')}, ${skippedExisting} already present`,
+      detail: `incremental install for pack "${packRow.slug}": +${toAdd.length} entries from sections ${sections.join(',')}, ${skippedExisting} already present${options.refreshExisting ? ` (${toRefresh.length} refreshed)` : ''}`,
     });
 
     return { ...packToDomain(updatedPack), added: toAdd.length, skippedExisting };
