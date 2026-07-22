@@ -32,6 +32,11 @@ import {
   subscribeToCachePurges,
 } from '../lib/swCache';
 import { AuthContext, type AuthState } from './auth';
+import {
+  clearAuthStorage,
+  setAuthStorage,
+  useAuthStorageListener,
+} from '../features/auth/useAuthStorageListener';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
 // e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
 // can be unit-tested without JSX and without React.
@@ -111,6 +116,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // stale/restored identity), so it can't itself be poisoned by offline artifacts.
   const lastInstanceRef = useRef<ServerInstance | null>(null);
 
+  const handleMultiTabSignOut = useCallback(() => {
+    setMe(null);
+    lastUserIdRef.current = null;
+    lastInstanceRef.current = null;
+    applyAccentColor(null);
+    applyTextSize('default');
+    clearAuthStorage();
+    clearMeSnapshot();
+    setStaleIdentity(false);
+    setLastSyncedAt(null);
+    setConnectionError(false);
+    void clearApiCache().finally(() => queryClient.clear());
+  }, []);
+
+  useAuthStorageListener(handleMultiTabSignOut);
+
   const refresh = useCallback(async () => {
     let outcome: MeFetchOutcome;
     try {
@@ -150,6 +171,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // — a later /me reporting a different generation (a restore happened) wipes
       // the cache on this tab even without a reload.
       lastInstanceRef.current = decision.me?.instance ?? lastInstanceRef.current;
+    } else if (outcome.kind === 'loggedOut') {
+      lastUserIdRef.current = null;
+      lastInstanceRef.current = null;
     }
 
     setMe(decision.me);
@@ -160,9 +184,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (decision.me) {
       applyAccentColor(decision.me.user.accentColor);
       applyTextSize(decision.me.user.textSize);
+      if (outcome.kind === 'live') setAuthStorage(decision.me.user);
     } else {
       applyAccentColor(null);
       applyTextSize('default');
+      if (outcome.kind === 'loggedOut') clearAuthStorage();
     }
 
     setReady(true);
@@ -190,21 +216,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await api.post(`${API}/auth/logout`);
-    // Drop this account's cached campaign data so the next person to sign in on
-    // this device never inherits it (issue #268), and clear the persisted
-    // offline identity so an offline reload no longer restores this account.
-    lastUserIdRef.current = null;
-    lastInstanceRef.current = null;
-    await clearApiCache();
-    queryClient.clear();
-    clearMeSnapshot();
-    setMe(null);
-    setStaleIdentity(false);
-    setLastSyncedAt(null);
-    setConnectionError(false);
-    applyAccentColor(null);
-    applyTextSize('default');
+    try {
+      await api.post(`${API}/auth/logout`);
+    } finally {
+      clearAuthStorage();
+      setMe(null);
+      // Drop this account's cached campaign data so the next person to sign in on
+      // this device never inherits it (issue #268), and clear the persisted
+      // offline identity so an offline reload no longer restores this account.
+      lastUserIdRef.current = null;
+      lastInstanceRef.current = null;
+      await clearApiCache();
+      queryClient.clear();
+      clearMeSnapshot();
+      setStaleIdentity(false);
+      setLastSyncedAt(null);
+      setConnectionError(false);
+      applyAccentColor(null);
+      applyTextSize('default');
+    }
   }, []);
 
   const isAdmin = me?.user.serverRole === 'admin';
