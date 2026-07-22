@@ -1,7 +1,8 @@
 /**
  * First-run "light the fire" screen — creates the initial admin user.
  * Same card-on-radial-ground language as LoginPage (design's Login screen).
- * If setup is not required, bounce to /login.
+ * If setup is not required, authenticated users return to the campaign hub and
+ * signed-out users continue to /login.
  */
 import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -30,8 +31,8 @@ function FlameMark() {
 }
 
 export function SetupPage() {
-  const { status, loading } = useAuthStatus();
-  const { refresh } = useAuth();
+  const { status, loading, refresh: refreshAuthStatus } = useAuthStatus();
+  const { me, ready, refresh: refreshAuth } = useAuth();
   const navigate = useNavigate();
 
   const [username, setUsername] = useState('');
@@ -41,8 +42,8 @@ export function SetupPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  if (!loading && status && !status.setupRequired) {
-    return <Navigate to="/login" replace />;
+  if (!loading && ready && status && !status.setupRequired) {
+    return <Navigate to={me ? '/' : '/login'} replace />;
   }
 
   async function onSubmit(e: FormEvent) {
@@ -69,7 +70,12 @@ export function SetupPage() {
         password,
         displayName: displayName.trim() || undefined,
       });
-      await refresh();
+      // Setup mutates both pieces of auth state that gate the router. Refresh
+      // identity first so the configured-state render can never bounce the new
+      // admin through /login, then refresh /auth/status so AuthedLayout no
+      // longer redirects the campaign hub back to this setup screen.
+      await refreshAuth();
+      await refreshAuthStatus();
       navigate('/', { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {

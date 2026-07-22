@@ -203,7 +203,7 @@ function safeInternalPath(raw: string | null | undefined): string | null {
 
 export function LoginPage() {
   const { status, loading } = useAuthStatus();
-  const { refresh } = useAuth();
+  const { me, ready, refresh } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -227,6 +227,9 @@ export function LoginPage() {
 
   if (!loading && status?.setupRequired) {
     return <Navigate to="/setup" replace />;
+  }
+  if (!loading && ready && me) {
+    return <Navigate to={redirectTo} replace />;
   }
 
   async function onSubmit(e: FormEvent) {
