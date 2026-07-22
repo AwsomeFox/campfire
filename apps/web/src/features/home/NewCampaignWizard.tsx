@@ -13,6 +13,8 @@ import { Link } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { Campaign, RulePack } from '@campfire/schema';
 import { mechanicsForPackSlug } from '../../lib/rules';
+import { useAuth } from '../../app/auth';
+import { adminRulesHref, NEW_CAMPAIGN_SETUP_PATH } from '../../lib/adminNavigation';
 
 type Step = 'details' | 'system';
 
@@ -23,6 +25,7 @@ export function NewCampaignWizard({
   onClose: () => void;
   onCreated: (campaign: Campaign) => void | Promise<void>;
 }) {
+  const { isAdmin } = useAuth();
   const [step, setStep] = useState<Step>('details');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -172,10 +175,19 @@ export function NewCampaignWizard({
                     style={{ padding: '10px 14px', border: '1px solid var(--color-divider)', borderRadius: 'var(--radius-md)', fontSize: 12 }}
                   >
                     <span className="text-muted">
-                      A server admin can install one from{' '}
-                      <Link to="/admin" style={{ color: 'var(--color-text)', textDecoration: 'underline' }}>
-                        Server admin → Rule systems
-                      </Link>
+                      {isAdmin ? (
+                        <>
+                          Install one from{' '}
+                          <Link
+                            to={adminRulesHref(NEW_CAMPAIGN_SETUP_PATH)}
+                            style={{ color: 'var(--color-text)', textDecoration: 'underline' }}
+                          >
+                            Server admin → Rule systems
+                          </Link>
+                        </>
+                      ) : (
+                        <>Ask a server admin to install a rule system</>
+                      )}
                       . You can still create this campaign and run it homebrew.
                     </span>
                   </div>

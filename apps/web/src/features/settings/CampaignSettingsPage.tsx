@@ -9,10 +9,11 @@
  * owned surfaces; this page covers the General + Rule system + Danger tab.
  */
 import { useEffect, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { Campaign, CampaignCloneMode, DangerLevel, RulePack } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { adminRulesHref } from '../../lib/adminNavigation';
 import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
@@ -390,9 +391,13 @@ function RuleSystemCard({
         )}
         <div className="flex-1" />
         {isAdmin && (
-          <a href="/admin" className="btn btn-secondary" style={{ fontSize: 12.5 }}>
+          <Link
+            to={adminRulesHref(`/c/${campaignId}/settings`)}
+            className="btn btn-secondary"
+            style={{ fontSize: 12.5 }}
+          >
             Manage packs
-          </a>
+          </Link>
         )}
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
