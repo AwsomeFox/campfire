@@ -131,7 +131,7 @@ export default function SessionsPage() {
   // URL points at a session that's gone) — otherwise the detail pane sat on a
   // misleading "No sessions yet" empty state even with sessions in the list.
   useEffect(() => {
-    if (isDesktop && tab === 'log' && sessions.length > 0 && !selected) {
+    if (isDesktop && tab === 'log' && recapAction !== 'new-recap' && sessions.length > 0 && !selected) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -141,7 +141,7 @@ export default function SessionsPage() {
         { replace: true },
       );
     }
-  }, [isDesktop, tab, sessions, selected, setSearchParams]);
+  }, [isDesktop, tab, recapAction, sessions, selected, setSearchParams]);
 
   function selectSession(id: number) {
     setSearchParams((prev) => {
@@ -357,12 +357,15 @@ export default function SessionsPage() {
               nextNumber={nextNumber()}
               onCreated={(created) => {
                 setShowAddForm(false);
-                setSearchParams((prev) => {
-                  const next = new URLSearchParams(prev);
-                  next.set('session', String(created.id));
-                  next.delete('action');
-                  return next;
-                });
+                setSearchParams(
+                  (prev) => {
+                    const next = new URLSearchParams(prev);
+                    next.set('session', String(created.id));
+                    next.delete('action');
+                    return next;
+                  },
+                  { replace: recapAction === 'new-recap' },
+                );
                 void load();
               }}
               onCancel={
