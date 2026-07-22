@@ -147,20 +147,21 @@ function RevisionDialog({
                   const currentMissing = !(field in currentSnapshot);
                   const changed = revision.snapshot[field] !== currentSnapshot[field];
                   const historicalOnly = field !== restoreField;
+                  const notRecorded = !historicalOnly && selectedMissing;
                   return (
                     <section key={field} className="cf-inset overflow-hidden p-3 sm:p-4" aria-label={fieldLabel(entityType, field)}>
                       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-bold text-slate-200">{fieldLabel(entityType, field)}</p>
                         <span
                           className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
-                            historicalOnly
+                            historicalOnly || notRecorded
                               ? 'border-slate-400/40 text-slate-300'
                               : changed
                               ? 'border-amber-400/40 text-amber-300'
                               : 'border-emerald-400/35 text-emerald-300'
                           }`}
                         >
-                          {historicalOnly ? 'Historical only' : changed ? 'Changed' : 'Unchanged'}
+                          {historicalOnly ? 'Historical only' : notRecorded ? 'Not recorded' : changed ? 'Changed' : 'Unchanged'}
                         </span>
                       </div>
                       {historicalOnly && (
@@ -363,7 +364,9 @@ export function RevisionHistoryPanel({
                 const preview = prior.replace(/\s+/g, ' ').trim().slice(0, 120);
                 const author = revisionAuthor(revision);
                 const timestamp = formatDate(revision.createdAt);
-                const restoreLabel = fieldLabel(entityType, restorableField(entityType));
+                const restoreField = restorableField(entityType);
+                const restoreLabel = fieldLabel(entityType, restoreField);
+                const restoreFieldRecorded = restoreField in revision.snapshot;
                 const unchanged = valuesMatch(entityType, revision.snapshot, currentSnapshot);
                 return (
                   <li key={revision.id} className="flex flex-col gap-2 py-3 first:pt-0 sm:flex-row sm:items-start">
@@ -372,8 +375,14 @@ export function RevisionHistoryPanel({
                         <span>{author}</span> · <time dateTime={revision.createdAt}>{timestamp}</time>
                       </p>
                       <p className="mt-0.5 line-clamp-2 break-words text-[13px] text-slate-400">{preview || '(empty)'}</p>
-                      <p className={`mt-1 text-[11px] font-semibold ${unchanged ? 'text-emerald-300' : 'text-amber-300'}`}>
-                        {restoreLabel} {unchanged ? 'matches' : 'differs from'} current content
+                      <p
+                        className={`mt-1 text-[11px] font-semibold ${
+                          !restoreFieldRecorded ? 'text-slate-400' : unchanged ? 'text-emerald-300' : 'text-amber-300'
+                        }`}
+                      >
+                        {!restoreFieldRecorded
+                          ? `${restoreLabel} was not recorded in this version`
+                          : `${restoreLabel} ${unchanged ? 'matches' : 'differs from'} current content`}
                       </p>
                     </div>
                     <Btn

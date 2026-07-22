@@ -94,7 +94,17 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(page.getByRole('status')).toContainText('Loading revision history');
     await expect(page.getByText('Quest description differs from current content').first()).toBeVisible();
     await expect(page.getByText('Quest description matches current content')).toBeVisible();
+    await expect(page.getByText('Quest description was not recorded in this version')).toBeVisible();
     await expect(page.getByText('Legacy-only readable preview.')).toBeVisible();
+
+    const legacyOnlyPreview = page.getByRole('button', { name: /Preview version .* by Morgan Vale/ }).last();
+    await legacyOnlyPreview.click();
+    const legacyOnlyDialog = page.getByRole('dialog');
+    await expect(
+      legacyOnlyDialog.getByRole('region', { name: 'Quest description' }).getByText('Not recorded', { exact: true }),
+    ).toBeVisible();
+    await expect(legacyOnlyDialog.getByRole('button', { name: 'Restore this version' })).toBeDisabled();
+    await legacyOnlyDialog.getByRole('button', { name: 'Close preview' }).click();
 
     const previewTrigger = page.getByRole('button', { name: /Preview version .* by Morgan Vale/ }).first();
     await previewTrigger.focus();
