@@ -181,6 +181,20 @@ const CONDITIONS = [
   },
 ];
 
+const VEHICLES = [
+  {
+    id: 'starfinder-skimmer',
+    name: 'Hover Skimmer',
+    type: 'Vehicle',
+    level: 2,
+    ac: 14,
+    hp: 40,
+    text: 'A fast single-occupant atmospheric skimmer.',
+    source: 'Starfinder 2e Playtest Rulebook',
+    license: 'ORC / OGL',
+  },
+];
+
 const BY_TYPE: Record<string, Array<Record<string, unknown>>> = {
   creature: CREATURES,
   spell: SPELLS,
@@ -192,6 +206,7 @@ const BY_TYPE: Record<string, Array<Record<string, unknown>>> = {
   class: CLASSES,
   background: BACKGROUNDS,
   condition: CONDITIONS,
+  vehicle: VEHICLES,
 };
 
 function parseType(q: unknown): string {
@@ -204,7 +219,7 @@ function parseType(q: unknown): string {
 export async function startFakePf2e(): Promise<FakePf2e> {
   const app = express();
 
-  app.get('/aon/_search', (req, res) => {
+  app.get(['/aon/_search', '/aonsf/_search'], (req, res) => {
     const type = parseType(req.query.q);
     const rows = BY_TYPE[type] ?? [];
     const from = Number(req.query.from ?? '0') || 0;

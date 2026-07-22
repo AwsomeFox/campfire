@@ -3,6 +3,7 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from '@nes
 import { and, eq, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
+  SF2E_PACK_SLUG,
   PF1E_PACK_SLUG,
   STARFINDER_ADAPTER_ID,
   isOpenLicense,
@@ -43,7 +44,11 @@ import {
   PF2E_DEFAULT_BASE_URL,
   PF2E_DEFAULT_LICENSE,
   PF2E_PACK_NAME,
+  SF2E_DEFAULT_BASE_URL,
+  SF2E_DEFAULT_LICENSE,
+  SF2E_PACK_NAME,
   fetchPf2eSection,
+  fetchSf2eSection,
   type Pf2eSection,
 } from './pf2e-importer';
 import {
@@ -289,13 +294,15 @@ export class RulesService {
    * The section vocabulary each `source` accepts (issue #345). A caller-supplied section
    * that isn't in the chosen source's set is rejected 400 synchronously, before a job is
    * enqueued (acceptance criteria) — the widened `RulePackInstallSection` enum lets a name
-   * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e keeps the
-   * historical 5e-shaped set (it ignores the filter at import but still rejects foreign
-   * names); 'other' rides the Open5e path for back-compat.
+   * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e and SF2e
+   * accept both 5e-shaped section names and native PF2e/SF2e section keys (e.g., 'creatures',
+   * 'equipment'); 'other' rides the Open5e path for back-compat.
    */
   private static readonly SECTIONS_BY_SOURCE: Record<RulePackInstallSource, readonly string[]> = {
     open5e: ALL_OPEN5E_SECTIONS,
-    pf2e: ALL_OPEN5E_SECTIONS,
+    // PF2e / SF2e accept both 5e-shaped section names and native PF2e/SF2e section keys
+    pf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
+    sf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
     pf1e: ALL_PF1E_SECTIONS,
     starfinder: ALL_STARFINDER_SECTIONS,
     archmage: ALL_ARCHMAGE_SECTIONS,
@@ -354,6 +361,8 @@ export class RulesService {
     switch (input.source) {
       case 'pf2e':
         return this.enqueuePf2eInstall(input, user);
+      case 'sf2e':
+        return this.enqueueSf2eInstall(input, user);
       case 'pf1e':
         return this.enqueuePf1eInstall(input, user);
       case 'starfinder':
@@ -387,6 +396,8 @@ export class RulesService {
     switch (input.source) {
       case 'pf2e':
         return this.installFromPf2e(input, user, onSectionDone);
+      case 'sf2e':
+        return this.installFromSf2e(input, user, onSectionDone);
       case 'pf1e':
         return this.installFromPf1e(input, user, onSectionDone);
       case 'starfinder':
@@ -436,6 +447,16 @@ export class RulesService {
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  enqueueSf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const job = this.newJob('sf2e', ALL_PF2E_SECTIONS);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromSf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
       ),
     );
     return this.getJobOrThrow(job.id);
@@ -713,6 +734,38 @@ export class RulesService {
 
     return this.persistPack(
       { slug: PF2E_PACK_SLUG, name: PF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
+      allEntries,
+      user,
+      `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  async installFromSf2e(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? SF2E_DEFAULT_BASE_URL;
+    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchSf2eSection(baseUrl, s);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Starfinder 2e import returned no entries for the requested sections');
+    }
+
+    const licenses = new Set(allEntries.map((e) => e.license).filter(Boolean));
+    const license = licenses.size > 0 ? [...licenses].join(', ') : SF2E_DEFAULT_LICENSE;
+
+    return this.persistPack(
+      { slug: SF2E_PACK_SLUG, name: SF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,

@@ -37,6 +37,11 @@ export const PF2E_PACK_NAME = 'Pathfinder 2e (Archives of Nethys)';
 /** Fallback pack-level license when an entry doesn't report its own (AoN OGC is OGL/ORC). */
 export const PF2E_DEFAULT_LICENSE = 'OGL / ORC';
 
+export const SF2E_DEFAULT_BASE_URL = 'https://elasticsearch.aonprd.com';
+export const SF2E_INDEX = 'aonsf';
+export const SF2E_PACK_NAME = 'Starfinder 2e (Archives of Nethys)';
+export const SF2E_DEFAULT_LICENSE = 'ORC / OGL';
+
 // Mirrors the Open5e importer's caps/timeouts (see open5e-importer.ts for the rationale):
 // large sections (creatures/spells/equipment run into the thousands) are page-fetched under
 // a hard per-section entry cap and a page cap so one install can't pull unbounded data.
@@ -49,7 +54,7 @@ const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 // Campfire's importer "sections" map 1:1 onto an AoN document `type` and a Campfire
 // rule-entry type. Ancestries -> race, backgrounds -> feat (per issue #2's class/race/feat
 // vocabulary; a background is a feat-like package of proficiencies), classes -> class.
-export type Pf2eSection = 'creatures' | 'spells' | 'equipment' | 'feats' | 'ancestries' | 'classes' | 'backgrounds' | 'conditions';
+export type Pf2eSection = 'creatures' | 'spells' | 'equipment' | 'feats' | 'ancestries' | 'classes' | 'backgrounds' | 'conditions' | 'vehicles';
 
 /** AoN `_source.type` value queried for each section. */
 const SECTION_TO_AON_TYPE: Record<Pf2eSection, string> = {
@@ -64,6 +69,7 @@ const SECTION_TO_AON_TYPE: Record<Pf2eSection, string> = {
   classes: 'class',
   backgrounds: 'background',
   conditions: 'condition',
+  vehicles: 'vehicle',
 };
 
 const SECTION_TO_ENTRY_TYPE: Record<Pf2eSection, RuleEntryType> = {
@@ -75,6 +81,7 @@ const SECTION_TO_ENTRY_TYPE: Record<Pf2eSection, RuleEntryType> = {
   classes: 'class',
   backgrounds: 'feat',
   conditions: 'condition',
+  vehicles: 'item',
 };
 
 export const ALL_PF2E_SECTIONS: Pf2eSection[] = [
@@ -86,6 +93,7 @@ export const ALL_PF2E_SECTIONS: Pf2eSection[] = [
   'classes',
   'backgrounds',
   'conditions',
+  'vehicles',
 ];
 
 export interface ImportedEntry {
@@ -162,9 +170,9 @@ function bodyOf(src: Record<string, unknown>): string {
   return asString(src.text) || asString(src.markdown) || asString(src.description) || asString(src.desc);
 }
 
-/** Reported license (OGL legacy / ORC remaster). Falls back to the pack default. */
-function licenseOf(src: Record<string, unknown>): string {
-  return asString(src.license) || PF2E_DEFAULT_LICENSE;
+/** Reported license (OGL legacy / ORC remaster). Falls back to the pack default license. */
+function licenseOf(src: Record<string, unknown>, defaultLicense: string = PF2E_DEFAULT_LICENSE): string {
+  return asString(src.license) || defaultLicense;
 }
 
 /** Source-book label for attribution (AoN `source`; array-valued on some rows). */
@@ -191,7 +199,7 @@ function num(v: unknown): number | null {
   return typeof v === 'number' ? v : null;
 }
 
-function mapCreature(src: Record<string, unknown>): ImportedEntry {
+function mapCreature(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const traits = traitsOf(src);
   const level = num(src.level);
@@ -214,12 +222,12 @@ function mapCreature(src: Record<string, unknown>): ImportedEntry {
       rarity: rarity || null,
       traits,
     }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapSpell(src: Record<string, unknown>): ImportedEntry {
+function mapSpell(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const rank = num(src.level) ?? num(src.rank); // PF2e remaster: spell "rank"; legacy field is `level`
   const traditions = asStringArray(src.tradition);
@@ -237,12 +245,12 @@ function mapSpell(src: Record<string, unknown>): ImportedEntry {
       duration: asString(src.duration) || null,
       traits: traitsOf(src),
     }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapEquipment(src: Record<string, unknown>): ImportedEntry {
+function mapEquipment(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const price = asString(src.price);
   return {
@@ -259,12 +267,12 @@ function mapEquipment(src: Record<string, unknown>): ImportedEntry {
       rarity: asString(src.rarity) || null,
       traits: traitsOf(src),
     }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapFeat(src: Record<string, unknown>): ImportedEntry {
+function mapFeat(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const level = num(src.level);
   const prereq = asString(src.prerequisite);
@@ -275,12 +283,12 @@ function mapFeat(src: Record<string, unknown>): ImportedEntry {
     summary: truncate([level !== null ? `Feat ${level}` : null, prereq ? `Prereq: ${prereq}` : null].filter(Boolean).join(' · ') || bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: JSON.stringify({ level, prerequisite: prereq || null, traits: traitsOf(src) }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapAncestry(src: Record<string, unknown>): ImportedEntry {
+function mapAncestry(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   return {
     slug: slugOf(src, name),
@@ -289,12 +297,12 @@ function mapAncestry(src: Record<string, unknown>): ImportedEntry {
     summary: truncate([src.hp !== undefined ? `HP ${num(src.hp)}` : null, asString(src.size), traitsOf(src).slice(0, 3).join(', ')].filter(Boolean).join(' · ') || bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: JSON.stringify({ hp: num(src.hp), size: asString(src.size) || null, speed: src.speed ?? null, traits: traitsOf(src) }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapClass(src: Record<string, unknown>): ImportedEntry {
+function mapClass(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const keyAbility = asStringArray(src.attribute ?? src.key_ability);
   return {
@@ -304,12 +312,12 @@ function mapClass(src: Record<string, unknown>): ImportedEntry {
     summary: truncate([src.hp !== undefined ? `HP ${num(src.hp)}/level` : null, keyAbility.length ? `key ${keyAbility.join('/')}` : null].filter(Boolean).join(' · ') || bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: JSON.stringify({ hpPerLevel: num(src.hp), keyAbility, traits: traitsOf(src) }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapBackground(src: Record<string, unknown>): ImportedEntry {
+function mapBackground(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   return {
     slug: slugOf(src, name),
@@ -318,12 +326,12 @@ function mapBackground(src: Record<string, unknown>): ImportedEntry {
     summary: truncate(bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: JSON.stringify({ kind: 'background', traits: traitsOf(src) }),
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-function mapCondition(src: Record<string, unknown>): ImportedEntry {
+function mapCondition(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   return {
     slug: slugOf(src, name),
@@ -332,12 +340,31 @@ function mapCondition(src: Record<string, unknown>): ImportedEntry {
     summary: truncate(bodyOf(src), 300),
     body: bodyOf(src),
     dataJson: null,
-    license: licenseOf(src),
+    license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
 }
 
-const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>) => ImportedEntry> = {
+function mapVehicle(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
+  const name = asString(src.name);
+  const body = bodyOf(src);
+  const level = num(src.level);
+  const ac = num(src.ac);
+  const hp = num(src.hp);
+
+  return {
+    slug: slugOf(src, name),
+    name,
+    type: 'item',
+    summary: truncate(body, 300) || 'Vehicle',
+    body,
+    dataJson: JSON.stringify({ category: 'vehicle', level, ac, hp }),
+    license: licenseOf(src, defaultLicense),
+    source: sourceOf(src),
+  };
+}
+
+const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>, defaultLicense?: string) => ImportedEntry> = {
   creatures: mapCreature,
   spells: mapSpell,
   equipment: mapEquipment,
@@ -346,6 +373,7 @@ const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>) => Impo
   classes: mapClass,
   backgrounds: mapBackground,
   conditions: mapCondition,
+  vehicles: mapVehicle,
 };
 
 async function fetchWithTimeout(url: string): Promise<Response> {
@@ -367,7 +395,12 @@ function sleep(ms: number): Promise<void> {
  * retries with 1s/3s backoff — identical policy to the Open5e importer. A 4xx or a
  * network error that isn't a timeout is not retried.
  */
-async function fetchPageWithRetry(url: string, section: Pf2eSection, logger: Pf2eImportLogger): Promise<Response> {
+async function fetchPageWithRetry(
+  url: string,
+  section: Pf2eSection,
+  logger: Pf2eImportLogger,
+  systemLabel: string = 'PF2e',
+): Promise<Response> {
   let lastErr: Error | null = null;
   let lastRes: Response | null = null;
 
@@ -390,7 +423,7 @@ async function fetchPageWithRetry(url: string, section: Pf2eSection, logger: Pf2
       const backoff = PAGE_RETRY_BACKOFFS_MS[attempt];
       const reason = lastErr ? lastErr.message : `HTTP ${lastRes?.status}`;
       logger.warn(
-        `[pf2e-importer] section "${section}": fetch of ${url} failed (${reason}), retrying in ${backoff}ms (attempt ${attempt + 1}/${PAGE_RETRY_BACKOFFS_MS.length})`,
+        `[${systemLabel.toLowerCase()}-importer] section "${section}": fetch of ${url} failed (${reason}), retrying in ${backoff}ms (attempt ${attempt + 1}/${PAGE_RETRY_BACKOFFS_MS.length})`,
       );
       await sleep(backoff);
     }
@@ -417,10 +450,13 @@ export async function fetchPf2eSection(
   baseUrl: string,
   section: Pf2eSection,
   logger: Pf2eImportLogger = consoleLogger,
+  index: string = PF2E_INDEX,
+  systemLabel: string = 'PF2e',
 ): Promise<Pf2eSectionResult> {
   const aonType = SECTION_TO_AON_TYPE[section];
   const mapper = SECTION_MAPPER[section];
   const base = baseUrl.replace(/\/$/, '');
+  const logPrefix = `[${systemLabel.toLowerCase()}-importer]`;
   // De-dupe same-name rows to one canonical entry per (name, type): a section is a single
   // type, so a lowercased name is the (name, type) key. First-seen wins (stable order).
   const byName = new Map<string, ImportedEntry>();
@@ -431,29 +467,29 @@ export async function fetchPf2eSection(
 
   while (byName.size < MAX_ENTRIES_PER_SECTION) {
     if (pagesFetched >= MAX_PAGES_PER_SECTION) {
-      logger.warn(`[pf2e-importer] section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
+      logger.warn(`${logPrefix} section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
       break;
     }
     pagesFetched += 1;
-    const url = `${base}/${PF2E_INDEX}/_search?q=${encodeURIComponent(`type:${aonType}`)}&size=${PAGE_SIZE}&from=${from}`;
+    const url = `${base}/${index}/_search?q=${encodeURIComponent(`type:${aonType}`)}&size=${PAGE_SIZE}&from=${from}`;
     let res: Response;
     try {
-      res = await fetchPageWithRetry(url, section, logger);
+      res = await fetchPageWithRetry(url, section, logger, systemLabel);
     } catch (err) {
-      throw new BadRequestException(`Failed to fetch PF2e section "${section}" from ${url}: ${(err as Error).message}`);
+      throw new BadRequestException(`Failed to fetch ${systemLabel} section "${section}" from ${url}: ${(err as Error).message}`);
     }
     if (!res.ok) {
-      throw new BadRequestException(`PF2e section "${section}" returned HTTP ${res.status} for ${url}`);
+      throw new BadRequestException(`${systemLabel} section "${section}" returned HTTP ${res.status} for ${url}`);
     }
     let page: AonPage;
     try {
       page = (await res.json()) as AonPage;
     } catch (err) {
-      throw new BadRequestException(`PF2e section "${section}" returned invalid JSON: ${(err as Error).message}`);
+      throw new BadRequestException(`${systemLabel} section "${section}" returned invalid JSON: ${(err as Error).message}`);
     }
     const hits = page.hits?.hits;
     if (!Array.isArray(hits)) {
-      throw new BadRequestException(`PF2e section "${section}" response missing "hits.hits" array (unexpected shape)`);
+      throw new BadRequestException(`${systemLabel} section "${section}" response missing "hits.hits" array (unexpected shape)`);
     }
     if (hits.length === 0) break; // exhausted
 
@@ -496,11 +532,11 @@ export async function fetchPf2eSection(
 
   const entries = [...byName.values()];
   logger.info(
-    `[pf2e-importer] section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)` +
+    `${logPrefix} section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)` +
       (dedupedCount > 0 ? ` (de-duped ${dedupedCount} same-name row(s))` : ''),
   );
   if (skippedCount > 0) {
-    logger.warn(`[pf2e-importer] section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
+    logger.warn(`${logPrefix} section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
   }
 
   return { entries, skippedCount, dedupedCount };
@@ -508,4 +544,12 @@ export async function fetchPf2eSection(
 
 export function entryTypeForSection(section: Pf2eSection): RuleEntryType {
   return SECTION_TO_ENTRY_TYPE[section];
+}
+
+export async function fetchSf2eSection(
+  baseUrl: string,
+  section: Pf2eSection,
+  logger: Pf2eImportLogger = consoleLogger,
+): Promise<Pf2eSectionResult> {
+  return fetchPf2eSection(baseUrl, section, logger, SF2E_INDEX, 'SF2e');
 }
