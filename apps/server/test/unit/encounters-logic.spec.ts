@@ -273,6 +273,87 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
     });
   });
 
+  describe('death-save roll — 5e crit/fumble (issue #619)', () => {
+    it('a natural 1 counts as TWO failures', () => {
+      // A dying character rolls nat 1 on a death save -> two failure pips at once.
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying' }), { deathSaveRoll: 1 });
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathSaveFailures).toBe(2);
+      expect(r.deathSaveSuccesses).toBe(0);
+      expect(r.deathState).toBe('dying');
+    });
+
+    it('a natural 1 from one existing failure kills the character (2 + 1 = 3 fails)', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying', deathSaveFailures: 1 }), { deathSaveRoll: 1 });
+      expect(r.deathSaveFailures).toBe(3);
+      expect(r.deathState).toBe('dead');
+    });
+
+    it('a natural 20 revives the character at 1 HP and clears the death-save slate', () => {
+      // A dying character with two failures already banked rolls nat 20 -> 1 HP, none, clear.
+      const r = applyCombatantHp(
+        charState({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 1, deathSaveFailures: 2 }),
+        { deathSaveRoll: 20 },
+      );
+      expect(r.hpCurrent).toBe(1);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveSuccesses).toBe(0);
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('a nat 20 revival does not exceed hpMax (a 1-max character still revives at 1)', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0, hpMax: 1, deathState: 'dying' }), { deathSaveRoll: 20 });
+      expect(r.hpCurrent).toBe(1);
+      expect(r.deathState).toBe('none');
+    });
+
+    it('a 10–19 roll adds one success (and stabilizes at three)', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 2 }), { deathSaveRoll: 14 });
+      expect(r.deathSaveSuccesses).toBe(3);
+      expect(r.deathState).toBe('stable');
+      expect(r.hpCurrent).toBe(0);
+    });
+
+    it('a 2–9 roll adds one failure', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dying' }), { deathSaveRoll: 7 });
+      expect(r.deathSaveFailures).toBe(1);
+      expect(r.deathState).toBe('dying');
+    });
+
+    it('a death-save roll on a stable character with three banked successes stays stable (the failure adds a pip but the 3 successes hold)', () => {
+      // 5e: a stable creature that takes DAMAGE resumes dying (handled by the damagedWhileDown
+      // path), but a voluntarily rolled death save merely adds to the slate — three banked
+      // successes keep it stable until a failure count catches up.
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'stable', deathSaveSuccesses: 3 }), { deathSaveRoll: 5 });
+      expect(r.deathSaveFailures).toBe(1);
+      expect(r.deathSaveSuccesses).toBe(3);
+      expect(r.deathState).toBe('stable');
+    });
+
+    it('a death-save roll on an already-dead character is a no-op', () => {
+      // Dead stays dead — the roll can't revive via the normal outcome path.
+      const r = applyCombatantHp(charState({ hpCurrent: 0, deathState: 'dead', deathSaveFailures: 3 }), { deathSaveRoll: 20 });
+      expect(r.deathState).toBe('dead');
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathSaveFailures).toBe(3);
+    });
+
+    it('a death-save roll is ignored for monsters (no death-save subsystem)', () => {
+      const r = applyCombatantHp(charState({ kind: 'monster', hpCurrent: 0 }), { deathSaveRoll: 20 });
+      expect(r.hpCurrent).toBe(0);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveSuccesses).toBe(0);
+      expect(r.deathSaveFailures).toBe(0);
+    });
+
+    it('a death-save roll on a character above 0 HP has no effect (already conscious)', () => {
+      const r = applyCombatantHp(charState({ hpCurrent: 10 }), { deathSaveRoll: 1 });
+      expect(r.hpCurrent).toBe(10);
+      expect(r.deathState).toBe('none');
+      expect(r.deathSaveFailures).toBe(0);
+    });
+  });
+
   describe('overkill / massive-damage instant death', () => {
     it('a single hit whose overflow past 0 >= hpMax kills a character outright', () => {
       // 20/20 character, 45 damage: 25 overflow >= 20 hpMax -> instant death.
