@@ -1395,3 +1395,182 @@ liveSmoke('rules / rule packs — Open Legend live default source smoke (issue #
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
   });
 });
+
+/**
+ * Issue #734: rule-pack licensing. Upload accepts per-entry license/attribution/author/
+ * sourceUrl, but install validated only the pack license, persistence dropped each entry's
+ * license, and the reader labelled every entry with the pack license. These tests pin the
+ * per-entry contract: a mixed-license pack preserves each entry's OWN license (and its
+ * attribution/author/sourceUrl), entries without a per-entry license inherit the pack's,
+ * and an incompatible (non-open) entry is rejected with an indexed 400 BEFORE any mutation.
+ */
+describe('rules / rule packs — per-entry licensing (issue #734)', () => {
+  let ctx: TestAppContext;
+  const uploader = { 'x-dev-role': 'dm', 'x-dev-user': 'license-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function uploadPack(body: Record<string, unknown>) {
+    return request(ctx.app.getHttpServer()).post('/api/v1/rules/packs/upload').set(uploader).send(body);
+  }
+
+  // A mixed-license pack: open pack license (CC-BY-4.0), but each entry carries its OWN
+  // open license — OGL, ORC, CC0 — exactly the "mixed OGL/ORC/CC entries in an otherwise
+  // open pack" case the issue calls out. Attribution/author/sourceUrl ride along per entry.
+  const mixedPack = {
+    source: 'upload' as const,
+    pack: {
+      slug: 'mixed-licensing-pack',
+      name: 'Mixed Licensing Anthology',
+      version: '1.0',
+      license: 'CC-BY-4.0',
+      sourceUrl: 'https://example.com/mixed',
+    },
+    entries: [
+      {
+        slug: 'ogl-fireball',
+        name: 'OGL Fireball',
+        type: 'spell',
+        body: 'A ball of fire.',
+        license: 'OGL 1.0a',
+        attribution: 'OGL Fireball, © Open Author, Open Game Content (OGL 1.0a).',
+        author: 'Open Author',
+        sourceUrl: 'https://example.com/mixed/ogl-fireball',
+      },
+      {
+        slug: 'orc-goblin',
+        name: 'ORC Goblin',
+        type: 'monster',
+        dataJson: JSON.stringify({ hp: 7 }),
+        license: 'ORC',
+        attribution: 'ORC Goblin, Open RPG Creative License.',
+        author: 'ORC Studio',
+      },
+      {
+        slug: 'cc0-sword',
+        name: 'CC0 Sword',
+        type: 'item',
+        body: 'A public-domain sword.',
+        license: 'CC0',
+        // attribution/author/sourceUrl intentionally omitted → inherit pack-level fallbacks.
+      },
+    ],
+  };
+
+  it('preserves each entry\u2019s OWN license (mixed OGL/ORC/CC0 in an open pack)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const res = await uploadPack(mixedPack);
+    expect(res.status).toBe(202);
+    const job = await pollJob(server, uploader, res.body.id);
+    expect(job.status).toBe('completed');
+    expect(job.outcome).toBe('created');
+    expect(job.pack.license).toBe('CC-BY-4.0');
+
+    // Each entry surfaces its OWN license — NOT the pack's CC-BY-4.0 blanket.
+    const oglRes = await request(server).get('/api/v1/rules/search').query({ q: 'OGL Fireball', pack: 'mixed-licensing-pack' }).set(uploader);
+    const ogl = oglRes.body.find((e: { name: string }) => e.name === 'OGL Fireball');
+    expect(ogl).toBeTruthy();
+    const oglEntry = await request(server).get(`/api/v1/rules/entries/${ogl.id}`).set(uploader);
+    expect(oglEntry.status).toBe(200);
+    expect(oglEntry.body.license).toBe('OGL 1.0a'); // entry's own license, not the pack's CC-BY-4.0
+    expect(oglEntry.body.attribution).toBe('OGL Fireball, © Open Author, Open Game Content (OGL 1.0a).');
+    expect(oglEntry.body.author).toBe('Open Author');
+    expect(oglEntry.body.sourceUrl).toBe('https://example.com/mixed/ogl-fireball');
+
+    const orcRes = await request(server).get('/api/v1/rules/search').query({ q: 'ORC Goblin', pack: 'mixed-licensing-pack' }).set(uploader);
+    const orc = orcRes.body.find((e: { name: string }) => e.name === 'ORC Goblin');
+    expect(orc).toBeTruthy();
+    const orcEntry = await request(server).get(`/api/v1/rules/entries/${orc.id}`).set(uploader);
+    expect(orcEntry.body.license).toBe('ORC');
+    expect(orcEntry.body.author).toBe('ORC Studio');
+
+    const cc0Res = await request(server).get('/api/v1/rules/search').query({ q: 'CC0 Sword', pack: 'mixed-licensing-pack' }).set(uploader);
+    const cc0 = cc0Res.body.find((e: { name: string }) => e.name === 'CC0 Sword');
+    expect(cc0).toBeTruthy();
+    const cc0Entry = await request(server).get(`/api/v1/rules/entries/${cc0.id}`).set(uploader);
+    expect(cc0Entry.body.license).toBe('CC0');
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(uploader);
+  });
+
+  it('entries without a per-entry license inherit the pack license (explicit inherited provenance)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const res = await uploadPack({
+      source: 'upload',
+      pack: { slug: 'uniform-ogl-pack', name: 'Uniform OGL Pack', license: 'OGL 1.0a', sourceUrl: 'https://example.com/u' },
+      entries: [
+        { slug: 'uniform-magic-missile', name: 'Uniform Magic Missile', type: 'spell', body: 'A dart of force.' },
+      ],
+    });
+    expect(res.status).toBe(202);
+    const job = await pollJob(server, uploader, res.body.id);
+    expect(job.status).toBe('completed');
+
+    const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'Uniform Magic Missile', pack: 'uniform-ogl-pack' }).set(uploader);
+    const found = searchRes.body.find((e: { name: string }) => e.name === 'Uniform Magic Missile');
+    const entry = await request(server).get(`/api/v1/rules/entries/${found.id}`).set(uploader);
+    // The entry's effective license is the pack's OGL — stored ON the entry so the reader
+    // can trust entry.license without needing the pack row (the pre-#734 reader labelled
+    // every entry with the pack license by reading pack.license; now the entry carries it).
+    expect(entry.body.license).toBe('OGL 1.0a');
+    // attribution falls back to the pack name (a reasonable default credit line).
+    expect(entry.body.attribution).toBe('Uniform OGL Pack');
+    expect(entry.body.sourceUrl).toBe('https://example.com/u');
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(uploader);
+  });
+
+  it('rejects a non-open entry in an otherwise-open pack with an indexed 400 — no mutation', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // Pack license is open (CC-BY-4.0), but one entry carries "All Rights Reserved" — the
+    // exact smuggling vector: a pack-level open check would miss it. The whole upload is
+    // rejected with a single indexed error naming the offending entry, and NOTHING is
+    // installed (no partial mutation).
+    const res = await uploadPack({
+      source: 'upload',
+      pack: { slug: 'smuggler-pack', name: 'Smuggler Pack', license: 'CC-BY-4.0' },
+      entries: [
+        { slug: 'open-one', name: 'Open One', type: 'spell', body: 'fine', license: 'CC-BY-4.0' },
+        { slug: 'proprietary-boss', name: 'Proprietary Boss', type: 'monster', body: 'not fine', license: 'All Rights Reserved' },
+        { slug: 'open-two', name: 'Open Two', type: 'item', body: 'also fine', license: 'CC0' },
+      ],
+    });
+    expect(res.status).toBe(400);
+    const message = String(res.body.message);
+    expect(message).toMatch(/non-open effective license/i);
+    // the offending entry is named (slug + the offending license + its input index) so the
+    // uploader can fix and resubmit.
+    expect(message).toContain('proprietary-boss');
+    expect(message).toContain('All Rights Reserved');
+    expect(message).toMatch(/entry\[1\]/); // 0-based index of the offending entry
+
+    // Nothing was installed — no partial mutation (the rejection is before persistPack).
+    const listRes = await request(server).get('/api/v1/rules/packs').set(uploader);
+    expect(listRes.body.some((p: { slug: string }) => p.slug === 'smuggler-pack')).toBe(false);
+    const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'Proprietary Boss' }).set(uploader);
+    expect(searchRes.body.some((e: { name: string }) => e.name === 'Proprietary Boss')).toBe(false);
+  });
+
+  it('rejects an entry that has no per-entry license when the pack license itself is non-open', async () => {
+    // Defense-in-depth on top of the pack-level check: even though assertOpenLicense(pack)
+    // already rejects a non-open PACK, per-entry validation independently flags an entry
+    // whose effective license (pack fallback) is non-open. This pins the per-entry path.
+    const res = await uploadPack({
+      source: 'upload',
+      pack: { slug: 'bad-pack-license', name: 'Bad Pack License', license: 'Proprietary' },
+      entries: [
+        { slug: 'inherited-bad', name: 'Inherited Bad', type: 'spell', body: 'inherits pack license' },
+      ],
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body.message)).toMatch(/open license/i);
+  });
+});

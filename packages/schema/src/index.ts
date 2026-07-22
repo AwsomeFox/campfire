@@ -1094,6 +1094,25 @@ export const RuleEntry = z.object({
   // distinguishable and the reader can attribute the real source/license (issue #143).
   // '' for older imports/uploads that predate the column — the reader falls back to the pack name.
   source: z.string().max(200).default(''),
+  // Per-entry provenance (issue #734): a pack may mix licenses (an OGL pack with a CC-BY
+  // spell, a community feat under ORC). Previously the entry's license was dropped on
+  // import and the reader labelled every entry with the PACK license — losing attribution
+  // the licence legally requires. These four fields capture what the entry ACTUALLY came
+  // under, falling back to the pack's value when the source data doesn't say otherwise
+  // (see effectiveLicense/effectiveAttribution). '' for rows written before the columns
+  // existed (migration 0050) — callers treat '' as "inherit the pack's value".
+  //   - license: the SPDX-ish/open-license string the entry is distributed under
+  //     ("OGL 1.0a", "CC-BY-4.0", "ORC"). Validated open by the importer/upload path.
+  //   - attribution: the credit line the licence obliges us to show (author + title +
+  //     copyright statement), e.g. "Fireball, © WotC, Open Game Content under the OGL 1.0a".
+  //   - author: the creator/rights-holder name to credit, when separable from the
+  //     attribution line ("Chris Gonnerman", "Archives of Nethys").
+  //   - sourceUrl: a deep link back to the entry on its origin site (CC-BY(-SA) requires
+  //     a link; also useful for the reader's "view original" affordance).
+  license: z.string().max(160).default(''),
+  attribution: z.string().max(500).default(''),
+  author: z.string().max(200).default(''),
+  sourceUrl: z.string().max(500).default(''),
   // Optional manual icon override (issue #305): the slug of a bundled game-icons.net
   // entity icon (see apps/web/src/lib/icons) shown in the compendium list + reader in
   // place of the type/school-derived default. '' means "no override — the web app
@@ -2048,8 +2067,15 @@ export const RulePackUploadEntry = z.object({
   summary: z.string().max(1000).optional(),
   body: z.string().max(50_000).optional(), // markdown
   dataJson: z.string().max(100_000).nullable().optional(), // raw structured fields, JSON-encoded
-  license: z.string().max(120).optional(), // per-entry license; falls back to the pack license
+  license: z.string().max(120).optional(), // per-entry license; falls back to the pack license (validated open, issue #734)
   source: z.string().max(200).optional(), // per-entry source/document label; falls back to the pack name
+  // Per-entry attribution/authorship provenance (issue #734): captured so a pack can mix
+  // licenses/sources and the reader credits each entry correctly. Each falls back to the
+  // pack-level value when omitted (attribution to the pack name, author to '', sourceUrl
+  // to the pack's sourceUrl).
+  attribution: z.string().max(500).optional(), // credit line the licence obliges us to show
+  author: z.string().max(200).optional(), // creator/rights-holder name to credit
+  sourceUrl: z.string().max(500).optional(), // deep link back to the entry on its origin site
   iconSlug: z.string().max(80).optional(), // optional bundled game-icons.net slug to seed the entry's icon (issue #305)
 });
 export type RulePackUploadEntry = z.infer<typeof RulePackUploadEntry>;

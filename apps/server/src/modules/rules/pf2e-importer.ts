@@ -106,6 +106,10 @@ export interface ImportedEntry {
   license: string;
   /** Human-readable source/book label (AoN `_source.source`), e.g. "Pathfinder Monster Core". */
   source: string;
+  /** Per-entry provenance (issue #734); '' → inherit the pack's value via the service layer. */
+  attribution?: string;
+  author?: string;
+  sourceUrl?: string;
 }
 
 export interface Pf2eImportLogger {
