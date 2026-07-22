@@ -595,6 +595,9 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   total INTEGER NOT NULL,
   label TEXT,
   dc INTEGER,
+  -- Per-term breakdown for compound expressions (issue #536), JSON text — null for a
+  -- classic single-term roll (no breakdown). Mirrors the kept column's nullable-JSON shape.
+  terms TEXT,
   created_at TEXT NOT NULL
 );
 

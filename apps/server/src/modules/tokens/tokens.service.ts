@@ -25,13 +25,23 @@ export interface MintForInput {
 const DEFAULT_TOKEN_SCOPE: TokenScope = 'viewer';
 
 /**
- * Back-compat default when a mint request omits `writeScope`: 'direct' — the
- * token writes exactly as pre-#158 tokens always did. (Least privilege for the
- * WRITE dimension would be 'none', but defaulting there would silently break
- * every existing integration/UI flow that mints a token and expects it to write;
- * operators opt INTO 'propose'/'none' explicitly.)
+ * Default write authority when a mint request omits `writeScope`: 'propose'
+ * (issue #575). Newly-issued tokens land every mutation in the DM proposal
+ * queue rather than writing canon directly — the safe default for AI agents,
+ * which can otherwise cause large blast-radius writes before a human reviews.
+ * 'direct' (writes apply immediately) is still available, but the admin must
+ * now opt INTO it explicitly at mint time, with the UI copy spelling out the
+ * risk. The previous 'direct' default matched pre-#158 behavior but made it
+ * too easy to hand an AI a token that could rewrite or delete canon without
+ * any approval gate.
+ *
+ * Note: callers that ALREADY pass an explicit `writeScope` (the AI driver's
+ * internal worker tokens, OAuth-issued tokens, the headless bootstrap when the
+ * caller asks for `direct`) are unaffected — only the omitted-writeScope path
+ * changes here. A calling token still caps the child via minWriteScope(), so a
+ * 'propose'/'none' PAT can never mint a broader-write sibling.
  */
-const DEFAULT_WRITE_SCOPE: WriteScope = 'direct';
+const DEFAULT_WRITE_SCOPE: WriteScope = 'propose';
 
 /** Throttle lastUsedAt writes to at most once per hour per token. */
 const LAST_USED_THROTTLE_MS = 60 * 60 * 1000;
@@ -118,10 +128,10 @@ export class TokensService {
    */
   async create(userId: number, input: ApiTokenCreateInput, caller: RequestUser): Promise<ApiTokenCreated> {
     let scope = input.scope;
-    // Back-compat default 'direct'. Capped below to the calling token so a
-    // propose-only / read-only PAT can never mint a broader-write sibling (the
-    // exact escalation the writeScope cap exists to prevent — mirrors the scope
-    // and adminEnabled caps).
+    // Safe default 'propose' (issue #575) when writeScope is omitted. Capped
+    // below to the calling token so a propose-only / read-only PAT can never
+    // mint a broader-write sibling (the exact escalation the writeScope cap
+    // exists to prevent — mirrors the scope and adminEnabled caps).
     let writeScope: WriteScope = input.writeScope ?? DEFAULT_WRITE_SCOPE;
     let campaignId = input.campaignId ?? null;
 

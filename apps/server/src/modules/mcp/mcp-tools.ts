@@ -2521,7 +2521,7 @@ export class McpToolsService {
         'the roll is audited (action "dice.roll") and appears in the campaign-shared dice log.',
       {
         campaignId: CampaignIdArg,
-        expr: RollRequest.shape.expr.describe('Dice expression, e.g. "1d20+3" or "2d20kh1"'),
+        expr: RollRequest.shape.expr.describe('Dice expression: a sum of die terms (NdM) and modifiers, e.g. "1d20+3", "2d20kh1", or "1d20+1d4+3"'),
         label: RollRequest.shape.label.describe('Optional check label, e.g. "DEX save"'),
         dc: RollRequest.shape.dc.describe('Optional difficulty class; success is computed as total >= dc'),
       },

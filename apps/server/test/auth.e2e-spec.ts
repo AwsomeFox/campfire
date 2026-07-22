@@ -599,9 +599,12 @@ describe('POST /auth/token — headless PAT bootstrap (e2e)', () => {
   });
 
   it('valid creds -> one call returns a working PAT, no cookie set', async () => {
+    // writeScope: 'direct' is explicit — the safe default is 'propose' now
+    // (issue #575), but this test asserts a DIRECT canon write (201 quest
+    // create), so we opt in rather than rely on the default.
     const res = await request(baseUrl)
       .post('/api/v1/auth/token')
-      .send({ username: 'bootstrap-dm', password: 'dm-password-1', tokenName: 'agent-bootstrap', scope: 'dm' });
+      .send({ username: 'bootstrap-dm', password: 'dm-password-1', tokenName: 'agent-bootstrap', scope: 'dm', writeScope: 'direct' });
 
     expect(res.status).toBe(201);
     expect(res.body.token).toMatch(/^cf_pat_[0-9a-f]{48}$/);
