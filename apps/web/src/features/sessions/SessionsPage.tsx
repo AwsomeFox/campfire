@@ -42,6 +42,7 @@ export default function SessionsPage() {
   const isDm = role === 'dm';
 
   const selectedId = searchParams.get('session');
+  const recapAction = searchParams.get('action');
   const tab: 'log' | 'schedule' = searchParams.get('tab') === 'schedule' ? 'schedule' : 'log';
 
   function setTab(next: 'log' | 'schedule') {
@@ -78,6 +79,23 @@ export default function SessionsPage() {
   }, []);
 
   const [showAddForm, setShowAddForm] = useState(false);
+  useEffect(() => {
+    // Reconcile browser Back/Forward for a deep-linked form. Local button opens
+    // do not change recapAction, so they remain controlled by showAddForm.
+    if (isDm && recapAction === 'new-recap') setShowAddForm(true);
+    else if (recapAction !== 'new-recap') setShowAddForm(false);
+  }, [isDm, recapAction]);
+
+  function clearRecapAction() {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (next.get('action') === 'new-recap' || next.get('action') === 'edit-recap') next.delete('action');
+        return next;
+      },
+      { replace: true },
+    );
+  }
   // Soft-delete Undo (issue #116/#269) lifted to the page level: on delete we refresh
   // the list immediately (so the trashed session stops showing without a manual reload)
   // and close the detail — the Undo bar must therefore outlive the now-unmounted detail.
@@ -114,7 +132,7 @@ export default function SessionsPage() {
   // URL points at a session that's gone) — otherwise the detail pane sat on a
   // misleading "No sessions yet" empty state even with sessions in the list.
   useEffect(() => {
-    if (isDesktop && tab === 'log' && sessions.length > 0 && !selected) {
+    if (isDesktop && tab === 'log' && recapAction !== 'new-recap' && sessions.length > 0 && !selected) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -124,7 +142,7 @@ export default function SessionsPage() {
         { replace: true },
       );
     }
-  }, [isDesktop, tab, sessions, selected, setSearchParams]);
+  }, [isDesktop, tab, recapAction, sessions, selected, setSearchParams]);
 
   function selectSession(id: number) {
     setSearchParams((prev) => {
@@ -318,6 +336,8 @@ export default function SessionsPage() {
               session={selected}
               campaignId={cid}
               isDm={isDm}
+              startEditing={recapAction === 'edit-recap'}
+              onEditActionHandled={clearRecapAction}
               onBack={backToList}
               onChange={load}
               onDeleted={handleDeleted}
@@ -338,10 +358,25 @@ export default function SessionsPage() {
               nextNumber={nextNumber()}
               onCreated={(created) => {
                 setShowAddForm(false);
-                selectSession(created.id);
+                setSearchParams(
+                  (prev) => {
+                    const next = new URLSearchParams(prev);
+                    next.set('session', String(created.id));
+                    next.delete('action');
+                    return next;
+                  },
+                  { replace: recapAction === 'new-recap' },
+                );
                 void load();
               }}
-              onCancel={sessions.length > 0 ? () => setShowAddForm(false) : undefined}
+              onCancel={
+                sessions.length > 0
+                  ? () => {
+                      setShowAddForm(false);
+                      clearRecapAction();
+                    }
+                  : undefined
+              }
             />
           )}
         </main>
@@ -365,6 +400,8 @@ function SessionDetail({
   session,
   campaignId,
   isDm,
+  startEditing,
+  onEditActionHandled,
   onBack,
   onChange,
   onDeleted,
@@ -372,12 +409,16 @@ function SessionDetail({
   session: SessionListItem;
   campaignId: number;
   isDm: boolean;
+  /** Open the existing recap editor when arriving from a post-encounter deep link. */
+  startEditing: boolean;
+  /** Removes the one-shot URL action after save/cancel so refresh does not reopen it. */
+  onEditActionHandled: () => void;
   onBack: () => void;
   onChange: () => void;
   /** Session was soft-deleted — the page refreshes the list + owns the Undo bar. */
   onDeleted: (id: number, number: number) => void | Promise<void>;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(isDm && startEditing);
   const [titleDraft, setTitleDraft] = useState(session.title);
   const [dateDraft, setDateDraft] = useState(toDateInputValue(session.playedAt));
   // The list omits the full recap body (issue #71) — fetch it for the opened session.
@@ -397,7 +438,7 @@ function SessionDetail({
   const [historyNonce, setHistoryNonce] = useState(0);
 
   useEffect(() => {
-    setEditing(false);
+    setEditing(isDm && startEditing);
     setTitleDraft(session.title);
     setDateDraft(toDateInputValue(session.playedAt));
     setRecapLoading(true);
@@ -418,7 +459,7 @@ function SessionDetail({
     return () => {
       cancelled = true;
     };
-  }, [session]);
+  }, [session, isDm, startEditing]);
 
   async function save() {
     setSaving(true);
@@ -436,6 +477,7 @@ function SessionDetail({
       setRecap(updated.recap);
       setLoadedUpdatedAt(updated.updatedAt);
       setEditing(false);
+      onEditActionHandled();
       setHistoryNonce((n) => n + 1);
       onChange();
     } catch (e) {
@@ -513,11 +555,18 @@ function SessionDetail({
           </div>
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Recap</label>
+              <label
+                htmlFor={`session-${session.id}-recap`}
+                className="text-xs font-bold text-slate-500 uppercase tracking-wide"
+              >
+                Recap
+              </label>
               <div className="flex-1" />
               <TemplateButton value={recapDraft} onInsert={setRecapDraft} />
             </div>
             <TextArea
+              id={`session-${session.id}-recap`}
+              autoFocus={startEditing}
               style={{ minHeight: 200 }}
               value={recapDraft}
               onChange={(e) => setRecapDraft(e.target.value)}
@@ -530,7 +579,14 @@ function SessionDetail({
                 Reload latest
               </Btn>
             )}
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={() => {
+                setEditing(false);
+                onEditActionHandled();
+              }}
+            >
               Cancel
             </Btn>
             <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
@@ -1083,6 +1139,7 @@ function AddRecapForm({
       <TextInput
         id="new-recap-title"
         className="min-w-0"
+        autoFocus
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder={'e.g. "The Dragon’s Shadow"'}
