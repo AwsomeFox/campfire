@@ -1142,8 +1142,36 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(discoverResult.isError).toBeFalsy();
     expect((parseResult(discoverResult) as { status: string }).status).toBe('current');
 
+    const replacementResult = await client.callTool({
+      name: 'upsert_location',
+      arguments: { campaignId, name: 'MCP Keep' },
+    });
+    const replacement = parseResult(replacementResult) as { id: number };
+    const replaceCurrentResult = await client.callTool({
+      name: 'set_location_discovery',
+      arguments: { locationId: replacement.id, status: 'current' },
+    });
+    expect(replaceCurrentResult.isError).toBeFalsy();
+
+    const locationListResult = await client.callTool({ name: 'list_locations', arguments: { campaignId } });
+    const locationRows = parseResult(locationListResult) as Array<{ id: number; status: string }>;
+    expect(locationRows.find((row) => row.id === location.id)?.status).toBe('explored');
+    expect(locationRows.find((row) => row.id === replacement.id)?.status).toBe('current');
+    const summaryResult = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
+    const summary = parseResult(summaryResult) as {
+      campaign: { currentLocationId: number | null };
+      currentLocation: { id: number } | null;
+    };
+    expect(summary.campaign.currentLocationId).toBe(replacement.id);
+    expect(summary.currentLocation?.id).toBe(replacement.id);
+
     const deleteLocResult = await client.callTool({ name: 'delete_location', arguments: { locationId: location.id } });
     expect(deleteLocResult.isError).toBeFalsy();
+    const deleteReplacementResult = await client.callTool({
+      name: 'delete_location',
+      arguments: { locationId: replacement.id },
+    });
+    expect(deleteReplacementResult.isError).toBeFalsy();
 
     const npcResult = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'MCP Blacksmith' } });
     const npc = parseResult(npcResult) as { id: number };

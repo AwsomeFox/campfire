@@ -150,7 +150,7 @@ describe('attachments (e2e)', () => {
 
   it('oversize upload is rejected (413)', async () => {
     const server = ctx.app.getHttpServer();
-    const big = Buffer.alloc(9 * 1024 * 1024, 1); // 9MB > 8MB limit
+    const big = Buffer.alloc(33 * 1024 * 1024, 1); // 33MB > 32MB limit
     const res = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/attachments`)
       .set(dm)
@@ -825,12 +825,12 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
     });
   });
 
-  // Issue #259 — attaching a battle map to an ENCOUNTER must NOT expose the raw map as a
+  // Issue #259, #523 — attaching a battle map to an ENCOUNTER must NOT expose the raw map as a
   // revealed handout (that defeats fog-of-war). Unlike the campaign background above, an
   // encounter map stays hidden (DM-only) as a handout: it is omitted from the player
-  // Handouts list, yet the fogged encounter canvas still serves it to players via the
-  // file route's encounter-map exception. The DM continues to see it.
-  describe('encounter battle map does not leak to the player Handouts card (issue #259)', () => {
+  // Handouts list. Non-DM GET on a hidden encounter map returns 404 when fog is non-empty,
+  // 200 for DM, and 200 for player only when fog is null.
+  describe('encounter battle map fog gating (issue #259, #523)', () => {
     let encounterId: number;
     let mapId: number;
 
@@ -848,7 +848,7 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       expect(enc.status).toBe(201);
       encounterId = enc.body.id;
 
-      // Attach the map + enable fog — the repro's exact steps.
+      // Attach the map + enable fog — non-empty fog.
       const patch = await dmAgent
         .patch(`/api/v1/encounters/${encounterId}`)
         .send({ mapAttachmentId: mapId, fog: { enabled: true, revealed: [] } });
@@ -875,10 +875,27 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       expect(dmList.body.some((a: { id: number }) => a.id === mapId)).toBe(true);
     });
 
-    it('the fogged encounter canvas can still fetch the map bytes for the player (200)', async () => {
-      const fileRes = await playerAgent.get(`/api/v1/attachments/${mapId}/file`);
-      expect(fileRes.status).toBe(200);
-      expect(Buffer.compare(fileRes.body, TINY_PNG)).toBe(0);
+    it('player GET on hidden encounter map returns 404 when fog is non-empty; DM GET returns 200; player GET returns 200 only when fog is null', async () => {
+      // 1. Player GET returns 404 when fog is non-empty
+      const playerGetActive = await playerAgent.get(`/api/v1/attachments/${mapId}/file`);
+      expect(playerGetActive.status).toBe(404);
+
+      // 2. DM GET returns 200
+      const dmGetActive = await dmAgent.get(`/api/v1/attachments/${mapId}/file`);
+      expect(dmGetActive.status).toBe(200);
+      expect(Buffer.compare(dmGetActive.body, TINY_PNG)).toBe(0);
+
+      // 3. DM sets fog to null
+      const clearFog = await dmAgent
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .send({ fog: null });
+      expect(clearFog.status).toBe(200);
+      expect(clearFog.body.fog).toBeNull();
+
+      // 4. Player GET returns 200 only when fog is null
+      const playerGetNullFog = await playerAgent.get(`/api/v1/attachments/${mapId}/file`);
+      expect(playerGetNullFog.status).toBe(200);
+      expect(Buffer.compare(playerGetNullFog.body, TINY_PNG)).toBe(0);
     });
 
     it('the encounter-map exception does not open OTHER hidden attachments to the player', async () => {

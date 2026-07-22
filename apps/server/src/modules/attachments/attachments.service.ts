@@ -31,7 +31,7 @@ export const ALLOWED_MIME_TO_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/webp': 'webp',
 };
-export const MAX_UPLOAD_BYTES = 8 * 1024 * 1024; // 8MB
+export const MAX_UPLOAD_BYTES = 32 * 1024 * 1024; // 32MB
 
 /**
  * Mime → extension for SERVER-GENERATED attachments only (issue #306). Kept separate
@@ -242,16 +242,30 @@ export class AttachmentsService {
    * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
    * `campaignId` (issue #259). A fogged encounter map stays hidden (DM-only) as a handout
    * so it never appears raw on the player Handouts card, but the fogged encounter canvas
-   * still needs the underlying image for every member — so the file route serves an
-   * encounter map to non-DM players even though the attachment itself is hidden.
+   * Returns encounter map fog information for `attachmentId` in `campaignId` (issue #259, #523).
+   * If `attachmentId` is an encounter's battle map, returns `{ isMap: true, fog: string | null }`.
+   * Otherwise returns `{ isMap: false, fog: null }`.
    */
-  async isEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
+  async getEncounterMapFog(
+    attachmentId: number,
+    campaignId: number,
+  ): Promise<{ isMap: boolean; fog: string | null }> {
     const [row] = await this.db
-      .select({ id: encounters.id })
+      .select({ fog: encounters.fog })
       .from(encounters)
       .where(and(eq(encounters.mapAttachmentId, attachmentId), eq(encounters.campaignId, campaignId)))
       .limit(1);
-    return !!row;
+    if (!row) return { isMap: false, fog: null };
+    return { isMap: true, fog: row.fog };
+  }
+
+  /**
+   * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
+   * `campaignId` (issue #259).
+   */
+  async isEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
+    const { isMap } = await this.getEncounterMapFog(attachmentId, campaignId);
+    return isMap;
   }
 
   /**

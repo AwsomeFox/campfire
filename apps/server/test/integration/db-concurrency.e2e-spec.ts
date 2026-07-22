@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { DB_HOLDER, type DbHolder } from '../../src/db/db.module';
 import { createTestApp, closeTestApp, type TestAppContext } from '../test-app';
 import { dm, player } from './fixtures';
 import { CharactersService } from '../../src/modules/characters/characters.service';
@@ -37,7 +38,7 @@ function synchronizeCharacterLookupPairs(service: CharactersService, characterId
 
 /**
  * Integration coverage for the atomic write paths under real concurrency (issue
- * #80). Two mechanisms are exercised against a real, *listening* socket so the
+ * #80). The HTTP mechanisms are exercised against a real, *listening* socket so the
  * requests are genuinely in flight at once (an un-listened in-memory handler
  * serialises them and proves nothing):
  *
@@ -49,6 +50,8 @@ function synchronizeCharacterLookupPairs(service: CharactersService, characterId
  *     transition is a single `UPDATE ... WHERE status='pending'`. Fire a burst of
  *     approves racing rejects at one pending proposal and exactly one must win;
  *     every loser gets a 409 and the entity is written at most once.
+ *   - Current-location discovery (issue #656): demotion, promotion, and the
+ *     campaign pointer must commit as one unit, even when two locations race.
  *
  * These need a real listening server (createTestApp only inits), so the suite
  * calls app.listen(0) in beforeAll and drives requests at the resolved URL.
@@ -165,6 +168,88 @@ describe('concurrency (real SQLite, atomic writes)', () => {
     expect(finalRow.body.hpCurrent).toBeLessThanOrEqual(30);
   });
 
+  it('keeps exactly one current location and a matching campaign pointer when discoveries race (#656)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Location Race' });
+    const campaignId = campaign.body.id;
+    const [locationA, locationB] = await Promise.all([
+      request(baseUrl)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'North Gate' }),
+      request(baseUrl)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'South Gate' }),
+    ]);
+
+    const results = await Promise.all(
+      [locationA.body.id, locationB.body.id].map((locationId) =>
+        request(baseUrl)
+          .post(`/api/v1/locations/${locationId}/discover`)
+          .set(dm)
+          .send({ status: 'current' }),
+      ),
+    );
+    expect(results.every((result) => result.status === 201)).toBe(true);
+
+    const [locations, persistedCampaign] = await Promise.all([
+      request(baseUrl).get(`/api/v1/campaigns/${campaignId}/locations`).set(dm),
+      request(baseUrl).get(`/api/v1/campaigns/${campaignId}`).set(dm),
+    ]);
+    const currentRows = (locations.body as Array<{ id: number; status: string }>).filter(
+      (location) => location.status === 'current',
+    );
+    expect(currentRows).toHaveLength(1);
+    expect(persistedCampaign.body.currentLocationId).toBe(currentRows[0].id);
+  });
+
+  it('rolls back location demotion and promotion when the campaign pointer write fails (#656)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Location Rollback' });
+    const campaignId = campaign.body.id;
+    const locationA = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaignId}/locations`)
+      .set(dm)
+      .send({ name: 'Safe Harbor' });
+    const locationB = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaignId}/locations`)
+      .set(dm)
+      .send({ name: 'Broken Bridge' });
+    await request(baseUrl).post(`/api/v1/locations/${locationA.body.id}/discover`).set(dm).send({ status: 'current' });
+
+    const sqlite = ctx.app.get<DbHolder>(DB_HOLDER).raw;
+    sqlite.exec(`
+      CREATE TEMP TRIGGER fail_location_pointer_update
+      BEFORE UPDATE OF current_location_id ON campaigns
+      WHEN NEW.id = ${campaignId}
+      BEGIN
+        SELECT RAISE(ABORT, 'forced current-location pointer failure');
+      END;
+    `);
+    try {
+      const failed = await request(baseUrl)
+        .post(`/api/v1/locations/${locationB.body.id}/discover`)
+        .set(dm)
+        .send({ status: 'current' });
+      expect(failed.status).toBe(500);
+    } finally {
+      sqlite.exec('DROP TRIGGER fail_location_pointer_update');
+    }
+
+    const failedAudit = sqlite
+      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'location.discover' AND entity_id = ?")
+      .get(locationB.body.id) as { n: number };
+    expect(failedAudit.n).toBe(0);
+
+    const [locations, persistedCampaign] = await Promise.all([
+      request(baseUrl).get(`/api/v1/campaigns/${campaignId}/locations`).set(dm),
+      request(baseUrl).get(`/api/v1/campaigns/${campaignId}`).set(dm),
+    ]);
+    const rows = locations.body as Array<{ id: number; status: string }>;
+    expect(rows.find((location) => location.id === locationA.body.id)?.status).toBe('current');
+    expect(rows.find((location) => location.id === locationB.body.id)?.status).toBe('unexplored');
+    expect(persistedCampaign.body.currentLocationId).toBe(locationA.body.id);
+  });
+
   it('resolves a proposal exactly once when approves race rejects (#85)', async () => {
     const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'CAS Race' });
     const campaignId = campaign.body.id;
@@ -211,5 +296,64 @@ describe('concurrency (real SQLite, atomic writes)', () => {
     // if it was a reject, the entity is untouched. Either way it's internally consistent.
     const finalQuest = await request(baseUrl).get(`/api/v1/quests/${questId}`).set(dm);
     expect(finalQuest.body.title).toBe(winners[0].kind === 'approve' ? 'Player Title' : 'Contested');
+  });
+
+  /**
+   * Issue #582: the treasury delta path is the primary fix for concurrent spends.
+   * Each denomination is applied as a single atomic `UPDATE ... SET col = col + ?`,
+   * so two players spending DIFFERENT coins at the same time can never clobber each
+   * other — and even racing spends on the SAME coin compose. This fires a genuine
+   * concurrent burst (real listening socket, requests in flight at once) at one
+   * treasury and asserts every delta landed: a lost update would leave the totals
+   * short. The CAS-on-set path is covered separately in inventory.e2e-spec.ts.
+   */
+  it('applies every concurrent treasury delta across different coins — no lost updates (#582)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Treasury Race' });
+    const campaignId = campaign.body.id;
+
+    const N = 40;
+    // Half the burst adds pp, the other half spends gp from a seeded balance, so the
+    // two groups touch disjoint denominations. A stale-snapshot write would silently
+    // restore the other coin; the atomic delta just composes.
+    await request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(dm).send({ delta: { gp: N } });
+
+    const results = await Promise.all([
+      ...Array.from({ length: N }, () =>
+        request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(dm).send({ delta: { pp: 1 } }),
+      ),
+      ...Array.from({ length: N }, () =>
+        request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(player).send({ delta: { gp: -1 } }),
+      ),
+    ]);
+    expect(results.every((r) => r.status === 200)).toBe(true);
+
+    // Every +1 pp and every -1 gp landed. A lost update on either column would leave
+    // the total short of the expected 40 / 0.
+    const finalRow = await request(baseUrl).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(finalRow.body.pp).toBe(N);
+    expect(finalRow.body.gp).toBe(0);
+  });
+
+  it('racing spends on the SAME coin compose atomically and never go negative (#582)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Same Coin Race' });
+    const campaignId = campaign.body.id;
+
+    // Seed 40gp, then 40 players each spend 1gp simultaneously. The atomic deltas must
+    // compose to exactly 0 — none lost, none doubled, and no spend may push the balance
+    // below 0 (a stale read-then-write would either lose updates or overspend).
+    await request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(dm).send({ delta: { gp: 40 } });
+
+    const N = 40;
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        request(baseUrl).patch(`/api/v1/campaigns/${campaignId}/treasury`).set(player).send({ delta: { gp: -1 } }),
+      ),
+    );
+    // Every spend landed (no race pushed a balance-check past 0); the 41st would 400.
+    expect(results.filter((r) => r.status === 200)).toHaveLength(N);
+    expect(results.filter((r) => r.status === 400)).toHaveLength(0);
+
+    const finalRow = await request(baseUrl).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(finalRow.body.gp).toBe(0);
   });
 });

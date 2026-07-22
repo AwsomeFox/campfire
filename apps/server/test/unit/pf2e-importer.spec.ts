@@ -1,4 +1,4 @@
-import { fetchPf2eSection, entryTypeForSection, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
+import { fetchPf2eSection, fetchSf2eSection, entryTypeForSection, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
 import { startFakePf2e, startFakePf2eDuplicates, startFakePf2eMixed, type FakePf2e } from '../fake-pf2e';
 
 /**
@@ -32,6 +32,16 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(data.abilityMods).toEqual({ strength: 0, dexterity: 3, constitution: 1, intelligence: 0, wisdom: -1, charisma: 1 });
     expect(data.saves).toEqual({ fortitude: 5, reflex: 7, will: 3 });
     expect(data.traits).toEqual(['Goblin', 'Humanoid']);
+  });
+
+  it('fetches sf2e section using fetchSf2eSection and maps vehicles -> item', async () => {
+    const { entries } = await fetchSf2eSection(fake.baseUrl, 'vehicles', silentLogger);
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries[0].name).toBe('Hover Skimmer');
+    expect(entries[0].type).toBe('item');
+    const data = JSON.parse(entries[0].dataJson!);
+    expect(data.category).toBe('vehicle');
+    expect(data.level).toBe(2);
   });
 
   it('strips art (image fields never make it into dataJson or body)', async () => {
@@ -78,7 +88,8 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(entryTypeForSection('creatures')).toBe('monster');
     expect(entryTypeForSection('ancestries')).toBe('race');
     expect(entryTypeForSection('backgrounds')).toBe('feat');
-    expect(ALL_PF2E_SECTIONS).toHaveLength(8);
+    expect(entryTypeForSection('vehicles')).toBe('item');
+    expect(ALL_PF2E_SECTIONS).toHaveLength(9);
   });
 });
 

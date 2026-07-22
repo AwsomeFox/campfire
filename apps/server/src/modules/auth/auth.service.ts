@@ -91,13 +91,61 @@ export class AuthService implements OnApplicationBootstrap {
     if (!(await this.setupRequired())) {
       throw new ConflictException('Setup already completed');
     }
-    const user = await this.usersService.create({
-      username: input.username,
-      password: input.password,
-      displayName: input.displayName,
-      serverRole: 'admin',
-    });
-    return this.issueSession(user.id);
+
+    // scrypt is intentionally completed before opening the transaction. It is
+    // CPU-expensive and synchronous, so doing it while holding SQLite's write
+    // lock would needlessly delay every other writer. The setupRequired() check
+    // above is only a fast path for already-configured servers; the count below
+    // is the authoritative claim and MUST remain inside this synchronous
+    // better-sqlite3 transaction (no await in the callback).
+    const passwordHash = hashPassword(input.password);
+    const token = generateSessionToken();
+    const tokenHash = hashSessionToken(token);
+    const ts = nowIso();
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS).toISOString();
+
+    const userId = this.db.transaction(
+      (tx) => {
+        const [existing] = tx.select({ id: users.id }).from(users).limit(1).all();
+        if (existing) {
+          throw new ConflictException('Setup already completed');
+        }
+
+        const [user] = tx
+          .insert(users)
+          .values({
+            username: input.username,
+            displayName: input.displayName ?? '',
+            passwordHash,
+            serverRole: 'admin',
+            disabled: false,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning({ id: users.id })
+          .all();
+
+        // The initial session is part of the same atomic claim: setup cannot
+        // commit an admin while failing to mint the winner's login session.
+        tx.insert(userSessions)
+          .values({
+            tokenHash,
+            userId: user.id,
+            createdAt: ts,
+            expiresAt,
+            lastSeenAt: ts,
+          })
+          .run();
+
+        return user.id;
+      },
+      // BEGIN IMMEDIATE reserves the writer slot before reading users. Besides
+      // serialising requests in this process, this keeps the claim correct if
+      // two Campfire processes point at the same SQLite file during startup.
+      { behavior: 'immediate' },
+    );
+
+    return { token, me: await this.buildMe(userId) };
   }
 
   /**

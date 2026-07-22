@@ -23,7 +23,7 @@ export type {
   AiStreamEvent,
 } from './ai-provider';
 
-export { AiProviderError, classifyHttpStatus, parseRetryAfterMs } from './errors';
+export { AiProviderError, classifyHttpStatus, getHttpStatusText, parseRetryAfterMs } from './errors';
 export type { AiErrorKind, AiProviderErrorOptions } from './errors';
 
 export { OpenAiProvider } from './openai-provider';

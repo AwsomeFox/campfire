@@ -8,7 +8,10 @@
  *   - a line-oriented SSE parser shared by both streaming paths.
  */
 
-import { AiProviderError, classifyHttpStatus, parseRetryAfterMs } from './errors';
+import { Logger } from '@nestjs/common';
+import { AiProviderError, classifyHttpStatus, getHttpStatusText, parseRetryAfterMs } from './errors';
+
+const httpLogger = new Logger('AiHttpProvider');
 
 /** The subset of `fetch` the adapters use — swapped for a fake in tests. */
 export type FetchLike = (url: string, init: FetchInit) => Promise<FetchResponse>;
@@ -121,9 +124,13 @@ export async function postJson(
     // Non-2xx: classify from status + body, retry the retryable ones.
     const bodyText = await safeText(res);
     const kind = classifyHttpStatus(res.status, bodyText);
-    lastErr = new AiProviderError(kind, `${opts.provider}: HTTP ${res.status}${bodyText ? ` — ${truncate(bodyText, 400)}` : ''}`, {
+    const statusText = getHttpStatusText(res.status);
+    const sanitizedMessage = `AI provider returned HTTP ${res.status}${statusText ? ` ${statusText}` : ''}`;
+    httpLogger.warn(`AI provider (${opts.provider}) returned HTTP ${res.status} (${kind}). Raw body: ${truncate(bodyText, 1000)}`);
+    lastErr = new AiProviderError(kind, sanitizedMessage, {
       provider: opts.provider,
       status: res.status,
+      rawBody: bodyText,
       retryAfterMs: parseRetryAfterMs(res.headers.get('retry-after')),
     });
     if (!lastErr.retryable || attempt === opts.retry.maxRetries) throw lastErr;

@@ -1,5 +1,5 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { InventoryItem, Treasury, Role } from '@campfire/schema';
@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { inventoryItems, partyTreasury, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -15,6 +16,7 @@ type InventoryItemUpdateInput = z.infer<typeof InventoryItemUpdate>;
 type TreasuryPatchInput = z.infer<typeof TreasuryPatch>;
 
 const COINS = ['cp', 'sp', 'ep', 'gp', 'pp'] as const;
+type CoinKey = (typeof COINS)[number];
 
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   return {
@@ -48,6 +50,7 @@ export class InventoryService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly events: CampaignEventsService,
   ) {}
 
   // ---------- items ----------
@@ -217,42 +220,123 @@ export class InventoryService {
 
   async patchTreasury(campaignId: number, patch: TreasuryPatchInput, user: RequestUser, role: Role): Promise<Treasury> {
     // Guarantee the coin row exists (lazy-creates a zeroed row on first access) BEFORE
-    // the transaction, so the read+compute+write below can assume it's present.
+    // the transaction, so the write below can assume it's present.
     await this.getTreasury(campaignId);
 
-    // Read the CURRENT committed balances, compute the next values, and write them in ONE
-    // synchronous better-sqlite3 transaction (issue #272). The old shape read via a
-    // separate awaited getTreasury and then wrote across the await, so two concurrent
-    // patches (e.g. two players spending coin) could each read the same balance and the
-    // second write would clobber the first — a lost update on a get-then-set. better-sqlite3
-    // serializes the whole sync callback, so a delta always composes onto the latest value.
-    // A negative-going delta throws inside the callback, which rolls the transaction back.
-    let row!: typeof partyTreasury.$inferSelect;
-    this.db.transaction((tx) => {
-      const [fresh] = tx.select().from(partyTreasury).where(eq(partyTreasury.campaignId, campaignId)).limit(1).all();
-      const next: Record<(typeof COINS)[number], number> = { cp: fresh.cp, sp: fresh.sp, ep: fresh.ep, gp: fresh.gp, pp: fresh.pp };
-      if ('delta' in patch) {
-        for (const coin of COINS) {
-          const d = patch.delta[coin];
-          if (d === undefined) continue;
-          const value = next[coin] + d;
-          if (value < 0) throw new BadRequestException(`Treasury cannot go negative (${coin}: ${next[coin]} ${d >= 0 ? '+' : ''}${d})`);
-          next[coin] = value;
+    // Issue #582: the write shapes and their concurrency stories.
+    //
+    //  - { delta }: the PRIMARY add/spend path. Each denomination is applied as a single
+    //    atomic `UPDATE ... SET col = col + :delta` statement (the column is referenced on
+    //    both sides of `+`, so SQLite reads the latest committed value inside statement
+    //    atomicity — no read-then-write window). Two players spending coin at the same time
+    //    can NEVER clobber each other: even on the SAME denomination the two increments
+    //    compose. A delta that would drive a denomination negative still 400s: the UPDATE
+    //    writes, RETURNING reads the result, the check throws — rolling the transaction back.
+    //
+    //  - { set }: a full reconciliation (DM correcting totals). Absolute writes are
+    //    inherently racy, so a set carries an optional `expectedUpdatedAt` compare-and-swap
+    //    token. When present, the UPDATE's WHERE narrows to `updated_at = :expected`, so a
+    //    row written by another player in between matches zero rows; we then return the live
+    //    values in a 409 so the client can merge. When `expectedUpdatedAt` is absent the set
+    //    is allowed (back-compat for pre-CAS callers) but is the risky shape the issue is
+    //    about — the web UI now always sends it for full edits.
+    //
+    // Both paths run inside one synchronous better-sqlite3 transaction so the before-read,
+    // the UPDATE, the RETURNING capture, and the updatedAt bump land together (or roll back
+    // together if the negativity check throws).
+    const isDelta = 'delta' in patch;
+    const assignments = isDelta
+      ? (Object.entries(patch.delta).filter(([, d]) => d !== undefined) as [CoinKey, number][])
+      : (Object.entries(patch.set).filter(([, v]) => v !== undefined) as [CoinKey, number][]);
+    if (assignments.length === 0) {
+      throw new BadRequestException('Treasury patch must change at least one denomination');
+    }
+    // Issue #582: an absolute { set } is inherently racy against concurrent deltas, so
+    // it MUST carry expectedUpdatedAt (CAS) — without it, a stale form can still clobber
+    // another player's concurrent spend, which is exactly the data-loss this PR closes.
+    // Deltas are atomic (col = col + ?) and never require CAS. The web editor always
+    // sends expectedUpdatedAt on the set path; a 400 here means an un-upgraded caller
+    // that should switch to { delta } for add/spend or supply the CAS token to reconcile.
+    if (!isDelta && patch.expectedUpdatedAt === undefined) {
+      throw new BadRequestException('An absolute { set } requires expectedUpdatedAt (CAS); use { delta } for add/spend');
+    }
+
+    const ts = nowIso();
+    const expected = !isDelta ? patch.expectedUpdatedAt : undefined;
+
+    // Build the SET clause as a drizzle set-object. For deltas each value is a
+    // `sql\`${col} + ${n}\`` fragment — the column name on the left is the live row value.
+    // For sets the value is the literal. updatedAt is always bumped.
+    const tableCols: Record<CoinKey, ReturnType<typeof sql.raw>> = {
+      cp: sql.raw('cp'),
+      sp: sql.raw('sp'),
+      ep: sql.raw('ep'),
+      gp: sql.raw('gp'),
+      pp: sql.raw('pp'),
+    };
+    const setValues: Record<string, unknown> = { updatedAt: ts };
+    for (const [coin, n] of assignments) {
+      setValues[coin] = isDelta ? sql`${tableCols[coin]} + ${n}` : n;
+    }
+
+    // CAS guard: when an absolute set carries an expected timestamp, the WHERE clause pins
+    // the update to that exact row version. A mismatched token yields zero updated rows,
+    // which we detect via RETURNING and surface as a 409 with the live values.
+    const casCondition = expected !== undefined ? sql`${partyTreasury.updatedAt} = ${expected}` : undefined;
+
+    let before: Record<CoinKey, number> = { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 };
+    let after: Treasury | null = null;
+    let conflict: Treasury | null = null;
+
+    try {
+      this.db.transaction((tx) => {
+        const [prior] = tx.select().from(partyTreasury).where(eq(partyTreasury.campaignId, campaignId)).limit(1).all();
+        before = { cp: prior.cp, sp: prior.sp, ep: prior.ep, gp: prior.gp, pp: prior.pp };
+
+        const updated = tx
+          .update(partyTreasury)
+          .set(setValues)
+          .where(casCondition !== undefined ? and(eq(partyTreasury.campaignId, campaignId), casCondition) : eq(partyTreasury.campaignId, campaignId))
+          .returning()
+          .all();
+
+        if (updated.length === 0) {
+          // CAS mismatch (only reachable on the set path with expectedUpdatedAt): another
+          // player wrote between the client's snapshot and this write. Stash the live row
+          // for the 409 body, then throw a sentinel to roll the tx back and branch out.
+          conflict = treasuryToDomain(prior);
+          throw new TreasuryConflictMarker();
         }
-      } else {
-        for (const coin of COINS) {
-          const v = patch.set[coin];
-          if (v !== undefined) next[coin] = v;
+
+        const row = updated[0];
+        // Negativity check on the delta path (set values are schema-validated nonnegative
+        // upstream). Throwing here rolls the whole transaction back, so a rejected spend
+        // leaves the row exactly as the prior read saw it.
+        if (isDelta) {
+          for (const [coin, d] of assignments) {
+            if (row[coin] < 0) {
+              throw new BadRequestException(
+                `Treasury cannot go negative (${coin}: ${before[coin]} ${d >= 0 ? '+' : ''}${d})`,
+              );
+            }
+          }
         }
+        after = treasuryToDomain(row);
+      });
+    } catch (err) {
+      if (err instanceof TreasuryConflictMarker) {
+        // Translate the in-tx sentinel into the HTTP 409 carrying the live values.
+        throw new ConflictException({
+          code: 'TREASURY_CONFLICT',
+          message: 'The treasury changed since you last loaded it.',
+          current: conflict,
+        });
       }
-      const [updated] = tx
-        .update(partyTreasury)
-        .set({ ...next, updatedAt: nowIso() })
-        .where(eq(partyTreasury.campaignId, campaignId))
-        .returning()
-        .all();
-      row = updated;
-    });
+      throw err;
+    }
+
+    // Per-denomination before/after + actor — only the denominations this write touched,
+    // so an audit reader can reconstruct exactly who moved which coin when (issue #582).
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -260,8 +344,37 @@ export class InventoryService {
       entityType: 'treasury',
       entityId: campaignId,
       campaignId,
-      detail: JSON.stringify(patch),
+      detail: JSON.stringify({
+        actor: { id: user.id, name: user.name, role },
+        kind: isDelta ? 'delta' : 'set',
+        changes: assignments.map(([coin, n]) => ({
+          coin,
+          before: before[coin],
+          ...(isDelta ? { delta: n } : { setTo: n }),
+          after: after![coin],
+        })),
+        ...(expected !== undefined ? { expectedUpdatedAt: expected } : {}),
+      }),
     });
-    return treasuryToDomain(row);
+
+    // Thin invalidation tick so open editors mark themselves stale. Carries the actor's
+    // userId (same identity space as RequestUser.id) so a client can both attribute the
+    // change ("another player updated the treasury") and ignore the echo of its own write.
+    this.events.emit({ type: 'treasury.updated', campaignId, userId: user.id });
+
+    return after!;
+  }
+}
+
+/**
+ * Internal sentinel thrown inside the treasury transaction when the CAS token mismatches.
+ * Throwing rolls the (synchronous better-sqlite3) transaction back; the outer try/catch in
+ * patchTreasury catches this exact class and translates it into a 409 with the live values.
+ * Kept private to this file so the Nest exception layer never sees it directly.
+ */
+class TreasuryConflictMarker extends Error {
+  constructor() {
+    super('treasury CAS mismatch');
+    this.name = 'TreasuryConflictMarker';
   }
 }

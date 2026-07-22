@@ -75,6 +75,26 @@ const AiDmRulesLookupRequest = z
   .strict();
 class AiDmRulesLookupDto extends createZodDto(AiDmRulesLookupRequest) {}
 
+/**
+ * Grant or revoke a narrowly-scoped secret-read approval (POST /ai-dm/secret-approval, #557).
+ * Lets a DM let the autonomous seat read ONE secret entity under the DM principal during
+ * narration (e.g. a hidden NPC the DM wants named). Single-use; bulk DM-only aggregate reads
+ * (export/audit/arcs/…) are not approvable here.
+ */
+const AiDmSecretApprovalRequest = z
+  .object({
+    action: z.enum(['grant', 'revoke']).describe('grant a new approval, or revoke an unconsumed one.'),
+    tool: z
+      .string()
+      .min(1)
+      .max(60)
+      .describe('The per-entity read tool the approval covers (e.g. get_npc, get_quest, get_location).'),
+    entityId: z.number().int().positive().describe('The single entity id the approval is scoped to.'),
+    note: z.string().max(500).optional().describe('Optional DM note recorded with the grant (audited).'),
+  })
+  .strict();
+class AiDmSecretApprovalDto extends createZodDto(AiDmSecretApprovalRequest) {}
+
 const HEARTBEAT_MS = 25_000;
 
 /**
@@ -257,6 +277,43 @@ export class AiDriverController {
     // the service then enforces that only the grant holder or a campaign DM may actually do it (#375).
     const role = await this.access.requireRole(user, id, 'player');
     return this.driver.handback(id, user, body.note, role);
+  }
+
+  @Get('secret-approvals')
+  @ApiOperation({
+    summary: 'List active narrowly-scoped secret-read approvals',
+    description:
+      'DM only. Returns the unconsumed approvals currently letting the AI DM seat read one secret entity under the DM ' +
+      'principal during narration (#557). Each is single-use and is consumed the first time the matching read runs.',
+  })
+  @ApiResponse({ status: 200, description: 'The active secret-read approvals.' })
+  async listSecretApprovals(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.driver.listSecretReadApprovals(id);
+  }
+
+  @Post('secret-approval')
+  @ApiOperation({
+    summary: 'Grant or revoke a narrowly-scoped secret-read approval',
+    description:
+      'DM only. `action:grant` lets the autonomous AI DM seat read ONE secret entity (tool + entityId) under the DM principal ' +
+      'during narration, so the model can reason about e.g. a hidden villain the DM wants named. Single-use: consumed the ' +
+      'first time the matching read runs. `action:revoke` withdraws an unconsumed approval. Bulk DM-only reads ' +
+      '(export_campaign, read_audit_log, list_arcs, …) are NOT approvable here.',
+  })
+  @ApiResponse({ status: 201, description: 'The grant (or the session state after a revoke).' })
+  @ApiResponse({ status: 400, description: 'The tool is not a per-entity read the DM can approve.' })
+  @ApiResponse({ status: 403, description: 'Not a DM.' })
+  async secretApproval(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiDmSecretApprovalDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireRole(user, id, 'dm');
+    if (body.action === 'grant') {
+      return this.driver.grantSecretReadApproval(id, user, body.tool, body.entityId, body.note, role);
+    }
+    return this.driver.revokeSecretReadApproval(id, user, body.tool, body.entityId, role);
   }
 
   @Sse('stream')

@@ -5,14 +5,29 @@
  * created Attachment (id + a ready-to-store `/api/v1/attachments/:id/file` url).
  *
  * Used by CharacterPage (portrait) and Dashboard/LocationPage map cards (map/image).
+ *
+ * Preview-vs-stored lifecycle (issue #583): a local object URL created on file
+ * select is STAGED, never confused with a stored attachment. While the upload is
+ * in flight the staged preview wears a clear "Uploading…" badge and a distinct
+ * border; on failure it stays staged (so the user can Retry/Discard) but is
+ * marked "Not saved" — never read as a confirmed image. Only when onUploaded
+ * resolves does the component reset to the committed url, revoking the staged
+ * object URL to avoid a blob leak. See imageUploadState.ts for the pure model.
  */
-import { useCallback, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState, type DragEvent } from 'react';
 import type { Attachment, AttachmentKind } from '@campfire/schema';
 import { API, ApiError } from '../lib/api';
 import { Btn } from './ui';
+import {
+  initialUploadState,
+  isPreviewUncommitted,
+  reduceUpload,
+  visiblePreview,
+  type UploadEvent,
+} from './imageUploadState';
 
 const ACCEPTED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * Build the file-byte URL for an attachment, optionally content-versioned (issue #498).
@@ -200,11 +215,43 @@ export function ImageUpload({
   onError?: (message: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  // The currently staged File, held in a ref (not state) so re-renders aren't
+  // driven by it and so Retry can re-issue the exact same bytes.
+  const pendingFileRef = useRef<File | null>(null);
+  // The staged object URL we are responsible for revoking. Tracked alongside the
+  // reducer state so we never lose the handle to revoke (issue #583 leak fix).
+  const stagedUrlRef = useRef<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [localPreview, setLocalPreview] = useState<string | null>(null);
+  const [state, dispatch] = useReducer(reduceUpload, initialUploadState);
 
-  const shown = localPreview ?? previewUrl ?? null;
+  // Revoke the staged object URL whenever it is replaced or cleared, and on
+  // unmount. This is the leak fix: previously the URL was created on select and
+  // only revoked implicitly. Now every terminal transition drops it.
+  useEffect(() => {
+    if (state.stagedPreview !== stagedUrlRef.current) {
+      // The reducer moved on from the old staged URL (or cleared it). Revoke the
+      // old handle and track the new one (or null).
+      if (stagedUrlRef.current) URL.revokeObjectURL(stagedUrlRef.current);
+      stagedUrlRef.current = state.stagedPreview;
+    }
+  }, [state.stagedPreview]);
+
+  useEffect(() => {
+    // Unmount: revoke whatever is still staged so we don't leak the blob past
+    // the component's life. This runs once; React keeps the ref current.
+    const handle = stagedUrlRef;
+    return () => {
+      if (handle.current) {
+        URL.revokeObjectURL(handle.current);
+        handle.current = null;
+      }
+    };
+  }, []);
+
+  const shown = visiblePreview(state, previewUrl);
+  const uncommitted = isPreviewUncommitted(state, previewUrl);
+  const isUploading = state.status === 'uploading' || state.status === 'saving';
+  const isFailed = state.status === 'failed';
 
   const doUpload = useCallback(
     async (file: File) => {
@@ -213,20 +260,43 @@ export function ImageUpload({
         return;
       }
       if (file.size > MAX_BYTES) {
-        onError?.('File is too large — 8MB max.');
+        onError?.('File is too large — 32MB max.');
         return;
       }
 
+      // Stage the local preview. If a previous staged URL exists (e.g. retrying
+      // with a different file), the effect above revokes it.
+      pendingFileRef.current = file;
       const objectUrl = URL.createObjectURL(file);
-      setLocalPreview(objectUrl);
-      setUploading(true);
+      dispatch({ type: 'select', stagedUrl: objectUrl });
+
       try {
         const attachment = await uploadAttachment(campaignId, kind, file);
-        onUploaded(attachment);
+        // Bytes are durably stored. Flip to "saving" so the badge reflects that
+        // the linking PATCH (the caller's onUploaded) is the remaining step.
+        const committedUrl = attachmentFileUrl(attachment.id, {
+          hidden: attachment.hidden,
+          updatedAt: attachment.updatedAt,
+        });
+        dispatch({ type: 'bytes-stored', committedUrl });
+        try {
+          // Await the host's linking step (e.g. PATCH characters/:id with the
+          // portraitUrl). If THAT fails we keep the committed url but mark the
+          // state failed, so the user sees a distinct "stored but not linked"
+          // error rather than a silent half-success (issue #583 recoverable state).
+          await onUploaded(attachment);
+          // Fully committed: drop the staged preview so the caller's previewUrl
+          // (refreshed from the server) becomes the single source of truth.
+          dispatch({ type: 'reset' });
+        } catch (err) {
+          const message = err instanceof ApiError ? err.message : "Couldn't link the uploaded image.";
+          onError?.(message);
+          dispatch({ type: 'commit-failed', committedUrl, error: message });
+        }
       } catch (err) {
-        onError?.(err instanceof ApiError ? err.message : "Couldn't upload the image.");
-      } finally {
-        setUploading(false);
+        const message = err instanceof ApiError ? err.message : "Couldn't upload the image.";
+        onError?.(message);
+        dispatch({ type: 'upload-failed', error: message });
       }
     },
     [campaignId, kind, onUploaded, onError],
@@ -245,46 +315,137 @@ export function ImageUpload({
     e.target.value = '';
   }
 
+  function onRetry() {
+    const file = pendingFileRef.current;
+    if (!file) {
+      // No file to re-send (shouldn't happen) — reset to a clean slate.
+      dispatch({ type: 'discard' });
+      return;
+    }
+    dispatch({ type: 'retry' });
+    void doUpload(file);
+  }
+
+  function onDiscard() {
+    pendingFileRef.current = null;
+    dispatch({ type: 'discard' });
+  }
+
   const shapeClass = shape === 'circle' ? 'rounded-full' : 'rounded-xl';
+  // A staged (uncommitted) preview wears a distinct amber dashed border so it is
+  // never mistaken for a stored image; a failed one goes rose. The committed
+  // preview keeps the default inset look.
+  const stateBorder = isFailed
+    ? 'border-rose-400/80'
+    : uncommitted
+      ? 'border-amber-400/80'
+      : '';
 
   return (
-    <div
-      className={`relative cf-inset border-dashed overflow-hidden cursor-pointer transition-colors ${shapeClass} ${
-        dragOver ? 'border-amber-400/70' : ''
-      }`}
-      style={shape === 'circle' ? { width: 96, height: 96 } : { minHeight: 140 }}
-      onClick={() => inputRef.current?.click()}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={onDrop}
-      role="button"
-      tabIndex={0}
-      aria-label={label}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') inputRef.current?.click();
-      }}
-    >
-      <input
-        ref={inputRef}
-        type="file"
-        accept={ACCEPTED_MIME.join(',')}
-        className="hidden"
-        onChange={onPick}
-      />
-      {shown ? (
-        <img src={shown} alt="" className={`w-full h-full object-cover ${shapeClass}`} style={shape === 'circle' ? { width: 96, height: 96 } : undefined} />
-      ) : (
-        <div className="w-full h-full flex flex-col items-center justify-center gap-1 text-center p-4">
-          <span className="text-[11px] text-[var(--color-neutral-600)]">{uploading ? 'Uploading…' : label}</span>
-        </div>
-      )}
-      {uploading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/40 text-xs text-white">
-          Uploading…
-        </div>
+    <div className="space-y-1.5">
+      <div
+        className={`relative cf-inset border-dashed overflow-hidden transition-colors ${shapeClass} ${
+          dragOver ? 'border-amber-400/70' : stateBorder
+        } ${isFailed ? '' : 'cursor-pointer'}`}
+        style={shape === 'circle' ? { width: 96, height: 96 } : { minHeight: 140 }}
+        onClick={() => {
+          // Don't open the picker while a failed upload is awaiting a decision —
+          // force an explicit Retry/Discard so the staged file isn't silently
+          // abandoned (issue #583: no duplicate silent uploads).
+          if (isFailed) return;
+          inputRef.current?.click();
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+        role="button"
+        tabIndex={isFailed ? -1 : 0}
+        aria-label={label}
+        aria-busy={isUploading}
+        onKeyDown={(e) => {
+          if (isFailed) return;
+          if (e.key === 'Enter' || e.key === ' ') inputRef.current?.click();
+        }}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPTED_MIME.join(',')}
+          className="hidden"
+          onChange={onPick}
+        />
+        {shown ? (
+          <img
+            src={shown}
+            alt=""
+            className={`w-full h-full object-cover ${shapeClass}`}
+            style={shape === 'circle' ? { width: 96, height: 96 } : undefined}
+          />
+        ) : (
+          <div className="w-full h-full flex flex-col items-center justify-center gap-1 text-center p-4">
+            <span className="text-[11px] text-[var(--color-neutral-600)]">{isUploading ? 'Uploading…' : label}</span>
+          </div>
+        )}
+
+        {/* Uncommitted badge: the core of issue #583. A staged local preview is
+            labeled so a user can never read it as a saved image. Different copy
+            per sub-state makes the distinction obvious. */}
+        {uncommitted && shown && (
+          <div
+            className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[10px] font-semibold leading-tight ${
+              isFailed
+                ? 'bg-rose-500/90 text-white'
+                : 'bg-amber-400/90 text-black'
+            }`}
+          >
+            {isFailed ? 'Not saved' : state.status === 'saving' ? 'Saving…' : 'Uploading…'}
+          </div>
+        )}
+
+        {isUploading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/40 text-xs text-white">
+            {state.status === 'saving' ? 'Saving…' : 'Uploading…'}
+          </div>
+        )}
+
+        {/* Failed: explicit recovery. Retry re-sends the staged file (no silent
+            re-upload); Discard drops it and revokes the object URL. */}
+        {isFailed && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-black/60 p-2 text-center">
+            <span className="text-[11px] font-semibold text-rose-200">Upload failed</span>
+            {state.error && <span className="text-[10px] text-rose-100/80 line-clamp-2">{state.error}</span>}
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                className="cf-btn cf-btn-ghost !min-h-0 !py-1 !px-2 text-[10px]"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRetry();
+                }}
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                className="cf-btn cf-btn-ghost !min-h-0 !py-1 !px-2 text-[10px]"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDiscard();
+                }}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+      {uncommitted && shown && !isFailed && (
+        <p className="text-[10px] text-amber-300/80 leading-tight">
+          {state.status === 'saving' ? 'Stored — linking to your page…' : 'Preview — not saved yet.'}
+        </p>
       )}
     </div>
   );

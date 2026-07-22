@@ -37,6 +37,8 @@ export interface AiProviderErrorOptions {
   retryAfterMs?: number;
   /** Underlying error/cause. */
   cause?: unknown;
+  /** Raw un-sanitized response body for server-side logging. */
+  rawBody?: string;
 }
 
 export class AiProviderError extends Error {
@@ -45,6 +47,7 @@ export class AiProviderError extends Error {
   readonly status?: number;
   readonly provider?: string;
   readonly retryAfterMs?: number;
+  readonly rawBody?: string;
 
   constructor(kind: AiErrorKind, message: string, opts: AiProviderErrorOptions = {}) {
     super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
@@ -54,6 +57,7 @@ export class AiProviderError extends Error {
     this.status = opts.status;
     this.provider = opts.provider;
     this.retryAfterMs = opts.retryAfterMs;
+    this.rawBody = opts.rawBody;
   }
 }
 
@@ -89,4 +93,25 @@ export function parseRetryAfterMs(header: string | null): number | undefined {
   const date = Date.parse(header);
   if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
   return undefined;
+}
+
+/** Map HTTP status code to standard human-readable description for sanitized client error messages. */
+export function getHttpStatusText(status: number): string {
+  switch (status) {
+    case 400: return 'bad request';
+    case 401: return 'unauthorized';
+    case 403: return 'forbidden';
+    case 404: return 'not found';
+    case 408: return 'request timeout';
+    case 422: return 'unprocessable entity';
+    case 429: return 'too many requests';
+    case 500: return 'internal server error';
+    case 502: return 'bad gateway';
+    case 503: return 'service unavailable';
+    case 504: return 'gateway timeout';
+    default:
+      if (status >= 400 && status < 500) return 'client error';
+      if (status >= 500) return 'server error';
+      return 'error';
+  }
 }

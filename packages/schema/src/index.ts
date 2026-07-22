@@ -970,6 +970,16 @@ export const Comment = z.object({
   // by author]" from a DM removal. It is cleared on restore, so durable
   // provenance of a past tombstone (who/when) lives in the AUDIT LOG, not here.
   deletedBy: z.string().max(120).nullable().default(null),
+  // Editor provenance for the trust case (issue #783): null on a comment whose
+  // only edits are by its own author. Stamped ONLY when a non-author (a DM
+  // moderating) edits the body — edited_at then and edited_by (same identity
+  // space as authorUserId / deletedBy) record that editor. The original
+  // authorUserId/authorName are NEVER overwritten, so the player who wrote the
+  // comment stays its author of record and the UI can render "Author: X (edited
+  // by DM Y)". A self-edit leaves both null (the usual updated_at "edited" badge
+  // already covers the author touching their own prose).
+  editedAt: IsoDate.nullable().default(null),
+  editedBy: z.string().max(120).nullable().default(null),
   ...timestamps,
 });
 export type Comment = z.infer<typeof Comment>;
@@ -980,6 +990,8 @@ export const CommentCreate = Comment.omit({
   authorName: true,
   deletedAt: true,
   deletedBy: true,
+  editedAt: true,
+  editedBy: true,
   createdAt: true,
   updatedAt: true,
 })
@@ -1106,6 +1118,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  * family so every shipped importer is reachable from the endpoint:
  *   - 'open5e'      — D&D 5e SRD (default, the built-in API importer)
  *   - 'pf2e'        — Pathfinder 2e (Archives of Nethys, issue #295)
+ *   - 'sf2e'        — Starfinder 2e (Archives of Nethys, issue #400)
  *   - 'pf1e'        — Pathfinder 1e SRD (issue #296)
  *   - 'starfinder'  — Starfinder 1e SRD (issue #297)
  *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)
@@ -1118,6 +1131,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
 export const RulePackInstallSource = z.enum([
   'open5e',
   'pf2e',
+  'sf2e',
   'pf1e',
   'starfinder',
   'archmage',
@@ -1239,6 +1253,15 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     note: 'Live import from the Archives of Nethys 2e Elasticsearch backend.',
     candidateSourceUrl: 'https://elasticsearch.aonprd.com',
   },
+  sf2e: {
+    source: 'sf2e',
+    label: 'Starfinder 2e (Archives of Nethys)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'ORC / OGL',
+    note: 'Live import from the Archives of Nethys SF2e Elasticsearch backend (aonsf index).',
+    candidateSourceUrl: 'https://elasticsearch.aonprd.com',
+  },
   'open-legend': {
     source: 'open-legend',
     label: 'Open Legend',
@@ -1263,8 +1286,8 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     sourceKind: 'manual-upload',
     installableWithoutUrl: false,
     license: 'Open Game License v1.0a',
-    note: 'No live open source: unlike PF2e, the Archives of Nethys Starfinder site exposes no Elasticsearch backend, and the community Starjammer SRD (HTTP 410) and Dragonlash API are offline. Upload an OGL JSON pack, or pass `url`.',
-    candidateSourceUrl: null,
+    note: 'Foundry system pack data is stored as multi-file JSON and LevelDB databases. Upload an OGL-licensed JSON pack (or pass an explicit `url`).',
+    candidateSourceUrl: 'https://github.com/foundryvtt-starfinder/foundryvtt-starfinder',
   },
   archmage: {
     source: 'archmage',
@@ -1341,6 +1364,14 @@ export interface RuleSystemAdapter {
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
   readonly initiativeDie: number;
   /**
+   * Hard level cap for this system, sourced from the adapter so `levelUp` doesn't bake in 5e's
+   * 20 (issue #535). 5e/PF1e/PF2e/Starfinder are 20; 13th Age is 10. A system with no hard cap
+   * (Open Legend, OSR retroclones) uses `Infinity`, so a `levelUp` check of
+   * `existing.level >= maxLevel` is never true and the character may advance without bound.
+   * Always read via comparison (never `level + 1 === maxLevel`): Infinity + 1 is still Infinity.
+   */
+  readonly maxLevel: number;
+  /**
    * Derive a combatant's initiative modifier from an ability-score map (5e: the DEX
    * modifier). Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster
    * `abilityScores` object (`{ dexterity: 14 }`); returns 0 when the governing score is
@@ -1395,6 +1426,9 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
+  // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
+  maxLevel: 20,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     const dex = dnd5eDexScore(abilities);
     return dex === null ? 0 : this.abilityModifier(dex);
@@ -1571,6 +1605,10 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   // roller is d20 + Agility — the full exploding pool is available via attributeDicePool for
   // action resolution, but initiative only needs an Agility-monotonic ordering.
   initiativeDie: 20,
+  // Open Legend has no class/level framework and no published hard character-level cap, so the
+  // adapter reports Infinity — `levelUp` never rejects on the cap (issue #535). A campaign that
+  // models "level" as a loose progression tier is free to advance without a synthetic 5e ceiling.
+  maxLevel: Infinity,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     return openLegendAgility(abilities);
   },
@@ -1823,6 +1861,8 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
+  maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
   // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
   // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
@@ -1877,6 +1917,19 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   degreeOfSuccess: pf2eDegreeOfSuccess,
 };
 
+/** Stable family id of the Starfinder 2e adapter. */
+export const SF2E_ADAPTER_ID = 'sf2e';
+/** Pack slug the SF2e importer installs under. */
+export const SF2E_PACK_SLUG = 'sf2e-srd';
+
+export type Sf2eRuleSystemAdapter = Pf2eRuleSystemAdapter;
+
+export const Sf2eAdapter: Sf2eRuleSystemAdapter = {
+  ...Pf2eAdapter,
+  id: SF2E_ADAPTER_ID,
+  label: 'Starfinder 2e',
+};
+
 // Sibling ruleset adapters (issues #296-300) live in their own files (type-only imports
 // from here, so no runtime cycle) and register below. Adding a system is one import + one
 // ADAPTERS entry, never a sweep across the combat code.
@@ -1905,6 +1958,8 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [PF2E_ADAPTER_ID]: Pf2eAdapter,
   // Pack slug the PF2e importer installs under — campaigns store the slug in `ruleSystem`.
   [PF2E_PACK_SLUG]: Pf2eAdapter,
+  [SF2E_ADAPTER_ID]: Sf2eAdapter,
+  [SF2E_PACK_SLUG]: Sf2eAdapter,
   [PF1E_PACK_SLUG]: Pathfinder1eAdapter, // Pathfinder 1e (issue #296)
   [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
   [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
@@ -2025,7 +2080,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),
@@ -3643,6 +3698,14 @@ export const Treasury = z.object({
 export type Treasury = z.infer<typeof Treasury>;
 // Union like HpPatch: { delta } (relative, may be negative but result must stay >= 0)
 // or { set } (absolute). Omitted denominations are left untouched.
+//
+// Issue #582: the `set` path is a full reconciliation, so it carries an optional
+// `expectedUpdatedAt` compare-and-swap token. The server returns 409 when the token
+// doesn't match the row's current updatedAt (someone else wrote in between), attaching
+// the fresh server values so the client can merge. The `delta` path never needs CAS —
+// two players spending different coins compose atomically and never conflict, and even
+// spending the SAME coin just composes (a spend that would go negative still 400s), so
+// deltas are the preferred write shape for add/spend flows.
 export const TreasuryPatch = z.union([
   z.object({
     delta: z.object({
@@ -3655,6 +3718,7 @@ export const TreasuryPatch = z.union([
   }),
   z.object({
     set: z.object({ cp: Coin.optional(), sp: Coin.optional(), ep: Coin.optional(), gp: Coin.optional(), pp: Coin.optional() }),
+    expectedUpdatedAt: IsoDate.optional(),
   }),
 ]);
 export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
@@ -3705,6 +3769,7 @@ export const CampaignEventType = z.enum([
   'encounter.deleted',
   'encounter.ping',
   'membership.revoked',
+  'treasury.updated',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -3740,6 +3805,20 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     userId: z.string().max(120),
     memberId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #582: the party treasury changed. A thin invalidation signal like the
+    // encounter.* ticks: no coin payload (permission-checked REST read is authoritative),
+    // so an open editor that snapshotted stale balances can mark itself stale and refetch
+    // instead of silently overwriting another player's concurrent spend on save. `userId`
+    // is String(users.id) of the actor (same identity space as RequestUser.id) so the
+    // editor can show "changed by <player>" without a second lookup — and so the editor's
+    // OWN write doesn't re-mark itself stale when it round-trips through the SSE stream
+    // (the client compares userId against the local session and ignores its own echo).
+    type: z.literal('treasury.updated'),
+    campaignId: Id,
+    userId: z.string().max(120),
     at: IsoDate,
   }),
 ]);

@@ -228,3 +228,53 @@ test('successful setup exits safely when the auth-status cache refresh fails', a
   expect(configuredStatusReads).toBeGreaterThanOrEqual(2);
   await context.close();
 });
+
+test('a browser that loses a concurrent setup claim exits the stale first-run form', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, serviceWorkers: 'block' });
+  const page = await context.newPage();
+  let competingSetupCompleted = false;
+
+  await page.route('**/api/v1/auth/status', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        setupRequired: !competingSetupCompleted,
+        localLoginEnabled: true,
+        oidcEnabled: false,
+        signupEnabled: false,
+      }),
+    });
+  });
+  await page.route('**/api/v1/auth/setup', async (route) => {
+    competingSetupCompleted = true;
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Setup already completed' }),
+    });
+  });
+  await page.route('**/api/v1/me', async (route) => {
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Unauthorized' }),
+    });
+  });
+
+  await page.goto('/setup');
+  await page.getByLabel('Username').fill('setup-race-loser');
+  await page.getByLabel('Password', { exact: true }).fill('campfire-race-loser-1');
+  await page.getByLabel('Confirm password').fill('campfire-race-loser-1');
+
+  const setupResponse = page.waitForResponse(
+    (response) => response.url().endsWith('/api/v1/auth/setup') && response.request().method() === 'POST',
+  );
+  await page.getByRole('button', { name: 'Light the fire' }).click();
+  expect((await setupResponse).status()).toBe(409);
+
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Light the fire' })).toHaveCount(0);
+  await context.close();
+});

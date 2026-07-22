@@ -1,5 +1,8 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { campaigns, characters } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const owner = { 'x-dev-role': 'player', 'x-dev-user': 'owner-1' };
@@ -627,5 +630,85 @@ describe('dmControlsProgression flag gates XP/level-up (issue #270)', () => {
     const dmLvl = await request(server).post(`/api/v1/characters/${characterId}/level-up`).set(dm).send({});
     expect(dmLvl.status).toBe(201);
     expect(dmLvl.body.level).toBe(3);
+  });
+});
+
+/**
+ * Issue #535: levelUp must consult the campaign's RuleSystemAdapter.maxLevel instead of a
+ * hardcoded 5e `20`. A 5e campaign still caps at 20 (regression guard), but a campaign on a
+ * no-cap system (an OSR retroclone → Infinity) lets a level-20 character advance to 21 — the
+ * exact advance the old hardcoded `>= 20` check wrongly rejected.
+ *
+ * The campaign's `ruleSystem` is written straight to the DB (the campaigns-service POST/PATCH
+ * path validates the slug against an installed rule pack, which is out of scope for this fix);
+ * `levelUp` reads it back through the same adapter resolver the live service uses.
+ */
+describe('levelUp honors the rule-system level cap (issue #535)', () => {
+  const capDm = { 'x-dev-role': 'dm', 'x-dev-user': 'cap-dm-1' };
+  let ctx: TestAppContext;
+  let server: import('http').Server;
+  let db: DrizzleDb;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    db = ctx.app.get<DrizzleDb>(DB);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a 5e (default) campaign still rejects level-up at 20', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: '5e Cap Camp' });
+    expect(camp.status).toBe(201);
+    expect(camp.body.ruleSystem).toBe(''); // default → 5e adapter → maxLevel 20
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Five E Hero', hpMax: 20, hpCurrent: 20 });
+    expect(char.status).toBe(201);
+
+    // Seed the character to level 20 via the PATCH escape hatch (ruleSystem '' stays 5e).
+    const at20 = await request(server).patch(`/api/v1/characters/${char.body.id}`).set(capDm).send({ level: 20 });
+    expect(at20.status).toBe(200);
+    expect(at20.body.level).toBe(20);
+
+    // levelUp at 20 is rejected: the 5e adapter's cap is 20.
+    const denied = await request(server).post(`/api/v1/characters/${char.body.id}/level-up`).set(capDm).send({});
+    expect(denied.status).toBe(400);
+  });
+
+  it('a no-cap OSR campaign lets a level-20 character advance to 21 (the #535 regression)', async () => {
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: 'OSR No-Cap Camp' });
+    expect(camp.status).toBe(201);
+
+    // Write a no-cap rule-system slug directly (bypassing the campaigns-service pack validation,
+    // which is unrelated to the cap logic under test). 'basic-fantasy' resolves to the OSR
+    // adapter, whose maxLevel is Infinity.
+    await db.update(campaigns).set({ ruleSystem: 'basic-fantasy' }).where(eq(campaigns.id, camp.body.id)).run();
+    const reloaded = await request(server).get(`/api/v1/campaigns/${camp.body.id}`).set(capDm);
+    expect(reloaded.body.ruleSystem).toBe('basic-fantasy');
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'Old School Delver', hpMax: 16, hpCurrent: 16 });
+    expect(char.status).toBe(201);
+
+    // Seed to level 20; the old hardcoded `>= 20` check would block the next levelUp here.
+    const at20 = await request(server).patch(`/api/v1/characters/${char.body.id}`).set(capDm).send({ level: 20 });
+    expect(at20.status).toBe(200);
+    expect(at20.body.level).toBe(20);
+
+    // The fix: a no-cap system's levelUp succeeds past 20.
+    const leveled = await request(server).post(`/api/v1/characters/${char.body.id}/level-up`).set(capDm).send({});
+    expect(leveled.status).toBe(201);
+    expect(leveled.body.level).toBe(21);
+
+    // Sanity: the character row really persisted 21 (not just the response body).
+    const [row] = await db.select({ level: characters.level }).from(characters).where(eq(characters.id, char.body.id)).limit(1);
+    expect(row?.level).toBe(21);
   });
 });

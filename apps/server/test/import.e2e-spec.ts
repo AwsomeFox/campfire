@@ -418,7 +418,10 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     characterId = charRes.body.id;
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Guild Signet', qty: 1, ownerType: 'party' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Vesper’s Daggers', qty: 2, ownerType: 'character', characterId });
-    await dmAgent.patch(`/api/v1/campaigns/${campaignId}/treasury`).send({ set: { gp: 150, sp: 40 } });
+    // Issue #582: absolute { set } now requires expectedUpdatedAt (CAS). Fetch the
+    // current row version first so this setup write is accepted.
+    const treasuryBefore = await dmAgent.get(`/api/v1/campaigns/${campaignId}/treasury`);
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}/treasury`).send({ set: { gp: 150, sp: 40 }, expectedUpdatedAt: treasuryBefore.body.updatedAt });
 
     const exportRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
     exportDoc = exportRes.body;
