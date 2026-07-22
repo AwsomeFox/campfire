@@ -27,9 +27,19 @@ import { SESSION_COOKIE_NAME } from '../src/modules/auth/auth.constants';
 describe('invite-accept session cookie honors ALLOW_INSECURE_HTTP (e2e, issue #525)', () => {
   let app: INestApplication;
   let dataDir: string;
+  // Capture every env var this suite mutates so afterAll can restore the lot —
+  // Jest reuses a worker across files, so a leftover DATA_DIR pointing at a
+  // removed dir or a sticky THROTTLE_DISABLED leaks into later suites.
   const originalNodeEnv = process.env.NODE_ENV;
   const originalInsecure = process.env.ALLOW_INSECURE_HTTP;
   const originalDevAuth = process.env.DEV_AUTH;
+  const originalDataDir = process.env.DATA_DIR;
+  const originalThrottle = process.env.THROTTLE_DISABLED;
+
+  // Shared fixtures created once in beforeAll so each `it` is order-independent
+  // (a single test can be run in isolation without relying on another's setup).
+  let adminAgent: ReturnType<typeof request.agent>;
+  let dmAgent: ReturnType<typeof request.agent>;
 
   beforeAll(async () => {
     // Set before AppModule compiles — resolveCookieSecure() reads these at
@@ -66,6 +76,15 @@ describe('invite-accept session cookie honors ALLOW_INSECURE_HTTP (e2e, issue #5
       ],
     });
     await app.init();
+
+    // First-run admin + a DM, both authenticated via real cookie sessions. Done
+    // once here so either `it` below can run standalone.
+    const server = app.getHttpServer();
+    adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'dm-dana', password: 'dm-password-1', serverRole: 'user' });
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/login').send({ username: 'dm-dana', password: 'dm-password-1' });
   });
 
   afterAll(async () => {
@@ -77,19 +96,27 @@ describe('invite-accept session cookie honors ALLOW_INSECURE_HTTP (e2e, issue #5
     else process.env.ALLOW_INSECURE_HTTP = originalInsecure;
     if (originalDevAuth === undefined) delete process.env.DEV_AUTH;
     else process.env.DEV_AUTH = originalDevAuth;
+    if (originalDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = originalDataDir;
+    if (originalThrottle === undefined) delete process.env.THROTTLE_DISABLED;
+    else process.env.THROTTLE_DISABLED = originalThrottle;
   });
+
+  /**
+   * Asserts whether a Set-Cookie header carries the `Secure` attribute by looking
+   * for the attribute at an attribute boundary (start-of-attributes or after `; `)
+   * rather than a bare substring. A naive `not.toContain('secure')` would false-fail
+   * if the cookie value or path ever happened to contain that substring.
+   */
+  function hasSecureAttribute(cookieHeader: string): boolean {
+    const normalized = cookieHeader.toLowerCase();
+    // Cookie attrs are `;`-separated; `secure` is a bare flag (no `=`). Match it
+    // either at the start of the attribute list or after a `; ` separator.
+    return /(?:^|;\s*)secure(?:;|$)/.test(normalized);
+  }
 
   it('accept sets a session cookie that is NOT marked Secure (homelab plain-HTTP path works)', async () => {
     const server = app.getHttpServer();
-
-    // First-run admin so the DM below can exist.
-    const adminAgent = request.agent(server);
-    await adminAgent.post('/api/v1/auth/setup').send({ username: 'admin', password: 'admin-password-1' });
-
-    // DM + campaign + invite link (the accept path is the anonymous new-user one).
-    await adminAgent.post('/api/v1/users').send({ username: 'dm-dana', password: 'dm-password-1', serverRole: 'user' });
-    const dmAgent = request.agent(server);
-    await dmAgent.post('/api/v1/auth/login').send({ username: 'dm-dana', password: 'dm-password-1' });
     const campaignRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'The Ember Vale' });
     const campaignId = campaignRes.body.id;
     const inviteRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
@@ -110,29 +137,28 @@ describe('invite-accept session cookie honors ALLOW_INSECURE_HTTP (e2e, issue #5
 
     // …and crucially it is NOT marked Secure — a Secure cookie over plain HTTP
     // is silently dropped by the browser, which is exactly the login loop #525
-    // reports. (Before the fix this branch hardcodes `secure: NODE_ENV ===
-    // 'production'` == true here, so the cookie carries `; Secure` and this
-    // assertion fails.)
-    expect(cookieHeader.toLowerCase()).not.toContain('secure');
+    // reports (same bug class as #117 on /login, re-introduced here because the
+    // helper was duplicated instead of imported). Before the fix this branch
+    // hardcodes `secure: NODE_ENV === 'production'` == true here, so the cookie
+    // carries `; Secure` and this assertion fails.
+    expect(hasSecureAttribute(cookieHeader)).toBe(false);
   });
 
   it('the just-accepted session actually authenticates the next request (no login loop)', async () => {
     // The whole point of dropping `Secure`: the new user must be able to USE the
     // cookie their browser will now actually retain over plain HTTP.
-    const server = app.getHttpServer();
-    const adminAgent = request.agent(server);
-    await adminAgent.post('/api/v1/auth/login').send({ username: 'admin', password: 'admin-password-1' });
-    const dmAgent = request.agent(server);
-    await dmAgent.post('/api/v1/auth/login').send({ username: 'dm-dana', password: 'dm-password-1' });
     const campaignRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Second Vale' });
     const campaignId = campaignRes.body.id;
     const inviteRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
     const code: string = inviteRes.body.code;
 
-    // A supertest .agent() replays the Set-Cookie from accept onto /me — exactly
-    // what a browser cookie jar does. If the cookie were Secure-over-HTTP the
-    // browser would have dropped it; here supertest keeps it, and /me must 200.
-    const newbie = request.agent(server);
+    // A supertest .agent() replays the Set-Cookie from accept onto /me. Unlike a
+    // real browser cookie jar (which DROPS a Secure cookie over HTTP — that's the
+    // bug), supertest's tough-cookie keeps it regardless of scheme, so /me 200s
+    // here even on the unpatched code. The previous test is the one that actually
+    // proves the Secure flag is gone; this one proves the accepted session is
+    // usable at all once the cookie is retained.
+    const newbie = request.agent(server());
     const acceptRes = await newbie.post(`/api/v1/invites/${code}/accept`).send({
       username: 'loop-leo',
       password: 'leo-password-1',
@@ -143,4 +169,8 @@ describe('invite-accept session cookie honors ALLOW_INSECURE_HTTP (e2e, issue #5
     expect(meRes.status).toBe(200);
     expect(meRes.body.user.username).toBe('loop-leo');
   });
+
+  function server() {
+    return app.getHttpServer();
+  }
 });

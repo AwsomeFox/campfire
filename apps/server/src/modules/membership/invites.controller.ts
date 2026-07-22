@@ -30,7 +30,9 @@ function cookieOptions() {
     maxAge: SESSION_MAX_AGE_MS,
     // Secure in production, unless the operator opted into plain-HTTP serving
     // (ALLOW_INSECURE_HTTP) — a Secure cookie is silently dropped over plain HTTP,
-    // causing a login loop on a no-TLS homelab deployment (issue #117).
+    // causing a login loop on a no-TLS homelab deployment. /login was fixed in
+    // #117; this accept-invite route was the lone holdout because it duplicated
+    // the helper (and hardcoded `secure`) instead of importing the resolver (#525).
     secure: resolveCookieSecure(),
   };
 }
