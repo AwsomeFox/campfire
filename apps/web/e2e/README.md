@@ -23,6 +23,7 @@ campaign fixtures described below.
 | `role-navigation.spec.ts` | Login-per-role smoke + role-appropriate nav: DM gets the "Dungeon master" section (Members/Settings/…), player/viewer don't and read as Player/Viewer; the server-admin console (`/admin`) is reachable by admin and refused to a non-admin. |
 | `ai-dialog-accessibility.spec.ts` | AI drafting modal and Co-DM disclosure keyboard flow, focus trap/restoration, inert background, persistent prompt/quantity names and announcements, request-in-flight dismissal, responsive positioning, and axe scans. |
 | `danger-button-states.spec.ts` | Solid dialog and ghost page-delete danger controls at desktop/mobile across default, hover, active, keyboard-focus, busy, disabled, reduced-motion, forced-colors, custom-accent isolation, contrast, screenshots, and axe. |
+| `notifications.spec.ts` | Shared polling/read behavior plus notification-dialog semantics, accurate item announcements, keyboard focus trap/restoration, Escape/outside-click dismissal, mobile bounds, empty state, and axe scans. |
 | `oidc-recovery.spec.ts` | Every safe OIDC recovery category plus success, fresh-retry/local-login affordances, fixed-copy secrecy, heading focus, keyboard order, axe scan, and mobile overflow/touch targets. |
 
 ## How auth / seeding works
