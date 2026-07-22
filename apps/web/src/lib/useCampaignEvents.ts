@@ -6,7 +6,7 @@
  * request carries the exact same auth surface as lib/api.ts: the session cookie
  * (credentials: include) plus the dev-role override headers, which EventSource
  * cannot send. Events are thin invalidation signals ({type, campaignId,
- * encounterId}) — consumers refetch through the normal REST reads.
+ * entity ids) — consumers refetch through the normal REST reads.
  *
  * Reconnects automatically with capped exponential backoff; after a drop is
  * healed, onReconnect fires so pages can refetch whatever they missed while
@@ -20,21 +20,27 @@ export interface CampaignEventsHandlers {
   onEvent: (event: CampaignEvent) => void;
   /** Fires after the stream reconnects following a drop — refetch to catch up. */
   onReconnect?: () => void;
+  /** Lets last-known-data surfaces distinguish a healthy stream from a dropped/offline one. */
+  onStatusChange?: (status: CampaignEventsStatus) => void;
 }
+
+export type CampaignEventsStatus = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'stopped';
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 15_000;
 
 /**
  * Runtime guard for the CampaignEvent union (issue #527 widened it to a
- * discriminated union; #582 added treasury.updated). Accepts every variant: the
+ * discriminated union; #582 added treasury.updated; #790 added schedule.updated).
+ * Accepts every variant: the
  * encounter.* signals carry an encounterId; membership.revoked carries
- * userId/memberId; treasury.updated carries userId (the actor). Consumers narrow
- * by `type` before reading variant-specific fields (see RunSessionPage).
+ * userId/memberId; treasury.updated carries userId (the actor); schedule.updated
+ * carries scheduleId. Consumers narrow by `type` before reading variant-specific
+ * fields (see RunSessionPage and DashboardPage).
  *
  * Note: the server filters membership.revoked out of the data path as an internal
- * control signal, so in practice this client only ever sees encounter.* and
- * treasury.updated frames — but validating the full union here keeps the guard
+ * control signal, so in practice this client sees encounter.*, treasury.updated,
+ * and schedule.updated frames — but validating the full union here keeps the guard
  * correct if that filtering ever changes, and lets the type system prove that
  * `onEvent` callbacks handle every variant (or explicitly narrow).
  */
@@ -65,6 +71,11 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
     // refetches the permission-checked REST read on receipt.
     return typeof v.userId === 'string';
   }
+  if (v.type === 'schedule.updated') {
+    // Issue #790: schedule writes carry only the changed row id. Consumers refetch
+    // the authoritative projection rather than accepting schedule details over SSE.
+    return typeof v.scheduleId === 'number';
+  }
   return false;
 }
 
@@ -85,22 +96,55 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
   useEffect(() => {
     if (campaignId === undefined || !Number.isFinite(campaignId)) return;
 
-    const controller = new AbortController();
     let disposed = false;
+    let activeRequest: AbortController | null = null;
+    let wakeSleep: (() => void) | null = null;
+    let status: CampaignEventsStatus | null = null;
+    let needsCatchUp = !navigator.onLine;
+
+    const setStatus = (next: CampaignEventsStatus) => {
+      if (status === next || disposed) return;
+      status = next;
+      handlersRef.current.onStatusChange?.(next);
+    };
 
     const sleep = (ms: number) =>
       new Promise<void>((resolve) => {
-        const handle = setTimeout(resolve, ms);
-        controller.signal.addEventListener('abort', () => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
           clearTimeout(handle);
+          window.removeEventListener('online', finish);
+          if (wakeSleep === finish) wakeSleep = null;
           resolve();
-        });
+        };
+        const handle = setTimeout(finish, ms);
+        wakeSleep = finish;
+        window.addEventListener('online', finish, { once: true });
+        if (disposed) finish();
       });
+
+    const onOffline = () => {
+      needsCatchUp = true;
+      setStatus('offline');
+      // Force the current reader to settle so the retry loop can wait for `online`
+      // and then open a fresh permission-checked stream.
+      activeRequest?.abort();
+    };
+    window.addEventListener('offline', onOffline);
+    setStatus(navigator.onLine ? 'connecting' : 'offline');
 
     (async () => {
       let attempt = 0;
       while (!disposed) {
+        if (!navigator.onLine) {
+          setStatus('offline');
+          await sleep(RECONNECT_MAX_MS);
+          continue;
+        }
         try {
+          activeRequest = new AbortController();
           const headers: Record<string, string> = { accept: 'text/event-stream' };
           const devRole = localStorage.getItem('cf.devRole');
           const devUser = localStorage.getItem('cf.devUser');
@@ -110,13 +154,19 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
           const res = await fetch(`${API}/campaigns/${campaignId}/events`, {
             credentials: 'include',
             headers,
-            signal: controller.signal,
+            signal: activeRequest.signal,
           });
-          if (res.status === 401 || res.status === 403) return;
+          if (res.status === 401 || res.status === 403) {
+            setStatus('stopped');
+            return;
+          }
           if (!res.ok || !res.body) throw new Error(`SSE connect failed (${res.status})`);
 
-          if (attempt > 0) handlersRef.current.onReconnect?.();
+          const reconnected = needsCatchUp;
           attempt = 0;
+          needsCatchUp = false;
+          setStatus('connected');
+          if (reconnected) handlersRef.current.onReconnect?.();
 
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
@@ -142,16 +192,22 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
           // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
           throw new Error('SSE stream ended');
         } catch {
-          if (disposed || controller.signal.aborted) return;
+          if (disposed) return;
+          needsCatchUp = true;
+          setStatus(navigator.onLine ? 'reconnecting' : 'offline');
           await sleep(Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS));
           attempt += 1;
+        } finally {
+          activeRequest = null;
         }
       }
     })();
 
     return () => {
       disposed = true;
-      controller.abort();
+      window.removeEventListener('offline', onOffline);
+      wakeSleep?.();
+      activeRequest?.abort();
     };
   }, [campaignId]);
 }

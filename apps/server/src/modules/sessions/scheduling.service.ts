@@ -9,6 +9,7 @@ import { nowIso } from '../../common/time';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { buildCampaignIcs } from './ics.util';
@@ -61,7 +62,13 @@ export class SchedulingService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly events: CampaignEventsService,
   ) {}
+
+  /** Push one permission-safe invalidation signal for every schedule projection change. */
+  private emitScheduleUpdated(campaignId: number, scheduleId: number): void {
+    this.events.emit({ type: 'schedule.updated', campaignId, scheduleId });
+  }
 
   /** Human label for a scheduled game night — its title, or a date fallback. */
   private scheduleLabel(row: typeof scheduledSessions.$inferSelect): string {
@@ -139,6 +146,7 @@ export class SchedulingService {
       entityId: row.id,
       campaignId,
     });
+    this.emitScheduleUpdated(campaignId, row.id);
     // Tell the party a game night was put on the calendar (issue #263). Best-effort;
     // no entity deep-link (scheduled sessions aren't an EntityType — the bell routes
     // session_scheduled to the sessions page, which hosts the schedule panel).
@@ -167,6 +175,7 @@ export class SchedulingService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    this.emitScheduleUpdated(existing.campaignId, id);
     // Re-notify the party only when the game night actually MOVES (issue #263) —
     // a title/location/notes tweak isn't worth a ping. Mirrors sessions.service's
     // playedAt-changed guard so an unrelated edit doesn't spam the schedule.
@@ -192,6 +201,7 @@ export class SchedulingService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    this.emitScheduleUpdated(existing.campaignId, id);
   }
 
   // ----- RSVPs (availability) -----
@@ -232,6 +242,7 @@ export class SchedulingService {
       campaignId: schedule.campaignId,
       detail: input.status,
     });
+    this.emitScheduleUpdated(schedule.campaignId, scheduleId);
     // Let the DM(s) know availability changed (issue #263) — they own scheduling, so
     // an RSVP is theirs to see. Fan out to every dm-role member except the actor (a DM
     // marking their own availability shouldn't ping themselves). Best-effort.
