@@ -27,14 +27,15 @@ import {
   persistMeSnapshot,
   readMeSnapshot,
 } from '../../src/lib/swCache';
-import type { Me } from '@campfire/schema';
+import type { Me, ServerInstance } from '@campfire/schema';
 
 /**
- * Minimal but type-complete Me for decision tests. decideAuthOutcome only reads
- * `user.id`, so a shallow mock suffices — but we keep the memberships array and
- * omit the optional token so the object is assignable to `Me`.
+ * Minimal but type-complete Me for decision tests. decideAuthOutcome reads
+ * `user.id` AND `instance` (the #723 data-generation identity), so the mock
+ * carries both. `instance` defaults to a stable generation; tests that exercise
+ * a restore pass a different generation to drive the wipe.
  */
-function meFor(id: number): Me {
+function meFor(id: number, instance: ServerInstance = INSTANCE_GEN0): Me {
   return {
     user: {
       id,
@@ -45,8 +46,18 @@ function meFor(id: number): Me {
       textSize: 'default',
     },
     memberships: [],
+    instance,
   } as unknown as Me;
 }
+
+/** A stable install identity for the "no change" cases. */
+const INSTANCE_ID = '11111111-1111-1111-1111-111111111111';
+const INSTANCE_GEN0: ServerInstance = { instanceId: INSTANCE_ID, dataGeneration: 0 };
+/** A post-restore identity: same install (UUID travels inside the restored DB),
+ * generation bumped — this is the #723 wipe signal. */
+const INSTANCE_GEN1: ServerInstance = { instanceId: INSTANCE_ID, dataGeneration: 1 };
+/** A different physical install entirely (e.g. pointed the SW at another box). */
+const INSTANCE_OTHER: ServerInstance = { instanceId: '22222222-2222-2222-2222-222222222222', dataGeneration: 0 };
 
 const NOW = 1_700_000_000_000;
 
@@ -65,7 +76,7 @@ test.describe('decideAuthOutcome — stale vs logged out (#579)', () => {
     expect(d.shouldWipeCaches).toBe(false);
     expect(d.shouldClearSnapshot).toBe(false);
     // But we DO persist the new snapshot so the next offline load can use it.
-    expect(d.snapshotToPersist).toEqual({ me: meFor(42), confirmedAt: NOW });
+    expect(d.snapshotToPersist).toEqual({ me: meFor(42), confirmedAt: NOW, instance: INSTANCE_GEN0 });
     expect(d.connectionError).toBe(false);
   });
 
@@ -73,7 +84,7 @@ test.describe('decideAuthOutcome — stale vs logged out (#579)', () => {
     // A subsequent refresh where the same user resolves live again. Still no
     // change — caches survive.
     const outcome: MeFetchOutcome = { kind: 'live', me: meFor(42) };
-    const d = decideAuthOutcome(outcome, { currentUserId: 42, snapshot: null }, NOW);
+    const d = decideAuthOutcome(outcome, { currentUserId: 42, currentInstance: INSTANCE_GEN0, snapshot: null }, NOW);
 
     expect(d.shouldWipeCaches).toBe(false);
     expect(d.me?.user.id).toBe(42);
@@ -84,12 +95,12 @@ test.describe('decideAuthOutcome — stale vs logged out (#579)', () => {
     // as user 99. That's a real account switch on the same device — wipe both
     // caches so the prior account's campaign data can never render for user 99.
     const outcome: MeFetchOutcome = { kind: 'live', me: meFor(99) };
-    const d = decideAuthOutcome(outcome, { currentUserId: 42, snapshot: null }, NOW);
+    const d = decideAuthOutcome(outcome, { currentUserId: 42, currentInstance: INSTANCE_GEN0, snapshot: null }, NOW);
 
     expect(d.me?.user.id).toBe(99);
     expect(d.shouldWipeCaches).toBe(true);
     expect(d.shouldClearSnapshot).toBe(false);
-    expect(d.snapshotToPersist).toEqual({ me: meFor(99), confirmedAt: NOW });
+    expect(d.snapshotToPersist).toEqual({ me: meFor(99), confirmedAt: NOW, instance: INSTANCE_GEN0 });
     expect(d.staleIdentity).toBe(false);
   });
 
