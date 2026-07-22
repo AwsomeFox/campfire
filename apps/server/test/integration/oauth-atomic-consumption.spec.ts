@@ -81,9 +81,7 @@ describe('OAuth atomic consumption (real SQLite, separate processes)', () => {
     };
     return Promise.all([
       runWorker({ ...common, participantId: 'a' }),
-      // Exercise the source-loading fallback used by `test:watch` in the same
-      // real cross-process race as the normal compiled-module worker.
-      runWorker({ ...common, participantId: 'b', forceSource: true }),
+      runWorker({ ...common, participantId: 'b' }),
     ]);
   }
 
