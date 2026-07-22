@@ -318,8 +318,9 @@ export class OidcService {
    * When an allowed-group is configured (OIDC_ALLOWED_GROUP or the in-app
    * `allowedGroup`), membership in that group — or in the admin group, since
    * admins always retain access — is required to sign in at all: without it, no
-   * account is provisioned and existing accounts are denied a session with a
-   * 403. Checked on EVERY login, so removing a user from the allowed group at
+   * account is provisioned and existing accounts are redirected to the safe
+   * group-denied recovery page without a session. Checked on EVERY login, so
+   * removing a user from the allowed group at
    * the IdP locks them out on their next login. Unset = any authenticated IdP
    * user may sign in (previous behavior).
    */

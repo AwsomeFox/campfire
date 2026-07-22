@@ -103,8 +103,28 @@ test.describe('OIDC recovery page', () => {
     await mockSignedOutStatus(page, false);
     await page.goto('/login/sso-error?category=PROVIDER_PRIVATE_PAYLOAD&ref=state-secret-value');
     await expect(page.getByRole('heading', { level: 1, name: 'SSO could not complete sign-in' })).toBeVisible();
-    await expect(page.getByText('unavailable')).toBeVisible();
+    await expect(page.getByText('No support reference is available for this attempt.')).toBeVisible();
+    await expect(page.getByText(/include support reference/i)).toHaveCount(0);
     await expect(page.getByText(/PROVIDER_PRIVATE_PAYLOAD|state-secret-value/)).toHaveCount(0);
+  });
+
+  test('keeps the local-login disclosure synchronized with query-only history navigation', async ({ page }) => {
+    await mockSignedOutStatus(page, true);
+    await page.goto('/login');
+    const username = page.getByLabel('Username');
+    await expect(username).toHaveCount(0);
+
+    await page.evaluate(() => {
+      window.history.pushState({}, '', '/login?local=1');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await expect(page).toHaveURL(/\/login\?local=1$/);
+    await expect(username).toBeVisible();
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\/login$/);
+    await expect(username).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /username & password instead/i })).toBeVisible();
   });
 
   test('preserves the existing successful callback redirect to the authenticated app', async ({ page }) => {

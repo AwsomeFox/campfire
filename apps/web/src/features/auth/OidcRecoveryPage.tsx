@@ -153,13 +153,16 @@ export function OidcRecoveryPage() {
           ) : null}
         </div>
 
-        <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12, lineHeight: 1.5 }}>
-          If you contact your server admin, include support reference{' '}
-          <code style={{ color: 'var(--color-text)', overflowWrap: 'anywhere' }}>
-            {reference ?? 'unavailable'}
-          </code>
-          .
-        </p>
+        {reference ? (
+          <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12, lineHeight: 1.5 }}>
+            If you contact your server admin, include support reference{' '}
+            <code style={{ color: 'var(--color-text)', overflowWrap: 'anywhere' }}>{reference}</code>.
+          </p>
+        ) : (
+          <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12, lineHeight: 1.5 }}>
+            If this keeps happening, contact your server admin. No support reference is available for this attempt.
+          </p>
+        )}
       </section>
     </main>
   );

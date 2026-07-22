@@ -7,7 +7,7 @@
  * when OIDC is configured; local username/password always available (primary when
  * OIDC is off, secondary/collapsible when it's on).
  */
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
@@ -226,6 +226,13 @@ export function LoginPage() {
   const [showLocalForm, setShowLocalForm] = useState(
     () => new URLSearchParams(location.search).get('local') === '1',
   );
+
+  // React Router keeps this page mounted for query-only navigation. Mirror the
+  // URL on back/forward and recovery-page navigation instead of treating the
+  // initial query string as immutable component state.
+  useEffect(() => {
+    setShowLocalForm(new URLSearchParams(location.search).get('local') === '1');
+  }, [location.search]);
 
   if (!loading && status?.setupRequired) {
     return <Navigate to="/setup" replace />;
