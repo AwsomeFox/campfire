@@ -1,5 +1,6 @@
 import { Body, Controller, Param, ParseIntPipe, Post } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -23,6 +24,7 @@ export class CoDmController {
   ) {}
 
   @Post('draft')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'Co-DM: draft content for the approval queue',
     description:
