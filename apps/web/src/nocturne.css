@@ -258,7 +258,7 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 .seg-opt {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 12px; font-size: var(--type-supporting); cursor: pointer;
+  padding: 7px 12px; font-size: var(--type-control); cursor: pointer;
 }
 /* On a narrow rail (e.g. an NPC's Notes panel at ~1280px) a 4-option segmented
    control can't fit on one row; without wrapping the last option ('🤫 Whisper')
