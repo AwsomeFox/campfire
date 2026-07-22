@@ -48,6 +48,8 @@ export interface SeedData {
   encounterId: number;
   /** A second encounter that was started and then ended — must render read-only (#368). */
   endedEncounterId: number;
+  /** An ended encounter attached to navigation.sessionId for post-encounter hand-off coverage (#663). */
+  linkedEndedEncounterId: number;
   npcId: number;
   xpRecipients: Record<'active' | 'retired' | 'dead' | 'inactive', { id: number; name: string; xp: number }>;
   semantic: {
@@ -335,6 +337,17 @@ export default async function globalSetup(config: FullConfig) {
   await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/start`);
   await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/end`);
 
+  // A linked ended encounter exercises the session-aware branch of the concise
+  // post-encounter hand-off (#663). It intentionally has no combatants: the fixture
+  // only needs a completed lifecycle plus a valid same-campaign session relation.
+  const linkedEndedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'Linked Aftermath at the Moon Gate',
+    sessionId: navSession.id,
+  });
+  const linkedEndedEncounterId: number = linkedEndedEncounter.id;
+  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/start`);
+  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/end`);
+
   // Party-XP fixtures (#814) are created after encounter setup so the active PC
   // does not alter the combat-trackers' already-pinned rosters.
   const xpRecipients = {} as SeedData['xpRecipients'];
@@ -402,6 +415,7 @@ export default async function globalSetup(config: FullConfig) {
     campaignId,
     encounterId,
     endedEncounterId,
+    linkedEndedEncounterId,
     npcId,
     xpRecipients,
     semantic: {
