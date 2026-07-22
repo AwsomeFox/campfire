@@ -30,6 +30,56 @@ export function slugify(name: string): string {
   return slug || 'untitled';
 }
 
+/**
+ * De-duplicating filename allocator (issue #530). JSZip's `folder.file(name, ...)`
+ * silently overwrites an existing entry, so two NPCs named "Bob" collapse into a
+ * single `bob.md` and one row of data is lost. This helper hands out distinct
+ * names within a folder: the first "bob" gets `bob`, the second gets `bob-2`,
+ * then `bob-3`, and so on.
+ *
+ * `seen` is a Set the caller owns (one per folder) so it tracks names across
+ * successive calls. Returns the allocated base name (no extension) — the caller
+ * appends `.md`. Deterministic: iteration order is the order entities arrive
+ * from the list services (a single DB query with a stable ORDER BY), so the
+ * `-2` suffix always attaches to the second occurrence in that order, never
+ * arbitrarily.
+ */
+export function uniqueFilename(seen: Set<string>, base: string): string {
+  if (!seen.has(base)) {
+    seen.add(base);
+    return base;
+  }
+  let n = 2;
+  while (seen.has(`${base}-${n}`)) n += 1;
+  const name = `${base}-${n}`;
+  seen.add(name);
+  return name;
+}
+
+/**
+ * Builds one human-readable warning line per slug that collided in a folder
+ * (issue #530). `slugs` is the full ordered list of slugified names the loop
+ * visited; `seen` is what uniqueFilename populated (base, base-2, …). A slug
+ * appears here only when it occurred 2+ times. The line names the count, the
+ * original (display) entity label, and every filename produced, so a reader can
+ * see exactly what was de-duplicated.
+ */
+function pushCollisionWarning(warnings: string[], label: string, slugs: string[], seen: Set<string>): void {
+  const counts = new Map<string, number>();
+  for (const s of slugs) counts.set(s, (counts.get(s) ?? 0) + 1);
+  for (const [base, count] of counts) {
+    if (count < 2) continue;
+    // The exact filenames uniqueFilename allocated for this slug, in order.
+    const names = [base];
+    for (let n = 2; n <= count; n++) names.push(`${base}-${n}`);
+    // Sanity: every allocated name should be present in `seen`.
+    const allNames = names.filter((nm) => seen.has(nm));
+    warnings.push(
+      `${count} ${label}s shared the name '${base}' and were exported as ${allNames.map((nm) => `${nm}.md`).join(', ')}.`,
+    );
+  }
+}
+
 @Injectable()
 export class ExportService {
   constructor(
@@ -243,10 +293,23 @@ export class ExportService {
     return `campfire-${slug}-${date}.${extension}`;
   }
 
-  /** Renders the same export data as a zip of markdown files. */
-  async buildMarkdownZip(campaignId: number, user: RequestUser): Promise<Buffer> {
+  /**
+   * Renders the same export data as a zip of markdown files.
+   *
+   * Returns the zip buffer plus a `warnings` array (issue #530): one human-readable
+   * line per folder where two or more entities shared a slug and would have silently
+   * overwritten each other under the old `${slugify(name)}.md` scheme. The buffer is
+   * what the controller streams as `application/zip`; the warnings are surfaced for
+   * any caller (UI, MCP, future JSON-wrapped variant) to flag the collision. They are
+   * also written into the archive as `warnings.txt` when non-empty, so a human
+   * unzipping the download sees the note without a UI — and they never enter
+   * `campaign.json`, which is the strict manifest POST /campaigns/import/archive
+   * reads back, so the round-trip is untouched.
+   */
+  async buildMarkdownZip(campaignId: number, user: RequestUser): Promise<{ buffer: Buffer; warnings: string[] }> {
     const data = await this.buildExport(campaignId, user);
     const zip = new JSZip();
+    const warnings: string[] = [];
 
     // Machine-readable manifest (issue #236): embed the full structured export as
     // campaign.json so the zip is round-trippable. The markdown files below are for
@@ -257,35 +320,60 @@ export class ExportService {
 
     zip.file('campaign.md', this.campaignMarkdown(data.campaign, data.notes));
 
+    // Per-folder seen-sets drive uniqueFilename (issue #530): each folder de-dups
+    // independently, so a quest and an NPC sharing a slug don't interfere.
     const questsFolder = zip.folder('quests')!;
+    const questsSeen = new Set<string>();
     for (const q of data.quests) {
-      questsFolder.file(`${slugify(q.title)}.md`, this.questMarkdown(q));
+      const base = uniqueFilename(questsSeen, slugify(q.title));
+      questsFolder.file(`${base}.md`, this.questMarkdown(q));
     }
+    pushCollisionWarning(warnings, 'quest', data.quests.map((q) => slugify(q.title)), questsSeen);
 
     const npcsFolder = zip.folder('npcs')!;
+    const npcsSeen = new Set<string>();
     for (const n of data.npcs) {
-      npcsFolder.file(`${slugify(n.name)}.md`, this.npcMarkdown(n));
+      const base = uniqueFilename(npcsSeen, slugify(n.name));
+      npcsFolder.file(`${base}.md`, this.npcMarkdown(n));
     }
+    pushCollisionWarning(warnings, 'NPC', data.npcs.map((n) => slugify(n.name)), npcsSeen);
 
     const locationsFolder = zip.folder('locations')!;
+    const locationsSeen = new Set<string>();
     for (const l of data.locations) {
-      locationsFolder.file(`${slugify(l.name)}.md`, this.locationMarkdown(l));
+      const base = uniqueFilename(locationsSeen, slugify(l.name));
+      locationsFolder.file(`${base}.md`, this.locationMarkdown(l));
     }
+    pushCollisionWarning(warnings, 'location', data.locations.map((l) => slugify(l.name)), locationsSeen);
 
     const sessionsFolder = zip.folder('sessions')!;
+    const sessionsSeen = new Set<string>();
     for (const s of data.sessions) {
-      sessionsFolder.file(`${slugify(s.title || `session-${s.number}`)}.md`, this.sessionMarkdown(s));
+      const base = uniqueFilename(sessionsSeen, slugify(s.title || `session-${s.number}`));
+      sessionsFolder.file(`${base}.md`, this.sessionMarkdown(s));
     }
+    pushCollisionWarning(
+      warnings,
+      'session',
+      data.sessions.map((s) => slugify(s.title || `session-${s.number}`)),
+      sessionsSeen,
+    );
 
     const charactersFolder = zip.folder('characters')!;
+    const charactersSeen = new Set<string>();
     for (const c of data.characters) {
-      charactersFolder.file(`${slugify(c.name)}.md`, this.characterMarkdown(c));
+      const base = uniqueFilename(charactersSeen, slugify(c.name));
+      charactersFolder.file(`${base}.md`, this.characterMarkdown(c));
     }
+    pushCollisionWarning(warnings, 'character', data.characters.map((c) => slugify(c.name)), charactersSeen);
 
     const encountersFolder = zip.folder('encounters')!;
+    const encountersSeen = new Set<string>();
     for (const e of data.encounters) {
-      encountersFolder.file(`${slugify(e.name)}.md`, this.encounterMarkdown(e));
+      const base = uniqueFilename(encountersSeen, slugify(e.name));
+      encountersFolder.file(`${base}.md`, this.encounterMarkdown(e));
     }
+    pushCollisionWarning(warnings, 'encounter', data.encounters.map((e) => slugify(e.name)), encountersSeen);
 
     // Issue #87: embed the actual attachment bytes (maps, portraits, images) under
     // uploads/ so the export is self-contained and its references resolve. A file
@@ -302,7 +390,14 @@ export class ExportService {
     }
     zip.file('attachments.md', this.attachmentsManifestMarkdown(data.campaign, data.characters, data.attachments, skipped));
 
-    return zip.generateAsync({ type: 'nodebuffer' });
+    // Issue #530: surface filename collisions inside the archive itself. The
+    // warnings are informational only — the structured campaign.json manifest is
+    // what import reads, so distinct markdown filenames don't affect round-trip.
+    if (warnings.length) {
+      zip.file('warnings.txt', warnings.join('\n') + '\n');
+    }
+
+    return { buffer: await zip.generateAsync({ type: 'nodebuffer' }), warnings };
   }
 
   /**
