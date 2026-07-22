@@ -684,6 +684,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             <RevisionHistoryPanel
               entityType="quest"
               entityId={quest.id}
+              currentSnapshot={{ body: quest.body }}
               reloadNonce={historyNonce}
               onRestored={() => {
                 setHistoryNonce((n) => n + 1);

@@ -360,6 +360,7 @@ export default function NpcPage() {
                 <RevisionHistoryPanel
                   entityType="npc"
                   entityId={id}
+                  currentSnapshot={{ body: npc.body }}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);
