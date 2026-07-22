@@ -14,7 +14,12 @@
  *
  * Design affordances with no backing API (rendered disabled with a "soon" tag — see report):
  *  - Inventory (no inventory API — `Character` has no items field)
- *  - D&D Beyond link (schema has `ddbId` but there is no linking flow/endpoint)
+ *
+ * D&D Beyond provenance (issue #720): the schema carries `ddbId` for characters
+ * imported once from a public DDB sheet (issue #18 — a one-time import, not a live
+ * link). The Player card's provenance row now branches on `ddbId`: imported sheets
+ * show "Imported from D&D Beyond" + a copyable source id (no "sync" overclaim),
+ * while manually-created sheets get honest guidance instead of "soon".
  */
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -365,10 +370,7 @@ export default function CharacterPage() {
                 <span className="text-muted">Owner</span>
                 <span>{ownerLabel(character.ownerUserId)}</span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-muted">D&amp;D Beyond</span>
-                <span className="text-muted">Not linked — soon</span>
-              </div>
+              <DdbProvenanceRow ddbId={character.ddbId} canEdit={canEdit} />
             </div>
           </Card>
         </div>
@@ -1481,6 +1483,100 @@ function DmSecretCard({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The stable public URL pattern for a D&D Beyond character sheet. The importer
+ * (issue #18) resolves a numeric id from this URL or a bare id and reads the
+ * public character-service JSON once; this is a one-time import, not a live
+ * link. We only render the link for an id that looks like a bare DDB character
+ * id (digits) so we never fabricate a URL from a malformed/garbage `ddbId`.
+ */
+const DDB_CHARACTER_URL = (id: string) => `https://www.dndbeyond.com/characters/${id}`;
+
+/**
+ * D&D Beyond provenance row (issue #720). The schema persists `ddbId` on
+ * import, but the sheet previously always said "Not linked — soon" — misleading
+ * for imported characters (they ARE linked) and vague for manual ones. This row
+ * now reflects the actual provenance honestly:
+ *
+ *  - `ddbId` present → "Imported from D&D Beyond", a copyable source id, and a
+ *    link to the public DDB sheet. Explicit that this was a one-time import, not
+ *    live synchronization — the app does not re-fetch or push changes.
+ *  - `ddbId` absent → "Created manually" with accurate guidance (import from a
+ *    public DDB sheet on the party page), never "soon".
+ *
+ * Only owners/DMs (canEdit) see the copy action; viewers still see the provenance
+ * label so they know where the sheet came from, but not the copy affordance.
+ */
+function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: boolean }) {
+  const [copied, setCopied] = useState(false);
+
+  // Manual character (no ddbId) — honest guidance, no "soon" hand-wave.
+  if (!ddbId) {
+    return (
+      <div className="flex justify-between gap-2">
+        <span className="text-muted">D&amp;D Beyond</span>
+        <span className="text-right text-slate-500">
+          Created manually
+          {canEdit && (
+            <span className="block text-[11px] text-slate-600">
+              Import from a public sheet on the party page.
+            </span>
+          )}
+        </span>
+      </div>
+    );
+  }
+
+  // Capture the narrowed non-null id so the closure below keeps the `string` type
+  // (TS does not carry early-return narrowing into nested function declarations).
+  const sourceId = ddbId;
+  const isBareId = /^\d+$/.test(sourceId);
+  async function copyId() {
+    try {
+      await navigator.clipboard.writeText(sourceId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable — id is still selectable above */
+    }
+  }
+
+  return (
+    <div className="flex justify-between gap-2">
+      <span className="text-muted">D&amp;D Beyond</span>
+      <span className="text-right min-w-0">
+        <span className="block">Imported from D&amp;D Beyond</span>
+        <span className="block text-[11px] text-slate-500">
+          One-time import — not synced.{' '}
+          {isBareId ? (
+            <a
+              href={DDB_CHARACTER_URL(sourceId)}
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              className="underline hover:text-slate-300"
+            >
+              Source sheet ↗
+            </a>
+          ) : (
+            <span title="D&D Beyond character id">id {sourceId}</span>
+          )}
+          {canEdit && (
+            <button
+              type="button"
+              onClick={copyId}
+              title="Copy D&D Beyond character id"
+              className="underline hover:text-slate-300 ml-1"
+              style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: 'pointer' }}
+            >
+              {copied ? 'Copied!' : 'Copy id'}
+            </button>
+          )}
+        </span>
+      </span>
     </div>
   );
 }
