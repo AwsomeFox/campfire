@@ -139,6 +139,34 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   return JSON.parse(text) as T;
 }
 
+/**
+ * Same as `request`, but also returns the response `Headers` so callers can
+ * read server-disclosed metadata (e.g. the dice-log retention headers, #614).
+ * Kept separate from `get` so the common path stays a bare `T`.
+ */
+export async function getWithHeaders<T>(path: string, init?: RequestInit): Promise<{ data: T; headers: Headers }> {
+  const headers = new Headers(init?.headers);
+  const devRole = localStorage.getItem('cf.devRole');
+  const devUser = localStorage.getItem('cf.devUser');
+  if (devRole) headers.set('x-dev-role', devRole);
+  if (devUser) headers.set('x-dev-user', devUser);
+  const res = await fetch(path, { ...init, credentials: 'include', headers });
+  if (!res.ok) {
+    // Reuse the same error shaping as `request` so callers' catch blocks are identical.
+    let message = res.statusText;
+    try {
+      const body = await res.json();
+      message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
+    } catch {
+      /* non-json error body */
+    }
+    throw new ApiError(res.status, message);
+  }
+  const text = await res.text();
+  const data = (text === '' ? undefined : JSON.parse(text)) as T;
+  return { data, headers: res.headers };
+}
+
 export const api = {
   get: <T>(path: string, init?: RequestInit) => request<T>(path, init),
   post: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'POST', json }),
