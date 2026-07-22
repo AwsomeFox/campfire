@@ -208,7 +208,7 @@ export default function CharacterPage() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
+    <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
       <div>
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/party`)}>
           ← Back
@@ -269,9 +269,9 @@ export default function CharacterPage() {
                 const score = abilityScore(character, k);
                 return (
                   <div key={k} className="cf-inset text-center py-2.5 px-1.5">
-                    <p className="text-[10px] tracking-wide text-slate-500">{k}</p>
+                    <p className="text-[length:var(--type-label)] tracking-wide text-slate-500">{k}</p>
                     <p className="text-xl font-heading my-0.5">{score}</p>
-                    <p className="text-[11px]" style={{ color: 'var(--color-accent-300)' }}>
+                    <p className="text-[length:var(--type-meta)]" style={{ color: 'var(--color-accent-300)' }}>
                       {signed(adapter.abilityModifier(score))}
                     </p>
                   </div>
@@ -327,7 +327,7 @@ export default function CharacterPage() {
           <Card className="space-y-2">
             <div className="flex items-baseline gap-2.5">
               <p className="card-kicker mb-0">Inventory</p>
-              <span className="tag tag-neutral" style={{ fontSize: 9 }}>soon</span>
+              <span className="tag tag-neutral">soon</span>
             </div>
             <p className="text-xs text-slate-500">Item tracking arrives with the Compendium — no inventory API yet.</p>
           </Card>
@@ -359,11 +359,11 @@ export default function CharacterPage() {
                 className="h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
               />
             ) : (
-              <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[11px] text-[var(--color-neutral-600)]">
+              <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-[var(--color-neutral-600)]">
                 Portrait
               </span>
             )}
-            {canEdit && <span className="text-[11px] text-slate-500">Click or drop to change</span>}
+            {canEdit && <span className="text-[length:var(--type-label)] text-slate-500">Click or drop to change</span>}
           </Card>
           <Card className="space-y-2">
             <p className="card-kicker mb-0">Player</p>
@@ -688,7 +688,7 @@ function XpCard({
       <div className="flex items-baseline gap-2.5 flex-wrap">
         <p className="card-kicker mb-0">Experience</p>
         {ready && (
-          <span className="tag tag-accent cf-anim-ready" style={{ fontSize: 10 }}>
+          <span className="tag tag-accent cf-anim-ready">
             Ready to level up
           </span>
         )}
@@ -1066,7 +1066,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
               <p className="text-[13px] font-semibold flex items-center gap-1.5 flex-wrap">
                 {action.name}
                 {action.kind && (
-                  <span className="tag tag-neutral" style={{ fontSize: 9 }}>
+                  <span className="tag tag-neutral">
                     {action.kind}
                   </span>
                 )}
@@ -1528,7 +1528,7 @@ function StoryBody({
   return (
     <div className="space-y-2">
       {character.notes ? (
-        <Markdown className="!text-[13px]">{character.notes}</Markdown>
+        <Markdown>{character.notes}</Markdown>
       ) : (
         <p className="text-sm text-slate-500 italic">No story written yet.</p>
       )}

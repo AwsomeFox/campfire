@@ -191,7 +191,7 @@ export default function DashboardPage() {
   if (!summary) return null;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div className="reading-surface max-w-7xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <StatusHeader campaignId={id} summary={summary} role={role} onChange={load} liveEncounter={liveEncounter} />
@@ -229,7 +229,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <p className="text-[11px] text-slate-600 pb-4">
+      <p className="reading-supporting text-slate-600 pb-4">
         Players can tick objectives and edit their own character; viewers can read and leave notes.
       </p>
     </div>

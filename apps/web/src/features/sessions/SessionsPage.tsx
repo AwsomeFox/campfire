@@ -305,7 +305,7 @@ export default function SessionsPage() {
   const showDetailOnMobile = Boolean(selected) || (isDm && (showAddForm || sessions.length === 0));
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+    <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <div className="flex items-center gap-2.5">
@@ -672,7 +672,7 @@ function SessionDetail({
   }
 
   return (
-    <div className="space-y-3" style={{ maxWidth: 720 }} {...entityTargetProps('session', session.id)}>
+    <div className="reading-surface space-y-3" style={{ maxWidth: 720 }} {...entityTargetProps('session', session.id)}>
       <div>
         <button onClick={onBack} className="text-xs text-slate-500 hover:text-slate-300 lg:hidden mb-1 block">
           ← Back to sessions

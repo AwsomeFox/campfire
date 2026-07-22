@@ -99,7 +99,7 @@ export function QuestsCard({
           {q.reward && (
             <span
               className="tag tag-neutral"
-              style={{ fontSize: 10, whiteSpace: 'normal', maxWidth: '100%', overflowWrap: 'anywhere', textAlign: 'left' }}
+              style={{ fontSize: 'var(--type-label)', whiteSpace: 'normal', maxWidth: '100%', overflowWrap: 'anywhere', textAlign: 'left' }}
               title={q.reward}
             >
               {q.reward}
