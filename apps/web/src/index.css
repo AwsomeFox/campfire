@@ -110,6 +110,23 @@
   --cf-arcane: var(--color-accent-2); /* lore, magic, proposals */
   --cf-threat: #38bdf8; /* sky — threats, movement paths (unchanged) */
   --cf-crit: #fbbf24; /* amber — natural-20 crit flourish (issue #67) */
+  /* Difficulty band tokens (issue #668) — green→red ramp for the encounter
+     Easy/Medium/Hard/Deadly badge (issue #58). Distinct from the accent-
+     colored status chips and from --cf-danger (the closed destructive family);
+     `trivial` aliases the neutral tokens it was originally built on so the
+     visual is unchanged while still participating in the difficulty family.
+     Lifted verbatim from the inline DIFFICULTY_STYLE hex so a theme or
+     dark/light swap can reach them. */
+  --cf-difficulty-trivial-bg: var(--color-neutral-800);
+  --cf-difficulty-trivial-fg: var(--color-neutral-100);
+  --cf-difficulty-easy-bg: #14532d;
+  --cf-difficulty-easy-fg: #bbf7d0;
+  --cf-difficulty-medium-bg: #713f12;
+  --cf-difficulty-medium-fg: #fde68a;
+  --cf-difficulty-hard-bg: #7c2d12;
+  --cf-difficulty-hard-fg: #fed7aa;
+  --cf-difficulty-deadly-bg: #7f1d1d;
+  --cf-difficulty-deadly-fg: #fecaca;
   --cf-radius: var(--radius-lg);
   color-scheme: dark;
 }
