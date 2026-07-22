@@ -15,6 +15,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
 // "Updated Xd ago", mirroring the dashboard's NotesQuickRail phrasing so relative
@@ -44,27 +45,6 @@ function buildChangeMap(changes: QuestChanges | null): Map<number, ChangeKind> {
   }
   return map;
 }
-
-const STATUS_GLYPH: Record<Quest['status'], { glyph: string; color: string }> = {
-  available: { glyph: '○', color: 'var(--color-neutral-500)' },
-  active: { glyph: '◐', color: 'var(--color-accent)' },
-  completed: { glyph: '✓', color: 'var(--color-neutral-500)' },
-  failed: { glyph: '✕', color: 'var(--color-neutral-600)' },
-};
-
-const STATUS_LABEL: Record<Quest['status'], string> = {
-  available: 'Available',
-  active: 'Active',
-  completed: 'Completed',
-  failed: 'Failed',
-};
-
-const STATUS_TAG_CLASS: Record<Quest['status'], string> = {
-  available: 'tag tag-outline',
-  active: 'tag tag-accent',
-  completed: 'tag tag-neutral',
-  failed: 'tag tag-neutral',
-};
 
 // NEW / CHANGED marker for a quest touched since the last session (#66), plus the
 // "updated Xd ago" relative time. Renders nothing when the quest hasn't changed.
@@ -175,7 +155,7 @@ export default function QuestListPage() {
   const childrenOf = (parentId: number) => quests.filter((q) => q.parentId === parentId && !isRoot(q));
 
   return (
-    <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div data-testid="quest-list-surface" className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <h3 style={{ margin: '4px 0 0' }}>{t('quests.title')}</h3>
         <div style={{ flex: 1 }} />
@@ -207,11 +187,10 @@ export default function QuestListPage() {
       ) : (
         roots.map((q) => {
           const kids = childrenOf(q.id);
-          const meta = STATUS_GLYPH[q.status];
           return (
             <div key={q.id} className="card elev-sm">
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 14, width: 18, textAlign: 'center', color: meta.color }}>{meta.glyph}</span>
+                <QuestStatusBadge status={q.status} />
                 <Link
                   to={`/c/${cid}/quests/${q.id}`}
                   style={{
@@ -225,9 +204,6 @@ export default function QuestListPage() {
                 >
                   {q.title}
                 </Link>
-                <span className={STATUS_TAG_CLASS[q.status]} style={{ fontSize: 10 }}>
-                  {STATUS_LABEL[q.status]}
-                </span>
                 <ChangeBadge quest={q} kind={changes.get(q.id)} />
                 {isDm && q.hidden && (
                   <span className="tag tag-outline" style={{ fontSize: 10 }} title={t('quests.hiddenFromPlayers')}>
@@ -254,9 +230,7 @@ export default function QuestListPage() {
                   >
                     {s.title}
                   </Link>
-                  <span className="tag tag-neutral" style={{ fontSize: 10 }}>
-                    {STATUS_LABEL[s.status]}
-                  </span>
+                  <QuestStatusBadge status={s.status} />
                   <ChangeBadge quest={s} kind={changes.get(s.id)} />
                 </div>
               ))}
