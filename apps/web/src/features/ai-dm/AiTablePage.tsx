@@ -555,7 +555,20 @@ function AiTableComposer({
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
-    if (blockReason) return;
+    const currentBlockReason = aiTableSendBlockReason({
+      input: draftRef.current.input,
+      composing: composingRef.current,
+      submitting,
+      connection,
+      sessionLoading,
+      sessionError,
+      streaming,
+      sessionStatus,
+      sessionState,
+      tokensUsed,
+      tokenBudget,
+    });
+    if (currentBlockReason) return;
 
     const snapshot = { ...draftRef.current };
     const text = snapshot.input.trim();

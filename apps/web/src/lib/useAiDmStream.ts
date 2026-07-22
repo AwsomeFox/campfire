@@ -245,27 +245,34 @@ export function useAiDmStream(
           attempt = 0;
           // Consume the established stream immediately. Send remains gated by the
           // reconnecting state until the best-effort authority refresh settles.
-          void reconciliation.finally(() => setConnectionState('connected'));
+          let streamOpen = true;
+          void reconciliation.finally(() => {
+            if (!disposed && streamOpen) setConnectionState('connected');
+          });
 
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let sep: number;
-            while ((sep = buffer.indexOf('\n\n')) !== -1) {
-              const data = sseBlockData(buffer.slice(0, sep));
-              buffer = buffer.slice(sep + 2);
-              if (!data) continue;
-              try {
-                const parsed = parseAiDmStreamEvent(JSON.parse(data));
-                if (parsed && !disposed) handlersRef.current.onEvent(parsed);
-              } catch {
-                /* malformed frame — skip */
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              let sep: number;
+              while ((sep = buffer.indexOf('\n\n')) !== -1) {
+                const data = sseBlockData(buffer.slice(0, sep));
+                buffer = buffer.slice(sep + 2);
+                if (!data) continue;
+                try {
+                  const parsed = parseAiDmStreamEvent(JSON.parse(data));
+                  if (parsed && !disposed) handlersRef.current.onEvent(parsed);
+                } catch {
+                  /* malformed frame — skip */
+                }
               }
             }
+          } finally {
+            streamOpen = false;
           }
           // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
           throw new Error('AI-DM SSE stream ended');

@@ -271,7 +271,7 @@ test.describe('AI Table local drafting', () => {
     await editor.fill('扉を調べる');
     await editor.dispatchEvent('compositionstart', { data: 'る' });
     await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
-    await expect(sendStatus(page)).toContainText('Finish composing');
+    await expect(sendStatus(page)).toContainText('Finish entering text');
     await editor.press('Control+Enter');
     expect(runtime.messagePosts).toBe(0);
 
