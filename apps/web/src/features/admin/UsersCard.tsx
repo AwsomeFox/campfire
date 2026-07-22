@@ -1,14 +1,15 @@
 /**
  * Users management card — extracted from AdminPage.tsx to its own file as part
- * of the /admin/* page split (issue #350). Lives on /admin/users. Unchanged
- * behavior from the original inline component: create/edit/disable/delete
- * users, plus an inline one-time password reset.
+ * of the /admin/* page split (issue #350). Lives on /admin/users. Supports an
+ * accessible new-user dialog, inline edit/disable/delete controls, and an
+ * inline one-time password reset.
  */
-import { useState } from 'react';
+import { useId, useRef, useState, type FormEvent } from 'react';
 import type { ServerRole, User } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Btn, TextInput, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { useDialog } from '../../components/useDialog';
 
 export function UsersCard({ users, onChange }: { users: User[]; onChange: () => void }) {
   const [showNew, setShowNew] = useState(false);
@@ -20,8 +21,17 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
     <Card className="space-y-3">
       <div className="flex items-center justify-between border-b border-slate-700 pb-3">
         <h2 className="font-bold text-white text-sm">Users</h2>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setShowNew((v) => !v)}>
-          {showNew ? 'Cancel' : '+ New user'}
+        <Btn
+          type="button"
+          className="!min-h-0 !py-1.5 text-xs"
+          aria-haspopup="dialog"
+          aria-expanded={showNew}
+          onClick={() => {
+            setError(null);
+            setShowNew(true);
+          }}
+        >
+          + New user
         </Btn>
       </div>
 
@@ -34,7 +44,6 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
             setShowNew(false);
             onChange();
           }}
-          onError={setError}
         />
       )}
 
@@ -90,80 +99,210 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
 function NewUserForm({
   onCancel,
   onCreated,
-  onError,
 }: {
   onCancel: () => void;
   onCreated: () => void;
-  onError: (msg: string | null) => void;
 }) {
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [serverRole, setServerRole] = useState<ServerRole>('user');
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [fieldErrors, setFieldErrors] = useState<{ username?: string; password?: string }>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
-  async function create() {
-    if (!username.trim() || password.length < 8) return;
+  const idPrefix = useId();
+  const titleId = `${idPrefix}-title`;
+  const descriptionId = `${idPrefix}-description`;
+  const usernameId = `${idPrefix}-username`;
+  const usernameHelpId = `${idPrefix}-username-help`;
+  const usernameErrorId = `${idPrefix}-username-error`;
+  const displayNameId = `${idPrefix}-display-name`;
+  const displayNameHelpId = `${idPrefix}-display-name-help`;
+  const passwordId = `${idPrefix}-password`;
+  const passwordHelpId = `${idPrefix}-password-help`;
+  const passwordErrorId = `${idPrefix}-password-error`;
+  const roleId = `${idPrefix}-role`;
+  const roleHelpId = `${idPrefix}-role-help`;
+
+  const dialogRef = useDialog<HTMLDivElement>({ onClose: onCancel, disabled: saving });
+
+  async function create(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (savingRef.current) return;
+
+    const trimmedUsername = username.trim();
+    const errors: { username?: string; password?: string } = {};
+    if (!trimmedUsername) {
+      errors.username = 'Enter a username.';
+    } else if (trimmedUsername.length < 2) {
+      errors.username = 'Username must be at least 2 characters.';
+    } else if (!/^[a-z0-9_.-]+$/i.test(trimmedUsername)) {
+      errors.username = 'Use only letters, numbers, underscores, periods, and hyphens.';
+    }
+    if (!password) {
+      errors.password = 'Enter a password.';
+    } else if (password.length < 8) {
+      errors.password = 'Password must be at least 8 characters.';
+    }
+
+    setFieldErrors(errors);
+    setSubmitError(null);
+    if (errors.username || errors.password) {
+      document.getElementById(errors.username ? usernameId : passwordId)?.focus();
+      return;
+    }
+
+    savingRef.current = true;
     setSaving(true);
-    onError(null);
     try {
       await api.post(`${API}/users`, {
-        username: username.trim(),
+        username: trimmedUsername,
         password,
         displayName: displayName.trim() || undefined,
         serverRole,
       });
-      onCreated();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't create user.");
-    } finally {
+      if (err instanceof ApiError && err.status === 409) {
+        setFieldErrors({ username: 'That username is already in use.' });
+        document.getElementById(usernameId)?.focus();
+      } else {
+        setSubmitError(err instanceof ApiError ? err.message : "Couldn't create user.");
+      }
+      savingRef.current = false;
       setSaving(false);
+      return;
     }
+
+    // Success closes and unmounts the dialog. Do not schedule another local
+    // state update after handing lifecycle ownership back to the parent.
+    onCreated();
   }
 
   return (
-    <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
-      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">New user</p>
-      <div className="grid sm:grid-cols-4 gap-2">
-        <TextInput
-          className="!min-h-0 !py-2 text-sm"
-          placeholder="username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-        />
-        <TextInput
-          className="!min-h-0 !py-2 text-sm"
-          placeholder="Display name"
-          value={displayName}
-          onChange={(e) => setDisplayName(e.target.value)}
-        />
-        <TextInput
-          className="!min-h-0 !py-2 text-sm"
-          placeholder="Password (min 8 chars)"
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        <select
-          className="cf-select !min-h-0 !py-2 text-sm"
-          value={serverRole}
-          onChange={(e) => setServerRole(e.target.value as ServerRole)}
-        >
-          <option value="user">Role: User</option>
-          <option value="admin">Role: Admin</option>
-        </select>
-      </div>
-      <div className="flex gap-2 justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
-          Cancel
-        </Btn>
-        <Btn
-          className="!min-h-0 !py-1.5 text-xs"
-          onClick={create}
-          disabled={saving || !username.trim() || password.length < 8}
-        >
-          Create
-        </Btn>
+    <div className="dialog-backdrop" style={{ zIndex: 50 }} onClick={() => !saving && onCancel()}>
+      <div
+        ref={dialogRef}
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        aria-busy={saving}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="dialog-title" id={titleId}>New user</h2>
+        <p className="dialog-body" id={descriptionId}>
+          Create a Campfire account. You can add the user to campaigns after creation.
+        </p>
+
+        <form className="space-y-3" onSubmit={create} noValidate>
+          <div className="field">
+            <label htmlFor={usernameId}>Username</label>
+            <TextInput
+              id={usernameId}
+              value={username}
+              onChange={(e) => {
+                setUsername(e.target.value);
+                setFieldErrors((current) => ({ ...current, username: undefined }));
+              }}
+              autoComplete="username"
+              minLength={2}
+              maxLength={60}
+              pattern="[A-Za-z0-9_.-]+"
+              required
+              aria-invalid={!!fieldErrors.username}
+              aria-describedby={`${usernameHelpId}${fieldErrors.username ? ` ${usernameErrorId}` : ''}`}
+            />
+            <p id={usernameHelpId} className="mt-1 text-xs text-slate-400">
+              2–60 characters; letters, numbers, underscores, periods, and hyphens.
+            </p>
+            {fieldErrors.username && (
+              <p id={usernameErrorId} role="alert" className="mt-1 text-xs text-rose-400">
+                {fieldErrors.username}
+              </p>
+            )}
+          </div>
+
+          <div className="field">
+            <label htmlFor={displayNameId}>
+              Display name <span className="text-slate-400 normal-case tracking-normal">· optional</span>
+            </label>
+            <TextInput
+              id={displayNameId}
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              autoComplete="name"
+              maxLength={120}
+              aria-describedby={displayNameHelpId}
+            />
+            <p id={displayNameHelpId} className="mt-1 text-xs text-slate-400">
+              Shown to other Campfire users instead of the username.
+            </p>
+          </div>
+
+          <div className="field">
+            <label htmlFor={passwordId}>Temporary password</label>
+            <TextInput
+              id={passwordId}
+              type="password"
+              value={password}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                setFieldErrors((current) => ({ ...current, password: undefined }));
+              }}
+              autoComplete="new-password"
+              minLength={8}
+              maxLength={200}
+              required
+              aria-invalid={!!fieldErrors.password}
+              aria-describedby={`${passwordHelpId}${fieldErrors.password ? ` ${passwordErrorId}` : ''}`}
+            />
+            <p id={passwordHelpId} className="mt-1 text-xs text-slate-400">
+              At least 8 characters. Share it with the user through a secure channel.
+            </p>
+            {fieldErrors.password && (
+              <p id={passwordErrorId} role="alert" className="mt-1 text-xs text-rose-400">
+                {fieldErrors.password}
+              </p>
+            )}
+          </div>
+
+          <div className="field">
+            <label htmlFor={roleId}>Server role</label>
+            <select
+              id={roleId}
+              className="cf-select"
+              value={serverRole}
+              onChange={(e) => setServerRole(e.target.value as ServerRole)}
+              aria-describedby={roleHelpId}
+            >
+              <option value="user">User</option>
+              <option value="admin">Admin</option>
+            </select>
+            <p id={roleHelpId} className="mt-1 text-xs text-slate-400">
+              Admins can manage server settings and user accounts.
+            </p>
+          </div>
+
+          {submitError && <p role="alert" className="text-sm text-rose-400">{submitError}</p>}
+
+          <div className="dialog-actions">
+            <Btn
+              ghost
+              type="button"
+              aria-label="Cancel creating user"
+              onClick={onCancel}
+              disabled={saving}
+            >
+              Cancel
+            </Btn>
+            <Btn type="submit" disabled={saving}>
+              {saving ? 'Creating…' : 'Create user'}
+            </Btn>
+          </div>
+        </form>
       </div>
     </div>
   );
