@@ -39,10 +39,11 @@ export function slugify(name: string): string {
  *
  * `seen` is a Set the caller owns (one per folder) so it tracks names across
  * successive calls. Returns the allocated base name (no extension) — the caller
- * appends `.md`. Deterministic: iteration order is the order entities arrive
- * from the list services (a single DB query with a stable ORDER BY), so the
- * `-2` suffix always attaches to the second occurrence in that order, never
- * arbitrarily.
+ * appends `.md`. Deterministic ONLY insofar as the caller's iteration order is:
+ * the `-2` suffix attaches to the second occurrence in that order. The markdown
+ * loops below sort each entity list by id before allocating so the result is
+ * reproducible regardless of the underlying DB row order (several list services
+ * have no ORDER BY).
  */
 export function uniqueFilename(seen: Set<string>, base: string): string {
   if (!seen.has(base)) {
@@ -83,8 +84,11 @@ function pushCollisionWarning(
   }
   for (const [slug, allocatedBases] of bySlug) {
     if (allocatedBases.length < 2) continue;
+    // The warning names the SLUG (the slugified filename base), not the original
+    // display name — multiple distinct display names can collapse to one slug
+    // (case/punctuation), so naming the slug is the honest, unambiguous framing.
     warnings.push(
-      `${allocatedBases.length} ${label}s shared the name '${slug}' and were exported as ${allocatedBases.map((b) => `${b}.md`).join(', ')}.`,
+      `${allocatedBases.length} ${label}s shared the slug '${slug}' and were exported as ${allocatedBases.map((b) => `${b}.md`).join(', ')}.`,
     );
   }
 }
@@ -334,10 +338,17 @@ export class ExportService {
     // loop also records its [originalSlug, allocatedBase] allocations so the
     // collision warning can name the ACTUAL filenames written (see
     // pushCollisionWarning for why reconstruction-from-counts would lie).
+    //
+    // Determinism: filename allocation (-2, -3 suffix assignment) is order-
+    // dependent, and several list services return rows without a guaranteed
+    // ORDER BY. Each list is sorted by id (a stable, monotonic key) before
+    // allocation so the same campaign exports to the same filenames on every
+    // run and across DB engines — the lowest-id entity keeps the bare slug,
+    // the next collision gets -2, etc.
     const questsFolder = zip.folder('quests')!;
     const questsSeen = new Set<string>();
     const questsAllocated: Array<[string, string]> = [];
-    for (const q of data.quests) {
+    for (const q of [...data.quests].sort((a, b) => a.id - b.id)) {
       const slug = slugify(q.title);
       const base = uniqueFilename(questsSeen, slug);
       questsAllocated.push([slug, base]);
@@ -348,7 +359,7 @@ export class ExportService {
     const npcsFolder = zip.folder('npcs')!;
     const npcsSeen = new Set<string>();
     const npcsAllocated: Array<[string, string]> = [];
-    for (const n of data.npcs) {
+    for (const n of [...data.npcs].sort((a, b) => a.id - b.id)) {
       const slug = slugify(n.name);
       const base = uniqueFilename(npcsSeen, slug);
       npcsAllocated.push([slug, base]);
@@ -359,7 +370,7 @@ export class ExportService {
     const locationsFolder = zip.folder('locations')!;
     const locationsSeen = new Set<string>();
     const locationsAllocated: Array<[string, string]> = [];
-    for (const l of data.locations) {
+    for (const l of [...data.locations].sort((a, b) => a.id - b.id)) {
       const slug = slugify(l.name);
       const base = uniqueFilename(locationsSeen, slug);
       locationsAllocated.push([slug, base]);
@@ -370,7 +381,7 @@ export class ExportService {
     const sessionsFolder = zip.folder('sessions')!;
     const sessionsSeen = new Set<string>();
     const sessionsAllocated: Array<[string, string]> = [];
-    for (const s of data.sessions) {
+    for (const s of [...data.sessions].sort((a, b) => a.id - b.id)) {
       const slug = slugify(s.title || `session-${s.number}`);
       const base = uniqueFilename(sessionsSeen, slug);
       sessionsAllocated.push([slug, base]);
@@ -381,7 +392,7 @@ export class ExportService {
     const charactersFolder = zip.folder('characters')!;
     const charactersSeen = new Set<string>();
     const charactersAllocated: Array<[string, string]> = [];
-    for (const c of data.characters) {
+    for (const c of [...data.characters].sort((a, b) => a.id - b.id)) {
       const slug = slugify(c.name);
       const base = uniqueFilename(charactersSeen, slug);
       charactersAllocated.push([slug, base]);
@@ -392,7 +403,7 @@ export class ExportService {
     const encountersFolder = zip.folder('encounters')!;
     const encountersSeen = new Set<string>();
     const encountersAllocated: Array<[string, string]> = [];
-    for (const e of data.encounters) {
+    for (const e of [...data.encounters].sort((a, b) => a.id - b.id)) {
       const slug = slugify(e.name);
       const base = uniqueFilename(encountersSeen, slug);
       encountersAllocated.push([slug, base]);

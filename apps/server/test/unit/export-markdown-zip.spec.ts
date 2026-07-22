@@ -186,7 +186,7 @@ describe('buildMarkdownZip — filename collisions (issue #530)', () => {
     // the exact filenames produced.
     const npcWarning = warnings.find((w) => w.includes('NPC'));
     expect(npcWarning).toBeDefined();
-    expect(npcWarning).toContain("2 NPCs shared the name 'bob'");
+    expect(npcWarning).toContain("2 NPCs shared the slug 'bob'");
     expect(npcWarning).toContain('bob.md');
     expect(npcWarning).toContain('bob-2.md');
   });
@@ -279,7 +279,7 @@ describe('buildMarkdownZip — filename collisions (issue #530)', () => {
     // displaced `bob-2-2.md` file must not appear in the `bob` warning.
     expect(warnings.length).toBe(1);
     const warning = warnings[0];
-    expect(warning).toContain("2 NPCs shared the name 'bob'");
+    expect(warning).toContain("2 NPCs shared the slug 'bob'");
     expect(warning).toContain('bob.md');
     expect(warning).toContain('bob-2.md');
     expect(warning).not.toContain('bob-2-2.md');
