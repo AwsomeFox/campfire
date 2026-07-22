@@ -66,7 +66,7 @@ export interface SeedData {
   };
 }
 
-async function okJson(ctx: APIRequestContext, method: 'post' | 'get', path: string, data?: unknown) {
+async function okJson(ctx: APIRequestContext, method: 'post' | 'get' | 'put', path: string, data?: unknown) {
   const res = await ctx[method](path, data === undefined ? undefined : { data });
   if (!res.ok()) {
     const body = await res.text();
@@ -120,6 +120,14 @@ export default async function globalSetup(config: FullConfig) {
   const dm = await loginContext(baseURL, 'dm');
   const campaign = await okJson(dm, 'post', '/api/v1/campaigns', { name: 'E2E — Cinderhaven' });
   const campaignId: number = campaign.id;
+
+  // Accessibility fixtures for the AI drafting dialog + mode disclosure (#812).
+  // Co-DM mode needs no provider and keeps the rest of the suite away from live-driver flows.
+  await okJson(admin, 'post', '/api/v1/settings/ai/kill', { enabled: true });
+  await okJson(dm, 'put', `/api/v1/campaigns/${campaignId}/ai-dm`, {
+    mode: 'co_dm',
+    tokenBudget: 10_000,
+  });
 
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.player, role: 'player' });
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.viewer, role: 'viewer' });

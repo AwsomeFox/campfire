@@ -62,9 +62,11 @@ export function TextInput({ className = '', ...props }: InputHTMLAttributes<HTML
   return <input className={`cf-input ${className}`} {...props} />;
 }
 
-export function TextArea({ className = '', ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea className={`cf-textarea ${className}`} {...props} />;
-}
+export const TextArea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
+  function TextArea({ className = '', ...props }, ref) {
+    return <textarea ref={ref} className={`cf-textarea ${className}`} {...props} />;
+  },
+);
 
 export function HpBar({ current, max }: { current: number; max: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (current / max) * 100)) : 0;
