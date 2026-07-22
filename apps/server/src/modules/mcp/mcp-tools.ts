@@ -53,6 +53,8 @@ import {
   RECAP_TEMPLATE,
   SessionCreate,
   SessionUpdate,
+  SessionShareCreate,
+  SessionShareUpdate,
   XpAward,
   AiDmTurnKind,
   InventoryItemCreate,
@@ -80,6 +82,7 @@ import { NpcsService } from '../npcs/npcs.service';
 import { FactionsService } from '../factions/factions.service';
 import { LocationsService } from '../locations/locations.service';
 import { SessionsService, buildRecapDraft } from '../sessions/sessions.service';
+import { SessionSharesService } from '../sessions/session-shares.service';
 import { CharactersService } from '../characters/characters.service';
 import { NotesService } from '../notes/notes.service';
 import { MembersService } from '../membership/members.service';
@@ -329,6 +332,7 @@ export class McpToolsService {
     private readonly factions: FactionsService,
     private readonly locations: LocationsService,
     private readonly sessions: SessionsService,
+    private readonly sessionShares: SessionSharesService,
     private readonly characters: CharactersService,
     private readonly notes: NotesService,
     private readonly members: MembersService,
@@ -772,6 +776,18 @@ export class McpToolsService {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
         const role = await this.access.requireMember(user, row.campaignId);
         return this.sessions.getOrThrow(sessionId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_session_shares',
+      'List active public recap-share metadata for a session. Any campaign member may inspect label, creator, expiry, access count, and access timestamps; raw tokens and hashes are never returned.',
+      { sessionId: Id.describe('Session id — from get_session_recaps') },
+      async ({ sessionId }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        await this.access.requireMember(user, row.campaignId);
+        return this.sessionShares.listForSession(sessionId as number);
       },
     );
 
@@ -1963,6 +1979,83 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.sessions.remove(sessionId as number, user, role);
         return { ok: true, sessionId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'create_session_share',
+      'DM only: create a public read-only recap capability. expiresAt is required: pass an ISO date-time for bounded access or explicit null only when deliberately choosing never. The raw token is returned once.',
+      {
+        sessionId: Id.describe('Session id — from get_session_recaps'),
+        label: z.string().max(120).optional().describe('Member-visible purpose/recipient label'),
+        expiresAt: z.string().datetime({ offset: true }).nullable().describe('Required expiry; explicit null means deliberately never'),
+      },
+      async ({ sessionId, label, expiresAt }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const input = SessionShareCreate.parse({ label, expiresAt });
+        return this.sessionShares.create(row, input, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_session_share',
+      'DM only: update a public recap share label and/or expiry. Extending the expiry notifies affected campaign members.',
+      {
+        sessionId: Id.describe('Session id'),
+        shareId: Id.describe('Share id — from list_session_shares'),
+        label: z.string().max(120).optional(),
+        expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+      },
+      async ({ sessionId, shareId, label, expiresAt }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const input = SessionShareUpdate.parse({ ...(label !== undefined ? { label } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}) });
+        return this.sessionShares.update(shareId as number, row, input, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'revoke_session_share',
+      'DM only: revoke one public recap capability immediately.',
+      { sessionId: Id.describe('Session id'), shareId: Id.describe('Share id — from list_session_shares') },
+      async ({ sessionId, shareId }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
+        await this.sessionShares.revoke(shareId as number, row, user, role);
+        return { ok: true, shareId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'revoke_all_session_shares',
+      'DM only: revoke every public recap capability in a campaign, including expired rows.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.sessionShares.getCampaignOrThrow(campaignId as number);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        return this.sessionShares.revokeAll(campaignId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_recap_share_policy',
+      'DM only: enable or disable public recap sharing for a campaign. Disabling atomically revokes every existing URL; re-enabling never resurrects them.',
+      { campaignId: CampaignIdArg, enabled: z.boolean() },
+      async ({ campaignId, enabled }) => {
+        const campaign = await this.sessionShares.getCampaignOrThrow(campaignId as number);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        return this.sessionShares.setCampaignPolicy(campaign, enabled as boolean, user, role);
       },
     );
 
