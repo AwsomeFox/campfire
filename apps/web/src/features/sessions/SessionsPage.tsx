@@ -570,6 +570,7 @@ function SessionDetail({
         <RevisionHistoryPanel
           entityType="session"
           entityId={session.id}
+          currentSnapshot={{ recap }}
           label="Recap history"
           reloadNonce={historyNonce}
           onRestored={() => {
