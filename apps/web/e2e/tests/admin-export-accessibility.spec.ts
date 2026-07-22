@@ -67,6 +67,7 @@ test.describe('admin campaign export accessibility', () => {
 
     const firstJson = card.getByRole('link', { name: 'Download Cinderhaven as a JSON export' });
     const firstMarkdown = card.getByRole('link', { name: 'Download Cinderhaven as a Markdown zip' });
+    await expect(card.getByRole('group', { name: 'Campaign export downloads' })).toBeVisible();
     await expect(firstJson).toHaveAttribute('href', '/api/v1/campaigns/101/export?format=json');
     await expect(firstMarkdown).toHaveAttribute('href', '/api/v1/campaigns/101/export?format=mdzip');
     await expect(firstJson).toHaveAccessibleDescription(/complete, machine-readable.*DM-only campaign data/i);

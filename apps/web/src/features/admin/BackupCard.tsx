@@ -83,7 +83,7 @@ export function BackupCard() {
           ))
         )}
       </select>
-      <div className="flex flex-col gap-2 sm:flex-row" aria-label="Campaign export downloads">
+      <div className="flex flex-col gap-2 sm:flex-row" role="group" aria-label="Campaign export downloads">
         <a
           className={`cf-btn cf-btn-ghost !min-h-0 !py-2 text-xs sm:w-auto ${!canExport ? 'pointer-events-none opacity-50' : ''}`}
           href={canExport ? `${API}/campaigns/${campaignId}/export?format=json` : undefined}
