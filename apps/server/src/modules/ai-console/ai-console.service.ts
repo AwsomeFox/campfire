@@ -123,6 +123,8 @@ export class AiConsoleService {
       allowedModels: serverView?.allowedModels ?? [],
       serverProviderConfigured: !!serverView,
       serverProviderType: serverView?.providerType ?? null,
+      serverProviderReady: serverView?.ready ?? false,
+      serverCredentialSource: serverView?.credentialSource ?? 'none',
       usage,
     };
   }

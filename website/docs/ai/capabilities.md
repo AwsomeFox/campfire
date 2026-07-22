@@ -77,13 +77,19 @@ The seat has three modes, set in the web UI:
 
 ### Configured in the web UI
 
-Under **Settings → AI Dungeon Master** on a campaign, the DM sets:
+The server admin sets the default provider under **Admin → AI console**. Campaign
+DMs normally inherit it; an advanced per-campaign override remains available under
+**Settings → AI Dungeon Master** when a table needs a different model or credential.
+Together these screens configure:
 
 - **Mode** (off / co-DM / driver).
-- **Provider** — OpenAI, Anthropic, or a `mock` provider — plus a **write-only API
-  key**. The key is **stored encrypted** (AES-256-GCM) and **never read back**: only
-  the last four characters are shown, and it's kept out of reads, logs, and the audit
-  trail.
+- **Provider** — OpenAI-compatible, Anthropic, or a `mock` provider — plus a
+  **write-only API key**. The key is **stored encrypted** (AES-256-GCM) and **never
+  read back**: only the last four characters are shown, and it is kept out of reads,
+  logs, and the audit trail. A deliberate **Clear stored key** action removes only
+  the ciphertext after confirmation, preserving the provider, model, base URL,
+  parameters, and allowlist. The screen then reports whether the provider is ready
+  through `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, a server fallback, or no credential.
 - **Model allowlist**, a per-campaign **token budget**, and free-text **steering
   instructions** (redacted from non-DM readers).
 
