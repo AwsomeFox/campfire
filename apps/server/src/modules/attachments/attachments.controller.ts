@@ -127,17 +127,40 @@ export class AttachmentsController {
   /**
    * Streams the file bytes. Requires campaign membership — never a public URL.
    *
-   * Attachment content is immutable for a given id (write-once, deleted with the
-   * row), so responses carry a strong content-hash `ETag` and a long-lived
-   * `Cache-Control: immutable`. A matching `If-None-Match` short-circuits to a
-   * 304 so the browser never re-downloads an unchanged (e.g. multi-MB map) file.
+   * Cache policy (issue #498): attachment bytes are immutable for a given id
+   * (write-once, deleted with the row), so responses carry a strong content-hash
+   * `ETag` and a long-lived `Cache-Control: private, max-age=...`. BUT this is a
+   * permission-dependent resource — the same id can be readable by one user and
+   * 403/404 for another (membership removed, hidden toggled, login-as-other-user
+   * in the same browser). A plain immutable cache would serve the previously-fetched
+   * bytes straight from the browser HTTP cache without the membership check ever
+   * running, leaking them across authorization states. Two guards make the cache
+   * honest instead:
+   *
+   *   1. No `immutable` directive. The browser is told the entry is fresh for the
+   *      max-age window, but it MUST still revalidate (send If-None-Match) on use
+   *      rather than serving a stale entry indefinitely — so the membership/hidden
+   *      check on this handler always gets a chance to run for an in-window request.
+   *      A matching ETag still short-circuits to 304, so an unchanged multi-MB map
+   *      isn't re-downloaded.
+   *   2. Content-versioned URLs. The web client appends `?v=<versionToken>` (see
+   *      AttachmentsService.versionToken), which folds the content hash together
+   *      with the `hidden` flag. When the authorization state changes (hidden
+   *      toggled, content re-uploaded, id restored/reused with new bytes) the URL
+   *      itself changes, the browser cache misses, and the request hits the server
+   *      — where the membership/hidden check runs and a now-unauthorized caller
+   *      gets 403/404 instead of stale bytes. `Vary: Cookie` is a belt-and-suspenders
+   *      hint so shared/proxy caches key on the session too (browsers mostly ignore
+   *      Vary for the HTTP cache, which is exactly why the versioned URL is the
+   *      real fix).
    *
    * `?size=thumb` serves a downscaled PNG preview for list/dashboard use (see
    * AttachmentsService.resolveFile / thumbnail.ts).
    */
   @Get(':id/file')
-  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses are cacheable (strong ETag + immutable Cache-Control); a matching If-None-Match returns 304. `?size=thumb` serves a downscaled PNG preview.' })
+  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses are privately cacheable (strong ETag + long-lived Cache-Control, no `immutable` so revalidation still runs the auth check); a matching If-None-Match returns 304. Clients should append `?v=<versionToken>` (from the attachment row) so an authorization change yields a new URL. `?size=thumb` serves a downscaled PNG preview.' })
   @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for the full-size original; `thumb` for a downscaled PNG preview.' })
+  @ApiQuery({ name: 'v', required: false, type: String, description: 'Authorization-aware version token (see AttachmentsService.versionToken). Optional but recommended — clients should append it so a content/hidden change produces a new URL.' })
   @ApiResponse({ status: 200, description: 'Raw file bytes, with Content-Type/Content-Disposition/ETag set from the stored attachment.' })
   @ApiResponse({ status: 304, description: 'Client cache is current (If-None-Match matched the ETag).' })
   @ApiResponse({ status: 400, description: 'Unsupported `size` value.' })
@@ -182,8 +205,15 @@ export class AttachmentsController {
     const variant = size === 'thumb' ? 'thumb' : 'original';
     const file = this.attachmentsService.resolveFile(row, variant);
 
+    // Issue #498 — honest cache policy for a permission-dependent resource. See the
+    // method doc above for the full rationale: no `immutable` (the browser must keep
+    // revalidating so the membership check runs), long `max-age` + strong ETag for
+    // 304 short-circuits, `private` so no shared proxy caches it, and `Vary: Cookie`
+    // as a defensive keying hint. The versioned URL (?v=) the client appends is what
+    // actually defeats cross-authorization-state cache hits.
     res.set({
-      'Cache-Control': 'private, max-age=31536000, immutable',
+      'Cache-Control': 'private, max-age=31536000',
+      Vary: 'Cookie',
       ETag: file.etag,
     });
 
