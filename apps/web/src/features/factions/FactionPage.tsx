@@ -360,7 +360,7 @@ export default function FactionPage() {
             <span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players (whole faction, not just the secret)</span>
           </label>
           <div className="flex items-center justify-between gap-2">
-            <Btn danger className="!min-h-0 !py-1.5 text-xs" disabled={deleting} onClick={() => setConfirmingDelete(true)}>
+            <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
               {deleting ? 'Deleting…' : 'Delete faction'}
             </Btn>
             <div className="flex gap-2">

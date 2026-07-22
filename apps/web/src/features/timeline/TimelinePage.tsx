@@ -309,7 +309,7 @@ export default function TimelinePage() {
                     <Btn onClick={() => saveEdit(e.id)} disabled={busy}>Save</Btn>
                     <Btn ghost onClick={() => setEditingId(null)} disabled={busy}>Cancel</Btn>
                     <div style={{ flex: 1 }} />
-                    <Btn danger ghost onClick={() => deleteEvent(e.id)} disabled={busy}>Delete</Btn>
+                    <Btn danger ghost onClick={() => deleteEvent(e.id)} busy={busy}>Delete</Btn>
                   </div>
                 </div>
               ) : (

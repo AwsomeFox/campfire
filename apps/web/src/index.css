@@ -51,6 +51,25 @@
   --color-accent-2-800: #423e5d;
   --color-accent-2-900: #2b293a;
 
+  /* Destructive actions are a closed semantic family. None of these tokens
+     derive from --color-accent, so a personal accent can never recolor delete,
+     revoke, reject, or other irreversible controls. Solid states keep at least
+     5.4:1 text contrast; ghost text is 5.6:1 or better on app surfaces. */
+  --color-danger: #fb7185;
+  --color-danger-solid: #be123c;
+  --color-danger-solid-hover: #c21845;
+  --color-danger-solid-active: #9f1239;
+  --color-danger-solid-busy: #881337;
+  --color-danger-solid-foreground: #fff1f2;
+  --color-danger-border: #fb7185;
+  --color-danger-focus: #fecdd3;
+  --color-danger-ghost-hover: color-mix(in srgb, #fb7185 14%, transparent);
+  --color-danger-ghost-active: color-mix(in srgb, #fb7185 24%, transparent);
+  --color-danger-ghost-busy: color-mix(in srgb, #fb7185 18%, transparent);
+  --color-danger-disabled-background: #4f2630;
+  --color-danger-disabled-foreground: #d6bdc2;
+  --color-danger-disabled-border: #8c5d68;
+
   --font-heading: "Inter", system-ui, sans-serif;
   --font-heading-weight: 500;
   --font-body: "Inter", system-ui, sans-serif;
@@ -87,7 +106,7 @@
   --cf-accent: var(--color-accent);
   --cf-accent-2: var(--color-accent-2);
   --cf-success: #34d399; /* emerald — completed / explored / healthy */
-  --cf-danger: #fb7185; /* rose — danger / failed / low HP */
+  --cf-danger: var(--color-danger); /* rose — danger / failed / low HP */
   --cf-arcane: var(--color-accent-2); /* lore, magic, proposals */
   --cf-threat: #38bdf8; /* sky — threats, movement paths (unchanged) */
   --cf-crit: #fbbf24; /* amber — natural-20 crit flourish (issue #67) */
@@ -243,12 +262,12 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--radius-md);
   cursor: pointer;
   min-height: 44px; /* tap target */
-  transition: background-color 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
-.cf-btn:hover {
+.cf-btn:not(:disabled):hover {
   background: color-mix(in srgb, var(--color-accent) 12%, transparent);
 }
-.cf-btn:active {
+.cf-btn:not(:disabled):active {
   background: color-mix(in srgb, var(--color-accent) 22%, transparent);
 }
 .cf-btn:disabled {
@@ -261,10 +280,66 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--cf-dim);
   border: 1px solid var(--color-divider);
 }
-.cf-btn-ghost:hover {
+.cf-btn-ghost:not(:disabled):hover {
   color: var(--cf-ink);
   border-color: color-mix(in srgb, var(--color-text) 45%, transparent);
   background: transparent;
+}
+
+/* Destructive buttons deliberately override every ordinary primary/ghost
+   interaction state. Keep these selectors after the base variants. */
+.cf-btn-danger {
+  color: var(--color-danger-solid-foreground);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-solid);
+}
+.cf-btn-danger:not(:disabled):hover {
+  color: var(--color-danger-solid-foreground);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-solid-hover);
+}
+.cf-btn-danger:not(:disabled):active {
+  background: var(--color-danger-solid-active);
+}
+.cf-btn-danger:focus-visible {
+  outline-color: var(--color-danger-focus);
+}
+.cf-btn-danger.cf-btn-ghost {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: transparent;
+}
+.cf-btn-danger.cf-btn-ghost:not(:disabled):hover {
+  color: var(--color-danger-focus);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-ghost-hover);
+}
+.cf-btn-danger.cf-btn-ghost:not(:disabled):active {
+  color: var(--color-danger-focus);
+  background: var(--color-danger-ghost-active);
+}
+.cf-btn-danger:disabled {
+  color: var(--color-danger-disabled-foreground);
+  border-color: var(--color-danger-disabled-border);
+  background: var(--color-danger-disabled-background);
+  opacity: 1;
+}
+.cf-btn-danger.cf-btn-ghost:disabled {
+  color: var(--color-danger-disabled-foreground);
+  border-color: var(--color-danger-disabled-border);
+  background: transparent;
+}
+.cf-btn-danger[aria-busy='true'] {
+  color: var(--color-danger-solid-foreground);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-solid-busy);
+  cursor: wait;
+  opacity: 1;
+}
+.cf-btn-danger.cf-btn-ghost[aria-busy='true'] {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-ghost-busy);
 }
 
 .cf-input {
@@ -610,6 +685,9 @@ h1, h2, h3, h4, h5, h6 {
    above. The persistent, non-motion cues (gold/rose roll totals, the level-up
    banner text) remain so the feedback is never motion-only. */
 @media (prefers-reduced-motion: reduce) {
+  .cf-btn {
+    transition: none;
+  }
   .cf-anim-roll,
   .cf-anim-crit,
   .cf-crit-spark,
@@ -621,6 +699,37 @@ h1, h2, h3, h4, h5, h6 {
   .cf-anim-levelup,
   .cf-sparkle {
     animation: none !important;
+  }
+}
+
+/* Preserve an obvious destructive affordance in Windows high-contrast mode
+   without forcing authored rose colors over the user's system palette. */
+@media (forced-colors: active) {
+  .cf-btn-danger {
+    color: MarkText;
+    border-color: Mark;
+    background: Mark;
+    forced-color-adjust: none;
+  }
+  .cf-btn-danger.cf-btn-ghost {
+    color: Mark;
+    border-color: Mark;
+    background: Canvas;
+  }
+  .cf-btn-danger:focus-visible {
+    outline-color: Highlight;
+  }
+  .cf-btn-danger:disabled,
+  .cf-btn-danger.cf-btn-ghost:disabled {
+    color: GrayText;
+    border-color: GrayText;
+    background: Canvas;
+  }
+  .cf-btn-danger[aria-busy='true'],
+  .cf-btn-danger.cf-btn-ghost[aria-busy='true'] {
+    color: MarkText;
+    border-color: Mark;
+    background: Mark;
   }
 }
 
