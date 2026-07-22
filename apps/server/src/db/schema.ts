@@ -491,7 +491,9 @@ export const membershipIntegrityRepairs = sqliteTable('membership_integrity_repa
 // an invite code is a shareable capability the DM re-displays and re-copies from
 // the UI, and it can only create a NEW membership at a capped role (never dm) —
 // it cannot impersonate an existing user. It is 128-bit random, always expiring,
-// optionally use-capped, and revocable (row delete).
+// optionally use-capped, and revocable (row delete). Expired/exhausted rows are
+// retained for operator inspection and whole-server backup; public code resolution
+// and the DM list API filter them out, while revoke/campaign deletion remove them.
 export const campaignInvites = sqliteTable('campaign_invites', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),

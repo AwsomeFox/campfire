@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { campaignInvites } from '../src/db/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
@@ -212,12 +212,12 @@ describe('campaign invites / join codes (e2e, real cookie sessions)', () => {
         .send({ username: 'late-lucy', password: 'lucy-password-1' });
       expect(second.status).toBe(404);
 
-      // Exhausted invites are purged from (not shown in) the DM's list.
+      // Exhausted invites are not shown in the DM's live-only list.
       const listRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/invites`);
       expect(listRes.body.some((i: { code: string }) => i.code === code)).toBe(false);
     });
 
-    it('an expired invite stops working (and is purged from the list)', async () => {
+    it('an expired invite stops working (and is omitted from the list)', async () => {
       const createRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
       const code = createRes.body.code;
 
@@ -238,6 +238,47 @@ describe('campaign invites / join codes (e2e, real cookie sessions)', () => {
 
       const listRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/invites`);
       expect(listRes.body.some((i: { code: string }) => i.code === code)).toBe(false);
+    });
+
+    it('repeated live-invite GETs are byte-identical and retain expired/exhausted rows', async () => {
+      const liveRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
+      const expiredRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'viewer' });
+      const exhaustedRes = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/invites`)
+        .send({ role: 'player', maxUses: 1 });
+      expect([liveRes.status, expiredRes.status, exhaustedRes.status]).toEqual([201, 201, 201]);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      await db
+        .update(campaignInvites)
+        .set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
+        .where(eq(campaignInvites.id, expiredRes.body.id));
+      await db
+        .update(campaignInvites)
+        .set({ useCount: exhaustedRes.body.maxUses })
+        .where(eq(campaignInvites.id, exhaustedRes.body.id));
+
+      const [{ value: countBefore }] = await db
+        .select({ value: count() })
+        .from(campaignInvites)
+        .where(eq(campaignInvites.campaignId, campaignId));
+
+      const first = await dmAgent.get(`/api/v1/campaigns/${campaignId}/invites`);
+      const second = await dmAgent.get(`/api/v1/campaigns/${campaignId}/invites`);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(first.text).toBe(second.text);
+      expect(first.body.some((i: { id: number }) => i.id === liveRes.body.id)).toBe(true);
+      expect(first.body.some((i: { id: number }) => i.id === expiredRes.body.id)).toBe(false);
+      expect(first.body.some((i: { id: number }) => i.id === exhaustedRes.body.id)).toBe(false);
+
+      const rowsAfter = await db
+        .select()
+        .from(campaignInvites)
+        .where(eq(campaignInvites.campaignId, campaignId));
+      expect(rowsAfter).toHaveLength(countBefore);
+      expect(rowsAfter.some((row) => row.id === expiredRes.body.id)).toBe(true);
+      expect(rowsAfter.some((row) => row.id === exhaustedRes.body.id)).toBe(true);
     });
 
     it('expiresInDays outside 1..365 is rejected (400)', async () => {
