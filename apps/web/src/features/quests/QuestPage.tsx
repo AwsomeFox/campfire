@@ -986,10 +986,6 @@ function PageShell({ campaignId, children }: { campaignId: number; children: Rea
   );
 }
 
-function capitalize(s: string): string {
-  return s.length ? s[0].toUpperCase() + s.slice(1) : s;
-}
-
 // "Updated Xd ago", matching QuestListPage / NotesQuickRail phrasing.
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();

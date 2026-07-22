@@ -38,12 +38,13 @@ export function NpcDispositionBadge({
   iconSize?: number;
 }) {
   const presentation = npcDispositionPresentation(disposition);
+  const semanticValue = disposition?.trim() || 'neutral';
   return (
     <Chip variant={presentation.variant} className={className}>
       <span
         className="inline-flex items-center gap-1"
         data-semantic="npc-disposition"
-        data-semantic-value={disposition || 'neutral'}
+        data-semantic-value={semanticValue}
         data-semantic-variant={presentation.variant}
       >
         <GameIcon slug={presentation.icon} size={iconSize} />
