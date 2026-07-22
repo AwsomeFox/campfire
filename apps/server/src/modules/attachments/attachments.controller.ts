@@ -137,19 +137,22 @@ export class AttachmentsController {
    * running, leaking them across authorization states. Two guards make the cache
    * honest instead:
    *
-   *   1. No `immutable` directive. The browser is told the entry is fresh for the
-   *      max-age window, but it MUST still revalidate (send If-None-Match) on use
-   *      rather than serving a stale entry indefinitely — so the membership/hidden
-   *      check on this handler always gets a chance to run for an in-window request.
+   *   1. No `immutable` directive. The browser may still reuse a fresh (in-window)
+   *      cached response without revalidation, but without `immutable` it will
+   *      revalidate once the entry is stale (or on reload/force-reload) rather than
+   *      serving it indefinitely — so the membership/hidden check on this handler
+   *      runs at stale boundaries and on any reload. The durable authorization
+   *      guarantee comes from guard (2): the URL itself changes when authorization
+   *      state changes, so the browser cache misses and the request hits the server.
    *      A matching ETag still short-circuits to 304, so an unchanged multi-MB map
    *      isn't re-downloaded.
    *   2. Content-versioned URLs. The web client appends `?v=<versionToken>` (see
-   *      AttachmentsService.versionToken), which folds the content hash together
-   *      with the `hidden` flag. When the authorization state changes (hidden
-   *      toggled, content re-uploaded, id restored/reused with new bytes) the URL
-   *      itself changes, the browser cache misses, and the request hits the server
-   *      — where the membership/hidden check runs and a now-unauthorized caller
-   *      gets 403/404 instead of stale bytes. `Vary: Cookie` is a belt-and-suspenders
+   *      AttachmentsService.versionToken), a deterministic hash over
+   *      `(id | hidden | updatedAt)`. When the authorization state changes (hidden
+   *      toggled, id restored/reused with a new updatedAt) the URL itself changes,
+   *      the browser cache misses, and the request hits the server — where the
+   *      membership/hidden check runs and a now-unauthorized caller gets 403/404
+   *      instead of stale bytes. `Vary: Cookie` is a belt-and-suspenders
    *      hint so shared/proxy caches key on the session too (browsers mostly ignore
    *      Vary for the HTTP cache, which is exactly why the versioned URL is the
    *      real fix).

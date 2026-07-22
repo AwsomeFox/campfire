@@ -18,23 +18,26 @@ const MAX_BYTES = 8 * 1024 * 1024;
  * Build the file-byte URL for an attachment, optionally content-versioned (issue #498).
  *
  * The server serves protected attachments with a long-lived browser cache but NO
- * `immutable`, so every entry revalidates and the membership/hidden check always
- * runs — that alone closes the cross-user/membership-removed cache leak. Appending
- * `?v=<token>` is the optimization that makes an authorization change produce a
- * brand-new URL (so the browser doesn't even round-trip a revalidation for the
- * stale entry): the token folds id + hidden + updatedAt, exactly the three
- * row-level signals that change on re-upload, reveal/hide toggle, or
- * delete-then-restore. Pass the row when you have it (Handouts list, freshly
- * uploaded attachment); call sites with only an id (campaign/encounter
- * `mapAttachmentId`) can omit it and still be safe, just without the cache-bust.
+ * `immutable`: the browser may reuse a fresh (in-window) cached response without
+ * revalidation, but it revalidates at stale boundaries and on reload — so the
+ * membership/hidden check runs at those points. The DURABLE authorization guarantee
+ * is the `?v=<token>` below: it makes an authorization change produce a brand-new
+ * URL (so the browser cache-misses and the request hits the server, where the check
+ * runs and a now-unauthorized caller gets 403/404). The token folds id + hidden +
+ * updatedAt, exactly the three row-level signals that change on re-upload,
+ * reveal/hide toggle, or delete-then-restore. Pass the row when you have it
+ * (Handouts list, freshly uploaded attachment); call sites with only an id
+ * (campaign/encounter `mapAttachmentId`) can omit it and still be safe, just
+ * without the cache-bust.
  *
  * NOTE: the server (AttachmentsService.versionToken) exposes a parallel helper
  * that hashes the SAME inputs for any non-web caller. The two do NOT need to
  * produce identical bytes — `?v=` is a client-controlled cache-buster the server
- * never validates; what matters is the SHARED invariant "token changes iff
- * (id, hidden, updatedAt) changes". Both implementations satisfy that. The web
- * client uses a sync FNV-style hash (below); the server uses sha256 via node:crypto.
- * Keep both folding the same three fields.
+ * never validates; what matters is that BOTH are deterministic functions of
+ * (id, hidden, updatedAt), so a given authorization state yields a stable URL and
+ * a changed state yields a different one (modulo the extremely-unlikely 64-bit
+ * hash collision). The web client uses a sync FNV-style hash (below); the server
+ * uses sha256 via node:crypto. Keep both folding the same three fields.
  */
 export function attachmentVersionToken(row: { id: number; hidden: boolean; updatedAt: string }): string {
   // Sync browser hash over `${id}|${hidden}|${updatedAt}`. We don't use SubtleCrypto
@@ -61,10 +64,23 @@ export function attachmentVersionToken(row: { id: number; hidden: boolean; updat
 export function attachmentFileUrl(
   attachmentId: number,
   version?: { hidden: boolean; updatedAt: string },
+  /**
+   * Extra query params to append (e.g. { size: 'thumb' }). Handled correctly whether
+   * or not `version` is provided, so callers never hand-build the query string and
+   * risk a double-`?` (which would silently drop the param — issue #498 review).
+   */
+  extra?: Record<string, string>,
 ): string {
   const base = `${API}/attachments/${attachmentId}/file`;
-  if (!version) return base;
-  return `${base}?v=${attachmentVersionToken({ id: attachmentId, hidden: version.hidden, updatedAt: version.updatedAt })}`;
+  const params = new URLSearchParams();
+  if (version) {
+    params.set('v', attachmentVersionToken({ id: attachmentId, hidden: version.hidden, updatedAt: version.updatedAt }));
+  }
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) params.set(k, v);
+  }
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
 }
 
 /** Dev-auth headers (mirrors the JSON api client) for the multipart helpers below. */

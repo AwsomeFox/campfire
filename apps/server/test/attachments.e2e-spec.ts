@@ -916,15 +916,11 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
   //            changes and the browser cache misses outright. Asserted via the
   //            AttachmentsService.versionToken helper that the web client mirrors.
   describe('authorization-aware cache (issue #498)', () => {
-    // --- helper: derive the client-facing version token server-side (web mirrors it) ---
-    function versionToken(row: { id: number; hidden: boolean; updatedAt: string }): string {
-      const crypto = require('node:crypto');
-      return crypto
-        .createHash('sha256')
-        .update(`${row.id}|${row.hidden ? '1' : '0'}|${row.updatedAt}`)
-        .digest('hex')
-        .slice(0, 16);
-    }
+    // Delegate to the production AttachmentsService.versionToken helper rather than
+    // re-implementing the hash inline — the test then asserts the ACTUAL token the
+    // server/client contract produces, and cannot drift if the algorithm changes.
+    const versionToken = (row: { id: number; hidden: boolean; updatedAt: string }): string =>
+      ctx.app.get(AttachmentsService).versionToken(row);
 
     // The honest-cache invariant every permission-dependent file response must hold:
     // NO `immutable` (the browser must revalidate so the membership/hidden check runs),

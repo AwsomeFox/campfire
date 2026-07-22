@@ -153,8 +153,10 @@ export class AttachmentsService {
    * The web client (apps/web/src/components/ImageUpload.tsx → attachmentVersionToken)
    * folds the SAME three fields with its own browser-side hash. The two do NOT need
    * to produce identical bytes — `?v=` is a client-controlled cache-buster the server
-   * never validates; what matters is the shared invariant "token changes iff
-   * (id, hidden, updatedAt) changes". The server helper exists as the canonical
+   * never validates; what matters is that BOTH are deterministic functions of
+   * (id, hidden, updatedAt), so a given authorization state yields a stable URL and
+   * a changed state yields a different one (modulo the extremely-unlikely 64-bit
+   * hash collision noted below). The server helper exists as the canonical
    * implementation for any non-web caller (e.g. an MCP/REST consumer) and for tests.
    *
    * Returns the first 16 hex chars (64 bits) — plenty of entropy to make a stale
