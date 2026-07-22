@@ -190,11 +190,17 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Campaign' });
     campaignId = campRes.body.id;
 
-    const dmTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-dm-token', scope: 'dm' });
+    // writeScope: 'direct' is explicit — the safe default is 'propose' now
+    // (issue #575), but this suite exercises MCP WRITE tools (create_quest,
+    // award_xp, add_member…) against CANON, so we opt the fixture token in.
+    const dmTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-dm-token', scope: 'dm', writeScope: 'direct' });
     expect(dmTokenRes.status).toBe(201);
     dmToken = dmTokenRes.body.token;
 
-    const viewerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-viewer-token', scope: 'viewer' });
+    // writeScope: 'direct' explicit (issue #575 default is 'propose') — this
+    // fixture asserts viewer scope GATES direct writes (RSVP allowed, create_quest
+    // denied). Under the propose default those would route differently, so opt in.
+    const viewerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-viewer-token', scope: 'viewer', writeScope: 'direct' });
     expect(viewerTokenRes.status).toBe(201);
     viewerToken = viewerTokenRes.body.token;
 
@@ -1918,7 +1924,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     ).toBe(true);
 
     // An adminEnabled token minted by the server admin DOES carry server-admin power.
-    const adminTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-admin-enabled', scope: 'dm', adminEnabled: true });
+    // writeScope: 'direct' explicit (issue #575 default is 'propose') — this
+    // token uninstalls a rule pack, a direct-only admin write with no proposal
+    // path, which a propose-mode token cannot drive.
+    const adminTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-admin-enabled', scope: 'dm', adminEnabled: true, writeScope: 'direct' });
     expect(adminTokenRes.status).toBe(201);
     expect(adminTokenRes.body.apiToken.adminEnabled).toBe(true);
     const adminClient = await mcpClient(adminTokenRes.body.token);

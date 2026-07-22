@@ -60,9 +60,12 @@ describe('POST /users/:id/tokens — admin token provisioning (e2e)', () => {
   it('admin mints a PAT for the player; it acts AS that player (own-character writes ok, others 403)', async () => {
     const server = ctx.app.getHttpServer();
 
+    // writeScope: 'direct' is explicit — the safe default is 'propose' now
+    // (issue #575), but this test asserts a DIRECT own-character write (200 +
+    // body.level===3), so we opt in rather than rely on the default.
     const mintRes = await adminAgent
       .post(`/api/v1/users/${playerId}/tokens`)
-      .send({ tokenName: 'provisioned-for-player', scope: 'player', campaignId });
+      .send({ tokenName: 'provisioned-for-player', scope: 'player', campaignId, writeScope: 'direct' });
     expect(mintRes.status).toBe(201);
     expect(mintRes.body.token).toMatch(/^cf_pat_[0-9a-f]{48}$/);
     expect(mintRes.body.apiToken.userId).toBe(playerId);
