@@ -69,6 +69,17 @@ test.describe('admin user creation accessibility', () => {
     await expect(password).toHaveAccessibleDescription(/Enter a password/);
     await expect(username).toBeFocused();
 
+    await username.fill('player');
+    await displayName.fill('Existing Player');
+    await password.fill('keyboard-user-password');
+    await role.selectOption('user');
+    await password.press('Enter');
+
+    await expect(username).toHaveAttribute('aria-invalid', 'true');
+    await expect(username).toHaveAccessibleDescription(/That username is already in use/);
+    await expect(username).toBeFocused();
+    await expect(dialog).toBeVisible();
+
     const uniqueUsername = `keyboard-user-${Date.now()}`;
     await username.fill(uniqueUsername);
     await displayName.fill('Keyboard User');
