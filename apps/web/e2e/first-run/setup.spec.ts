@@ -89,3 +89,83 @@ test('first admin reaches the campaign hub without reload or stale auth routes',
   await expect(signedOutPage.getByRole('button', { name: 'Sign in' })).toBeVisible();
   await signedOut.close();
 });
+
+test('successful setup exits safely when the auth-status cache refresh fails', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, serviceWorkers: 'block' });
+  const page = await context.newPage();
+  let configured = false;
+  let configuredStatusReads = 0;
+
+  await page.route('**/api/v1/auth/status', async (route) => {
+    if (!configured) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ setupRequired: true, oidcEnabled: false, signupEnabled: false }),
+      });
+      return;
+    }
+
+    configuredStatusReads += 1;
+    if (configuredStatusReads === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'temporary status failure' }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ setupRequired: false, oidcEnabled: false, signupEnabled: false }),
+    });
+  });
+  await page.route('**/api/v1/auth/setup', async (route) => {
+    configured = true;
+    await route.fulfill({ status: 201, contentType: 'application/json', body: '{}' });
+  });
+  await page.route('**/api/v1/me', async (route) => {
+    if (!configured) {
+      await route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Unauthorized' }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        user: {
+          id: 1,
+          username: 'fallback-admin',
+          displayName: 'Fallback Admin',
+          serverRole: 'admin',
+          disabled: false,
+          accentColor: null,
+          textSize: 'default',
+          createdAt: '2026-07-22T00:00:00.000Z',
+          updatedAt: '2026-07-22T00:00:00.000Z',
+        },
+        memberships: [],
+      }),
+    });
+  });
+  await page.route('**/api/v1/campaigns', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+  });
+
+  await page.goto('/setup');
+  await page.getByLabel('Username').fill('fallback-admin');
+  await page.getByLabel('Password', { exact: true }).fill('campfire-fallback-admin-1');
+  await page.getByLabel('Confirm password').fill('campfire-fallback-admin-1');
+  await page.getByRole('button', { name: 'Light the fire' }).click();
+
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole('heading', { name: 'Your campaigns' })).toBeVisible();
+  expect(configuredStatusReads).toBeGreaterThanOrEqual(2);
+  await context.close();
+});

@@ -228,7 +228,9 @@ export function LoginPage() {
   if (!loading && status?.setupRequired) {
     return <Navigate to="/setup" replace />;
   }
-  if (!loading && ready && me) {
+  // During a successful submit, onSubmit owns the single history-replacing
+  // navigation after refreshing identity. Do not race it with this guard.
+  if (!submitting && !loading && ready && me) {
     return <Navigate to={redirectTo} replace />;
   }
 

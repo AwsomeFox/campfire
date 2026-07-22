@@ -78,6 +78,17 @@ export function SetupPage() {
         password,
         displayName: displayName.trim() || undefined,
       });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
+        setError('Too many attempts — wait a minute and try again.');
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+      }
+      setSubmitting(false);
+      return;
+    }
+
+    try {
       // Setup mutates both pieces of auth state that gate the router. Refresh
       // identity first so the configured-state render can never bounce the new
       // admin through /login, then refresh /auth/status so AuthedLayout no
@@ -85,14 +96,11 @@ export function SetupPage() {
       await refreshAuth();
       await refreshAuthStatus();
       navigate('/', { replace: true });
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 429) {
-        setError('Too many attempts — wait a minute and try again.');
-      } else {
-        setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
-      }
-    } finally {
-      setSubmitting(false);
+    } catch {
+      // The account already exists and the one-time setup endpoint is now
+      // closed. If either cache refresh fails, never strand the new admin on a
+      // form that can no longer succeed: rebuild both providers from the server.
+      window.location.replace('/');
     }
   }
 
