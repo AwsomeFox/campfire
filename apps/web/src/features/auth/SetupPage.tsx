@@ -42,7 +42,9 @@ export function SetupPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  if (!loading && status && !status.setupRequired) {
+  // During a successful setup submit, onSubmit owns the single history-replacing
+  // navigation after both auth contexts refresh. Do not race it with this guard.
+  if (!submitting && !loading && status && !status.setupRequired) {
     if (!ready) {
       return (
         <div className="min-h-screen grid place-items-center p-6" aria-live="polite">
