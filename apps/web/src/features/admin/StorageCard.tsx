@@ -234,11 +234,19 @@ export function StorageCard() {
       const oc = outcomeOf(res);
       setOutcome(oc);
       // A successful execution consumes the preview — drop it so a subsequent
-      // run can't reuse a stale binding. load() also refreshes stats.
+      // run can't reuse a stale binding. Refresh stats so the card reflects the
+      // post-cleanup state, but DO NOT call load() here: load() clears the
+      // outcome banner (issue #703), and we just set it so the admin can see
+      // the partial-failure/success result. Inline the stats fetch instead.
       setBinding(null);
       setConfirming(false);
       setConfirmDry(null);
-      await load();
+      try {
+        setStats(await api.get<StorageStats>(`${API}/admin/storage`));
+      } catch {
+        // Stats refresh is best-effort here; the outcome banner is the primary
+        // post-execute signal and must not be masked by a stats fetch failure.
+      }
     } catch (err) {
       setConfirmError(err instanceof ApiError ? err.message : "Couldn't run cleanup.");
     } finally {
@@ -370,7 +378,17 @@ export function StorageCard() {
           confirmLabel="Delete orphans"
           cancelLabel="Cancel"
           busy={busy}
-          confirmDisabled={!confirmDry || !binding || confirmError !== null}
+          confirmDisabled={
+            !confirmDry ||
+            !binding ||
+            confirmError !== null ||
+            // Drift between the bound preview and the fresh confirm-time dry-run
+            // (issue #703): the admin must re-preview before the destructive call
+            // can fire. Without this, a stale preview could drive a wrong delete set.
+            (confirmDry !== null &&
+              (confirmDry.rowsWithoutFile !== binding.rowsWithoutFile ||
+                confirmDry.filesWithoutRow !== binding.filesWithoutRow))
+          }
           onCancel={cancelConfirm}
           onConfirm={() => void executeCleanup()}
           body={<ConfirmBody binding={binding} fresh={confirmDry} error={confirmError} />}
