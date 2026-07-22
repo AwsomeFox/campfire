@@ -159,6 +159,8 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  // Starfinder 1e caps characters at level 20 (Core Rulebook), the same ceiling as 5e/PF.
+  maxLevel: 20,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     const dex = starfinderDexScore(abilities);
     return dex === null ? 0 : this.abilityModifier(dex);

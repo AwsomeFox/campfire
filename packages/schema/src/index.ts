@@ -1341,6 +1341,14 @@ export interface RuleSystemAdapter {
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
   readonly initiativeDie: number;
   /**
+   * Hard level cap for this system, sourced from the adapter so `levelUp` doesn't bake in 5e's
+   * 20 (issue #535). 5e/PF1e/PF2e/Starfinder are 20; 13th Age is 10. A system with no hard cap
+   * (Open Legend, OSR retroclones) uses `Infinity`, so a `levelUp` check of
+   * `existing.level >= maxLevel` is never true and the character may advance without bound.
+   * Always read via comparison (never `level + 1 === maxLevel`): Infinity + 1 is still Infinity.
+   */
+  readonly maxLevel: number;
+  /**
    * Derive a combatant's initiative modifier from an ability-score map (5e: the DEX
    * modifier). Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster
    * `abilityScores` object (`{ dexterity: 14 }`); returns 0 when the governing score is
@@ -1395,6 +1403,9 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
+  // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
+  maxLevel: 20,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     const dex = dnd5eDexScore(abilities);
     return dex === null ? 0 : this.abilityModifier(dex);
@@ -1571,6 +1582,10 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   // roller is d20 + Agility — the full exploding pool is available via attributeDicePool for
   // action resolution, but initiative only needs an Agility-monotonic ordering.
   initiativeDie: 20,
+  // Open Legend has no class/level framework and no published hard character-level cap, so the
+  // adapter reports Infinity — `levelUp` never rejects on the cap (issue #535). A campaign that
+  // models "level" as a loose progression tier is free to advance without a synthetic 5e ceiling.
+  maxLevel: Infinity,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     return openLegendAgility(abilities);
   },
@@ -1823,6 +1838,8 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
+  maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
   // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
   // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
