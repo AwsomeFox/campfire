@@ -116,6 +116,10 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  // 13th Age caps at level 10 (the game's "epic tier" ceiling — 10 is to 13th Age what 20 is
+  // to 5e). Sourced from the adapter, not hardcoded, so a 13th-Age campaign rejects a level-11
+  // level-up that 5e's hardcoded cap would wrongly allow (issue #535).
+  maxLevel: 10,
   initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
     const dex = dexScore(abilities);
     return dex === null ? 0 : this.abilityModifier(dex);
