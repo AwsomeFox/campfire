@@ -6,6 +6,11 @@ import { createContext, useContext } from 'react';
 import type { Me, Role } from '@campfire/schema';
 
 export interface AuthState {
+  /**
+   * AuthProvider mirrors a minimal user-id sentinel in localStorage. Removing it
+   * in one tab clears auth/query/SW state in peer tabs; AuthedLayout then routes
+   * those tabs to login. No session token or user profile is stored there.
+   */
   me: Me | null; // null = not logged in (or still loading — check ready)
   ready: boolean; // false until the first /me fetch settles
   /**
