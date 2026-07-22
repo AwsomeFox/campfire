@@ -195,6 +195,8 @@ function mapMonster(row: Record<string, unknown>, source: OsrSource): ImportedEn
     }),
     license: source.license,
     source: source.attribution,
+    attribution: source.attribution,
+    sourceUrl: source.sourceUrl,
   };
 }
 
@@ -216,6 +218,8 @@ function mapSpell(row: Record<string, unknown>, source: OsrSource): ImportedEntr
     }),
     license: source.license,
     source: source.attribution,
+    attribution: source.attribution,
+    sourceUrl: source.sourceUrl,
   };
 }
 
@@ -235,6 +239,8 @@ function mapItem(row: Record<string, unknown>, source: OsrSource): ImportedEntry
     }),
     license: source.license,
     source: source.attribution,
+    attribution: source.attribution,
+    sourceUrl: source.sourceUrl,
   };
 }
 
@@ -249,6 +255,8 @@ function mapCondition(row: Record<string, unknown>, source: OsrSource): Imported
     dataJson: null,
     license: source.license,
     source: source.attribution,
+    attribution: source.attribution,
+    sourceUrl: source.sourceUrl,
   };
 }
 
