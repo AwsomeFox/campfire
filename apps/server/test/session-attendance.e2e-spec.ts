@@ -1,5 +1,8 @@
 import request from 'supertest';
+import { and, eq, sql } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { characters, sessionAttendees } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'att-dm' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'att-player' };
@@ -61,6 +64,77 @@ describe('session attendance (e2e) — issue #121', () => {
     const get = await request(server).get(`/api/v1/sessions/${sessionId}/attendance`).set(dm);
     expect(get.status).toBe(200);
     expect(get.body.map((r: { characterId: number }) => r.characterId).sort()).toEqual([charA, charB].sort());
+  });
+
+  it('reflects a rename immediately and survives retirement and soft-delete', async () => {
+    const server = ctx.app.getHttpServer();
+    const session = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 659, title: 'The Rename' });
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Aria Before' });
+
+    const set = await request(server)
+      .put(`/api/v1/sessions/${session.body.id}/attendance`)
+      .set(dm)
+      .send({ characterIds: [character.body.id] });
+    expect(set.status).toBe(200);
+    expect(set.body[0].characterName).toBe('Aria Before');
+
+    const rename = await request(server)
+      .patch(`/api/v1/characters/${character.body.id}`)
+      .set(dm)
+      .send({ name: 'Aria After' });
+    expect(rename.status).toBe(200);
+
+    const renamedAttendance = await request(server).get(`/api/v1/sessions/${session.body.id}/attendance`).set(dm);
+    expect(renamedAttendance.status).toBe(200);
+    expect(renamedAttendance.body).toEqual([
+      expect.objectContaining({ characterId: character.body.id, characterName: 'Aria After' }),
+    ]);
+
+    // The read is a live join, not a hidden synchronization write: the stored
+    // compatibility snapshot remains the name captured by setAttendance.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [stored] = await db
+      .select()
+      .from(sessionAttendees)
+      .where(and(eq(sessionAttendees.sessionId, session.body.id), eq(sessionAttendees.characterId, character.body.id)));
+    expect(stored.characterName).toBe('Aria Before');
+
+    const retire = await request(server)
+      .patch(`/api/v1/characters/${character.body.id}`)
+      .set(dm)
+      .send({ status: 'retired' });
+    expect(retire.status).toBe(200);
+    const retiredAttendance = await request(server).get(`/api/v1/sessions/${session.body.id}/attendance`).set(dm);
+    expect(retiredAttendance.body[0].characterName).toBe('Aria After');
+
+    const remove = await request(server).delete(`/api/v1/characters/${character.body.id}`).set(dm);
+    expect(remove.status).toBe(200);
+    const trashedAttendance = await request(server).get(`/api/v1/sessions/${session.body.id}/attendance`).set(dm);
+    expect(trashedAttendance.status).toBe(200);
+    expect(trashedAttendance.body).toEqual([
+      expect.objectContaining({ characterId: character.body.id, characterName: 'Aria After' }),
+    ]);
+
+    // Pre-#69 databases may not have the modern FK cascade, so a historical
+    // attendee can outlive a hard-deleted character. Simulate that legacy orphan
+    // and verify the write-time snapshot is the graceful fallback.
+    await db.run(sql`PRAGMA foreign_keys = OFF`);
+    try {
+      await db.delete(characters).where(eq(characters.id, character.body.id));
+    } finally {
+      await db.run(sql`PRAGMA foreign_keys = ON`);
+    }
+    const orphanedAttendance = await request(server).get(`/api/v1/sessions/${session.body.id}/attendance`).set(dm);
+    expect(orphanedAttendance.status).toBe(200);
+    expect(orphanedAttendance.body).toEqual([
+      expect.objectContaining({ characterId: character.body.id, characterName: 'Aria Before' }),
+    ]);
   });
 
   it('setting attendance again replaces the set (not additive)', async () => {

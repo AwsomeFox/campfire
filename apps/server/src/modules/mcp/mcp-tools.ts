@@ -1945,7 +1945,8 @@ export class McpToolsService {
       server,
       'get_session_attendance',
       'List the characters that played a session (issue #121) — the West Marches "who was there" record. Ids come ' +
-        'from get_session_recaps / get_session. Empty when attendance was never recorded.',
+        'from get_session_recaps / get_session. Names reflect the current character row (including retired/trashed ' +
+        'characters), with the recorded name as a fallback if that row is unavailable. Empty when attendance was never recorded.',
       { sessionId: Id.describe('Session id — from get_session_recaps') },
       async ({ sessionId }) => {
         const row = await this.sessions.getRowOrThrow(sessionId as number);

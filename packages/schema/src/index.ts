@@ -628,7 +628,8 @@ export const RECAP_TEMPLATE = RECAP_HEADINGS.map((h) => `## ${h}\n\n`).join('').
 // up each outing) need a per-session "who was there" record so recaps, per-attendee
 // context and "you weren't there" all become possible. One row per (session,
 // character); the set is REPLACED on write (PUT /sessions/:id/attendance), not
-// accumulated. characterName is denormalized for display.
+// accumulated. characterName is the current character name when the character row
+// is available, with the stored write-time snapshot used as a graceful fallback.
 export const SessionAttendee = z.object({
   id: Id,
   sessionId: Id,

@@ -439,15 +439,30 @@ export class SessionsService {
 
   // ----- attendance (issue #121): which characters played a session -----
 
-  /** The roster that played a session — characters, newest-added first. Any member may read. */
+  /**
+   * The roster that played a session. Any member may read.
+   *
+   * `character_name` is the write-time snapshot kept for compatibility and as a
+   * graceful fallback for an orphaned legacy row. Prefer the character table's
+   * current name when that row still exists, including when it is retired or
+   * soft-deleted. This is intentionally a read-only LEFT JOIN: renames are visible
+   * immediately without a read causing synchronization writes.
+   */
   async getAttendance(sessionId: number): Promise<SessionAttendee[]> {
     await this.getRowOrThrow(sessionId); // 404 for an unknown session
+    const displayName = sql<string>`coalesce(${characters.name}, ${sessionAttendees.characterName})`;
     const rows = await this.db
-      .select()
+      .select({ attendee: sessionAttendees, currentCharacterName: characters.name })
       .from(sessionAttendees)
+      .leftJoin(characters, eq(sessionAttendees.characterId, characters.id))
       .where(eq(sessionAttendees.sessionId, sessionId))
-      .orderBy(asc(sessionAttendees.characterName), asc(sessionAttendees.id));
-    return rows.map(attendeeToDomain);
+      .orderBy(asc(displayName), asc(sessionAttendees.id));
+    return rows.map(({ attendee, currentCharacterName }) =>
+      attendeeToDomain({
+        ...attendee,
+        characterName: currentCharacterName ?? attendee.characterName,
+      }),
+    );
   }
 
   /**
