@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post, Put } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -75,6 +76,7 @@ export class AiConsoleController {
   }
 
   @Post('health')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({
     summary: 'Test all AI providers',
