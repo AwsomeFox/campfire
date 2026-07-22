@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { DiceRoll } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, getWithHeaders } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { DiceTray } from './DiceTray';
@@ -67,13 +67,22 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   // Id of the roll the local user just made — only that total tumbles in, so
   // polled-in rolls from other players don't animate on every 5s refresh.
   const [justRolledId, setJustRolledId] = useState<number | null>(null);
+  // Durable retention ceiling disclosed by the server (#614): the number of
+  // rolls a campaign keeps before the oldest are pruned, or null when history
+  // is never pruned ("keep all"). Used to render the honest "Showing the latest
+  // N rolls" footnote; undefined until the first successful feed fetch.
+  const [retention, setRetention] = useState<number | null | undefined>(undefined);
   const announce = useAnnounce();
   const exprId = useId();
 
   const load = useCallback(async () => {
     try {
-      const list = await api.get<DiceRoll[]>(`${API}/campaigns/${campaignId}/rolls?limit=${limit}`);
-      setRolls(list);
+      const { data, headers } = await getWithHeaders<DiceRoll[]>(`${API}/campaigns/${campaignId}/rolls?limit=${limit}`);
+      setRolls(data);
+      // Retention is disclosed per-response so it tracks the server's current
+      // policy (incl. the "unlimited" keep-all mode) without a separate call.
+      const r = headers.get('X-Dice-Rolls-Retention');
+      setRetention(r === null ? undefined : r === 'unlimited' ? null : Number.isFinite(Number(r)) ? Number(r) : undefined);
     } catch {
       /* keep last-known feed; next poll retries */
     }
@@ -244,6 +253,16 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
             );
           })}
         </div>
+      )}
+      {/* #614: disclose the durable retention policy honestly. Hidden on the
+          compact dashboard widget (no room) and until the first fetch resolves
+          `retention`; null means "keep everything", a number is the cap. */}
+      {!compact && retention !== undefined && (
+        <p className="text-muted" style={{ fontSize: 10.5, margin: 0 }}>
+          {retention === null
+            ? t('dice.retentionUnbounded')
+            : t('dice.retentionCapped', { count: retention })}
+        </p>
       )}
     </Card>
   );

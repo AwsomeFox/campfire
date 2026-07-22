@@ -1018,6 +1018,20 @@ exact same one-line-per-DTO pattern.
   predates auth; the new auth-session table is named `user_sessions` in SQL
   (`userSessions` in drizzle) to avoid a name collision.
 
+### Data retention env vars
+
+Per-campaign dice-roll history is retained under a *disclosed, configurable*
+policy (issue #614). The shared log used to hard-prune to the newest 200 rolls
+on every insert — silently, with no policy or recovery. It now defaults to a
+much higher cap, prunes on a background sweep (off the player's insert path),
+and discloses the ceiling in the dice-log UI and the
+`X-Dice-Rolls-Retention` / `X-Dice-Rolls-Unbounded` response headers on
+`GET /campaigns/:id/rolls`.
+
+| Env var | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `DICE_ROLLS_RETENTION` | no | `1000` | Max dice rolls kept per campaign before the oldest are pruned by the hourly background sweep. `0` or a negative value disables pruning entirely (keep all history — e.g. for tables that ship the DB off-box). The audit log has an analogous `AUDIT_RETENTION_DAYS`. The GET feed's page size (`?limit=`) is independent of this durable ceiling. |
+
 ## Prod hardening
 
 `main.ts`'s `bootstrap()` applies (via the exported `configureApp()`, which
