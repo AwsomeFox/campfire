@@ -320,3 +320,76 @@ describe('party XP transaction atomicity against the real SQLite database (issue
     expect(unchanged.body.xp).toBe(40);
   });
 });
+
+// Issue #531: awardXp's party loop must be one synchronous better-sqlite3 transaction so a
+// mid-loop failure cannot leave some characters leveled and others not. The #814 block above
+// only proves rollback when the *trailing* audit insert fails (after every UPDATE succeeded)
+// with a single recipient. This block injects a failure *between* character updates — a
+// BEFORE UPDATE trigger ABORTs on the middle of three recipients — and asserts every
+// character's XP is still the pre-award value and no successful award was recorded. Without
+// the `this.db.transaction((tx) => ...)` wrapper, the first recipient would already be
+// committed and survive the second recipient's failure.
+describe('party XP transaction atomicity on mid-loop failure (issue #531)', () => {
+  let ctx: TestAppContext;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('rolls back every character when an UPDATE fails mid-loop', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Atomic Mid-Loop' });
+
+    // Three active recipients so the default party award targets more than one row —
+    // the failure on the middle character is genuinely "mid-loop".
+    const created = await Promise.all(
+      [100, 200, 300].map((xp, i) =>
+        request(server)
+          .post(`/api/v1/campaigns/${campaign.body.id}/characters`)
+          .set(dm)
+          .send({ name: `Member ${i + 1}`, xp }),
+      ),
+    );
+    expect(created.every((res) => res.status === 201)).toBe(true);
+    const [a, b, c] = created.map((res) => ({ id: res.body.id as number, xp: res.body.xp as number }));
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    // A trigger scoped to the middle recipient's id fires only on its UPDATE. RAISE(ABORT)
+    // is the failure mode the issue calls out (analogous to a DB lock timeout / check
+    // constraint): it aborts the surrounding statement and, inside a transaction, triggers
+    // ROLLBACK. Outside a transaction it would commit the prior siblings — exactly the bug.
+    // SQLite triggers cannot bind variables, so the id is inlined as a literal; it is a
+    // DB-assigned autoincrement integer, coerced to Number and asserted integral first to
+    // keep the raw SQL injection-free.
+    const middleId = Number(b.id);
+    expect(Number.isInteger(middleId)).toBe(true);
+    db.run(
+      sql.raw(
+        `CREATE TRIGGER characters_xp_midloop_fail BEFORE UPDATE OF xp ON characters WHEN new.id = ${middleId} BEGIN SELECT RAISE(ABORT, 'mid-loop failure'); END`,
+      ),
+    );
+
+    const award = await request(server)
+      .post(`/api/v1/campaigns/${campaign.body.id}/characters/xp`)
+      .set(dm)
+      .send({ amount: 50 });
+    expect(award.status).toBe(500);
+
+    const [afterA, afterB, afterC] = await Promise.all(
+      [a.id, b.id, c.id].map((id) => request(server).get(`/api/v1/characters/${id}`).set(dm)),
+    );
+    expect(afterA.body.xp).toBe(a.xp);
+    expect(afterB.body.xp).toBe(b.xp);
+    expect(afterC.body.xp).toBe(c.xp);
+
+    // The trailing audit insert is the last statement in the transaction; since the loop
+    // never reached it, no successful award can be recorded for this campaign.
+    const audit = await request(server).get(`/api/v1/campaigns/${campaign.body.id}/audit`).set(dm);
+    const awards = audit.body.filter((row: { action: string }) => row.action === 'character.xp_award');
+    expect(awards).toHaveLength(0);
+  });
+});
