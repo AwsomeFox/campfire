@@ -300,8 +300,8 @@ export class RulesService {
    */
   private static readonly SECTIONS_BY_SOURCE: Record<RulePackInstallSource, readonly string[]> = {
     open5e: ALL_OPEN5E_SECTIONS,
-    pf2e: ALL_OPEN5E_SECTIONS,
-    sf2e: ALL_OPEN5E_SECTIONS,
+    pf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
+    sf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
     pf1e: ALL_PF1E_SECTIONS,
     starfinder: ALL_STARFINDER_SECTIONS,
     archmage: ALL_ARCHMAGE_SECTIONS,

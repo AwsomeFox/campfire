@@ -1067,6 +1067,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  * family so every shipped importer is reachable from the endpoint:
  *   - 'open5e'      — D&D 5e SRD (default, the built-in API importer)
  *   - 'pf2e'        — Pathfinder 2e (Archives of Nethys, issue #295)
+ *   - 'sf2e'        — Starfinder 2e (Archives of Nethys, issue #400)
  *   - 'pf1e'        — Pathfinder 1e SRD (issue #296)
  *   - 'starfinder'  — Starfinder 1e SRD (issue #297)
  *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)

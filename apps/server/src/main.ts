@@ -98,8 +98,8 @@ export function configureApp(app: INestApplication): void {
   // resource-exhaustion vector on any authenticated (or unauthenticated, e.g. /auth/login)
   // write endpoint. Multipart uploads (attachments) go through multer's own FileInterceptor
   // size limit, not these parsers, so this cap doesn't affect them.
-  app.use(express.json({ limit: '16mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '16mb' }));
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
   const corsOrigin = resolveCorsOrigin();
   if (corsOrigin) {
