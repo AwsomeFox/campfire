@@ -46,11 +46,15 @@ export interface PanelState<T> {
  *
  * @param fetcher  Returns the panel's data. Receives nothing; close over the ids
  *                 you need. Must be referentially stable (wrap in `useCallback`) —
- *                 a identity change re-runs the fetch, exactly like the page-level
+ *                 an identity change re-runs the fetch, exactly like the page-level
  *                 `load()` these pages already use.
- * @param enabled  When `false`, the panel stays idle (no fetch, no error). Use this
- *                 to gate a DM-only panel (e.g. the audit log) without coupling its
- *                 lifecycle to the host page's role check.
+ * @param enabled  When `false`, the panel stays idle (no fetch, no error). Any error
+ *                 left over from a prior enabled period is cleared on the transition
+ *                 to disabled, so a gated-off panel never surfaces a stale failure.
+ *                 Prior `data` is retained (callers don't render disabled panels, so
+ *                 it's never shown stale). Use this to gate a DM-only panel (e.g. the
+ *                 audit log) without coupling its lifecycle to the host page's role
+ *                 check.
  * @param errorMessage  Shown in the inline degraded state when the fetch fails.
  *
  * The friendly `errorMessage` always leads the inline alert so it identifies which
@@ -98,7 +102,14 @@ export function usePanelData<T>(
 
   useEffect(() => {
     if (!enabled) {
+      // A panel going idle (e.g. its `isDm`/`idReady` gate just flipped off) must
+      // not keep advertising a failure from the period it was enabled — otherwise a
+      // disabled panel can surface a stale inline error for a request it's no longer
+      // making. Prior `data` is retained: callers don't render disabled panels, so it
+      // is never shown stale, and keeping it lets a re-enabled panel flash its last
+      // good value before the next load resolves.
       setLoading(false);
+      setError(null);
       return;
     }
     void load();

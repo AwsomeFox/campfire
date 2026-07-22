@@ -143,6 +143,16 @@ export default function LocationPage() {
     [questsPanel.data, hereNpcIds],
   );
 
+  // "Here & connected" empty-state guard (#697 review): the combined list is empty
+  // both while the panels are still loading AND after they fail (a failed panel
+  // yields null data -> empty filtered list). Without distinguishing those from a
+  // genuine "nothing is connected" we'd show the cheerful empty state over a load
+  // failure. Only treat it as truly empty once both panels have settled
+  // successfully with no results.
+  const panelsLoading = (npcsPanel.loading && !npcsPanel.data) || (questsPanel.loading && !questsPanel.data);
+  const panelsFailed = (!!npcsPanel.error && !npcsPanel.data) || (!!questsPanel.error && !questsPanel.data);
+  const nothingConnected = hereNpcs.length === 0 && connectedQuests.length === 0;
+
   const locById = useMemo(() => new Map(allLocations.map((l) => [l.id, l])), [allLocations]);
 
   /** Ancestor chain from outermost to the direct parent, for the breadcrumb (#99). */
@@ -570,11 +580,16 @@ export default function LocationPage() {
                 {questsPanel.error && !questsPanel.data && (
                   <ErrorNote message={questsPanel.error} onRetry={questsPanel.retry} />
                 )}
-                {((npcsPanel.loading && !npcsPanel.data) || (questsPanel.loading && !questsPanel.data)) &&
-                  hereNpcs.length === 0 &&
-                  connectedQuests.length === 0 ? (
+                {/* Distinguish "still loading", "failed to load", and "genuinely empty"
+                    (#697 review): previously the empty state rendered whenever the
+                    combined list was empty, which is also true mid-load and post-failure.
+                    Now the empty state only shows once both panels settled successfully
+                    with no results. A failure shows just the inline alerts above (no
+                    misleading "Nothing connected here yet"); a pending load shows a
+                    skeleton. */}
+                {nothingConnected && panelsFailed ? null : nothingConnected && panelsLoading ? (
                   <Skeleton lines={2} />
-                ) : hereNpcs.length === 0 && connectedQuests.length === 0 ? (
+                ) : nothingConnected ? (
                   <EmptyState icon="shaking-hands" title="Nothing connected here yet" />
                 ) : (
                   <div className="grid sm:grid-cols-2 gap-3">

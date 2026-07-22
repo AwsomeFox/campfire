@@ -404,6 +404,12 @@ function MembersCard({
   onRetryCharacters: () => void;
   onChange: () => void;
 }) {
+  // A failed character roster reads as an empty list. Without this flag the
+  // per-member character select would still render (with only "— unlinked —"),
+  // and a DM could silently unlink a member from its character by saving the
+  // "empty" selection. We block the select entirely while the roster is
+  // unavailable so a failed load can never clear an assignment (#697 review).
+  const charactersUnavailable = !!charactersError;
   const [showAdd, setShowAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -442,7 +448,16 @@ function MembersCard({
       ) : (
         <div className="flex flex-col">
           {members.map((m) => (
-            <MemberRow key={m.id} campaignId={campaignId} member={m} characters={characters} charactersLoading={charactersLoading} onChange={onChange} onError={setError} />
+            <MemberRow
+              key={m.id}
+              campaignId={campaignId}
+              member={m}
+              characters={characters}
+              charactersLoading={charactersLoading}
+              charactersUnavailable={charactersUnavailable}
+              onChange={onChange}
+              onError={setError}
+            />
           ))}
         </div>
       )}
@@ -459,6 +474,7 @@ function MemberRow({
   member,
   characters,
   charactersLoading,
+  charactersUnavailable,
   onChange,
   onError,
 }: {
@@ -466,6 +482,7 @@ function MemberRow({
   member: CampaignMember;
   characters: Character[];
   charactersLoading: boolean;
+  charactersUnavailable: boolean;
   onChange: () => void;
   onError: (msg: string | null) => void;
 }) {
@@ -556,7 +573,12 @@ function MemberRow({
         className="cf-select !min-h-0 !py-1 text-xs"
         style={{ width: 130 }}
         value={character?.id ?? ''}
-        disabled={savingChar || charactersLoading}
+        disabled={savingChar || charactersLoading || charactersUnavailable}
+        title={
+          charactersUnavailable
+            ? "Character roster didn't load — retry above before changing links."
+            : undefined
+        }
         onChange={(e) => changeCharacter(e.target.value ? Number(e.target.value) : null)}
       >
         <option value="">— unlinked —</option>
