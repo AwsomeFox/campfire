@@ -2,7 +2,15 @@ import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { rulePacks, ruleEntries, combatants as combatantsTable, encounterEvents as encounterEventsTable } from '../src/db/schema';
+import {
+  auditLog,
+  encounters as encountersTable,
+  rulePacks,
+  ruleEntries,
+  combatants as combatantsTable,
+  encounterEvents as encounterEventsTable,
+} from '../src/db/schema';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -2202,6 +2210,114 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
         .send({ fog: { enabled: true, revealed: [{ x: -5, y: 0, w: 200, h: 10 }] } });
       expect(res.status).toBe(400);
     });
+  });
+});
+
+// Issue #865 — an equivalent encounter PATCH is a read-equivalent no-op. The conditional
+// UPDATE is exercised against real SQLite so this covers persisted timestamps/audit rows and
+// the real in-process event broadcaster, including two clients racing the same defaults.
+describe('encounters — issue #865: semantic PATCH no-ops (real DB)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    campaignId = (
+      await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(dm).send({ name: 'No-op Grid Campaign' })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('returns the encounter without touching updatedAt, audit, or SSE for a semantic no-op', async () => {
+    const server = ctx.app.getHttpServer();
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Stable Grid' })
+    ).body.id;
+    const patch = {
+      name: 'Stable Grid',
+      locationId: null,
+      questId: null,
+      sessionId: null,
+      mapAttachmentId: null,
+      gridSize: 8,
+      gridScale: 5,
+      gridUnit: 'ft',
+      gridSnap: true,
+      gridType: 'hex',
+      fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 25, h: 25 }] },
+      aoe: [{ id: 'noop-circle', shape: 'circle', x: 50, y: 50, sizeFt: 20, angleDeg: 0, color: null }],
+      hidden: true,
+    };
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send(patch)).status).toBe(200);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [beforeRow] = await db.select().from(encountersTable).where(eq(encountersTable.id, encounterId));
+    const beforeAudit = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId))).filter(
+      (row) => row.action === 'encounter.update',
+    );
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      // JSON values are compared as domain values, not storage strings; key insertion order
+      // therefore cannot turn an equivalent fog/template payload into a write.
+      const response = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ ...patch, fog: { revealed: [{ h: 25, w: 25, y: 0, x: 0 }], enabled: true } });
+      expect(response.status).toBe(200);
+      expect(response.body.gridScale).toBe(5);
+
+      const [afterRow] = await db.select().from(encountersTable).where(eq(encountersTable.id, encounterId));
+      const afterAudit = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId))).filter(
+        (row) => row.action === 'encounter.update',
+      );
+      expect(afterRow.updatedAt).toBe(beforeRow.updatedAt);
+      expect(afterAudit).toHaveLength(beforeAudit.length);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(0);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('allows exactly one meaningful default PATCH when two clients race', async () => {
+    const server = ctx.app.getHttpServer();
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Two-client Grid' })
+    ).body.id;
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridSize: 8 })).status).toBe(200);
+
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      const [left, right] = await Promise.all([
+        request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridScale: 5, gridUnit: 'ft' }),
+        request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridUnit: 'ft', gridScale: 5 }),
+      ]);
+      expect(left.status).toBe(200);
+      expect(right.status).toBe(200);
+      expect(left.body).toMatchObject({ gridSize: 8, gridScale: 5, gridUnit: 'ft' });
+      expect(right.body).toMatchObject({ gridSize: 8, gridScale: 5, gridUnit: 'ft' });
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const audits = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId))).filter(
+        (row) => row.action === 'encounter.update' && row.detail.includes('gridScale'),
+      );
+      expect(audits).toHaveLength(1);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(1);
+    } finally {
+      subscription.unsubscribe();
+    }
   });
 });
 

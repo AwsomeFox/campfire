@@ -145,9 +145,13 @@ export class ObservabilityService {
       id: r.id,
       campaignId: r.campaignId ?? null,
       // audit_log.actorRole is a free-text column; the AuditEntry contract types
-      // it as Role. Existing rows are always one of dm/player/viewer, but coerce
-      // defensively so a stray value can never make the whole snapshot fail to parse.
-      actorRole: (['dm', 'player', 'viewer'].includes(r.actorRole) ? r.actorRole : 'viewer') as 'dm' | 'player' | 'viewer',
+      // it as AuditActorRole (dm/player/viewer + the 'admin' sentinel — issue #526,
+      // so an admin's privileged action isn't misread as a low-priv viewer's).
+      // Coerce defensively so a stray value can never make the whole snapshot fail
+      // to parse.
+      actorRole: (['dm', 'player', 'viewer', 'admin'].includes(r.actorRole)
+        ? r.actorRole
+        : 'viewer') as 'dm' | 'player' | 'viewer' | 'admin',
       actor: r.actor,
       action: r.action,
       entityType: r.entityType ?? null,

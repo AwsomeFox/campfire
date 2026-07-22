@@ -701,6 +701,34 @@ function migrateSoftDeleteColumns(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before comment tombstoning (issue #503): the comments
+ * table gained `deleted_at` (nullable ISO timestamp — a tombstoned root keeps its
+ * row so replies survive) and `deleted_by` (the actor who tombstoned it, same
+ * identity space as author_user_id). Plain nullable ADD COLUMNs — no table rebuild
+ * needed, same idempotent shape as migrateSoftDeleteColumns / migrateNotesTableForRecipient
+ * above. Existing comments come in with both NULL (== live), which is exactly the
+ * pre-migration state. New DBs never hit this path — BOOTSTRAP_SQL already declares
+ * both columns.
+ *
+ * Note this is deliberately NOT part of migrateSoftDeleteColumns (0031): that
+ * migration predates comments' tombstone semantics, and comments are NOT filtered
+ * out of normal reads the way the trashed entities are (a tombstoned root must stay
+ * visible as a placeholder so replies keep their parent), so the column deserves its
+ * own documented migration rather than being silently lumped into the trash set.
+ */
+function migrateCommentsTableForSoftDelete(sqlite: Database.Database): void {
+  const hasCommentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'")
+    .get();
+  if (!hasCommentsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(comments)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('deleted_at')) sqlite.exec('ALTER TABLE comments ADD COLUMN deleted_at TEXT');
+  if (!has('deleted_by')) sqlite.exec('ALTER TABLE comments ADD COLUMN deleted_by TEXT');
+}
+
+/**
  * Migration for DBs created before the VTT grid + fog of war (issue #40, phases 2–3):
  * `encounters` gained `grid_size` / `grid_scale` / `grid_unit` / `grid_snap` / `fog`.
  * Plain nullable/defaulted ADD COLUMNs. Existing encounters get NULL grid (no grid) and
@@ -1069,6 +1097,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0041_ai_dm_seats_mode', run: migrateAiDmSeatsTableForMode },
   { name: '0043_ai_scribe_jobs', run: migrateAiScribeTables },
   { name: '0044_combatants_npc_id', run: migrateCombatantsTableForNpcId },
+  { name: '0045_comments_soft_delete', run: migrateCommentsTableForSoftDelete },
 ];
 
 /**

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
 import { api, API } from '../../lib/api';
-import { formatDate } from '../../lib/format';
+import { formatDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 
@@ -16,6 +16,7 @@ function firstLinePlain(text: string): string {
 }
 
 export function SessionLog({ campaignId, sessions }: { campaignId: number; sessions: SessionListItem[] }) {
+  useFormattingLocale();
   const sorted = [...sessions].sort((a, b) => b.number - a.number);
   const latest3 = sorted.slice(0, 3);
 
@@ -61,7 +62,7 @@ export function SessionLog({ campaignId, sessions }: { campaignId: number; sessi
         >
           <span style={{ fontSize: 12, color: 'var(--color-accent)', flex: 'none' }}><GameIcon slug="calendar" size={12} className="inline align-text-bottom mr-1" />Next session</span>
           <span style={{ fontSize: 13 }}>
-            {new Date(next.scheduledAt).toLocaleString(undefined, {
+            {formatDateTime(next.scheduledAt, {
               weekday: 'short',
               month: 'short',
               day: 'numeric',

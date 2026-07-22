@@ -65,6 +65,35 @@ const STATUS_TAG_CLASS: Record<string, string> = {
   ended: 'tag tag-outline',
 };
 
+type EncounterGridPatch = Partial<
+  Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>
+>;
+
+/** Stable serialization for suppressing an equivalent encounter PATCH while it is in flight. */
+function encounterPatchKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(encounterPatchKey).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${encounterPatchKey(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+/** Defaults shown by the grid panel must become real encounter state once the grid is enabled. */
+function missingGridDefaults(encounter: EncounterWithCombatants): EncounterGridPatch | null {
+  if (encounter.gridSize == null || encounter.gridSize <= 0) return null;
+  const patch: EncounterGridPatch = {};
+  if (encounter.gridScale == null) patch.gridScale = 5;
+  if (encounter.gridUnit == null) patch.gridUnit = 'ft';
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function gridDefaultAttemptKey(encounterId: number, patch: EncounterGridPatch): string {
+  return `${encounterId}:${Object.keys(patch).sort().join(',')}`;
+}
+
 // 5e difficulty band badge (issue #58) — party XP thresholds vs adjusted monster XP.
 const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {
   trivial: 'Trivial',
@@ -500,6 +529,12 @@ export default function RunSessionPage() {
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
+        // Only the encounter.* variants carry an encounterId; membership.revoked
+        // (and any future non-encounter variant) is irrelevant here and has no
+        // encounterId to compare against. The server already filters revoked
+        // frames out of the data path, but narrowing on type keeps this correct
+        // even if that ever changes.
+        if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping') return;
         if (event.encounterId !== eid) return;
         if (event.type === 'encounter.deleted') {
           navigate(`/c/${cid}/encounters`);
@@ -684,19 +719,77 @@ export default function RunSessionPage() {
   // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
   // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
   // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
+  const pendingEncounterPatchKeys = useRef(new Set<string>());
+  const gridDefaultAttempts = useRef(new Set<string>());
   const setMap = useMutation({
-    mutationFn: (patch: Record<string, unknown>) => api.patch(`${API}/encounters/${eid}`, patch),
+    mutationFn: ({ patch }: { patch: Record<string, unknown>; pendingKey: string; defaultAttemptKey?: string }) =>
+      api.patch(`${API}/encounters/${eid}`, patch),
     onMutate: () => setActionError(null),
-    onError: reportError,
-    onSettled: () => invalidateEncounter(queryClient, eid),
+    onError: (error, variables) => {
+      if (variables.defaultAttemptKey) gridDefaultAttempts.current.delete(variables.defaultAttemptKey);
+      reportError(error);
+    },
+    onSettled: (_data, error, variables) => {
+      pendingEncounterPatchKeys.current.delete(variables.pendingKey);
+      // A failed default write keeps its optimistic intent until a poll/SSE refresh supplies
+      // server truth. That fresh missing-field snapshot is what permits the next retry, rather
+      // than mutation-render churn immediately creating an unbounded failure loop.
+      if (!variables.defaultAttemptKey || !error) invalidateEncounter(queryClient, eid);
+    },
   });
-  const setEncounterMap = (attachmentId: number | null) => setMap.mutate({ mapAttachmentId: attachmentId });
+  const mutateMapRef = useRef(setMap.mutate);
+  mutateMapRef.current = setMap.mutate;
+
+  const queueEncounterPatch = useCallback(
+    (patch: Record<string, unknown>, defaultAttemptKey?: string): boolean => {
+      const pendingKey = `${eid}:${encounterPatchKey(patch)}`;
+      if (pendingEncounterPatchKeys.current.has(pendingKey)) return false;
+      pendingEncounterPatchKeys.current.add(pendingKey);
+      if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
+
+      // Record the default intent before dispatch. Strict Mode's second effect pass, mutation
+      // renders, and stale polling/SSE responses therefore all see committed-looking defaults;
+      // the pending-key guard remains the final backstop if a stale response overwrites them.
+      if (defaultAttemptKey) {
+        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+          current ? { ...current, ...patch } : current,
+        );
+      }
+
+      mutateMapRef.current({ patch, pendingKey, defaultAttemptKey });
+      return true;
+    },
+    [eid, queryClient],
+  );
+
+  const setEncounterMap = useCallback(
+    (attachmentId: number | null) => queueEncounterPatch({ mapAttachmentId: attachmentId }),
+    [queueEncounterPatch],
+  );
   // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
-  const setEncounterGrid = (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>>) => setMap.mutate(patch);
+  const setEncounterGrid = useCallback((patch: EncounterGridPatch) => queueEncounterPatch(patch), [queueEncounterPatch]);
   // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
-  const setEncounterFog = (fog: FogState | null) => setMap.mutate({ fog });
+  const setEncounterFog = useCallback((fog: FogState | null) => queueEncounterPatch({ fog }), [queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
-  const setEncounterAoe = (aoe: AoeTemplate[]) => setMap.mutate({ aoe });
+  const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
+
+  // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
+  // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
+  useEffect(() => {
+    if (!isDm || !encounter) return;
+    const patch = missingGridDefaults(encounter);
+    const encounterPrefix = `${encounter.id}:`;
+    if (!patch) {
+      for (const key of gridDefaultAttempts.current) {
+        if (key.startsWith(encounterPrefix)) gridDefaultAttempts.current.delete(key);
+      }
+      return;
+    }
+
+    const attemptKey = gridDefaultAttemptKey(encounter.id, patch);
+    if (gridDefaultAttempts.current.has(attemptKey)) return;
+    queueEncounterPatch(patch, attemptKey);
+  }, [encounter, isDm, queueEncounterPatch]);
 
   // Transient battle-map ping (issue #238). Fire-and-forget POST; the server broadcasts an
   // `encounter.ping` SSE signal that every client — including this one — renders and fades, so
@@ -1191,13 +1284,20 @@ function BattleMap({
   onSetMap: (attachmentId: number | null) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
   onUnplaceToken: (combatantId: number) => void;
-  onSetGrid: (patch: Partial<Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>>) => void;
+  onSetGrid: (patch: EncounterGridPatch) => void;
   onSetFog: (fog: FogState | null) => void;
   onSetAoe: (aoe: AoeTemplate[]) => void;
   onPing: (x: number, y: number) => void;
   pings: ReadonlyArray<{ key: number; x: number; y: number }>;
   onError: (message: string) => void;
 }) {
+  type MapPoint = { x: number; y: number };
+  type ActiveMapGesture =
+    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
+    | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
+    | { kind: 'fog'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
+    | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint };
+
   const [uploading, setUploading] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
@@ -1213,7 +1313,69 @@ function BattleMap({
   // (object-contain) rendered rect so the grid overlay can be clipped to it (issue #273b).
   const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const activeGestureRef = useRef<ActiveMapGesture | null>(null);
+  // A successful pointerup normally causes lostpointercapture immediately afterwards. Keep the
+  // released id long enough to identify that expected notification; any earlier capture loss is
+  // an interruption and must roll the gesture back without persisting it.
+  const successfulPointerUpRef = useRef<number | null>(null);
   const { w: surfaceW, h: surfaceH } = useElementSize(surfaceRef);
+
+  const clearGesturePreview = useCallback((kind: ActiveMapGesture['kind']) => {
+    if (kind === 'token') {
+      setDraggingId(null);
+      setDragPos(null);
+    } else if (kind === 'aoe') {
+      setAoeDrag(null);
+    } else if (kind === 'fog') {
+      setRevealCorners(null);
+    } else {
+      setRuler(null);
+    }
+  }, []);
+
+  const cancelActiveGesture = useCallback(
+    (pointerId?: number, clearPreview = true) => {
+      const gesture = activeGestureRef.current;
+      if (!gesture || (pointerId != null && gesture.pointerId !== pointerId)) return;
+
+      // Clear ownership before releasing capture because releasePointerCapture may synchronously
+      // dispatch lostpointercapture. That follow-up must observe an already-cancelled gesture.
+      activeGestureRef.current = null;
+      successfulPointerUpRef.current = null;
+      if (clearPreview) clearGesturePreview(gesture.kind);
+      try {
+        if (gesture.captureTarget.hasPointerCapture?.(gesture.pointerId)) {
+          gesture.captureTarget.releasePointerCapture?.(gesture.pointerId);
+        }
+      } catch {
+        // The browser may already have dropped capture while backgrounding or unmounting.
+      }
+    },
+    [clearGesturePreview],
+  );
+
+  useEffect(() => {
+    const cancelWhenHidden = () => {
+      if (document.visibilityState === 'hidden') cancelActiveGesture();
+    };
+    const cancelForPageExit = () => cancelActiveGesture();
+    const cancelForRotation = () => cancelActiveGesture();
+    const orientation = globalThis.screen?.orientation;
+
+    document.addEventListener('visibilitychange', cancelWhenHidden);
+    window.addEventListener('pagehide', cancelForPageExit);
+    window.addEventListener('orientationchange', cancelForRotation);
+    orientation?.addEventListener?.('change', cancelForRotation);
+    return () => {
+      document.removeEventListener('visibilitychange', cancelWhenHidden);
+      window.removeEventListener('pagehide', cancelForPageExit);
+      window.removeEventListener('orientationchange', cancelForRotation);
+      orientation?.removeEventListener?.('change', cancelForRotation);
+      // Component teardown already removes every preview from the DOM. Drop ownership and capture
+      // without scheduling state updates; in particular, never turn unmount into a commit.
+      cancelActiveGesture(undefined, false);
+    };
+  }, [cancelActiveGesture]);
 
   const mapImageUrl = encounter.mapAttachmentId != null ? attachmentFileUrl(encounter.mapAttachmentId) : null;
   const placed = encounter.combatants.filter((c) => c.tokenX != null && c.tokenY != null);
@@ -1249,19 +1411,6 @@ function BattleMap({
     return { left: (surfaceW - width) / 2, top: (surfaceH - height) / 2, width, height };
   }, [surfaceW, surfaceH, imgNatural]);
 
-  // Heal grid config that shows placeholder defaults but stores null (issue #273a): the panel
-  // *displays* scale 5 / unit ft even when `gridScale`/`gridUnit` are null, which leaves Measure
-  // disabled ("Set a grid scale first"). Once the grid is on, commit those shown defaults so the
-  // values are real, persist, and enable Measure. DM-only — players can't PATCH the encounter.
-  useEffect(() => {
-    if (!isDm || !gridOn) return;
-    if (encounter.gridScale != null && encounter.gridUnit != null) return;
-    const patch: Partial<Pick<EncounterWithCombatants, 'gridScale' | 'gridUnit'>> = {};
-    if (encounter.gridScale == null) patch.gridScale = 5;
-    if (encounter.gridUnit == null) patch.gridUnit = 'ft';
-    onSetGrid(patch);
-  }, [isDm, gridOn, encounter.gridScale, encounter.gridUnit, onSetGrid]);
-
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
@@ -1282,7 +1431,7 @@ function BattleMap({
     }
   }
 
-  function pointerToPercent(e: ReactPointerEvent): { x: number; y: number } | null {
+  function pointerToPercent(e: ReactPointerEvent): MapPoint | null {
     const rect = surfaceRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0 || rect.height === 0) return null;
     const x = ((e.clientX - rect.left) / rect.width) * 100;
@@ -1291,7 +1440,7 @@ function BattleMap({
   }
 
   /** Snap a drop point to the nearest cell centre when the grid + snap are on (issue #40). */
-  function snapPoint(pt: { x: number; y: number }): { x: number; y: number } {
+  function snapPoint(pt: MapPoint): MapPoint {
     if (!gridOn || !encounter.gridSnap || cellPx <= 0 || surfaceW === 0 || surfaceH === 0) return pt;
     const px = (pt.x / 100) * surfaceW;
     const py = (pt.y / 100) * surfaceH;
@@ -1301,15 +1450,20 @@ function BattleMap({
   }
 
   function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
-    if (tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
+    if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
     e.preventDefault();
     e.stopPropagation();
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    const point = pointerToPercent(e);
+    const captureTarget = e.currentTarget;
+    captureTarget.setPointerCapture?.(e.pointerId);
+    successfulPointerUpRef.current = null;
+    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point };
     setDraggingId(c.id);
-    setDragPos(pointerToPercent(e));
+    setDragPos(point);
   }
 
   function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!e.isPrimary || activeGestureRef.current) return;
     const pct = pointerToPercent(e);
     if (!pct) return;
     if (tool === 'ping') {
@@ -1318,10 +1472,14 @@ function BattleMap({
       return;
     }
     if (tool === 'measure' && canMeasure) {
-      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      activeGestureRef.current = { kind: 'measure', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
       setRuler({ start: pct, end: pct });
     } else if (tool === 'reveal' && isDm) {
-      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      activeGestureRef.current = { kind: 'fog', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
       setRevealCorners({ start: pct, end: pct });
     } else if (tool === 'move') {
       // Click on empty map in move mode clears any AoE selection (deselect).
@@ -1330,56 +1488,61 @@ function BattleMap({
   }
 
   function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId != null) {
-      const pct = pointerToPercent(e);
-      if (pct) setDragPos(pct);
-      return;
-    }
-    if (aoeDrag) {
-      const pct = pointerToPercent(e);
-      if (pct) setAoeDrag((prev) => (prev ? { ...prev, x: pct.x, y: pct.y } : prev));
-      return;
-    }
-    if (ruler) {
-      const pct = pointerToPercent(e);
-      if (pct) setRuler((prev) => (prev ? { ...prev, end: pct } : prev));
-      return;
-    }
-    if (revealCorners) {
-      const pct = pointerToPercent(e);
-      if (pct) setRevealCorners((prev) => (prev ? { ...prev, end: pct } : prev));
+    const gesture = activeGestureRef.current;
+    if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+    const pct = pointerToPercent(e);
+    if (!pct) return;
+
+    if (gesture.kind === 'token') {
+      gesture.point = pct;
+      setDragPos(pct);
+    } else if (gesture.kind === 'aoe') {
+      gesture.point = pct;
+      setAoeDrag({ id: gesture.templateId, ...pct });
+    } else {
+      gesture.end = pct;
+      if (gesture.kind === 'measure') setRuler({ start: gesture.start, end: pct });
+      else setRevealCorners({ start: gesture.start, end: pct });
     }
   }
 
-  // Ends whatever surface drag is active. Wired to onPointerUp AND onPointerCancel /
-  // onLostPointerCapture: when the surface itself holds the pointer capture (measure/reveal), a
-  // plain synthetic `pointerup` on that element is unreliable across browsers — the fog-reveal
-  // commit (issue #231) was silently dropped because its `pointerup` branch never ran, leaving
-  // the dashed preview stuck and never PATCHing `fog.revealed`. `lostpointercapture` fires
-  // reliably when the captured pointer is released or cancelled, so routing it here guarantees
-  // the reveal (and token/AoE) drag commits. Each branch clears its own state and returns, so a
-  // second invocation (pointerup THEN lostpointercapture) is an idempotent no-op.
+  // Only the owning primary pointer's normal release may commit. Ownership is cleared before the
+  // mutation callback, making duplicate pointerup/lostcapture delivery exactly-once by design.
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId != null) {
-      const raw = pointerToPercent(e) ?? dragPos;
-      const id = draggingId;
-      setDraggingId(null);
-      setDragPos(null);
+    const gesture = activeGestureRef.current;
+    if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+    const finalPoint = pointerToPercent(e);
+    successfulPointerUpRef.current = e.pointerId;
+    activeGestureRef.current = null;
+    // Pointer capture is normally released implicitly after pointerup, but doing it explicitly
+    // makes the lifecycle deterministic across mouse, pen, and touch implementations. Ownership
+    // is already cleared, so a synchronous lostpointercapture can only acknowledge this success.
+    try {
+      if (gesture.captureTarget.hasPointerCapture?.(gesture.pointerId)) {
+        gesture.captureTarget.releasePointerCapture?.(gesture.pointerId);
+      }
+    } catch {
+      // The browser may already have released capture as part of pointerup dispatch.
+    }
+    // Completed measurements intentionally remain visible for reading. The three persistent
+    // gesture classes clear their transient overrides before invoking their mutation callbacks.
+    if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
+
+    if (gesture.kind === 'token') {
+      const raw = finalPoint ?? gesture.point;
       if (raw) {
         const pt = snapPoint(raw);
-        onMoveToken(id, pt.x, pt.y);
+        onMoveToken(gesture.tokenId, pt.x, pt.y);
       }
       return;
     }
-    if (aoeDrag) {
-      const drag = aoeDrag;
-      setAoeDrag(null);
-      onSetAoe(aoeTemplates.map((t) => (t.id === drag.id ? { ...t, x: drag.x, y: drag.y } : t)));
+    if (gesture.kind === 'aoe') {
+      const point = finalPoint ?? gesture.point;
+      onSetAoe(aoeTemplates.map((t) => (t.id === gesture.templateId ? { ...t, x: point.x, y: point.y } : t)));
       return;
     }
-    if (revealCorners) {
-      const rect = rectFromCorners(revealCorners.start, revealCorners.end);
-      setRevealCorners(null);
+    if (gesture.kind === 'fog') {
+      const rect = rectFromCorners(gesture.start, finalPoint ?? gesture.end);
       // Ignore an accidental micro-drag (a click) — a real reveal has some area.
       if (rect.w >= 1 && rect.h >= 1) {
         const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
@@ -1389,16 +1552,33 @@ function BattleMap({
     }
     // A ruler stays on screen after release so the readout can be read; it clears when the
     // next measurement starts, the tool changes, or move mode is re-entered.
+    setRuler({ start: gesture.start, end: finalPoint ?? gesture.end });
+  }
+
+  function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
+    cancelActiveGesture(e.pointerId);
+  }
+
+  function onSurfaceLostPointerCapture(e: ReactPointerEvent<HTMLDivElement>) {
+    if (successfulPointerUpRef.current === e.pointerId) {
+      successfulPointerUpRef.current = null;
+      return;
+    }
+    cancelActiveGesture(e.pointerId);
   }
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
-    if (!isDm) return;
+    if (!e.isPrimary || activeGestureRef.current || !isDm) return;
     e.preventDefault();
     e.stopPropagation();
-    (e.target as Element).setPointerCapture?.(e.pointerId);
-    setSelectedAoeId(t.id);
     const pct = pointerToPercent(e);
-    setAoeDrag({ id: t.id, x: pct?.x ?? t.x, y: pct?.y ?? t.y });
+    const point = pct ?? { x: t.x, y: t.y };
+    const captureTarget = e.currentTarget;
+    captureTarget.setPointerCapture?.(e.pointerId);
+    successfulPointerUpRef.current = null;
+    activeGestureRef.current = { kind: 'aoe', pointerId: e.pointerId, captureTarget, templateId: t.id, point };
+    setSelectedAoeId(t.id);
+    setAoeDrag({ id: t.id, ...point });
   }
 
   // AoE template CRUD (issue #238) — all DM-only PATCHes of the whole template list.
@@ -1658,6 +1838,7 @@ function BattleMap({
 
           <div
             ref={surfaceRef}
+            data-testid="battle-map-surface"
             className="relative overflow-hidden"
             style={{
               margin: '8px 14px',
@@ -1668,10 +1849,8 @@ function BattleMap({
             onPointerDown={onSurfacePointerDown}
             onPointerMove={onSurfacePointerMove}
             onPointerUp={onSurfacePointerUp}
-            // See onSurfacePointerUp: cancel/lost-capture are the reliable drag-end signals when the
-            // surface itself holds pointer capture (fixes the fog-reveal commit, issue #231).
-            onPointerCancel={onSurfacePointerUp}
-            onLostPointerCapture={onSurfacePointerUp}
+            onPointerCancel={onSurfacePointerCancel}
+            onLostPointerCapture={onSurfaceLostPointerCapture}
           >
             <img
               src={mapImageUrl}
@@ -1728,6 +1907,7 @@ function BattleMap({
               return (
                 <div
                   key={c.id}
+                  data-testid={`map-token-${c.id}`}
                   className="absolute -translate-x-1/2 -translate-y-1/2"
                   style={{
                     left: `${left}%`,
@@ -1830,6 +2010,7 @@ function BattleMap({
                 return (
                   <div
                     key={t.id}
+                    data-testid={`map-aoe-${t.id}`}
                     className="absolute -translate-x-1/2 -translate-y-1/2"
                     style={{
                       left: `${x}%`,
@@ -1877,6 +2058,7 @@ function BattleMap({
             {revealPreview && (
               <div
                 className="absolute"
+                data-testid="map-fog-preview"
                 style={{
                   left: `${revealPreview.x}%`,
                   top: `${revealPreview.y}%`,
@@ -1895,6 +2077,7 @@ function BattleMap({
               <>
                 <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none', zIndex: 7 }}>
                   <line
+                    data-testid="map-ruler-line"
                     x1={`${ruler.start.x}%`}
                     y1={`${ruler.start.y}%`}
                     x2={`${ruler.end.x}%`}

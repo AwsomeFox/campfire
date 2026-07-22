@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import type { Quest, QuestObjective, Npc } from '@campfire/schema';
+import { QuestStatus, type Quest, type QuestObjective, type Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import {
@@ -18,8 +18,8 @@ import {
   EmptyState,
   Skeleton,
   ErrorNote,
-  statusVariant,
 } from '../../components/ui';
+import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Markdown } from '../../components/Markdown';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
@@ -32,7 +32,7 @@ import { entityTargetProps } from '../../lib/entityLinks';
 type QuestWithObjectives = Quest & { objectives: QuestObjective[] };
 type QuestStatusValue = Quest['status'];
 
-const STATUS_OPTIONS: QuestStatusValue[] = ['available', 'active', 'completed', 'failed'];
+const STATUS_OPTIONS: QuestStatusValue[] = QuestStatus.options;
 
 export default function QuestPage() {
   const { campaignId, questId } = useParams<{ campaignId: string; questId: string }>();
@@ -437,7 +437,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
-        <Chip variant={statusVariant(quest.status)}>{capitalize(quest.status)}</Chip>
+        <QuestStatusBadge status={quest.status} />
         {isDm && quest.hidden && <Chip variant="failed">{t('quests.hiddenChip')}</Chip>}
         {isDm && (
           <>
@@ -480,7 +480,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                         s === quest.status ? 'text-white font-semibold' : 'text-slate-300'
                       }`}
                     >
-                      {capitalize(s)}
+                      <QuestStatusBadge status={s} />
                     </button>
                   ))}
                 </div>
@@ -662,9 +662,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                     >
                       {sq.title}
                     </Link>
-                    <span className="tag tag-neutral" style={{ fontSize: 10 }}>
-                      {capitalize(sq.status)}
-                    </span>
+                    <QuestStatusBadge status={sq.status} />
                   </div>
                 ))}
               </>
@@ -686,6 +684,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             <RevisionHistoryPanel
               entityType="quest"
               entityId={quest.id}
+              currentSnapshot={{ body: quest.body }}
               reloadNonce={historyNonce}
               onRestored={() => {
                 setHistoryNonce((n) => n + 1);
@@ -762,7 +761,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               )}
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <span className="text-muted">{t('quests.statusLabel')}</span>
-                <span>{capitalize(quest.status)}</span>
+                <QuestStatusBadge status={quest.status} />
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <span className="text-muted">{t('quests.updated')}</span>
@@ -986,10 +985,6 @@ function PageShell({ campaignId, children }: { campaignId: number; children: Rea
       {children}
     </div>
   );
-}
-
-function capitalize(s: string): string {
-  return s.length ? s[0].toUpperCase() + s.slice(1) : s;
 }
 
 // "Updated Xd ago", matching QuestListPage / NotesQuickRail phrasing.

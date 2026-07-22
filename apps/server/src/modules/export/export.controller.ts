@@ -31,7 +31,13 @@ export class ExportController {
     const campaign = await this.campaigns.getOrThrow(campaignId);
 
     if (format === 'mdzip') {
-      const zipBuffer = await this.exportService.buildMarkdownZip(campaignId, user);
+      // Issue #530: buildMarkdownZip now returns { buffer, warnings }. The HTTP
+      // contract is a raw binary stream with no JSON envelope, so the buffer is
+      // streamed unchanged and the warnings ride inside the archive as
+      // warnings.txt (when non-empty) for a human to read. The returned array is
+      // also available to any programmatic caller that wants to surface collisions
+      // in a UI; surfacing it in this controller is a documented follow-up.
+      const { buffer: zipBuffer } = await this.exportService.buildMarkdownZip(campaignId, user);
       const filename = this.exportService.exportFilename(campaign.name, 'zip');
       res
         .status(200)

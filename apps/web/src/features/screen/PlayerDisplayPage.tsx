@@ -26,6 +26,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
+import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { useAuth } from '../../app/auth';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
 import {
@@ -346,9 +347,7 @@ export default function PlayerDisplayPage() {
                 <div key={q.id} className="cf-quest">
                   <div className="cf-quest-top">
                     <span className="cf-quest-title">{q.title}</span>
-                    <span className={`cf-chip cf-chip-sm ${q.status === 'active' ? 'cf-chip-accent' : ''}`}>
-                      {q.status}
-                    </span>
+                    <QuestStatusBadge status={q.status} className="cf-chip-sm" iconSize={14} />
                   </div>
                   {q.objectives.length > 0 && (
                     <ul className="cf-objs">
@@ -377,6 +376,7 @@ export default function PlayerDisplayPage() {
                 <div key={n.id} className="cf-npc">
                   <span className="cf-npc-name">{n.name}</span>
                   {n.role && <span className="cf-npc-role">{n.role}</span>}
+                  <NpcDispositionBadge disposition={n.disposition} className="cf-chip-sm cf-npc-disposition" iconSize={14} />
                 </div>
               ))}
             </div>
@@ -513,7 +513,6 @@ const SCREEN_CSS = `
   padding: 6px 14px;
   font-size: clamp(13px, 1.2vw, 18px);
   white-space: nowrap;
-  color: var(--color-text);
 }
 .cf-chip-sm { padding: 3px 9px; font-size: clamp(10px, 0.9vw, 13px); text-transform: capitalize; }
 .cf-chip-accent {
@@ -652,4 +651,5 @@ const SCREEN_CSS = `
 .cf-npc { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 10px 13px; }
 .cf-npc-name { display: block; font-weight: 600; color: #fff; font-size: clamp(14px, 1.3vw, 19px); }
 .cf-npc-role { color: var(--color-neutral-400); font-size: clamp(12px, 1.1vw, 15px); }
+.cf-npc-disposition { margin-top: 8px; }
 `;

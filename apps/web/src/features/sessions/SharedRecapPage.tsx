@@ -9,12 +9,13 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type { SharedRecap } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { formatDate as formatLocaleDate } from '../../lib/format';
+import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
 import { Card, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
 
 export default function SharedRecapPage() {
+  useFormattingLocale();
   const { token } = useParams<{ token: string }>();
   const [recap, setRecap] = useState<SharedRecap | null>(null);
   const [loading, setLoading] = useState(true);

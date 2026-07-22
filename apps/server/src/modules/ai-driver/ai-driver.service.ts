@@ -13,7 +13,7 @@ import type {
   AiToolSchema,
   AiGenerateResult,
 } from '../ai-dm/providers/ai-provider';
-import { AI_PROVIDER_RESOLVER, type AiProviderResolver } from './ai-provider-resolver';
+import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
@@ -435,14 +435,19 @@ export class AiDriverService {
     this.lastInputs.set(campaignId, input);
     const prevNarration = session.lastNarration;
 
-    const provider = await this.resolver.resolve(campaignId);
-    if (!provider) {
+    // Resolve the provider AND the executable model through the execution-time choke
+    // point (issue #564): the model derives ONLY from the effective provider config and
+    // is revalidated against the admin allowlist HERE, so a legacy `seat.model` can never
+    // bypass policy. The resolved `execModel` is what every provider call this turn sends.
+    const execution = await resolveProviderForExecution(this.resolver, campaignId);
+    if (!execution) {
       // Release the reserved slot (compare-and-set): only if nothing else grabbed the seat meanwhile.
       if (session.status === 'running') session.status = 'idle';
       throw new ServiceUnavailableException(
         'No AI provider is configured. A server admin or the DM must set one via the AI provider config (issue #310).',
       );
     }
+    const { provider, model: execModel } = execution;
 
     const seatPrincipal = this.seatPrincipal(campaignId);
     const actor = `ai-dm-seat:${campaignId}`;
@@ -491,18 +496,22 @@ export class AiDriverService {
         const { text, result } = await this.streamStep(campaignId, provider, {
           system,
           messages,
-          model: seat.model,
+          // Issue #564: the executable model derives ONLY from the effective provider
+          // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
+          model: execModel,
           maxTokens,
           tools: toolSchemas,
         });
 
         // Meter this step's REAL usage against the budget (atomic; hard cap). Every step
-        // is audited via AiDmService.meterTurn (actor = the seat).
+        // is audited via AiDmService.meterTurn (actor = the seat). The audit records the
+        // EXACT model sent (the resolved, allowlist-validated one) — not the legacy label.
         const usage = result?.usage.totalTokens ?? 0;
+        const servedModel = result?.model || execModel;
         const metered = await this.aiDm.meterTurn(campaignId, usage, {
           actor,
           action: 'ai-dm.driver.turn',
-          detail: `step ${steps} model=${seat.model || 'default'} +${usage} tokens by ${triggeredBy.id}`,
+          detail: `step ${steps} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
         });
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;

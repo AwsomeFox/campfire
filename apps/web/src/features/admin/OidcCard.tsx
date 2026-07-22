@@ -17,6 +17,7 @@ export function OidcCard() {
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
   // Editable form fields.
+  const [providerName, setProviderName] = useState('');
   const [issuer, setIssuer] = useState('');
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState(''); // blank = keep current
@@ -34,6 +35,7 @@ export function OidcCard() {
 
   const apply = useCallback((c: OidcSettings) => {
     setCfg(c);
+    setProviderName(c.providerName);
     setIssuer(c.issuer);
     setClientId(c.clientId);
     setClientSecret('');
@@ -65,6 +67,7 @@ export function OidcCard() {
     setSaved(false);
     try {
       const body: Record<string, string> = {
+        providerName: providerName.trim(),
         issuer: issuer.trim(),
         clientId: clientId.trim(),
         redirectUri: redirectUri.trim(),
@@ -128,6 +131,14 @@ export function OidcCard() {
 
       {cfg && (
         <div className="space-y-2">
+          <OidcField
+            label="Provider display name"
+            value={providerName}
+            onChange={setProviderName}
+            placeholder="(optional) e.g. Keycloak"
+            envPinned={envPinned('OIDC_PROVIDER_NAME')}
+            hint="Shown on the public sign-in button. Leave blank to use SSO."
+          />
           <OidcField
             label="Issuer / discovery URL"
             value={issuer}

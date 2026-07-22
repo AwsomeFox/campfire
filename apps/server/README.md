@@ -197,9 +197,10 @@ free-text string, not a FK).
 ### Auth endpoints
 
 - `GET /auth/status` (public) — `{setupRequired, localLoginEnabled,
-  oidcEnabled, version}`. `oidcEnabled` is true only when `OIDC_ISSUER`,
+  signupEnabled, oidcEnabled, oidcProviderName, version}`. `oidcEnabled` is true only when `OIDC_ISSUER`,
   `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are all set (see "OIDC / SSO
-  login" below).
+  login" below). `oidcProviderName` is the optional public display name only;
+  issuer, client, group, and secret configuration details are never included.
 - `POST /auth/setup` (public, only while zero users exist, else 409) —
   creates the first user as `serverRole: 'admin'`, starts a session.
 - `POST /auth/login` (public) — 401 generic on bad credentials, 403 if
@@ -220,10 +221,13 @@ free-text string, not a FK).
   "Driving Campfire as an AI agent" below.
 - `POST /auth/logout` — deletes the session row, clears the cookie, 204.
 - `GET /auth/oidc/login` (public) — 302 to the identity provider's
-  authorization endpoint, or 503 if OIDC isn't configured or discovery
-  currently fails. See below.
+  authorization endpoint. If OIDC cannot start, 302s same-origin to the web
+  recovery page with only a safe category and random support reference.
 - `GET /auth/oidc/callback` (public) — completes the code exchange,
-  provisions/updates the user, sets the session cookie, 302 to `/`.
+  provisions/updates the user, sets the session cookie, and 302s to `/` on
+  success. Expected cancellation/flow/security/provider/account failures 302
+  same-origin to `/login/sso-error`; raw provider payloads, code, state, PKCE
+  values, tokens, claims, and secrets are never copied into that redirect.
 - `GET /me` — `{user, memberships}`; `passwordHash` never included; 401 if
   unauthenticated. `dev:*` header users get a synthesized `id: 0` shape with
   no memberships (there's no DB row to read).
@@ -254,8 +258,8 @@ free-text string, not a FK).
 ### OIDC / SSO login
 
 Generic OIDC (tested against [Authentik](https://goauthentik.io/), works with
-any standards-compliant provider), gated entirely by env vars — nothing to
-configure in the DB or admin UI. Implemented with `openid-client` v6
+any standards-compliant provider), configurable from the admin UI or env vars
+(env values win per field). Implemented with `openid-client` v6
 (`modules/auth/oidc.service.ts`, `oidc.controller.ts`, `oidc.config.ts`).
 
 **Env vars:**
@@ -266,15 +270,16 @@ configure in the DB or admin UI. Implemented with `openid-client` v6
 | `OIDC_CLIENT_ID` | yes* | — | |
 | `OIDC_CLIENT_SECRET` | yes* | — | |
 | `OIDC_REDIRECT_URI` | no | `${APP_URL or http://localhost:8080}/api/v1/auth/oidc/callback` | Must exactly match the redirect URI registered on the provider. |
+| `OIDC_PROVIDER_NAME` | no | — (`Sign in with SSO`) | Optional public identity-provider display name for the login button, e.g. `Keycloak` (80 characters max). |
 | `OIDC_SCOPE` | no | `openid profile email` | Add `groups` (or your provider's scope name) here too if group membership isn't included by default. |
 | `OIDC_GROUPS_CLAIM` | no | `groups` | Name of the ID-token claim holding the user's group list. |
 | `OIDC_ADMIN_GROUP` | no | — (admin sync disabled) | Group name that grants `serverRole: 'admin'`. Applied on **every** login, both directions — added to the group -> promoted, removed -> demoted — except the last enabled admin is never demoted (a warn is logged and the role left as-is). |
-| `OIDC_ALLOWED_GROUP` | no | — (any authenticated IdP user may sign in) | Group name required to sign in at all. Checked on **every** login: without it the callback 403s, no account is auto-provisioned, and existing accounts get no session (removing the group at the IdP locks the user out on their next login). Members of `OIDC_ADMIN_GROUP` always have access, so setting only the admin group can't lock admins out. |
+| `OIDC_ALLOWED_GROUP` | no | — (any authenticated IdP user may sign in) | Group name required to sign in at all. Checked on **every** login: without it the callback redirects to safe access-denied recovery, no account is auto-provisioned, and existing accounts get no session (removing the group at the IdP locks the user out on their next login). Members of `OIDC_ADMIN_GROUP` always have access, so setting only the admin group can't lock admins out. |
 | `APP_URL` | no | `http://localhost:8080` | Only used to build the default `OIDC_REDIRECT_URI`. |
 
 \* All three of `OIDC_ISSUER`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` must be
 set together; a partial set behaves as OIDC disabled (`oidcEnabled: false`,
-the `/auth/oidc/*` routes 503).
+and direct `/auth/oidc/*` visits lead to safe recovery rather than a raw API error).
 
 **Authentik setup:**
 
@@ -293,17 +298,17 @@ the `/auth/oidc/*` routes 503).
    the relevant users, and set `OIDC_ADMIN_GROUP=campfire-admins`. Removing
    a user from that group demotes them on their next login.
 5. Restart Campfire with the env vars set — `GET /auth/status` should now
-   report `oidcEnabled: true`, and a "Sign in with SSO" affordance (web-side)
-   can point at `GET /auth/oidc/login`.
+   report `oidcEnabled: true`. The web app shows “Sign in with SSO” unless
+   `OIDC_PROVIDER_NAME` supplies a display name.
 
 **How it works server-side:**
 
 - **Discovery** (`OidcService.getClientConfig()`) is lazy — the first call to
   `/auth/oidc/login` or `/callback` triggers it, not server boot — and
   cached in-memory after success. If the IdP is unreachable, discovery fails,
-  the failure is logged (`console.warn`) and **not** cached, and the route
-  returns 503; the *next* request retries discovery from scratch. The server
-  never crashes or refuses to boot because the IdP is down.
+  the failure is **not** cached, and the browser reaches the recovery page; the
+  *next* request retries discovery from scratch. The server never crashes or
+  refuses to boot because the IdP is down.
 - **Login** (`GET /auth/oidc/login`) generates PKCE (`code_verifier` +
   S256 `code_challenge`) and a random `state`, stores `state:codeVerifier` in
   a short-lived (5 min) httpOnly cookie scoped to `/api/v1/auth/oidc`, then
@@ -313,6 +318,13 @@ the `/auth/oidc/*` routes 503).
   token's signature against the provider's published JWKS (`openid-client`
   handles this — a real RS256/ES256 JWT is required; `alg: none` is
   rejected).
+- **Recovery**: cancellation, missing/expired flow cookies, state/PKCE
+  mismatch, provider outage, client/token failure, missing claims, group
+  denial, and disabled accounts map to eight fixed public categories. The
+  redirect contains only that category and a random 16-hex support reference.
+  Server diagnostics use the same reference and fixed redacted fields — never
+  an exception message, callback query/cookie, provider body, token, claim, or
+  configuration value. “Try SSO again” starts a brand-new state/PKCE flow.
 - **Claim mapping / provisioning** (`OidcService.provisionOrUpdateUser`):
   `sub` is the stable identity key (stored as `users.oidc_sub`, indexed).
   First login for a `sub` auto-provisions a user: username from
@@ -496,13 +508,16 @@ combat — over MCP alone.
   (`number` defaults to max+1), `update_session`.
 - **Write — characters:** `upsert_character` (player owner or dm),
   `update_character_hp` (exactly one of `delta`|`set`),
-  `award_xp` (single character: owner or dm; party-wide/subset: dm),
+  `award_xp` (single character: owner or dm; party-wide/subset: dm; party awards
+  default to active PCs and require `includeNonActive:true` for explicitly selected
+  inactive/retired/dead historical corrections),
   `level_up_character` (owner or dm — +1 level, optional new `hpMax`),
   `set_character_conditions` (add/remove).
 - **Write — notes & inbox:** `add_note`, `update_note`/`delete_note`
   (author only — dm may NOT edit/delete another member's note),
   `submit_inbox_item` (any member — the player -> DM message queue),
-  `resolve_inbox_item` (dm).
+  `resolve_inbox_item` (dm; terminal payload is idempotent — an identical retry
+  returns the stored result, while a different resolution conflicts).
 - **Write — proposals & membership:** `approve_proposal` (dm),
   `reject_proposal` (dm), `add_member`/`update_member`/`remove_member` (dm;
   refuses to demote/remove the campaign's last dm).

@@ -1,10 +1,15 @@
 import { Body, Controller, Delete, Get, HttpCode, Post, Put } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ApiBody, ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { AiProviderConfigService } from './ai-provider-config.service';
-import { AiProviderConfigUpdateDto } from './ai-provider-config.dto';
+import {
+  AiProviderConfigUpdateDto,
+  AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA,
+  AiProviderTestRequestDto,
+  AiProviderTestResultDto,
+} from './ai-provider-config.dto';
 
 /**
  * Server-default AI provider config (issue #310) — ADMIN only (@ServerRoles('admin')).
@@ -65,14 +70,15 @@ export class AiProviderServerConfigController {
 
   @Post('test')
   @ApiOperation({
-    summary: 'Test the server-default AI provider connection',
+    summary: 'Test a server-default AI provider draft',
     description:
-      'Server-admin only. Builds the provider from the decrypted server config and runs a minimal probe. ' +
-      'Returns ok/error only — never any credential.',
+      'Server-admin only. Tests the submitted provider/model/base URL and optional write-only key without saving them. ' +
+      'A blank or omitted key reuses the stored server key, then the matching environment credential. Returns only ' +
+      'non-secret target/scope/credential-source metadata and the redacted result.',
   })
-  @ApiResponse({ status: 201, description: 'The connection test result.' })
-  async test() {
-    const r = await this.configs.testConnection(null);
-    return { scope: 'server' as const, ...r };
+  @ApiBody({ schema: AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA })
+  @ApiResponse({ status: 201, description: 'The non-persisting connection test result.', type: AiProviderTestResultDto })
+  async test(@Body() body: AiProviderTestRequestDto) {
+    return this.configs.testConnection(null, body);
   }
 }

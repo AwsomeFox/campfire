@@ -84,6 +84,7 @@ documented in [Authentication](../administration/authentication.md).
 |---|---|---|
 | `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | *(unset)* | Enable SSO — all three must be set for OIDC to be considered enabled |
 | `OIDC_REDIRECT_URI` | *(derived from `APP_URL`)* | OIDC callback URL, e.g. `https://campfire.example.com/api/v1/auth/oidc/callback` |
+| `OIDC_PROVIDER_NAME` | *(unset)* | Optional public provider name on the login button; unset uses “Sign in with SSO” |
 | `OIDC_ADMIN_GROUP` | *(unset)* | Members of this IdP group become **server admins** (synced on every login) |
 | `OIDC_ALLOWED_GROUP` | *(unset)* | Restrict sign-in to members of this IdP group; others get a 403 and no account is provisioned |
 | `OIDC_GROUPS_CLAIM` | `groups` | ID-token claim holding the user's group list |

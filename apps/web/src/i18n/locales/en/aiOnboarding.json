@@ -61,6 +61,7 @@
       "coDm": "AI: Co-DM",
       "driver": "AI: Driver",
       "coDmAria": "An AI is co-DMing this campaign — what that means",
+      "coDmPopover": "AI Co-DM explanation",
       "driverAria": "An AI is running this campaign — open the Table"
     },
     "transparency": {

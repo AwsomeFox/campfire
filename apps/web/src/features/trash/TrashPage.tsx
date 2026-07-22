@@ -13,7 +13,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { TrashedEntity, TrashedEntityType } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { formatDate as formatLocaleDate } from '../../lib/format';
+import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
@@ -29,6 +29,7 @@ const TYPE_META: Record<TrashedEntityType, { label: string; route: string; icon:
 };
 
 export default function TrashPage() {
+  useFormattingLocale();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { roleIn } = useAuth();

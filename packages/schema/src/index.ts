@@ -318,10 +318,22 @@ export const XpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),
 ]);
-/** DM party-wide XP award: amount to every character in the campaign, or just `characterIds`. */
+/**
+ * DM party XP award. Omitting `characterIds` targets active characters only.
+ * A non-active (inactive, retired, or dead) recipient is accepted only when the
+ * caller explicitly opts in with `includeNonActive: true`; this keeps archived
+ * careers safe while preserving deliberate historical corrections.
+ */
 export const XpAward = z.object({
   amount: z.number().int().min(1).max(1_000_000),
-  characterIds: z.array(Id).min(1).optional(),
+  characterIds: z
+    .array(Id)
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length, { message: 'Recipient characterIds must be unique' })
+    .optional(),
+  includeNonActive: z.boolean().optional().default(false).describe(
+    'Explicit opt-in required to award XP to inactive, retired, or dead characters.',
+  ),
 });
 /**
  * Guided level-up: +1 level, optionally raising hpMax (hpCurrent grows by the
@@ -357,7 +369,8 @@ export function levelForXp(xp: number): number {
 }
 
 // ---------- quest ----------
-export const QuestStatus = z.enum(['available', 'active', 'completed', 'failed']);
+export const QUEST_STATUSES = ['available', 'active', 'completed', 'failed'] as const;
+export const QuestStatus = z.enum(QUEST_STATUSES);
 
 export const QuestObjective = z.object({
   id: Id,
@@ -492,6 +505,12 @@ export const StoryArcWithBeats = StoryArc.extend({ beats: z.array(StoryBeatWithB
 export type StoryArcWithBeats = z.infer<typeof StoryArcWithBeats>;
 
 // ---------- npc ----------
+// NPC disposition remains open text so campaigns can use setting-specific values.
+// These are the canonical values the shipped UI gives semantic treatment; every
+// other value is deliberately presented as neutral.
+export const CANONICAL_NPC_DISPOSITIONS = ['friendly', 'neutral', 'hostile'] as const;
+export const CanonicalNpcDisposition = z.enum(CANONICAL_NPC_DISPOSITIONS);
+
 export const Npc = z.object({
   id: Id,
   campaignId: Id,
@@ -628,7 +647,8 @@ export const RECAP_TEMPLATE = RECAP_HEADINGS.map((h) => `## ${h}\n\n`).join('').
 // up each outing) need a per-session "who was there" record so recaps, per-attendee
 // context and "you weren't there" all become possible. One row per (session,
 // character); the set is REPLACED on write (PUT /sessions/:id/attendance), not
-// accumulated. characterName is denormalized for display.
+// accumulated. characterName is the current character name when the character row
+// is available, with the stored write-time snapshot used as a graceful fallback.
 export const SessionAttendee = z.object({
   id: Id,
   sessionId: Id,
@@ -918,6 +938,14 @@ export type EntityRevision = z.infer<typeof EntityRevision>;
 // discussion is inherently shared. `parentId` gives one level of threading (a reply
 // to a comment). `inCharacter` flags an in-character post (a play-by-post scene) vs
 // out-of-character table chatter. Author-or-DM may edit/delete.
+//
+// Soft delete / tombstone (issue #503): a top-level comment that has other members'
+// replies is NOT hard-deleted (that would destroy their content). Instead it is
+// tombstoned: deletedAt is set, body is redacted to a neutral placeholder in API
+// responses, and the row stays so replies keep their parent pointer. A tombstoned
+// root is still returned by list/get (as a placeholder) — it is NOT filtered out of
+// normal reads the way a trashed note is, precisely because replies anchor to it.
+// deletedBy records who pulled the trigger (author or DM moderating).
 export const Comment = z.object({
   id: Id,
   campaignId: Id,
@@ -931,8 +959,17 @@ export const Comment = z.object({
   parentId: Id.nullable().default(null),
   authorUserId: z.string().max(120), // String(users.id) or dev:<name>
   authorName: z.string().max(120).default(''),
-  body: z.string().min(1).max(20_000), // markdown
+  body: z.string().min(1).max(20_000), // markdown (redacted to a placeholder when tombstoned)
   inCharacter: z.boolean().default(false),
+  // Tombstone (issue #503). null = live; an ISO timestamp means the comment was
+  // deleted by its author / a DM and its body has been redacted. The row remains so
+  // replies keep their parent. Cleared on restore.
+  deletedAt: IsoDate.nullable().default(null),
+  // Who tombstoned the comment (String(users.id), 'dev:<name>', or 'token:<name>');
+  // null on a live row. While tombstoned, this lets the UI distinguish "[deleted
+  // by author]" from a DM removal. It is cleared on restore, so durable
+  // provenance of a past tombstone (who/when) lives in the AUDIT LOG, not here.
+  deletedBy: z.string().max(120).nullable().default(null),
   ...timestamps,
 });
 export type Comment = z.infer<typeof Comment>;
@@ -941,6 +978,8 @@ export const CommentCreate = Comment.omit({
   campaignId: true,
   authorUserId: true,
   authorName: true,
+  deletedAt: true,
+  deletedBy: true,
   createdAt: true,
   updatedAt: true,
 })
@@ -2136,10 +2175,31 @@ export const AuthStatus = z.object({
   setupRequired: z.boolean(), // true until the first (admin) user exists
   localLoginEnabled: z.boolean(), // for non-admin users (admins can always log in locally)
   signupEnabled: z.boolean(), // effective: allowSignup && allowLocalLogin && !setupRequired
-  oidcEnabled: z.boolean(), // future
+  oidcEnabled: z.boolean(),
+  // Optional operator-authored branding for the public login button. Null means
+  // the UI must use neutral "SSO" copy; no issuer/client/group details belong here.
+  oidcProviderName: z.string().max(80).nullable(),
   version: z.string(),
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
+
+/**
+ * Safe, public reasons an OIDC browser flow can land on Campfire's recovery
+ * page. These values are deliberately coarse: provider responses, OAuth
+ * codes, state, PKCE material, tokens, claims, and configuration details must
+ * never be copied into the recovery URL or rendered by the web client.
+ */
+export const OidcRecoveryCategory = z.enum([
+  'cancelled',
+  'flow_expired',
+  'state_pkce_mismatch',
+  'provider_unavailable',
+  'client_token_failure',
+  'missing_claims',
+  'group_denied',
+  'account_disabled',
+]);
+export type OidcRecoveryCategory = z.infer<typeof OidcRecoveryCategory>;
 
 export const ServerSettings = z.object({
   allowLocalLogin: z.boolean().default(true), // gate for non-admin local login
@@ -2166,9 +2226,11 @@ export const SettingsUpdate = ServerSettings.partial();
 // the stored value for that field (see server oidc.config.ts). The client
 // secret is WRITE-ONLY — it is accepted on update but never returned.
 const OidcField = z.string().trim().max(2048);
+const OidcProviderNameField = z.string().trim().max(80);
 
 /** OIDC settings as returned to admins (GET). Never includes the client secret. */
 export const OidcSettings = z.object({
+  providerName: z.string(),
   issuer: z.string(),
   clientId: z.string(),
   redirectUri: z.string(),
@@ -2186,6 +2248,7 @@ export type OidcSettings = z.infer<typeof OidcSettings>;
 
 /** Admin update payload. All fields optional. clientSecret is write-only: omit to keep the current secret, pass '' to clear it. */
 export const OidcSettingsUpdate = z.object({
+  providerName: OidcProviderNameField.optional(),
   issuer: OidcField.optional(),
   clientId: OidcField.optional(),
   clientSecret: z.string().max(2048).optional(),
@@ -2663,13 +2726,48 @@ export const AiProviderConfigView = z.object({
 });
 export type AiProviderConfigView = z.infer<typeof AiProviderConfigView>;
 
-// Result of POST .../ai-provider/test — a live connection probe through the
-// effective (decrypted, server-side) config. Never echoes any credential.
+// Non-persisting candidate for POST .../ai-provider/test (issue #852). This is
+// deliberately narrower than AiProviderConfigUpdate: testing cannot mutate the
+// allowlist or sampling params. `apiKey` is WRITE-ONLY. Omitted OR '' means
+// "reuse the current credential chain", matching the form's leave-key-blank
+// behavior: this scope's stored key first, then the permitted environment/server
+// fallback. A non-empty value tests that candidate key without storing it.
+export const AiProviderTestRequest = z
+  .object({
+    providerType: AiProviderConfigType,
+    model: z.string().min(1).max(120),
+    baseUrl: AiProviderBaseUrl.optional(),
+    apiKey: z.string().max(4096).optional(),
+  })
+  .strict();
+export type AiProviderTestRequest = z.infer<typeof AiProviderTestRequest>;
+
+// Non-secret credential source used by a connection test. `candidate` means the
+// request supplied a non-empty write-only key; every other value describes a
+// server-side reuse/fallback decision and carries no key material.
+export const AiProviderTestCredentialSource = z.enum([
+  'candidate',
+  'stored',
+  'environment',
+  'server',
+  'not-required',
+  'none',
+]);
+export type AiProviderTestCredentialSource = z.infer<typeof AiProviderTestCredentialSource>;
+
+// Result of POST .../ai-provider/test — a live, non-persisting probe of the
+// submitted candidate. `testedTarget` distinguishes a campaign draft that can use
+// its own endpoint from one whose blank key inherits the server credential AND,
+// for SSRF safety, the server-owned provider/endpoint. Never echoes a credential.
 export const AiProviderTestResult = z.object({
   ok: z.boolean(),
   scope: z.enum(['server', 'campaign']),
+  testedTarget: z.enum(['server-default', 'campaign-override', 'inherited-server-default']),
   providerType: AiProviderConfigType,
   model: z.string(),
+  baseUrl: z.string().nullable(),
+  credentialSource: AiProviderTestCredentialSource,
+  testedAt: IsoDate,
   error: z.string().nullable().default(null),
 });
 export type AiProviderTestResult = z.infer<typeof AiProviderTestResult>;
@@ -3549,19 +3647,74 @@ export type RollResult = z.infer<typeof RollResult>;
 // ---------- real-time campaign events (SSE) ----------
 // Thin invalidation signals pushed over GET /campaigns/:id/events — they carry ids, not
 // entity payloads, so clients refetch through the normal (permission-checked) REST reads.
-export const CampaignEventType = z.enum(['encounter.updated', 'encounter.deleted', 'encounter.ping']);
+//
+// A discriminated union on `type`: encounter.* signals are id-only change notifications;
+// `membership.revoked` (issue #527) carries the affected user instead — the SSE controller
+// uses it to tear down that user's open stream the instant they are removed (previously the
+// requireMember check ran once at open, so a kicked member kept receiving ticks until they
+// themselves disconnected). It is still thin (no entity payload): the only consumer is the
+// subscriber whose own stream it ends, and a reconnecting client re-hits requireMember and
+// gets a 403. `memberId` is the campaign_members row id (included so a future UI can surface
+// "you were removed" rather than just dropping the tab — but it carries no secret fields).
+export const CampaignEventType = z.enum([
+  'encounter.updated',
+  'encounter.deleted',
+  'encounter.ping',
+  'membership.revoked',
+]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
-export const CampaignEvent = z.object({
-  type: CampaignEventType,
-  campaignId: Id,
-  encounterId: Id,
-  // Present only on 'encounter.ping' (issue #238): the transient battle-map ping's location and
-  // optional colour/label. Unlike the id-only updated/deleted signals this carries a small,
-  // non-secret payload (a click coordinate the sender chose), so there is nothing to leak.
-  ping: MapPing.optional(),
-  at: IsoDate,
-});
+export const CampaignEvent = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('encounter.updated'),
+    campaignId: Id,
+    encounterId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    type: z.literal('encounter.deleted'),
+    campaignId: Id,
+    encounterId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Present only on 'encounter.ping' (issue #238): the transient battle-map ping's location and
+    // optional colour/label. Unlike the id-only updated/deleted signals this carries a small,
+    // non-secret payload (a click coordinate the sender chose), so there is nothing to leak.
+    type: z.literal('encounter.ping'),
+    campaignId: Id,
+    encounterId: Id,
+    ping: MapPing,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #527: a member was removed (or self-left) from the campaign. The affected
+    // user's open SSE stream completes on receipt; other members' streams ignore it (they
+    // are not the revokee). `userId` is String(users.id) — the same identity space as
+    // RequestUser.id / campaignMembers.userId (String form), so the controller can match it
+    // against the subscriber's own id without a second lookup.
+    type: z.literal('membership.revoked'),
+    campaignId: Id,
+    userId: z.string().max(120),
+    memberId: Id,
+    at: IsoDate,
+  }),
+]);
 export type CampaignEvent = z.infer<typeof CampaignEvent>;
+
+/**
+ * Distributive Omit over the CampaignEvent union so each variant keeps its own
+ * discriminated shape. A plain `Omit<Union, K>` collapses to one object with a
+ * widened `type`, which then rejects object-literal emit() calls whose `type` is
+ * a subset of the literals (TS can't correlate a variable discriminant with which
+ * extra fields are present, so it flags `encounterId`/`userId` as excess). Routing
+ * the union through a generic conditional forces real distribution: each member
+ * is omitted independently and the result is a union of single-variant shapes,
+ * against which an object literal with a matching `type` discriminant assigns fine.
+ * This is the input shape for CampaignEventsService.emit(): callers pass one
+ * variant minus its server-assigned `at` timestamp.
+ */
+export type DistributiveOmit<T, K extends keyof any> = [T] extends [never] ? never : T extends unknown ? Omit<T, K> : never;
+export type CampaignEventInput = DistributiveOmit<CampaignEvent, 'at'>;
 
 // A persisted, campaign-shared dice roll (issue #35): RollResult plus authorship +
 // timestamp. Rolls are stored server-side so every campaign member sees the same
@@ -3582,6 +3735,7 @@ export type DiceRoll = z.infer<typeof DiceRoll>;
 export type DangerLevel = z.infer<typeof DangerLevel>;
 export type CampaignCloneMode = z.infer<typeof CampaignCloneMode>;
 export type QuestStatus = z.infer<typeof QuestStatus>;
+export type CanonicalNpcDisposition = z.infer<typeof CanonicalNpcDisposition>;
 export type LocationStatus = z.infer<typeof LocationStatus>;
 export type NoteVisibility = z.infer<typeof NoteVisibility>;
 export type NoteKind = z.infer<typeof NoteKind>;
@@ -3592,11 +3746,27 @@ export type ProposalStatus = z.infer<typeof ProposalStatus>;
 export type ApiTokenCreated = z.infer<typeof ApiTokenCreated>;
 export type AttachmentKind = z.infer<typeof AttachmentKind>;
 
+// The role attributed to an audit-log actor. The audit table's `actor_role`
+// column is a free-form TEXT column (NOT a DB enum — see the server's
+// db/schema.ts), so its value space is wider than the campaign `Role` enum.
+//
+// `dm`/`player`/`viewer` are the campaign-scoped roles (who did what *inside* a
+// campaign — the actor's effective membership role at the time). `admin` is the
+// server-scoped sentinel (issue #526): it marks an action taken by a server
+// admin exercising server-wide power (user/rule-pack/ai-provider/settings
+// writes), so an incident reviewer can distinguish a privileged operator action
+// from an ordinary campaign-DM one. Server-scoped admin rows carry
+// `campaignId: null`; a campaign-scoped row is never attributed `admin`
+// (an admin who also happens to be a DM in a campaign is recorded by their
+// campaign role there).
+export const AuditActorRole = z.enum(['dm', 'player', 'viewer', 'admin']);
+export type AuditActorRole = z.infer<typeof AuditActorRole>;
+
 export const AuditEntry = z.object({
   id: Id,
   campaignId: Id.nullable(),
   actor: z.string().max(200), // user id or token name
-  actorRole: Role,
+  actorRole: AuditActorRole,
   action: z.string().max(80), // e.g. quest.update
   entityType: z.string().max(40).nullable(),
   entityId: Id.nullable(),

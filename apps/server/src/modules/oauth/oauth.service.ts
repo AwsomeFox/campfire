@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { BadRequestException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { eq, lt } from 'drizzle-orm';
 import { Role } from '@campfire/schema';
@@ -228,7 +229,9 @@ export class OAuthService {
       throw new BadRequestException({ error: 'invalid_request', error_description: 'code_verifier required' });
     }
     const expected = row.codeChallengeMethod === 'plain' ? input.codeVerifier : pkceS256Challenge(input.codeVerifier);
-    if (expected !== row.codeChallenge) {
+    const expectedBuffer = Buffer.from(expected, 'utf8');
+    const challengeBuffer = Buffer.from(row.codeChallenge, 'utf8');
+    if (expectedBuffer.length !== challengeBuffer.length || !timingSafeEqual(expectedBuffer, challengeBuffer)) {
       throw new BadRequestException({ error: 'invalid_grant', error_description: 'PKCE verification failed' });
     }
 

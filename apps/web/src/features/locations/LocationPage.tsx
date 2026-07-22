@@ -22,6 +22,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
+import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { entityTargetProps } from '../../lib/entityLinks';
 
 
@@ -525,6 +526,7 @@ export default function LocationPage() {
                 <RevisionHistoryPanel
                   entityType="location"
                   entityId={id}
+                  currentSnapshot={{ body: location.body }}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);
@@ -564,9 +566,7 @@ export default function LocationPage() {
                         className="cf-inset p-3 hover:border-amber-500/50"
                       >
                         <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={13} /> {q.title}</p>
-                        <Chip variant={statusVariant(q.status)} className="mt-1">
-                          {q.status}
-                        </Chip>
+                        <QuestStatusBadge status={q.status} className="mt-1" />
                       </a>
                     ))}
                   </div>

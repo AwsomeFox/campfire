@@ -7,7 +7,7 @@
  * when OIDC is configured; local username/password always available (primary when
  * OIDC is off, secondary/collapsible when it's on).
  */
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
@@ -223,7 +223,16 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [showLocalForm, setShowLocalForm] = useState(false);
+  const [showLocalForm, setShowLocalForm] = useState(
+    () => new URLSearchParams(location.search).get('local') === '1',
+  );
+
+  // React Router keeps this page mounted for query-only navigation. Mirror the
+  // URL on back/forward and recovery-page navigation instead of treating the
+  // initial query string as immutable component state.
+  useEffect(() => {
+    setShowLocalForm(new URLSearchParams(location.search).get('local') === '1');
+  }, [location.search]);
 
   if (!loading && status?.setupRequired) {
     return <Navigate to="/setup" replace />;
@@ -258,6 +267,7 @@ export function LoginPage() {
   }
 
   const oidcEnabled = Boolean(status?.oidcEnabled);
+  const oidcProviderName = status?.oidcProviderName?.trim() || 'SSO';
   // Forward the intended target through SSO. The OIDC flow is a full-page server
   // round-trip (callback currently always redirects to `/`), so honoring this
   // needs matching backend support; the local form already returns to it.
@@ -284,12 +294,12 @@ export function LoginPage() {
         {oidcEnabled ? (
           <>
             <a href={oidcLoginHref} className="btn btn-primary btn-block" style={{ minHeight: 44 }}>
-              Sign in with Authentik
+              Sign in with {oidcProviderName}
             </a>
             <p className="text-muted" style={{ margin: '2px 0 0', fontSize: 11 }}>
-              One account for players, DM and viewers.
+              SSO creates your Campfire account.
               <br />
-              Roles come from your campaign groups.
+              Campaign access and DM, player, or viewer roles are assigned inside Campfire.
             </p>
             {showLocalForm ? (
               <div className="w-full flex flex-col gap-3" style={{ marginTop: 6 }}>

@@ -264,7 +264,9 @@ export const sessions = sqliteTable('sessions', {
 // Per-session attendance (issue #121) — which characters played a given session.
 // West Marches / rotating-cast tables need a "who was there" record instead of the
 // party being all-or-nothing. One row per (session, character); the set is replaced
-// wholesale on write. character_name is denormalized so recaps/cards don't join.
+// wholesale on write. character_name is a write-time snapshot retained as a
+// compatibility fallback; normal reads prefer the current characters.name via a
+// LEFT JOIN so character renames cannot make attendance drift (issue #659).
 export const sessionAttendees = sqliteTable('session_attendees', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   sessionId: integer('session_id').notNull(),
@@ -339,6 +341,17 @@ export const notes = sqliteTable('notes', {
 // Threaded discussion layer (issue #123). Distinct from notes: always anchored
 // to an entity, always visible to all campaign members, one level of threading
 // via parent_id, optional in-character flag.
+//
+// Soft delete / tombstone (issue #503): deleting a top-level comment that has
+// other members' replies must NOT destroy them. Instead the row is tombstoned
+// (deleted_at set, body redacted in responses) so replies keep their parent
+// pointer and the thread topology stays intact. A tombstoned root is still
+// returned by list/get (as a placeholder) — unlike notes/campaigns, the row is
+// NOT filtered out of normal reads, because replies reference it. deleted_by
+// records who pulled the trigger (the author or a DM moderating) WHILE the row
+// is tombstoned, so the UI can render "[deleted by author]" vs "[deleted by
+// moderator]". It is cleared on restore, so durable provenance of a past
+// tombstone (who/when) lives in the AUDIT LOG, not on this row.
 export const comments = sqliteTable('comments', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
@@ -349,6 +362,13 @@ export const comments = sqliteTable('comments', {
   authorName: text('author_name').notNull().default(''),
   body: text('body').notNull(),
   inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
+  // Soft delete / tombstone (issue #503). NULL = live; an ISO timestamp means the
+  // comment is tombstoned (body redacted in API responses, replies preserved).
+  // Nullable/absent in older DBs pre-migration; see db/db.module.ts migrateCommentsTableForSoftDelete().
+  deletedAt: text('deleted_at'),
+  // Who tombstoned it: String(users.id), 'dev:<name>', or 'token:<name>' — same
+  // identity space as author_user_id. Null on a live row. Cleared on restore.
+  deletedBy: text('deleted_by'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

@@ -10,7 +10,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Faction, Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
+import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
@@ -26,14 +27,6 @@ function initials(name: string): string {
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
-
-function dispositionVariant(disposition: string) {
-  const d = disposition.toLowerCase();
-  if (d.includes('friend') || d.includes('ally') || d.includes('trust')) return 'completed' as const;
-  if (d.includes('hostile') || d.includes('enemy') || d.includes('wary')) return 'failed' as const;
-  if (d.includes('warm') || d.includes('active')) return 'active' as const;
-  return statusVariant(disposition);
 }
 
 export default function NpcPage() {
@@ -321,7 +314,7 @@ export default function NpcPage() {
               <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{npc.name}</h1>
               {npc.role && <p className="text-sm text-slate-400 break-words">{npc.role}</p>}
             </div>
-            <Chip variant={dispositionVariant(npc.disposition)}>{npc.disposition || 'Neutral'}</Chip>
+            <NpcDispositionBadge disposition={npc.disposition} />
             {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {isDm && (
               <div className="flex gap-2 ml-auto">
@@ -367,6 +360,7 @@ export default function NpcPage() {
                 <RevisionHistoryPanel
                   entityType="npc"
                   entityId={id}
+                  currentSnapshot={{ body: npc.body }}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);
@@ -392,9 +386,7 @@ export default function NpcPage() {
                         className="cf-inset p-3 hover:border-amber-500/50"
                       >
                         <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={13} /> {q.title}</p>
-                        <Chip variant={statusVariant(q.status)} className="mt-1">
-                          {q.status}
-                        </Chip>
+                        <QuestStatusBadge status={q.status} className="mt-1" />
                       </a>
                     ))}
                   </div>
@@ -407,7 +399,7 @@ export default function NpcPage() {
                 <p className="card-kicker">Facts</p>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Disposition</span>
-                  <span>{npc.disposition || 'Neutral'}</span>
+                  <NpcDispositionBadge disposition={npc.disposition} />
                 </div>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Faction</span>

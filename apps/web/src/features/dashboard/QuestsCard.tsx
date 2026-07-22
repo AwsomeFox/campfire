@@ -8,23 +8,10 @@ import { Link } from 'react-router-dom';
 import type { CampaignSummary, QuestObjective, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { EmptyState } from '../../components/ui';
+import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Toggle } from '../../components/Toggle';
 
 type QuestWithObjectives = CampaignSummary['quests'][number];
-
-const STATUS_GLYPH: Record<QuestWithObjectives['status'], { glyph: string; color: string }> = {
-  available: { glyph: '○', color: 'var(--color-neutral-500)' },
-  active: { glyph: '◐', color: 'var(--color-accent)' },
-  completed: { glyph: '✓', color: 'var(--color-neutral-500)' },
-  failed: { glyph: '✕', color: 'var(--color-neutral-600)' },
-};
-
-const STATUS_LABEL: Record<QuestWithObjectives['status'], string> = {
-  available: 'Available',
-  active: 'Active',
-  completed: 'Completed',
-  failed: 'Failed',
-};
 
 export function QuestsCard({
   campaignId,
@@ -79,7 +66,6 @@ export function QuestsCard({
 
   function renderQuest(q: QuestWithObjectives) {
     const kids = childrenOf(q.id);
-    const meta = STATUS_GLYPH[q.status];
     const isFaded = q.status === 'completed' || q.status === 'failed';
 
     return (
@@ -95,7 +81,7 @@ export function QuestsCard({
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 28, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13, width: 18, textAlign: 'center', color: meta.color }}>{meta.glyph}</span>
+          <QuestStatusBadge status={q.status} />
           <Link
             to={`/c/${campaignId}/quests/${q.id}`}
             style={{
@@ -155,9 +141,7 @@ export function QuestsCard({
             >
               {s.title}
             </Link>
-            <span className="tag tag-neutral" style={{ fontSize: 10 }}>
-              {STATUS_LABEL[s.status]}
-            </span>
+            <QuestStatusBadge status={s.status} />
           </div>
         ))}
       </div>

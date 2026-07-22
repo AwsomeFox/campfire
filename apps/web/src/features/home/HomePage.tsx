@@ -400,8 +400,8 @@ export function HomePage() {
         <div className="max-w-md space-y-4">
           <EmptyState icon="candle-flame" title="No campaigns yet — light the first fire." />
           <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
-            New here as a player? Ask your DM or the server admin to add your account to a campaign — no need to
-            create one.
+            New here as a player? Follow a campaign invite, or ask a DM or server admin to add your account — no
+            need to create a campaign.
           </p>
           <NewCampaignTile onClick={() => setWizardOpen(true)} />
           <ImportCampaignTile

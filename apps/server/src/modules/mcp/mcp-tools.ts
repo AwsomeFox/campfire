@@ -1225,11 +1225,12 @@ export class McpToolsService {
     this.tool(
       server,
       'get_comment',
-      'Get one discussion comment by id. Ids come from list_comments. 404s (not 403) for a comment on an entity the ' +
-        'caller cannot see (issue #230).',
+      'Get one discussion comment by id. Ids come from list_comments. A tombstoned comment (issue #503) is ' +
+        'returned as a redacted "[deleted]" placeholder rather than 404 — replies keep their parent. ' +
+        '404s (not 403) for a comment on an entity the caller cannot see (issue #230).',
       { commentId: Id.describe('Comment id — from list_comments') },
       async ({ commentId }) => {
-        const row = await this.comments.getRowOrThrow(commentId as number);
+        const row = await this.comments.getRowOrThrow(commentId as number, true);
         const role = await this.access.requireMember(user, row.campaignId);
         return this.comments.getOrThrow(commentId as number, role);
       },
@@ -1945,7 +1946,8 @@ export class McpToolsService {
       server,
       'get_session_attendance',
       'List the characters that played a session (issue #121) — the West Marches "who was there" record. Ids come ' +
-        'from get_session_recaps / get_session. Empty when attendance was never recorded.',
+        'from get_session_recaps / get_session. Names reflect the current character row (including retired/trashed ' +
+        'characters), with the recorded name as a fallback if that row is unavailable. Empty when attendance was never recorded.',
       { sessionId: Id.describe('Session id — from get_session_recaps') },
       async ({ sessionId }) => {
         const row = await this.sessions.getRowOrThrow(sessionId as number);
@@ -2059,15 +2061,22 @@ export class McpToolsService {
       server,
       user,
       'award_xp',
-      "Award XP. Either to one character by characterId (player owner or DM; delta may be negative to correct a mistake, XP never drops below 0), or DM-only to the whole party / a characterIds subset via amount.",
+      "Award XP. Either adjust one character by characterId (player owner or DM; amount may be negative and XP never drops below 0), or make a DM-only party award. Party awards default to active characters; characterIds is enforced exactly, and inactive/retired/dead recipients require both explicit characterIds and includeNonActive:true for deliberate historical corrections.",
       {
         campaignId: CampaignIdArg,
         characterId: Id.optional().describe('Single character to adjust (owner or DM); omit for a DM party-wide award'),
         amount: z.number().int().describe('XP to add. Party-wide awards require a positive amount'),
-        characterIds: z.array(Id).optional().describe('Party-award only: limit the award to these characters'),
+        characterIds: z.array(Id).min(1).optional().describe('Party-award only: exact recipient character ids'),
+        includeNonActive: z
+          .boolean()
+          .optional()
+          .describe('Party-award only: explicit opt-in required for inactive, retired, or dead recipients'),
       },
-      async ({ campaignId, characterId, amount, characterIds }) => {
+      async ({ campaignId, characterId, amount, characterIds, includeNonActive }) => {
         if (characterId !== undefined) {
+          if (characterIds !== undefined || includeNonActive !== undefined) {
+            throw new BadRequestException('characterIds/includeNonActive are only valid for party awards');
+          }
           const row = await this.characters.getRowOrThrow(characterId as number);
           if (row.campaignId !== (campaignId as number)) {
             throw new BadRequestException(`Character ${characterId} belongs to campaign ${row.campaignId}, not ${campaignId}`);
@@ -2075,7 +2084,11 @@ export class McpToolsService {
           const role = await this.access.requireRole(user, row.campaignId, 'player');
           return this.characters.patchXp(characterId as number, { delta: amount as number }, user, role);
         }
-        const validated = XpAward.parse({ amount, ...(characterIds !== undefined ? { characterIds } : {}) });
+        const validated = XpAward.parse({
+          amount,
+          ...(characterIds !== undefined ? { characterIds } : {}),
+          ...(includeNonActive !== undefined ? { includeNonActive } : {}),
+        });
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.characters.awardXp(campaignId as number, validated, user, role);
       },
@@ -2256,7 +2269,9 @@ export class McpToolsService {
       user,
       'resolve_inbox_item',
       'DM only: resolve a player inbox item, optionally with a resolution note and/or a link to the entity it ' +
-        'became (entityType + entityId together) — shown in the resolved history (read_inbox with resolved=true).',
+        'became (entityType + entityId together) — shown in the resolved history (read_inbox with resolved=true). ' +
+        'Retrying the identical terminal payload returns the existing result; a different terminal payload after ' +
+        'resolution fails with conflict.',
       {
         noteId: Id.describe('Inbox note id'),
         resolvedNote: z.string().max(1000).optional().describe('Resolution note'),
@@ -2961,13 +2976,30 @@ export class McpToolsService {
       server,
       user,
       'delete_comment',
-      'Delete a discussion comment. Author or DM only. Deleting a top-level comment cascades to its direct replies.',
+      'Delete a discussion comment (tombstone). Author or DM only. Soft-deletes the comment — its body is ' +
+        'redacted to "[deleted]" but the row remains so replies keep their parent (issue #503: a root author ' +
+        'must not destroy other members\' replies). Reversible via restore_comment.',
       { commentId: Id.describe('Comment id — from list_comments') },
       async ({ commentId }) => {
-        const row = await this.comments.getRowOrThrow(commentId as number);
+        const row = await this.comments.getRowOrThrow(commentId as number, true);
         const role = await this.access.requireMember(user, row.campaignId, { write: true });
         await this.comments.remove(commentId as number, user, role);
         return { ok: true, commentId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'restore_comment',
+      'Restore a tombstoned discussion comment. Author or DM only. Undoes a soft-delete (issue #503): clears ' +
+        'deletedAt/deletedBy and returns the comment with its original body. 404 if the comment is not currently ' +
+        'tombstoned.',
+      { commentId: Id.describe('Comment id — from list_comments') },
+      async ({ commentId }) => {
+        const row = await this.comments.getRowOrThrow(commentId as number, true);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        return this.comments.restore(commentId as number, user, role);
       },
     );
 
