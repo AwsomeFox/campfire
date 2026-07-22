@@ -93,12 +93,12 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
-  const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
-  if (init?.json !== undefined) headers['Content-Type'] = 'application/json';
+  const headers = new Headers(init?.headers);
+  if (init?.json !== undefined) headers.set('Content-Type', 'application/json');
   const devRole = localStorage.getItem('cf.devRole');
   const devUser = localStorage.getItem('cf.devUser');
-  if (devRole) headers['x-dev-role'] = devRole;
-  if (devUser) headers['x-dev-user'] = devUser;
+  if (devRole) headers.set('x-dev-role', devRole);
+  if (devUser) headers.set('x-dev-user', devUser);
 
   const res = await fetch(path, {
     ...init,

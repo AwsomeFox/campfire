@@ -21,6 +21,7 @@ import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
 import { Btn, EmptyState, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
 
 const POLL_MS = 60_000;
@@ -328,6 +329,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   }, [closePanel, loadItems]);
 
   const syncReadMessage = useCallback((message: Extract<NotificationSyncMessage, { type: 'read' | 'read-all' }>) => {
+    if (!mountedRef.current) return;
     if (message.type === 'read') {
       readAtByIdRef.current.set(message.id, message.readAt);
       setItems((previous) => previous?.map((item) => (
@@ -539,8 +541,14 @@ export function NotificationsBell() {
 
 /** The single panel instance remains mounted in the shared layout controller. */
 export function NotificationsPanel() {
-  const { count, open, items, loadError, closePanel, markRead, markAllRead } = useNotifications();
-  if (!open) return null;
+  const notifications = useNotifications();
+  if (!notifications.open) return null;
+  return <OpenNotificationsPanel notifications={notifications} />;
+}
+
+function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
+  const { count, items, loadError, closePanel, markRead, markAllRead } = notifications;
+  const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
 
   return (
     <div
@@ -549,6 +557,7 @@ export function NotificationsPanel() {
       onClick={closePanel}
     >
       <div
+        ref={dialogRef}
         className="cf-card elev-lg fixed flex flex-col"
         role="dialog"
         aria-modal="true"

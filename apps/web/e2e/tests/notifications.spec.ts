@@ -54,8 +54,20 @@ test.describe('shared notification controller', () => {
     await expect(page.getByRole('button', { name: /Notifications/ })).toHaveCount(1);
     expect(requests).toBe(1);
 
-    await page.getByRole('button', { name: /Notifications/ }).click();
-    await expect(page.getByRole('dialog', { name: 'Notifications' })).toBeVisible();
+    const bell = page.getByRole('button', { name: /Notifications/ });
+    await bell.focus();
+    await bell.press('Enter');
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog).toBeVisible();
+    expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press('Shift+Tab');
+    expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(bell).toBeFocused();
+
+    await bell.click();
+    await expect(dialog).toBeVisible();
     await page.setViewportSize({ width: 375, height: 812 });
     await expect(page.getByRole('button', { name: /Notifications/ })).toHaveCount(1);
     await expect(page.getByRole('dialog', { name: 'Notifications' })).toBeVisible();
