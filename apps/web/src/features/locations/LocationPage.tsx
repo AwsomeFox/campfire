@@ -22,6 +22,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
+import { entityTargetProps } from '../../lib/entityLinks';
 
 
 /** Design's primary "discover" action advances one step: unexplored -> explored -> current. */
@@ -345,7 +346,7 @@ export default function LocationPage() {
   const nextStatus = NEXT_STATUS[location.status];
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('location', location.id)}>
       <div>
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/locations`)}>
           ← Back

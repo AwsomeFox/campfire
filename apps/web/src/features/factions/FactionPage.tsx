@@ -16,6 +16,7 @@ import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { standingVariant } from './FactionListPage';
 import { GameIcon } from '../../components/GameIcon';
+import { entityTargetProps } from '../../lib/entityLinks';
 
 const STANDINGS: FactionStanding[] = ['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'];
 
@@ -187,7 +188,7 @@ export default function FactionPage() {
   if (!faction) return null;
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('faction', faction.id)}>
       <div>
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/factions`)}>
           ← Back

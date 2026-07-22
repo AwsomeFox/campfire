@@ -11,6 +11,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { Card, EmptyState, ErrorNote, Skeleton, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ENTITY_ICON } from '../../lib/uiIcons';
+import { searchResultHref } from '../../lib/entityLinks';
 
 const typeLabel: Record<SearchResult['type'], string> = {
   quest: 'Quests',
@@ -41,44 +42,6 @@ const typeIcon: Record<SearchResult['type'], string> = {
   arc: ENTITY_ICON.arc,
   beat: ENTITY_ICON.beat,
 };
-
-const typeRoute: Record<SearchResult['type'], string> = {
-  quest: 'quests',
-  npc: 'npcs',
-  faction: 'factions',
-  location: 'locations',
-  character: 'characters',
-  session: 'sessions',
-  note: 'notes',
-  timeline: 'timeline',
-  item: 'inventory',
-  comment: 'comments',
-  arc: 'storylines',
-  beat: 'storylines',
-};
-
-/** Types rendered as list-only pages: a hit deep-links to the list, not a per-id page. */
-const listOnlyRoute: Partial<Record<SearchResult['type'], string>> = {
-  session: 'sessions',
-  timeline: 'timeline',
-  item: 'inventory',
-  arc: 'storylines',
-  beat: 'storylines',
-};
-
-/** Where a result links to. Notes/comments anchored to an entity link to that entity. */
-function resultHref(campaignId: number, r: SearchResult): string {
-  if (r.type === 'note' || r.type === 'comment') {
-    if (r.entityType && r.entityType !== 'campaign' && r.entityId != null) {
-      const sub = r.entityType === 'session' ? 'sessions' : `${r.entityType}s`;
-      return `/c/${campaignId}/${sub}/${r.entityId}`;
-    }
-    return `/c/${campaignId}/${r.type === 'comment' ? '' : 'notes'}`;
-  }
-  const listRoute = listOnlyRoute[r.type];
-  if (listRoute) return `/c/${campaignId}/${listRoute}`;
-  return `/c/${campaignId}/${typeRoute[r.type]}/${r.id}`;
-}
 
 export default function SearchPage() {
   const { campaignId: campaignIdParam } = useParams<{ campaignId: string }>();
@@ -185,7 +148,7 @@ export default function SearchPage() {
                 </h2>
                 <div className="space-y-2">
                   {grouped.get(t)!.map((r) => (
-                    <Link key={`${r.type}-${r.id}`} to={resultHref(campaignId, r)} className="block">
+                    <Link key={`${r.type}-${r.id}`} to={searchResultHref(campaignId, r)} className="block">
                       <Card className="hover:border-slate-600 transition-colors">
                         <div className="text-sm font-medium text-white">{r.title}</div>
                         {r.snippet && (

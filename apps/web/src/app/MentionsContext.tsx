@@ -15,21 +15,6 @@ type MentionsValue = {
 
 const MentionsContext = createContext<MentionsValue>({ campaignId: undefined, targets: [] });
 
-/** Route sub-path for each linkable entity type (mirrors the app router). */
-export const mentionRoute: Record<MentionTarget['type'], string> = {
-  quest: 'quests',
-  npc: 'npcs',
-  faction: 'factions',
-  location: 'locations',
-  character: 'characters',
-  session: 'sessions',
-  // List-only pages (no per-id route): a mention links to the list, matching the
-  // existing session behaviour.
-  timeline: 'timeline',
-  arc: 'storylines',
-  beat: 'storylines',
-};
-
 export function MentionsProvider({ campaignId, children }: { campaignId: number | undefined; children: ReactNode }) {
   const [targets, setTargets] = useState<MentionTarget[]>([]);
 

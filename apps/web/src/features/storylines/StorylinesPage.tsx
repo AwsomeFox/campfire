@@ -23,6 +23,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { Markdown } from '../../components/Markdown';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
@@ -253,7 +254,7 @@ function ArcCard({
   };
 
   return (
-    <div className="card elev-sm" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div className="card elev-sm" style={{ display: 'flex', flexDirection: 'column', gap: 10 }} {...entityTargetProps('arc', arc.id)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span
           style={{
@@ -414,7 +415,7 @@ function BeatRow({
   };
 
   return (
-    <div style={{ borderLeft: '2px solid var(--color-border)', paddingLeft: 10, display: 'flex', flexDirection: 'column', gap: 5 }}>
+    <div style={{ borderLeft: '2px solid var(--color-border)', paddingLeft: 10, display: 'flex', flexDirection: 'column', gap: 5 }} {...entityTargetProps('beat', beat.id)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ width: 14, textAlign: 'center' }}>{BEAT_GLYPH[beat.status]}</span>
         <span style={{ fontWeight: 500, fontSize: 14 }}>{beat.title}</span>
@@ -456,17 +457,17 @@ function BeatRow({
       {hasLinks && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 22, flexWrap: 'wrap', fontSize: 12 }}>
           {beat.sessionId != null && (
-            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/sessions?session=${beat.sessionId}`}>
+            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'session', id: beat.sessionId })}>
               <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />{linkedSession ? sessionLabel(linkedSession) : `Session #${beat.sessionId}`}
             </Link>
           )}
           {beat.questId != null && (
-            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/quests/${beat.questId}`}>
+            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'quest', id: beat.questId })}>
               <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />{linkedQuest?.title ?? `Quest #${beat.questId}`}
             </Link>
           )}
           {beat.encounterId != null && (
-            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={`/c/${cid}/encounters/${beat.encounterId}`}>
+            <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'encounter', id: beat.encounterId })}>
               <GameIcon slug="crossed-swords" size={11} className="inline align-text-bottom mr-1" />{linkedEncounter?.name ?? `Encounter #${beat.encounterId}`}
             </Link>
           )}
