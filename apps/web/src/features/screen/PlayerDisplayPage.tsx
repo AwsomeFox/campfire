@@ -226,7 +226,6 @@ export default function PlayerDisplayPage() {
     fullscreenActiveRef.current = next;
     setIsFullscreen(next);
     setFullscreenSupported(fullscreenAvailable());
-    setFullscreenPending(false);
     if (previous && !next) {
       setFullscreenNotice({
         kind: 'info',
@@ -239,7 +238,6 @@ export default function PlayerDisplayPage() {
 
   useEffect(() => {
     function handleFullscreenError() {
-      setFullscreenPending(false);
       setFullscreenSupported(fullscreenAvailable());
       setFullscreenNotice({
         kind: 'error',
@@ -321,9 +319,13 @@ export default function PlayerDisplayPage() {
       // but synchronizing here also handles implementations that resolve first.
       syncFullscreen();
     } catch (fullscreenError) {
-      setFullscreenPending(false);
       setFullscreenSupported(fullscreenAvailable());
       setFullscreenNotice({ kind: 'error', message: fullscreenFailure(action, fullscreenError) });
+    } finally {
+      // The async browser operation — not fullscreenchange/fullscreenerror — owns
+      // pending state. Browsers may dispatch either event before the promise
+      // settles, and the control must remain busy/disabled until it actually does.
+      setFullscreenPending(false);
     }
   }, [syncFullscreen]);
 

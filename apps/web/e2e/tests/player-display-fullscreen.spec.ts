@@ -2,13 +2,17 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
 
-type FullscreenMockMode = 'supported' | 'unsupported' | 'denied' | 'request-error' | 'exit-error';
+type FullscreenMockMode = 'supported' | 'unsupported' | 'denied' | 'request-error' | 'exit-error' | 'deferred';
 
 async function installFullscreenMock(page: Page, mode: FullscreenMockMode = 'supported') {
   await page.addInitScript(
     ({ mockMode }) => {
       let activeElement: Element | null = null;
       const supported = mockMode !== 'unsupported';
+      let resolveRequest: () => void = () => undefined;
+      const deferredRequest = new Promise<void>((resolve) => {
+        resolveRequest = resolve;
+      });
 
       Object.defineProperty(document, 'fullscreenEnabled', {
         configurable: true,
@@ -25,17 +29,18 @@ async function installFullscreenMock(page: Page, mode: FullscreenMockMode = 'sup
       Object.defineProperty(Element.prototype, 'requestFullscreen', {
         configurable: true,
         value: supported
-          ? async () => {
+          ? () => {
               if (mockMode === 'denied') {
                 fail();
-                throw new DOMException('Permission denied by test browser', 'NotAllowedError');
+                return Promise.reject(new DOMException('Permission denied by test browser', 'NotAllowedError'));
               }
               if (mockMode === 'request-error') {
                 fail();
-                throw new Error('Display hardware failure');
+                return Promise.reject(new Error('Display hardware failure'));
               }
               activeElement = document.documentElement;
               change();
+              return mockMode === 'deferred' ? deferredRequest : Promise.resolve();
             }
           : undefined,
       });
@@ -62,8 +67,12 @@ async function installFullscreenMock(page: Page, mode: FullscreenMockMode = 'sup
       });
 
       (window as typeof window & {
-        __fullscreenTest: { exitExternally: () => void; dispatchError: () => void };
-      }).__fullscreenTest = { exitExternally, dispatchError: fail };
+        __fullscreenTest: { exitExternally: () => void; dispatchError: () => void; resolveRequest: () => void };
+      }).__fullscreenTest = {
+        exitExternally,
+        dispatchError: fail,
+        resolveRequest,
+      };
     },
     { mockMode: mode },
   );
@@ -121,11 +130,29 @@ test.describe('Player Display fullscreen', () => {
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
     await expect(fullscreen).toHaveAttribute('aria-busy', 'false');
 
+    await fullscreen.focus();
     await page.keyboard.press('Enter');
     await expect(fullscreen).toHaveAccessibleName('⛶ Enter fullscreen');
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'false');
     await expect(fullscreenNotice(page)).toHaveAttribute('role', 'status');
     await expect(fullscreenNotice(page)).toContainText(/fullscreen ended.*enter fullscreen/i);
+  });
+
+  test('stays busy after fullscreenchange until the request promise settles', async ({ page }) => {
+    const fullscreen = await openPlayerDisplay(page, 'deferred');
+
+    // Dispatch synchronously so the test can observe the interval after the
+    // fullscreenchange event but before the deliberately unresolved promise.
+    await fullscreen.evaluate((button) => (button as HTMLButtonElement).click());
+    await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
+    await expect(fullscreen).toHaveAttribute('aria-busy', 'true');
+    await expect(fullscreen).toBeDisabled();
+
+    await page.evaluate(() => {
+      (window as typeof window & { __fullscreenTest: { resolveRequest: () => void } }).__fullscreenTest.resolveRequest();
+    });
+    await expect(fullscreen).toHaveAttribute('aria-busy', 'false');
+    await expect(fullscreen).toBeEnabled();
   });
 
   test('tracks Escape and external exits reported by fullscreenchange', async ({ page }) => {
