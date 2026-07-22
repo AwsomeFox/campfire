@@ -66,3 +66,4 @@ export function resolveRollMode(chosen: RollMode, modifiers: { shiftKey: boolean
   if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey) return 'dis';
   return chosen;
 }
+
