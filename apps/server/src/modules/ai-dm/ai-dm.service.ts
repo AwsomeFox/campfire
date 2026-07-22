@@ -109,6 +109,21 @@ export class AiDmService {
     }
   }
 
+  /**
+   * Resolve the executable model for a turn and revalidate it against the admin
+   * allowlist at EXECUTION time (issue #564). Public so EVERY token-spending path
+   * that AiDmService's siblings own — the legacy takeTurn below, the co-DM drafts,
+   * the scribe — all derive the model from the SAME policy-checked source rather
+   * than the legacy `seat.model` label (which a DM could set to arbitrary text and
+   * bypass the admin allowlist). Returns the resolved model, or `null` when no
+   * provider is configured (callers fall back to the no-op seam). Throws
+   * `BadRequestException` when the resolved model is off the (non-empty) allowlist.
+   */
+  async resolveExecutionModel(campaignId: number): Promise<string | null> {
+    const resolved = await this.providerConfig.resolveExecutionModel(campaignId);
+    return resolved?.model ?? null;
+  }
+
   private async findRow(campaignId: number): Promise<(typeof aiDmSeats.$inferSelect) | undefined> {
     const [row] = await this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1);
     return row;
@@ -282,13 +297,20 @@ export class AiDmService {
     // a turn is stopped with a clear reason before any (potential) provider spend.
     await this.assertWithinServerTokenCap();
 
+    // Issue #564: the executable model derives ONLY from the effective provider config
+    // (allowlist-validated at execution), NEVER from the legacy `seat.model` label. When
+    // a provider is configured we resolve + revalidate its model here; the legacy no-op
+    // seam (the default in a stock install) ignores the model, so falling back to '' for
+    // an unconfigured provider keeps the existing scaffold behavior unchanged.
+    const execModel = (await this.resolveExecutionModel(campaignId)) ?? '';
+
     const maxTokens = Math.min(input.maxTokens ?? DEFAULT_MAX_TOKENS, remaining);
     const result = await this.provider.generate({
       campaignId,
       kind: input.kind,
       prompt: input.prompt,
       instructions: seat.instructions,
-      model: seat.model,
+      model: execModel,
       maxTokens,
     });
 
@@ -346,7 +368,9 @@ export class AiDmService {
       action: 'ai-dm.turn',
       entityType: 'ai-dm',
       campaignId,
-      detail: `${input.kind} via ${this.provider.name} (+${tokensUsed} tokens, ${newTokensUsed}/${seat.tokenBudget})`,
+      // Issue #564: audit the EXACT model sent (resolved + allowlist-validated), not the
+      // legacy seat.model label.
+      detail: `${input.kind} via ${this.provider.name} model=${execModel || 'default'} (+${tokensUsed} tokens, ${newTokensUsed}/${seat.tokenBudget})`,
     });
 
     const updatedSeat = await this.getSeat(campaignId);

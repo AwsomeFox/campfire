@@ -16,7 +16,7 @@ import { DB, type DrizzleDb, resolveDataDir } from '../../db/db.module';
 import { aiProviderConfigs } from '../../db/schema';
 import { encryptSecret, decryptSecret, secretLast4 } from '../../common/crypto';
 import { nowIso } from '../../common/time';
-import { auditActor, type RequestUser } from '../../common/user.types';
+import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import {
   createAiProvider,
@@ -312,7 +312,7 @@ export class AiProviderConfigService {
     // Audit records WHAT changed and the key ACTION only — never the key or last4.
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.configure',
       entityType: 'ai-provider',
       campaignId: auditCampaignId ?? null,
@@ -346,7 +346,7 @@ export class AiProviderConfigService {
       .where(eq(aiProviderConfigs.id, existing.id));
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.allowlist',
       entityType: 'ai-provider',
       detail: `server allowlist=${models.length} model(s)`,
@@ -384,7 +384,7 @@ export class AiProviderConfigService {
       .where(eq(aiProviderConfigs.id, row.id));
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.key-clear',
       entityType: 'ai-provider',
       campaignId: campaignId ?? null,
@@ -396,7 +396,7 @@ export class AiProviderConfigService {
     await this.db.delete(aiProviderConfigs).where(eq(aiProviderConfigs.scope, 'server'));
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.delete',
       entityType: 'ai-provider',
       detail: 'server',
@@ -409,7 +409,7 @@ export class AiProviderConfigService {
       .where(and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.campaignId, campaignId)));
     await this.audit.log({
       actor: auditActor(user),
-      actorRole: 'dm',
+      actorRole: auditActorRole(user),
       action: 'ai-provider.delete',
       entityType: 'ai-provider',
       campaignId,
@@ -509,6 +509,41 @@ export class AiProviderConfigService {
       baseUrl: primary.baseUrl ?? undefined,
       params: safeJson(primary.params, {}),
     };
+  }
+
+  /**
+   * Resolve the EFFECTIVE model that WILL be sent to the provider for a campaign, AND
+   * revalidate it against the server admin's `allowedModels` at EXECUTION time
+   * (issue #564).
+   *
+   * The executable model derives ONLY from the effective provider config
+   * (`resolveEffectiveConfig` → `model`), NEVER from the legacy `seat.model` label.
+   * The allowlist was already checked when a campaign override's `model` was WRITTEN
+   * (`putCampaign`), but an admin can tighten the allowlist AFTER a seat was
+   * configured — so a model that was legal yesterday must still be rejected today.
+   * This is the single execution-time choke point: every turn-bearing path (the driver
+   * runtime, the legacy takeTurn/co-dm bridge) resolves the model through here, so a
+   * legacy `seat.model` cannot bypass the admin policy regardless of provider type
+   * (OpenAI-compatible OR Anthropic — both flow through the same `AiProviderConfig`).
+   *
+   * Returns `{ model, config }` so the caller can build the provider from the SAME
+   * decrypted config the model was validated against (no second resolve that could
+   * diverge). Throws `BadRequestException` when the resolved model is not on the
+   * (non-empty) server allowlist. `null` when no provider is configured at all.
+   */
+  async resolveExecutionModel(
+    campaignId: number,
+  ): Promise<{ model: string; config: AiProviderConfig } | null> {
+    const config = await this.resolveEffectiveConfig(campaignId);
+    if (!config) return null;
+    const allow = await this.getServerAllowedModels();
+    if (allow.length > 0 && !allow.includes(config.model)) {
+      throw new BadRequestException(
+        `Model '${config.model}' is not in the server admin's allowlist (${allow.join(', ')}). ` +
+          'The allowlist was tightened after this provider was configured — update the provider model to an allowed value.',
+      );
+    }
+    return { model: config.model, config };
   }
 
   // ── test-connection (builds the real provider via #309's factory) ────────────

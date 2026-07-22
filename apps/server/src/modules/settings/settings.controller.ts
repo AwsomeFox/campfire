@@ -2,7 +2,7 @@ import { Body, Controller, Get, Patch } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { type RequestUser, auditActor } from '../../common/user.types';
+import { type RequestUser, auditActor, auditActorRole } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from './settings.service';
 import { SettingsUpdateDto } from './settings.dto';
@@ -32,7 +32,7 @@ export class SettingsController {
     const changed = Object.keys(body).filter((k) => (body as Record<string, unknown>)[k] !== undefined);
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      actorRole: auditActorRole(actor),
       action: 'settings.update',
       entityType: 'settings',
       detail: changed.map((k) => `${k}=${String((updated as Record<string, unknown>)[k])}`).join(', ') || 'no-op',

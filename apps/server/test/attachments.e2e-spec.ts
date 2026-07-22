@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { AttachmentsService } from '../src/modules/attachments/attachments.service';
 
 // --- Test-only PNG builder: produces a real WxH 8-bit RGB PNG so we can exercise
 // the server's thumbnail downscaler on an image larger than the thumb cap. ---
@@ -551,10 +552,18 @@ describe('attachments (e2e)', () => {
     });
   });
 
-  // Issue #75 — attachment bytes are immutable per id, so responses must be
-  // cacheable (strong content-hash ETag + immutable Cache-Control) and revalidate
-  // to 304, and a `?size=thumb` variant serves a downscaled PNG preview.
-  describe('caching + thumbnails (issue #75)', () => {
+  // Issue #75 — attachment bytes are immutable per id, so responses carry a strong
+  // content-hash ETag and a long-lived Cache-Control, and revalidate to 304; a
+  // `?size=thumb` variant serves a downscaled PNG preview.
+  //
+  // Issue #498 hardened the policy: `immutable` was REMOVED (the resource is
+  // permission-dependent — membership/hidden/login-as-other-user can change who
+  // may read it, so the browser must keep revalidating so the auth check runs),
+  // `private` + `Vary: Cookie` are set so no shared proxy caches it, and the web
+  // client appends `?v=<versionToken>` (id+hidden+updatedAt) so an authorization
+  // change yields a new URL. The long `max-age` + strong ETag still let an
+  // unchanged multi-MB map short-circuit to 304.
+  describe('caching + thumbnails (issues #75, #498)', () => {
     let pngId: number; // a >thumb-cap PNG so the downscaler actually runs
 
     beforeAll(async () => {
@@ -569,12 +578,16 @@ describe('attachments (e2e)', () => {
       pngId = res.body.id;
     });
 
-    it('GET sets a strong ETag and immutable Cache-Control', async () => {
+    it('GET sets a strong ETag and an authorization-aware (non-immutable) Cache-Control', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).get(`/api/v1/attachments/${pngId}/file`).set(dm);
       expect(res.status).toBe(200);
-      expect(res.headers['cache-control']).toContain('immutable');
+      // Issue #498: NO `immutable` — the browser must revalidate so the membership/hidden check runs.
+      expect(res.headers['cache-control']).not.toContain('immutable');
+      expect(res.headers['cache-control']).toContain('private');
       expect(res.headers['cache-control']).toContain('max-age=31536000');
+      // `Vary: Cookie` is a defensive keying hint for shared/proxy caches.
+      expect(String(res.headers['vary'])).toContain('Cookie');
       expect(res.headers['etag']).toMatch(/^"[0-9a-f]{64}"$/); // quoted sha256 hex
     });
 
@@ -664,6 +677,10 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
   let playerId: number;
   let campaignId: number;
   let attachmentId: number;
+  // Issue #498 Scenario 2 (membership removal): a second player member whose access
+  // we can revoke mid-suite without disturbing playerAgent (used by the other scenarios).
+  let removablePlayerId: number;
+  let removablePlayerAgent: ReturnType<typeof request.agent>;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -677,6 +694,10 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       .post('/api/v1/users')
       .send({ username: 'player-real', password: 'password-pl-1', serverRole: 'user' });
     playerId = createPlayer.body.id;
+    const createRemovable = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'removable-real', password: 'password-rm-1', serverRole: 'user' });
+    removablePlayerId = createRemovable.body.id;
 
     dmAgent = request.agent(server);
     await dmAgent.post('/api/v1/auth/login').send({ username: 'dm-real', password: 'password-dm-1' });
@@ -687,11 +708,17 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
     playerAgent = request.agent(server);
     await playerAgent.post('/api/v1/auth/login').send({ username: 'player-real', password: 'password-pl-1' });
 
+    removablePlayerAgent = request.agent(server);
+    await removablePlayerAgent.post('/api/v1/auth/login').send({ username: 'removable-real', password: 'password-rm-1' });
+
     const createRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Private Campaign' });
     campaignId = createRes.body.id;
 
     // player-real is a member of this campaign (role: player), unlike outsider-real.
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    // removable-real is also a campaign member (player) so the #498 membership-removal
+    // scenario can fetch a revealed attachment and then lose access mid-suite.
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: removablePlayerId, role: 'player' });
 
     const uploadRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/attachments`)
@@ -868,6 +895,176 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
     it('a non-member outsider still cannot fetch the encounter map (403)', async () => {
       const res = await outsiderAgent.get(`/api/v1/attachments/${mapId}/file`);
       expect(res.status).toBe(403);
+    });
+  });
+
+  // Issue #498 — protected attachments used to ship `Cache-Control: ..., immutable`,
+  // so the browser HTTP cache would serve previously-fetched bytes straight from disk
+  // without ever re-hitting the server's membership/hidden check. That leaks bytes
+  // across authorization states: login-as-other-user in the same browser, membership
+  // removal, hidden toggle, or a delete-then-restore reusing the id. The fix has two
+  // halves and these tests pin both:
+  //
+  //   (server) The cache policy is HONEST: no `immutable`, `private` + `Vary: Cookie`,
+  //            and — critically — the membership/hidden check runs BEFORE any
+  //            If-None-Match short-circuit. So even if a browser replays a stale ETag
+  //            for an entry it cached under an old authorization, the server answers
+  //            401/403/404, never 304-with-bytes. Each scenario below asserts that.
+  //
+  //   (client) The version token (id + hidden + updatedAt) changes exactly when the
+  //            authorization state changes, so the URL the web client builds also
+  //            changes and the browser cache misses outright. Asserted via the
+  //            AttachmentsService.versionToken helper that the web client mirrors.
+  describe('authorization-aware cache (issue #498)', () => {
+    // Delegate to the production AttachmentsService.versionToken helper rather than
+    // re-implementing the hash inline — the test then asserts the ACTUAL token the
+    // server/client contract produces, and cannot drift if the algorithm changes.
+    const versionToken = (row: { id: number; hidden: boolean; updatedAt: string }): string =>
+      ctx.app.get(AttachmentsService).versionToken(row);
+
+    // The honest-cache invariant every permission-dependent file response must hold:
+    // NO `immutable` (the browser must revalidate so the membership/hidden check runs),
+    // `private` (no shared-proxy caching), and `Vary: Cookie` (defensive keying). Every
+    // successful (200) GET in the scenarios below must satisfy this — if the old
+    // `immutable` policy regressed, these assertions fail right alongside the policy test.
+    function assertHonestCache(res: { headers: Record<string, unknown> }) {
+      expect(String(res.headers['cache-control'])).not.toContain('immutable');
+      expect(String(res.headers['cache-control'])).toContain('private');
+      expect(String(res.headers['vary'])).toContain('Cookie');
+    }
+
+    it('Scenario 1 (logout / login-as-other-user): a non-member replaying a valid ETag is NOT served 304 — the auth check runs first', async () => {
+      // A member (dm) fetches and receives a strong ETag the browser would cache.
+      const dmGet = await dmAgent.get(`/api/v1/attachments/${attachmentId}/file`);
+      expect(dmGet.status).toBe(200);
+      assertHonestCache(dmGet);
+      const etag = dmGet.headers['etag'];
+      expect(etag).toBeTruthy();
+
+      // A non-member (outsider) requests the SAME url replaying that ETag. A buggy
+      // immutable cache would have the browser serve dm's bytes from its HTTP cache;
+      // the server-side guarantee is that even if the ETag is presented, the membership
+      // check runs first and answers 403 — never a 304 that would imply "your cached
+      // copy is still good" (and risk serving the cached bytes).
+      const outsiderRevalidate = await outsiderAgent
+        .get(`/api/v1/attachments/${attachmentId}/file`)
+        .set('If-None-Match', etag);
+      expect(outsiderRevalidate.status).toBe(403);
+    });
+
+    it('Scenario 2 (membership removal): after a member is removed, their replayed ETag yields 403 (not 304)', async () => {
+      // removablePlayerAgent is a campaign member (provisioned in beforeAll). Stage a
+      // revealed attachment it can fetch and cache an ETag for, then revoke its access.
+      const up = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'membership.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const id = up.body.id;
+      await dmAgent.post(`/api/v1/attachments/${id}/reveal`);
+
+      // Member fetches and caches an ETag.
+      const memberGet = await removablePlayerAgent.get(`/api/v1/attachments/${id}/file`);
+      expect(memberGet.status).toBe(200);
+      assertHonestCache(memberGet);
+      const etag = memberGet.headers['etag'];
+      expect(etag).toBeTruthy();
+
+      // Resolve the membership ROW id (the delete route keys on that, not on userId).
+      const list = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
+      expect(list.status).toBe(200);
+      const seat = list.body.find((m: { userId: number }) => m.userId === removablePlayerId);
+      expect(seat).toBeTruthy();
+
+      // Membership revoked (204 No Content).
+      const removeRes = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/members/${seat.id}`);
+      expect(removeRes.status).toBe(204);
+
+      // The same browser replays the cached ETag. The server MUST run the (now-failing)
+      // membership check and answer 403, not 304 — so the browser's cached copy can't
+      // be treated as fresh and served as bytes.
+      const after = await removablePlayerAgent.get(`/api/v1/attachments/${id}/file`).set('If-None-Match', etag);
+      expect(after.status).toBe(403);
+    });
+
+    it('Scenario 3 (hidden toggle): re-hiding an attachment makes a player replaying the old ETag get 404 (not 304), and the version token changes across the toggle', async () => {
+      // Fresh hidden attachment: a player 404s; the DM reveals it; the player fetches
+      // (caching an ETag); the DM re-hides; the player replays the ETag and MUST get 404.
+      const up = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'toggle.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const id = up.body.id;
+      expect(up.body.hidden).toBe(true);
+
+      // Player can't see it while hidden.
+      expect((await playerAgent.get(`/api/v1/attachments/${id}/file`)).status).toBe(404);
+
+      // Reveal: player fetches and caches an ETag.
+      await dmAgent.post(`/api/v1/attachments/${id}/reveal`);
+      const playerGet = await playerAgent.get(`/api/v1/attachments/${id}/file`);
+      expect(playerGet.status).toBe(200);
+      assertHonestCache(playerGet);
+      const etag = playerGet.headers['etag'];
+      const revealedRow = (await playerAgent.get(`/api/v1/campaigns/${campaignId}/attachments`)).body.find(
+        (a: { id: number }) => a.id === id,
+      );
+      const tokenWhileRevealed = versionToken(revealedRow);
+
+      // Re-hide.
+      const hideRes = await dmAgent.post(`/api/v1/attachments/${id}/hide`);
+      expect(hideRes.body.hidden).toBe(true);
+      const hiddenRow = hideRes.body;
+      const tokenWhileHidden = versionToken(hiddenRow);
+
+      // The URL the client would build flips (so the browser cache misses outright).
+      expect(tokenWhileHidden).not.toBe(tokenWhileRevealed);
+
+      // And even if the browser somehow replayed the old ETag, the server-side hidden
+      // check runs first and answers 404 — never 304.
+      const revalidate = await playerAgent.get(`/api/v1/attachments/${id}/file`).set('If-None-Match', etag);
+      expect(revalidate.status).toBe(404);
+    });
+
+    it('Scenario 4 (delete): a deleted attachment 404s even when the old ETag is replayed', async () => {
+      const up = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'goner.png', contentType: 'image/png' });
+      const id = up.body.id;
+      const get1 = await dmAgent.get(`/api/v1/attachments/${id}/file`);
+      expect(get1.status).toBe(200);
+      assertHonestCache(get1);
+      const etag = get1.headers['etag'];
+
+      await dmAgent.delete(`/api/v1/attachments/${id}`);
+
+      // The browser may still hold the ETag; the server must 404 (row gone), not 304.
+      const revalidate = await dmAgent.get(`/api/v1/attachments/${id}/file`).set('If-None-Match', etag);
+      expect(revalidate.status).toBe(404);
+    });
+
+    it('Scenario 5 (restore / id reuse): the version token for a reused id differs when the restored row has a new updatedAt (so cached URLs do not collide)', async () => {
+      // The leak this guards: an attachment is deleted and a later restore inserts a
+      // NEW row that SQLite reuses the same id for. The old URL (/attachments/<id>/file)
+      // collides, and a stale immutable cache would serve the OLD bytes for the NEW
+      // (possibly differently-authorized) content. The fix: the version token folds in
+      // updatedAt, so even with an identical id+hidden the token differs across the
+      // two rows and the client builds a different URL.
+      const rowV1 = { id: 42, hidden: false, updatedAt: '2025-01-01T00:00:00.000Z' };
+      const rowV2 = { id: 42, hidden: false, updatedAt: '2025-06-01T00:00:00.000Z' }; // same id, restored later
+      const rowV2Hidden = { id: 42, hidden: true, updatedAt: '2025-06-01T00:00:00.000Z' }; // auth also changed
+
+      expect(versionToken(rowV1)).not.toBe(versionToken(rowV2));
+      expect(versionToken(rowV2)).not.toBe(versionToken(rowV2Hidden));
+
+      // The live service agrees: it folds the same three fields (its own hash, but
+      // the SAME inputs, so the same uniqueness invariant holds). This pins the
+      // server-side helper the web client parallels for any non-web caller.
+      const svc = ctx.app.get(AttachmentsService);
+      expect(svc.versionToken(rowV1)).not.toBe(svc.versionToken(rowV2));
+      expect(svc.versionToken(rowV2)).not.toBe(svc.versionToken(rowV2Hidden));
     });
   });
 });
