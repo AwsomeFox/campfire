@@ -18,5 +18,5 @@ module.exports = {
   // database for many files. Recycle Jest's lone worker between files once it
   // grows past this bound instead of letting retained module state accumulate
   // until the GitHub runner's Node heap is exhausted.
-  workerIdleMemoryLimit: '1GB',
+  workerIdleMemoryLimit: '1024MB',
 };
