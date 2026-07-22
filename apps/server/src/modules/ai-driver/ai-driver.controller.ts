@@ -3,10 +3,13 @@ import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { interval, merge, map, type Observable } from 'rxjs';
+import { filter, takeUntil } from 'rxjs/operators';
+import type { CampaignEvent } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { AiDriverService } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 
@@ -97,6 +100,7 @@ export class AiDriverController {
     private readonly driver: AiDriverService,
     private readonly stream: AiDmStreamService,
     private readonly access: CampaignAccessService,
+    private readonly events: CampaignEventsService,
   ) {}
 
   @Post('message')
@@ -257,7 +261,8 @@ export class AiDriverController {
     description:
       'Requires campaign membership. Server-sent stream of AiDmStreamEvent JSON in `data`: turn.start, narration.delta ' +
       '(token-by-token), narration.message, tool (id-only signals — refetch through REST), and turn.end. Periodic ' +
-      '`{"type":"ping"}` keepalives should be ignored.',
+      '`{"type":"ping"}` keepalives should be ignored. The stream closes automatically when the subscriber is removed ' +
+      'from the campaign (issue #527); a reconnect then receives 403.',
   })
   @ApiProduces('text/event-stream')
   @ApiResponse({ status: 200, description: 'text/event-stream of AiDmStreamEvent JSON.' })
@@ -267,9 +272,22 @@ export class AiDriverController {
     @CurrentUser() user: RequestUser,
   ): Promise<Observable<MessageEvent>> {
     await this.access.requireMember(user, id);
+    // Issue #527: terminate the narration stream when this user's membership is revoked.
+    // The AI narration channel is a separate Subject from CampaignEventsService, so the
+    // shared membership.revoked notifier (from the campaign event stream) is tapped here
+    // via takeUntil — applied to the WHOLE merged stream so the heartbeat interval stops
+    // too (otherwise merge keeps the connection alive on keepalive pings after the data
+    // stream has ended). Same race-free reasoning as CampaignEventsController: the notifier
+    // subscribes to the same Subject the revocation is emitted on, so it fires synchronously.
+    const revoked = this.events.streamFor(id).pipe(
+      filter(
+        (event): event is Extract<CampaignEvent, { type: 'membership.revoked' }> =>
+          event.type === 'membership.revoked' && event.userId === user.id,
+      ),
+    );
     return merge(
       this.stream.streamFor(id).pipe(map((event): MessageEvent => ({ data: event }))),
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
-    );
+    ).pipe(takeUntil(revoked));
   }
 }
