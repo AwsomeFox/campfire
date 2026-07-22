@@ -2508,6 +2508,51 @@ export const MeToken = z.object({
 });
 export type MeToken = z.infer<typeof MeToken>;
 
+/**
+ * Server instance + data-generation identity (issue #723).
+ *
+ * A whole-server backup restore reuses the same numeric user/campaign IDs but
+ * swaps out the entire dataset (DB rows + uploads) underneath. The PWA's
+ * `/api` runtime cache (Workbox, 7-day TTL) is keyed only by URL, so after a
+ * restore a cached GET for, say, `/api/v1/campaigns/3` would still serve the
+ * PRE-restore bytes offline — leaking data the operator just rolled back.
+ * Numeric IDs alone can't detect that; we need a token that changes whenever
+ * the underlying data is replaced.
+ *
+ *   - `instanceId`  is a per-install UUID generated once and persisted in the
+ *                   DB (server_meta). It differs across physically distinct
+ *                   installs (two homelabs, or a dev vs prod box) so an SW that
+ *                   somehow pointed at the wrong origin can never serve one
+ *                   install's cached data for another. It is STABLE across a
+ *                   backup/restore (it travels inside the restored DB), so it
+ *                   alone is not enough to invalidate on restore.
+ *   - `dataGeneration` is a monotonic integer (also persisted) that the server
+ *                   bumps on every whole-server restore. It is the actual
+ *                   "the bytes under these IDs have changed" signal: a restore
+ *                   bumps it, so a client that cached responses against the
+ *                   prior generation sees a mismatch and wipes them.
+ *
+ * Both fields ride on `/me` (already proven-live — see vite.config.ts) so the
+ * web client learns the current identity from a response that did NOT come
+ * from the SW cache, then namespaces its cached responses by
+ * `${instanceId}:${dataGeneration}`. On a restore the next proven-live `/me`
+ * carries a new generation; the client notices the change and purges the old
+ * cache, so stale pre-restore bytes can never render as truth (online or
+ * offline). The server itself does not need to know the client's cache key —
+ * the contract is just "this is who I am right now".
+ *
+ * The combined token is also surfaced as the response header
+ * `cf-data-generation` on `/me` so a non-/me caller that needs the current
+ * generation (e.g. a diagnostic) can read it without parsing JSON.
+ */
+export const ServerInstance = z.object({
+  /** Stable per-install UUID; travels inside a backup so the same box keeps it. */
+  instanceId: z.string().min(1),
+  /** Monotonic integer bumped on every whole-server restore. */
+  dataGeneration: z.number().int().nonnegative(),
+});
+export type ServerInstance = z.infer<typeof ServerInstance>;
+
 export const Me = z.object({
   user: User,
   // When `token` is present (PAT auth), memberships reflect the token's
@@ -2515,6 +2560,12 @@ export const Me = z.object({
   // campaign-bound token only lists that campaign. Cookie sessions see raw
   // membership roles and no `token` field.
   memberships: z.array(z.object({ campaignId: Id, role: Role, characterId: Id.nullable() })),
+  // Server instance + data-generation identity (issue #723) — see
+  // ServerInstance. Always present on a proven-live /me; the web client
+  // namespaces the SW runtime cache by this so a restore invalidates stale
+  // bytes. /me is excluded from the SW cache (vite.config.ts), so this value
+  // is always authoritative, never a cached copy.
+  instance: ServerInstance,
   token: MeToken.optional(),
 });
 export type Me = z.infer<typeof Me>;
