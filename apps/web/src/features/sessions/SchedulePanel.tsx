@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { formatDateTime } from '../../lib/format';
+import { formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -22,6 +22,7 @@ const RSVP_OPTIONS: Array<{ status: RsvpStatus; label: string; icon: string }> =
 ];
 
 export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
+  useFormattingLocale();
   const { me } = useAuth();
   const [schedules, setSchedules] = useState<ScheduledSessionWithRsvps[]>([]);
   const [feed, setFeed] = useState<CalendarFeed | null>(null);
