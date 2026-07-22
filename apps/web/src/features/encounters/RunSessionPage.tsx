@@ -1204,6 +1204,13 @@ function BattleMap({
   pings: ReadonlyArray<{ key: number; x: number; y: number }>;
   onError: (message: string) => void;
 }) {
+  type MapPoint = { x: number; y: number };
+  type ActiveMapGesture =
+    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
+    | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
+    | { kind: 'fog'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
+    | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint };
+
   const [uploading, setUploading] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
@@ -1219,7 +1226,69 @@ function BattleMap({
   // (object-contain) rendered rect so the grid overlay can be clipped to it (issue #273b).
   const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const activeGestureRef = useRef<ActiveMapGesture | null>(null);
+  // A successful pointerup normally causes lostpointercapture immediately afterwards. Keep the
+  // released id long enough to identify that expected notification; any earlier capture loss is
+  // an interruption and must roll the gesture back without persisting it.
+  const successfulPointerUpRef = useRef<number | null>(null);
   const { w: surfaceW, h: surfaceH } = useElementSize(surfaceRef);
+
+  const clearGesturePreview = useCallback((kind: ActiveMapGesture['kind']) => {
+    if (kind === 'token') {
+      setDraggingId(null);
+      setDragPos(null);
+    } else if (kind === 'aoe') {
+      setAoeDrag(null);
+    } else if (kind === 'fog') {
+      setRevealCorners(null);
+    } else {
+      setRuler(null);
+    }
+  }, []);
+
+  const cancelActiveGesture = useCallback(
+    (pointerId?: number, clearPreview = true) => {
+      const gesture = activeGestureRef.current;
+      if (!gesture || (pointerId != null && gesture.pointerId !== pointerId)) return;
+
+      // Clear ownership before releasing capture because releasePointerCapture may synchronously
+      // dispatch lostpointercapture. That follow-up must observe an already-cancelled gesture.
+      activeGestureRef.current = null;
+      successfulPointerUpRef.current = null;
+      if (clearPreview) clearGesturePreview(gesture.kind);
+      try {
+        if (gesture.captureTarget.hasPointerCapture?.(gesture.pointerId)) {
+          gesture.captureTarget.releasePointerCapture?.(gesture.pointerId);
+        }
+      } catch {
+        // The browser may already have dropped capture while backgrounding or unmounting.
+      }
+    },
+    [clearGesturePreview],
+  );
+
+  useEffect(() => {
+    const cancelWhenHidden = () => {
+      if (document.visibilityState === 'hidden') cancelActiveGesture();
+    };
+    const cancelForPageExit = () => cancelActiveGesture();
+    const cancelForRotation = () => cancelActiveGesture();
+    const orientation = globalThis.screen?.orientation;
+
+    document.addEventListener('visibilitychange', cancelWhenHidden);
+    window.addEventListener('pagehide', cancelForPageExit);
+    window.addEventListener('orientationchange', cancelForRotation);
+    orientation?.addEventListener?.('change', cancelForRotation);
+    return () => {
+      document.removeEventListener('visibilitychange', cancelWhenHidden);
+      window.removeEventListener('pagehide', cancelForPageExit);
+      window.removeEventListener('orientationchange', cancelForRotation);
+      orientation?.removeEventListener?.('change', cancelForRotation);
+      // Component teardown already removes every preview from the DOM. Drop ownership and capture
+      // without scheduling state updates; in particular, never turn unmount into a commit.
+      cancelActiveGesture(undefined, false);
+    };
+  }, [cancelActiveGesture]);
 
   const mapImageUrl = encounter.mapAttachmentId != null ? attachmentFileUrl(encounter.mapAttachmentId) : null;
   const placed = encounter.combatants.filter((c) => c.tokenX != null && c.tokenY != null);
@@ -1288,7 +1357,7 @@ function BattleMap({
     }
   }
 
-  function pointerToPercent(e: ReactPointerEvent): { x: number; y: number } | null {
+  function pointerToPercent(e: ReactPointerEvent): MapPoint | null {
     const rect = surfaceRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0 || rect.height === 0) return null;
     const x = ((e.clientX - rect.left) / rect.width) * 100;
@@ -1297,7 +1366,7 @@ function BattleMap({
   }
 
   /** Snap a drop point to the nearest cell centre when the grid + snap are on (issue #40). */
-  function snapPoint(pt: { x: number; y: number }): { x: number; y: number } {
+  function snapPoint(pt: MapPoint): MapPoint {
     if (!gridOn || !encounter.gridSnap || cellPx <= 0 || surfaceW === 0 || surfaceH === 0) return pt;
     const px = (pt.x / 100) * surfaceW;
     const py = (pt.y / 100) * surfaceH;
@@ -1307,15 +1376,20 @@ function BattleMap({
   }
 
   function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
-    if (tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
+    if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
     e.preventDefault();
     e.stopPropagation();
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    const point = pointerToPercent(e);
+    const captureTarget = e.currentTarget;
+    captureTarget.setPointerCapture?.(e.pointerId);
+    successfulPointerUpRef.current = null;
+    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point };
     setDraggingId(c.id);
-    setDragPos(pointerToPercent(e));
+    setDragPos(point);
   }
 
   function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!e.isPrimary || activeGestureRef.current) return;
     const pct = pointerToPercent(e);
     if (!pct) return;
     if (tool === 'ping') {
@@ -1324,10 +1398,14 @@ function BattleMap({
       return;
     }
     if (tool === 'measure' && canMeasure) {
-      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      activeGestureRef.current = { kind: 'measure', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
       setRuler({ start: pct, end: pct });
     } else if (tool === 'reveal' && isDm) {
-      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      activeGestureRef.current = { kind: 'fog', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
       setRevealCorners({ start: pct, end: pct });
     } else if (tool === 'move') {
       // Click on empty map in move mode clears any AoE selection (deselect).
@@ -1336,56 +1414,51 @@ function BattleMap({
   }
 
   function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId != null) {
-      const pct = pointerToPercent(e);
-      if (pct) setDragPos(pct);
-      return;
-    }
-    if (aoeDrag) {
-      const pct = pointerToPercent(e);
-      if (pct) setAoeDrag((prev) => (prev ? { ...prev, x: pct.x, y: pct.y } : prev));
-      return;
-    }
-    if (ruler) {
-      const pct = pointerToPercent(e);
-      if (pct) setRuler((prev) => (prev ? { ...prev, end: pct } : prev));
-      return;
-    }
-    if (revealCorners) {
-      const pct = pointerToPercent(e);
-      if (pct) setRevealCorners((prev) => (prev ? { ...prev, end: pct } : prev));
+    const gesture = activeGestureRef.current;
+    if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+    const pct = pointerToPercent(e);
+    if (!pct) return;
+
+    if (gesture.kind === 'token') {
+      gesture.point = pct;
+      setDragPos(pct);
+    } else if (gesture.kind === 'aoe') {
+      gesture.point = pct;
+      setAoeDrag({ id: gesture.templateId, ...pct });
+    } else {
+      gesture.end = pct;
+      if (gesture.kind === 'measure') setRuler({ start: gesture.start, end: pct });
+      else setRevealCorners({ start: gesture.start, end: pct });
     }
   }
 
-  // Ends whatever surface drag is active. Wired to onPointerUp AND onPointerCancel /
-  // onLostPointerCapture: when the surface itself holds the pointer capture (measure/reveal), a
-  // plain synthetic `pointerup` on that element is unreliable across browsers — the fog-reveal
-  // commit (issue #231) was silently dropped because its `pointerup` branch never ran, leaving
-  // the dashed preview stuck and never PATCHing `fog.revealed`. `lostpointercapture` fires
-  // reliably when the captured pointer is released or cancelled, so routing it here guarantees
-  // the reveal (and token/AoE) drag commits. Each branch clears its own state and returns, so a
-  // second invocation (pointerup THEN lostpointercapture) is an idempotent no-op.
+  // Only the owning primary pointer's normal release may commit. Ownership is cleared before the
+  // mutation callback, making duplicate pointerup/lostcapture delivery exactly-once by design.
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId != null) {
-      const raw = pointerToPercent(e) ?? dragPos;
-      const id = draggingId;
-      setDraggingId(null);
-      setDragPos(null);
+    const gesture = activeGestureRef.current;
+    if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+    const finalPoint = pointerToPercent(e);
+    successfulPointerUpRef.current = e.pointerId;
+    activeGestureRef.current = null;
+    // Completed measurements intentionally remain visible for reading. The three persistent
+    // gesture classes clear their transient overrides before invoking their mutation callbacks.
+    if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
+
+    if (gesture.kind === 'token') {
+      const raw = finalPoint ?? gesture.point;
       if (raw) {
         const pt = snapPoint(raw);
-        onMoveToken(id, pt.x, pt.y);
+        onMoveToken(gesture.tokenId, pt.x, pt.y);
       }
       return;
     }
-    if (aoeDrag) {
-      const drag = aoeDrag;
-      setAoeDrag(null);
-      onSetAoe(aoeTemplates.map((t) => (t.id === drag.id ? { ...t, x: drag.x, y: drag.y } : t)));
+    if (gesture.kind === 'aoe') {
+      const point = finalPoint ?? gesture.point;
+      onSetAoe(aoeTemplates.map((t) => (t.id === gesture.templateId ? { ...t, x: point.x, y: point.y } : t)));
       return;
     }
-    if (revealCorners) {
-      const rect = rectFromCorners(revealCorners.start, revealCorners.end);
-      setRevealCorners(null);
+    if (gesture.kind === 'fog') {
+      const rect = rectFromCorners(gesture.start, finalPoint ?? gesture.end);
       // Ignore an accidental micro-drag (a click) — a real reveal has some area.
       if (rect.w >= 1 && rect.h >= 1) {
         const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
@@ -1397,14 +1470,30 @@ function BattleMap({
     // next measurement starts, the tool changes, or move mode is re-entered.
   }
 
+  function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
+    cancelActiveGesture(e.pointerId);
+  }
+
+  function onSurfaceLostPointerCapture(e: ReactPointerEvent<HTMLDivElement>) {
+    if (successfulPointerUpRef.current === e.pointerId) {
+      successfulPointerUpRef.current = null;
+      return;
+    }
+    cancelActiveGesture(e.pointerId);
+  }
+
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
-    if (!isDm) return;
+    if (!e.isPrimary || activeGestureRef.current || !isDm) return;
     e.preventDefault();
     e.stopPropagation();
-    (e.target as Element).setPointerCapture?.(e.pointerId);
-    setSelectedAoeId(t.id);
     const pct = pointerToPercent(e);
-    setAoeDrag({ id: t.id, x: pct?.x ?? t.x, y: pct?.y ?? t.y });
+    const point = pct ?? { x: t.x, y: t.y };
+    const captureTarget = e.currentTarget;
+    captureTarget.setPointerCapture?.(e.pointerId);
+    successfulPointerUpRef.current = null;
+    activeGestureRef.current = { kind: 'aoe', pointerId: e.pointerId, captureTarget, templateId: t.id, point };
+    setSelectedAoeId(t.id);
+    setAoeDrag({ id: t.id, ...point });
   }
 
   // AoE template CRUD (issue #238) — all DM-only PATCHes of the whole template list.
@@ -1664,6 +1753,7 @@ function BattleMap({
 
           <div
             ref={surfaceRef}
+            data-testid="battle-map-surface"
             className="relative overflow-hidden"
             style={{
               margin: '8px 14px',
@@ -1674,10 +1764,8 @@ function BattleMap({
             onPointerDown={onSurfacePointerDown}
             onPointerMove={onSurfacePointerMove}
             onPointerUp={onSurfacePointerUp}
-            // See onSurfacePointerUp: cancel/lost-capture are the reliable drag-end signals when the
-            // surface itself holds pointer capture (fixes the fog-reveal commit, issue #231).
-            onPointerCancel={onSurfacePointerUp}
-            onLostPointerCapture={onSurfacePointerUp}
+            onPointerCancel={onSurfacePointerCancel}
+            onLostPointerCapture={onSurfaceLostPointerCapture}
           >
             <img
               src={mapImageUrl}
@@ -1734,6 +1822,7 @@ function BattleMap({
               return (
                 <div
                   key={c.id}
+                  data-testid={`map-token-${c.id}`}
                   className="absolute -translate-x-1/2 -translate-y-1/2"
                   style={{
                     left: `${left}%`,
@@ -1836,6 +1925,7 @@ function BattleMap({
                 return (
                   <div
                     key={t.id}
+                    data-testid={`map-aoe-${t.id}`}
                     className="absolute -translate-x-1/2 -translate-y-1/2"
                     style={{
                       left: `${x}%`,
@@ -1883,6 +1973,7 @@ function BattleMap({
             {revealPreview && (
               <div
                 className="absolute"
+                data-testid="map-fog-preview"
                 style={{
                   left: `${revealPreview.x}%`,
                   top: `${revealPreview.y}%`,
