@@ -107,16 +107,16 @@ export class CampaignCalendarFeedController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'Calendar feed settings', description: 'Requires campaign membership. Returns the ICS feed token/URL, or nulls when the feed is disabled. Members may read it — the feed only exposes schedule data members already see.' })
-  @ApiResponse({ status: 200, description: 'Feed token + relative URL (nulls when disabled).' })
+  @ApiOperation({ summary: 'Calendar feed settings', description: 'Requires campaign membership. Returns the ICS feed token/URL plus its expiry, or nulls when the feed is disabled. Members may read it — the feed only exposes schedule data members already see.' })
+  @ApiResponse({ status: 200, description: 'Feed token + relative URL + expiry (nulls when disabled).' })
   async get(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<CalendarFeed> {
     await this.access.requireMember(user, campaignId);
     return this.scheduling.getFeed(campaignId);
   }
 
   @Post()
-  @ApiOperation({ summary: 'Enable or rotate the calendar feed', description: 'dm role required. Generates a fresh unguessable feed token; any previously shared feed URL stops working.' })
-  @ApiResponse({ status: 201, description: 'New feed token + URL.' })
+  @ApiOperation({ summary: 'Enable or rotate the calendar feed', description: 'dm role required. Generates a fresh unguessable feed token with a new expiry; any previously shared feed URL stops working immediately (and an expired token stops working on its own once the window elapses).' })
+  @ApiResponse({ status: 201, description: 'New feed token + URL + expiry.' })
   async rotate(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<CalendarFeed> {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.scheduling.rotateFeed(campaignId, user, role);
@@ -150,7 +150,7 @@ export class CalendarFeedController {
   @ApiParam({ name: 'token', description: 'Feed capability token (cf_ics_…), from the campaign calendar-feed settings.' })
   @ApiOperation({ summary: 'ICS calendar feed (public)', description: 'Unauthenticated, token-authorized iCalendar feed of a campaign\'s scheduled sessions. Subscribe to this URL from any calendar app. Rate-limited per IP.' })
   @ApiResponse({ status: 200, description: 'text/calendar document.' })
-  @ApiResponse({ status: 404, description: 'Unknown, rotated, or disabled feed token.' })
+  @ApiResponse({ status: 404, description: 'Unknown, rotated, disabled, or expired feed token.' })
   async feed(@Param('token') token: string, @Res() res: Response): Promise<void> {
     const ics = await this.scheduling.buildFeedByToken(token);
     res
