@@ -1113,6 +1113,7 @@ export default function RunSessionPage() {
               canViewStatblock={isDm}
               canRemove={isDm}
               canSetInitiative={isDm && encounter.status !== 'ended'}
+              running={encounter.status === 'running'}
               character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
               openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
               campaignId={cid}
@@ -1126,6 +1127,7 @@ export default function RunSessionPage() {
               onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
               onRollDeathSave={() => rollDeathSave(c)}
               onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
+              onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
               onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
               onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
               onRename={(name) => patchCombatant(c.id, { name })}
@@ -2356,6 +2358,7 @@ function CombatantRow({
   canViewStatblock,
   canRemove,
   canSetInitiative,
+  running,
   character,
   openCardByDefault,
   campaignId,
@@ -2369,6 +2372,7 @@ function CombatantRow({
   onSetDeathSaves,
   onRollDeathSave,
   onSetInitiative,
+  onClearInitiative,
   onAddCondition,
   onRemoveCondition,
   onRename,
@@ -2383,6 +2387,8 @@ function CombatantRow({
   canViewStatblock: boolean;
   canRemove: boolean;
   canSetInitiative: boolean;
+  /** Encounter is running — clearing initiative re-sorts the live turn order (issue #715). */
+  running: boolean;
   /** The linked player character (kind === 'character'), for the in-encounter stat card; null otherwise. */
   character: Character | null;
   /** Start the character card expanded — used for the viewer's own character. */
@@ -2403,6 +2409,8 @@ function CombatantRow({
   /** Roll a death save (issue #619) — rolls d20, posts to the dice log, drives the server outcome. */
   onRollDeathSave: () => void;
   onSetInitiative: (value: number) => void;
+  /** Clear initiative back to the unrolled state (issue #715) — sends `initiative: null`. */
+  onClearInitiative: () => void;
   onAddCondition: (cond: string) => void;
   onRemoveCondition: (cond: string) => void;
   onRename: (name: string) => void;
@@ -2445,11 +2453,25 @@ function CombatantRow({
 
   function commitInitiative() {
     const trimmed = initDraft.trim();
-    if (trimmed === '') return; // empty = leave as-is (can't clear back to null from the UI)
+    // Empty input now CLEARS initiative back to the unrolled state (issue #715),
+    // instead of silently leaving it as-is. An explicit Clear control is also
+    // rendered beside the input for discoverability + keyboard access.
+    if (trimmed === '') {
+      if (combatant.initiative !== null) onClearInitiative();
+      return;
+    }
     const value = Number(trimmed);
     if (!Number.isInteger(value) || value === combatant.initiative) return;
     onSetInitiative(value);
   }
+
+  // Clear initiative back to null (issue #715). While combat is running this re-sorts
+  // the order — the cleared combatant sinks below every rolled actor — so the title
+  // warns the DM. The current-turn pointer is identity-based and stays stable; the
+  // server reconciles the positional turnIndex after the write.
+  const runningReorderNote =
+    'Clear initiative back to unrolled' +
+    (running ? ' — re-sorts the turn order while combat is running' : '');
 
   const edgeColor = isCurrentTurn ? 'var(--color-accent)' : 'transparent';
   const kindTagClass = combatant.kind === 'character' ? 'tag tag-accent' : combatant.kind === 'npc' ? 'tag tag-outline' : 'tag tag-neutral';
@@ -2477,34 +2499,69 @@ function CombatantRow({
       }}
     >
       {canSetInitiative ? (
-        <input
-          type="number"
-          aria-label={`Initiative for ${combatant.name}`}
-          title="Set initiative"
-          value={initDraft}
-          disabled={busy}
-          placeholder="–"
-          onChange={(e) => setInitDraft(e.target.value)}
-          onBlur={commitInitiative}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              (e.target as HTMLInputElement).blur();
-            }
-          }}
-          style={{
-            width: 34,
-            height: 30,
-            flex: 'none',
-            borderRadius: 'var(--radius-md)',
-            border: '1px solid var(--color-divider)',
-            background: 'transparent',
-            textAlign: 'center',
-            fontSize: 13,
-            fontFamily: 'var(--font-heading)',
-            color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
-          }}
-        />
+        <div className="flex items-center" style={{ gap: 2 }}>
+          <input
+            type="number"
+            aria-label={`Initiative for ${combatant.name}`}
+            title="Set initiative"
+            value={initDraft}
+            disabled={busy}
+            placeholder="–"
+            onChange={(e) => setInitDraft(e.target.value)}
+            onBlur={commitInitiative}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                (e.target as HTMLInputElement).blur();
+              }
+              // Backspace/Delete on an empty field clears initiative (issue #715) — a
+              // keyboard-only path that mirrors the dedicated Clear button below.
+              if ((e.key === 'Backspace' || e.key === 'Delete') && initDraft.trim() === '') {
+                e.preventDefault();
+                if (combatant.initiative !== null) onClearInitiative();
+              }
+            }}
+            style={{
+              width: 34,
+              height: 30,
+              flex: 'none',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-divider)',
+              background: 'transparent',
+              textAlign: 'center',
+              fontSize: 13,
+              fontFamily: 'var(--font-heading)',
+              color: isCurrentTurn ? 'var(--color-accent)' : 'var(--color-text)',
+            }}
+          />
+          {combatant.initiative !== null && (
+            <button
+              type="button"
+              aria-label={`Clear ${combatant.name} roll order`}
+              title={runningReorderNote}
+              disabled={busy}
+              onClick={() => {
+                setInitDraft('');
+                onClearInitiative();
+              }}
+              style={{
+                width: 22,
+                height: 30,
+                flex: 'none',
+                padding: 0,
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--color-divider)',
+                background: 'transparent',
+                cursor: busy ? 'default' : 'pointer',
+                color: 'var(--color-neutral-500)',
+                fontSize: 13,
+                lineHeight: 1,
+              }}
+            >
+              ×
+            </button>
+          )}
+        </div>
       ) : (
         <span
           style={{

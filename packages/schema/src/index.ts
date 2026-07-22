@@ -3860,7 +3860,11 @@ export const CombatantUpdate = z.object({
   deathSaveRoll: z.number().int().min(1).max(20).optional(),
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
-  initiative: z.number().int().optional(), // dm only, enforced server-side
+  // Nullable so a mistaken value can be cleared back to the unrolled state (issue
+  // #715): `initiative: null` writes NULL onto the row (distinguished from omitting
+  // the field, which leaves it unchanged). DM only, enforced server-side. A cleared
+  // combatant sinks to the bottom of the running order (see sortCombatants).
+  initiative: z.number().int().nullable().optional(),
   // Combatant identity edits (issue #114) — dm only, enforced server-side. Let a DM
   // rename a duplicate ("Goblin" -> "Goblin (archer)") or fix a mistyped hpMax/initMod
   // at add-time without a delete + re-add.
