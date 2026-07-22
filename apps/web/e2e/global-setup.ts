@@ -116,6 +116,20 @@ export interface SeedData {
       /** Soft-deleted NPC — its typed token must degrade to plain text. */
       deletedNpcId: number;
     };
+    /** Unicode auto-linking and role-filtering fixtures (issue #627). */
+    unicode: {
+      questId: number;
+      arabicNpcId: number;
+      hebrewNpcId: number;
+      cjkTokyoNpcId: number;
+      cjkKyotoNpcId: number;
+      accentNpcId: number;
+      combiningNpcId: number;
+      emojiNpcId: number;
+      mixedNpcId: number;
+      hiddenNpcId: number;
+      deletedNpcId: number;
+    };
   };
 }
 
@@ -362,6 +376,51 @@ export default async function globalSetup(config: FullConfig) {
   if (!deleted.ok()) {
     throw new Error(`DELETE ghosttarget npc -> ${deleted.status()}: ${await deleted.text()}`);
   }
+
+  // Unicode mention fixtures (issue #627). The quest intentionally mixes RTL,
+  // CJK without spaces, canonical-equivalent Latin spellings, emoji, adjacent
+  // markdown-created text nodes, and protected elements.
+  const unicodeNpc = async (name: string, extra: Record<string, unknown> = {}) =>
+    okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
+      name,
+      role: 'Unicode mention fixture',
+      ...extra,
+    });
+  const unicodeArabic = await unicodeNpc('زيد');
+  const unicodeHebrew = await unicodeNpc('דוד');
+  const unicodeTokyo = await unicodeNpc('東京');
+  const unicodeKyoto = await unicodeNpc('京都');
+  const unicodeAccent = await unicodeNpc('Café');
+  const unicodeCombining = await unicodeNpc('Éclair');
+  const unicodeEmoji = await unicodeNpc('守り🐉');
+  const unicodeMixed = await unicodeNpc('Asha龍');
+  await unicodeNpc('Amélie');
+  await unicodeNpc('AME\u0301LIE');
+  const unicodeHidden = await unicodeNpc('سر مخفي', { hidden: true });
+  const unicodeDeleted = await unicodeNpc('亡霊');
+  const unicodeQuest = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/quests`, {
+    title: 'Unicode mention matrix',
+    body: [
+      '# زيد protected heading',
+      'زيد، **زيد**؛ زيد.',
+      'דוד! 東京京都。',
+      'CAFE\u0301 meets E\u0301CLAIR; 守り🐉 and Asha龍.',
+      'Partial guards: supercaféine مرحبازيد שלוםדוד.',
+      'Canonical ambiguity: Ame\u0301lie.',
+      'Hidden target: سر مخفي.',
+      'Deleted target: 亡霊.',
+      'Existing link: [زيد](https://example.com/existing).',
+      'Inline code: `زيد`.',
+      '```text\nزيد\n```',
+      '<pre>زيد</pre>',
+      '<script>زيد</script>',
+    ].join('\n\n'),
+    status: 'active',
+  });
+  const deletedUnicode = await dm.delete(`/api/v1/npcs/${unicodeDeleted.id}`);
+  if (!deletedUnicode.ok()) {
+    throw new Error(`DELETE Unicode target npc -> ${deletedUnicode.status()}: ${await deletedUnicode.text()}`);
+  }
   const proposed = await dm.patch(`/api/v1/sessions/${navSession.id}?proposed=true`, {
     data: { title: navSession.title },
   });
@@ -532,6 +591,19 @@ export default async function globalSetup(config: FullConfig) {
         twinAId: twinA.id,
         twinBId: twinB.id,
         deletedNpcId: deadTargetNpc.id,
+      },
+      unicode: {
+        questId: unicodeQuest.id,
+        arabicNpcId: unicodeArabic.id,
+        hebrewNpcId: unicodeHebrew.id,
+        cjkTokyoNpcId: unicodeTokyo.id,
+        cjkKyotoNpcId: unicodeKyoto.id,
+        accentNpcId: unicodeAccent.id,
+        combiningNpcId: unicodeCombining.id,
+        emojiNpcId: unicodeEmoji.id,
+        mixedNpcId: unicodeMixed.id,
+        hiddenNpcId: unicodeHidden.id,
+        deletedNpcId: unicodeDeleted.id,
       },
     },
   };

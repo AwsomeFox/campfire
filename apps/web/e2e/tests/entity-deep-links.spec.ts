@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import { test, expect } from '@playwright/test';
 import { seed, stateFor } from './seed';
 
@@ -167,6 +168,64 @@ test.describe('typed mention identity (issue #739)', () => {
     // and no cf-mention link to a missing record is emitted.
     await expect(page.locator(`a[data-mention="npc:${deletedNpcId}"]`)).toHaveCount(0);
     await expect(page.getByText('DLRNAV Ghosttarget')).toBeVisible();
+  });
+});
+
+test.describe('Unicode markdown mentions (issue #627)', () => {
+  test.use({ storageState: stateFor('dm') });
+
+  test('links multilingual repeated names, preserves protected content, and is axe-clean', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const unicode = navigation.unicode;
+    await page.goto(`/c/${campaignId}/quests/${unicode.questId}`);
+    const prose = page.locator('.cf-prose').filter({ hasText: 'Partial guards' });
+
+    await expect(prose.locator(`a[data-mention="npc:${unicode.arabicNpcId}"]`)).toHaveCount(3);
+    await expect(prose.locator(`a[data-mention="npc:${unicode.hebrewNpcId}"]`)).toHaveAccessibleName('דוד');
+    await expect(prose.locator(`a[data-mention="npc:${unicode.cjkTokyoNpcId}"]`)).toHaveAccessibleName('東京');
+    await expect(prose.locator(`a[data-mention="npc:${unicode.cjkKyotoNpcId}"]`)).toHaveAccessibleName('京都');
+    await expect(prose.locator(`a[data-mention="npc:${unicode.accentNpcId}"]`)).toHaveAccessibleName('CAFE\u0301');
+    await expect(prose.locator(`a[data-mention="npc:${unicode.combiningNpcId}"]`)).toHaveAccessibleName('E\u0301CLAIR');
+    await expect(prose.locator(`a[data-mention="npc:${unicode.emojiNpcId}"]`)).toHaveAccessibleName('守り🐉');
+    await expect(prose.locator(`a[data-mention="npc:${unicode.mixedNpcId}"]`)).toHaveAccessibleName('Asha龍');
+
+    await expect(prose.locator('h1 a, code a, pre a')).toHaveCount(0);
+    await expect(prose.locator('a[href="https://example.com/existing"]')).toHaveText('زيد');
+    await expect(prose.locator('a[href="https://example.com/existing"]')).not.toHaveAttribute('data-mention');
+    await expect(prose.locator('script')).toHaveCount(0);
+    await expect(prose.locator('a.cf-mention:has-text("Amélie")')).toHaveCount(0);
+    await expect(prose.locator(`a[data-mention="npc:${unicode.deletedNpcId}"]`)).toHaveCount(0);
+    await expect(prose.getByText('Partial guards: supercaféine مرحبازيد שלוםדוד.', { exact: true })).toBeVisible();
+
+    const accessibilityScan = await new AxeBuilder({ page }).include('.cf-prose').analyze();
+    expect(accessibilityScan.violations).toEqual([]);
+  });
+
+  test('uses the role-filtered mention list for a hidden RTL target', async ({ browser }) => {
+    const { campaignId, navigation } = seed();
+    const { questId, hiddenNpcId } = navigation.unicode;
+
+    const dmContext = await browser.newContext({ storageState: stateFor('dm') });
+    const dmPage = await dmContext.newPage();
+    await dmPage.goto(`/c/${campaignId}/quests/${questId}`);
+    await expect(dmPage.locator(`a[data-mention="npc:${hiddenNpcId}"]`)).toHaveAccessibleName('سر مخفي');
+    await dmContext.close();
+
+    const playerContext = await browser.newContext({ storageState: stateFor('player') });
+    const playerPage = await playerContext.newPage();
+    await playerPage.goto(`/c/${campaignId}/quests/${questId}`);
+    await expect(playerPage.locator(`a[data-mention="npc:${hiddenNpcId}"]`)).toHaveCount(0);
+    await expect(playerPage.getByText('Hidden target: سر مخفي.')).toBeVisible();
+    await playerContext.close();
+  });
+
+  test('keeps Unicode mention navigation inside the SPA', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const { questId, hebrewNpcId } = navigation.unicode;
+    await page.goto(`/c/${campaignId}/quests/${questId}`);
+    await page.locator(`a[data-mention="npc:${hebrewNpcId}"]`).click();
+    await expect(page).toHaveURL(`/c/${campaignId}/npcs/${hebrewNpcId}#entity-npc-${hebrewNpcId}`);
+    await expectFocused(page, `entity-npc-${hebrewNpcId}`);
   });
 });
 

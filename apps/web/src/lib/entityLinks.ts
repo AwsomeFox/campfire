@@ -1,4 +1,5 @@
 import type { EntityType, MentionTarget, Notification, Proposal, SearchResult } from '@campfire/schema';
+import { normalizeMentionName } from './mentionMatching';
 
 /** Every campaign record that can be the destination of a cross-entity link. */
 export type NavigableEntityType = EntityType | MentionTarget['type'] | SearchResult['type'];
@@ -125,11 +126,11 @@ export function resolveUniqueByName(
   targets: ReadonlyArray<Pick<MentionTarget, 'type' | 'id' | 'name'>>,
   needle: string,
 ): MentionTarget | null {
-  const lower = needle.trim().toLowerCase();
-  if (!lower) return null;
+  const key = normalizeMentionName(needle);
+  if (!key) return null;
   let hit: MentionTarget | null = null;
   for (const t of targets) {
-    if (t.name.trim().toLowerCase() !== lower) continue;
+    if (normalizeMentionName(t.name) !== key) continue;
     if (hit) return null; // collision — caller must disambiguate explicitly
     hit = { type: t.type, id: t.id, name: t.name };
   }
