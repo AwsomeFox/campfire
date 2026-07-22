@@ -95,6 +95,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'ai_scribe_jobs')).toEqual(
         expect.arrayContaining(['campaign_id', 'trigger', 'status', 'source_hash', 'proposal_id', 'proposal_count', 'tokens_used', 'provider']),
       );
+      // 0052 (#877): a new participant-owned table, with privacy-safe defaults.
+      expect(columnNames(sqlite, 'participant_support_preferences')).toEqual(
+        expect.arrayContaining(['campaign_id', 'owner_user_id', 'owner_name', 'support_text', 'visibility', 'ai_use_consent']),
+      );
     } finally {
       sqlite.close();
     }
@@ -157,6 +161,13 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // reply's parent_id threading is intact (reply still points at the root).
       // The new tombstone columns backfill to NULL on the pre-existing rows.
       expect(countRows(sqlite, 'comments')).toBe(2);
+      expect(countRows(sqlite, 'participant_support_preferences')).toBe(0);
+      sqlite.prepare(
+        "INSERT INTO participant_support_preferences (campaign_id, owner_user_id, support_text, created_at, updated_at) VALUES (1, '1', 'legacy-upgrade-check', '2025-01-01', '2025-01-01')",
+      ).run();
+      expect(
+        sqlite.prepare('SELECT visibility, ai_use_consent FROM participant_support_preferences').get(),
+      ).toEqual({ visibility: 'facilitator', ai_use_consent: 0 });
       const legacyRoot = sqlite
         .prepare("SELECT body, parent_id, deleted_at, deleted_by FROM comments WHERE parent_id IS NULL")
         .get() as { body: string; parent_id: number | null; deleted_at: string | null; deleted_by: string | null };
@@ -228,12 +239,18 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // Fresh DB already has the modern columns (never touched a migration path).
       expect(columnNames(sqlite, 'characters')).toEqual(expect.arrayContaining(['xp', 'dm_secret', 'spell_slots']));
       expect(columnNames(sqlite, 'users')).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
+
       expect(columnNames(sqlite, 'oauth_access_tokens')).toEqual(
         expect.arrayContaining(['family_id', 'refresh_consumed_at', 'revoked_at', 'family_revoked_at']),
       );
       expect(
         (sqlite.pragma('index_list(oauth_access_tokens)') as Array<{ name: string }>).map((index) => index.name),
       ).toContain('idx_oauth_access_tokens_family');
+      expect(columnNames(sqlite, 'participant_support_preferences')).toEqual(
+        expect.arrayContaining(['owner_user_id', 'support_text', 'visibility', 'ai_use_consent']),
+      );
+      expect(MIGRATION_NAMES).toContain('0055_participant_support_preferences');
+
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');
     } finally {

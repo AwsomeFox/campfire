@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 /**
  * Drizzle table definitions mirroring @campfire/schema entities.
@@ -191,6 +191,28 @@ export const sessionZero = sqliteTable('session_zero', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+
+// Participant-owned practical access supports (issue #877). owner_user_id uses
+// the same identity space as notes/characters (real numeric ids serialized as
+// strings, plus dev:* identities in explicit DEV_AUTH environments). Lifecycle
+// paths delete these rows explicitly when the participant leaves/is removed.
+export const participantSupportPreferences = sqliteTable(
+  'participant_support_preferences',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    ownerUserId: text('owner_user_id').notNull(),
+    ownerName: text('owner_name').notNull().default(''),
+    supportText: text('support_text').notNull(),
+    visibility: text('visibility').notNull().default('facilitator'),
+    aiUseConsent: integer('ai_use_consent', { mode: 'boolean' }).notNull().default(false),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    campaignOwnerUnique: uniqueIndex('idx_participant_support_campaign_owner').on(table.campaignId, table.ownerUserId),
+  }),
+);
 
 export const npcs = sqliteTable('npcs', {
   id: integer('id').primaryKey({ autoIncrement: true }),

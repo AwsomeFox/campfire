@@ -887,6 +887,52 @@ export const SessionZeroUpdate = z.object({
 });
 export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 
+// ---------- participant-owned access-support preferences (issue #877) ----------
+// Practical participation support belongs to the participant who supplied it. Human
+// visibility and model use are intentionally separate decisions: facilitator-only does
+// not imply AI consent, and table visibility does not imply AI consent either.
+export const SupportPreferenceVisibility = z.enum(['table', 'facilitator']);
+export type SupportPreferenceVisibility = z.infer<typeof SupportPreferenceVisibility>;
+
+export const ParticipantSupportPreference = z.object({
+  id: Id,
+  campaignId: Id,
+  ownerUserId: z.string().min(1).max(120),
+  ownerName: z.string().max(120).default(''),
+  supportText: z.string().min(1).max(2000),
+  visibility: SupportPreferenceVisibility,
+  aiUseConsent: z.boolean(),
+  ...timestamps,
+});
+export type ParticipantSupportPreference = z.infer<typeof ParticipantSupportPreference>;
+
+// PUT is a complete replacement, not a partial patch. Requiring both privacy
+// choices on every write prevents an API/MCP caller from accidentally inheriting
+// stale consent while changing the support text.
+export const ParticipantSupportPreferenceUpsert = z.object({
+  supportText: z.string().trim().min(1).max(2000),
+  visibility: SupportPreferenceVisibility,
+  aiUseConsent: z.boolean(),
+});
+export type ParticipantSupportPreferenceUpsert = z.infer<typeof ParticipantSupportPreferenceUpsert>;
+
+// Deliberately excludes owner ids and timestamps: model-facing contexts need only
+// the respectful instruction and participant label, and receive rows only after the
+// service has enforced explicit AI consent.
+export const AiSupportPreference = z.object({
+  participantName: z.string().max(120),
+  supportText: z.string().min(1).max(2000),
+  visibility: SupportPreferenceVisibility,
+  aiUseConsent: z.literal(true),
+});
+export type AiSupportPreference = z.infer<typeof AiSupportPreference>;
+
+export const FacilitatorSupportSummary = z.object({
+  campaignId: Id,
+  entries: z.array(ParticipantSupportPreference),
+});
+export type FacilitatorSupportSummary = z.infer<typeof FacilitatorSupportSummary>;
+
 // ---------- notes ----------
 // `whisper` is a per-player secret channel (issue #127): the note is visible ONLY to
 // its author, the single targeted recipient (recipientUserId), and any DM. This is the

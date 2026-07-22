@@ -282,6 +282,7 @@ const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
   'list_campaigns',
   'get_campaign_summary', // player-scoped: hidden/dmSecret/redacted by the summary builder
   'get_session_zero', // member-readable safety charter
+  'get_ai_support_preferences', // service filters on explicit per-participant AI consent
   // quests / npcs / locations / characters / factions (per-entity reads; secrecy-aware)
   'get_quest',
   'list_quests',
@@ -1508,6 +1509,14 @@ export class AiDriverService {
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
+
+    // This tool is model-specific by design: it ignores facilitator authority and
+    // returns only rows with explicit participant AI consent. It is read fresh for
+    // every turn, so revocation cannot linger in a cached prompt.
+    const supports = await safeRead(contextToolset, 'get_ai_support_preferences', { campaignId });
+    if (supports && supports !== '[]') {
+      parts.push(`## Participant-authorized practical supports\n${supports}`);
+    }
 
     return parts.join('\n\n');
   }

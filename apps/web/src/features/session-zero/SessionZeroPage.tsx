@@ -17,7 +17,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
-import type { SessionZero } from '@campfire/schema';
+import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibility } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
@@ -30,6 +30,18 @@ interface Draft {
   houseRules: string;
   toneAndExpectations: string;
 }
+
+interface SupportDraft {
+  supportText: string;
+  visibility: SupportPreferenceVisibility;
+  aiUseConsent: boolean;
+}
+
+const EMPTY_SUPPORT_DRAFT: SupportDraft = {
+  supportText: '',
+  visibility: 'facilitator',
+  aiUseConsent: false,
+};
 
 function draftFrom(c: SessionZero): Draft {
   return {
@@ -67,6 +79,12 @@ export default function SessionZeroPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  const [ownSupport, setOwnSupport] = useState<ParticipantSupportPreference | null>(null);
+  const [visibleSupports, setVisibleSupports] = useState<ParticipantSupportPreference[]>([]);
+  const [supportDraft, setSupportDraft] = useState<SupportDraft>(EMPTY_SUPPORT_DRAFT);
+  const [supportBusy, setSupportBusy] = useState(false);
+  const [supportMessage, setSupportMessage] = useState<string | null>(null);
+  const [confirmDeleteSupport, setConfirmDeleteSupport] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -78,8 +96,19 @@ export default function SessionZeroPage() {
     setError(null);
     setForbidden(false);
     try {
-      const c = await api.get<SessionZero>(`${API}/campaigns/${cid}/session-zero`);
+      const [c, own, visible] = await Promise.all([
+        api.get<SessionZero>(`${API}/campaigns/${cid}/session-zero`),
+        api.get<ParticipantSupportPreference | null>(`${API}/campaigns/${cid}/session-zero/support-preferences/me`),
+        api.get<ParticipantSupportPreference[]>(`${API}/campaigns/${cid}/session-zero/support-preferences`),
+      ]);
       setCharter(c);
+      setOwnSupport(own);
+      setVisibleSupports(visible);
+      setSupportDraft(
+        own
+          ? { supportText: own.supportText, visibility: own.visibility, aiUseConsent: own.aiUseConsent }
+          : EMPTY_SUPPORT_DRAFT,
+      );
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setForbidden(true);
       else setError("Couldn't load the session-zero charter.");
@@ -118,6 +147,42 @@ export default function SessionZeroPage() {
       setActionError("Couldn't save the charter.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const saveSupport = async () => {
+    setSupportBusy(true);
+    setSupportMessage(null);
+    try {
+      const saved = await api.put<ParticipantSupportPreference>(
+        `${API}/campaigns/${cid}/session-zero/support-preferences/me`,
+        supportDraft,
+      );
+      setOwnSupport(saved);
+      setVisibleSupports((rows) => [...rows.filter((row) => row.id !== saved.id), saved]);
+      setSupportMessage('Your support preference was saved.');
+    } catch (e) {
+      setSupportMessage(e instanceof ApiError ? e.message : "Couldn't save your support preference.");
+    } finally {
+      setSupportBusy(false);
+    }
+  };
+
+  const deleteSupport = async () => {
+    setSupportBusy(true);
+    setSupportMessage(null);
+    try {
+      await api.delete<void>(`${API}/campaigns/${cid}/session-zero/support-preferences/me`);
+      const deletedId = ownSupport?.id;
+      setOwnSupport(null);
+      setVisibleSupports((rows) => rows.filter((row) => row.id !== deletedId));
+      setSupportDraft(EMPTY_SUPPORT_DRAFT);
+      setConfirmDeleteSupport(false);
+      setSupportMessage('Your support preference was deleted.');
+    } catch (e) {
+      setSupportMessage(e instanceof ApiError ? e.message : "Couldn't delete your support preference.");
+    } finally {
+      setSupportBusy(false);
     }
   };
 
@@ -179,7 +244,131 @@ export default function SessionZeroPage() {
           <Btn ghost onClick={() => { setEditing(false); setDraft(null); }} disabled={busy}>Cancel</Btn>
         </div>
       )}
+
+      {!loading && (
+        <>
+          <div style={{ marginTop: 10 }}>
+            <h3 style={{ margin: 0 }}>Access support</h3>
+            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13, lineHeight: 1.5 }}>
+              Optional practical preferences that help participation. No diagnosis or explanation is needed, and sharing
+              is never required. You own your submission and can change or delete it at any time.
+            </p>
+          </div>
+
+          <SupportSummary entries={visibleSupports} facilitator={isDm} />
+
+          <Section
+            title="Your support preference"
+            hint="Examples include extra processing time, explicit turn cues, breaks, reading support, motion limits, or avoiding timers."
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div>
+                <label htmlFor="support-preference-text" style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>
+                  What would help you participate comfortably?
+                </label>
+                <TextArea
+                  id="support-preference-text"
+                  rows={4}
+                  maxLength={2000}
+                  value={supportDraft.supportText}
+                  placeholder="For example: Give me a moment to answer after asking what my character does."
+                  onChange={(e) => setSupportDraft({ ...supportDraft, supportText: e.target.value })}
+                  style={{ marginTop: 6 }}
+                />
+              </div>
+
+              <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+                <legend style={{ fontSize: 13, fontWeight: 600 }}>Who can read this?</legend>
+                <p className="text-muted" style={{ fontSize: 11, margin: '2px 0 8px' }}>
+                  This choice controls people at the table. AI use is a separate choice below.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13 }}>
+                    <input
+                      type="radio"
+                      name="support-visibility"
+                      value="facilitator"
+                      checked={supportDraft.visibility === 'facilitator'}
+                      onChange={() => setSupportDraft({ ...supportDraft, visibility: 'facilitator' })}
+                    />
+                    <span><strong>Facilitators only</strong><br /><span className="text-muted">Visible to campaign DMs for prep and live play.</span></span>
+                  </label>
+                  <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13 }}>
+                    <input
+                      type="radio"
+                      name="support-visibility"
+                      value="table"
+                      checked={supportDraft.visibility === 'table'}
+                      onChange={() => setSupportDraft({ ...supportDraft, visibility: 'table' })}
+                    />
+                    <span><strong>Entire table</strong><br /><span className="text-muted">Visible to every campaign member.</span></span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={supportDraft.aiUseConsent}
+                  onChange={(e) => setSupportDraft({ ...supportDraft, aiUseConsent: e.target.checked })}
+                />
+                <span>
+                  <strong>Allow Campfire AI features to use this preference</strong><br />
+                  <span className="text-muted">
+                    Off by default. This is independent of who at the table can read it. Turning it off stops future AI disclosure immediately.
+                  </span>
+                </span>
+              </label>
+
+              {supportMessage && <div role="status" aria-live="polite" style={{ fontSize: 13 }}>{supportMessage}</div>}
+
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <Btn onClick={saveSupport} disabled={supportBusy || supportDraft.supportText.trim() === ''}>
+                  {ownSupport ? 'Save changes' : 'Save preference'}
+                </Btn>
+                {ownSupport && !confirmDeleteSupport && (
+                  <Btn ghost danger onClick={() => setConfirmDeleteSupport(true)} disabled={supportBusy}>Delete my submission</Btn>
+                )}
+                {confirmDeleteSupport && (
+                  <div role="group" aria-label="Confirm support preference deletion" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <Btn danger onClick={deleteSupport} disabled={supportBusy}>Confirm delete</Btn>
+                    <Btn ghost onClick={() => setConfirmDeleteSupport(false)} disabled={supportBusy}>Keep it</Btn>
+                  </div>
+                )}
+              </div>
+            </div>
+          </Section>
+        </>
+      )}
     </div>
+  );
+}
+
+function SupportSummary({ entries, facilitator }: { entries: ParticipantSupportPreference[]; facilitator: boolean }) {
+  const visible = facilitator ? entries : entries.filter((entry) => entry.visibility === 'table');
+  return (
+    <Section
+      title={facilitator ? 'Facilitator prep / live summary' : 'Table-shared support'}
+      hint={facilitator
+        ? 'A concise view of what participants authorized facilitators to read. AI access remains separately consented.'
+        : 'Only preferences participants chose to share with the entire table.'}
+    >
+      {visible.length === 0 ? (
+        <span className="text-muted" style={{ fontStyle: 'italic', fontSize: 13 }}>No preferences shared for this view.</span>
+      ) : (
+        <ul style={{ display: 'flex', flexDirection: 'column', gap: 10, listStyle: 'none', margin: 0, padding: 0 }}>
+          {visible.map((entry) => (
+            <li key={entry.id} style={{ fontSize: 13 }}>
+              <div style={{ display: 'flex', gap: 7, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <strong>{entry.ownerName || 'Participant'}</strong>
+                <span className="text-muted">{entry.visibility === 'table' ? 'Entire table' : 'Facilitators only'}</span>
+              </div>
+              <div style={{ marginTop: 3, whiteSpace: 'pre-wrap' }}>{entry.supportText}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Section>
   );
 }
 

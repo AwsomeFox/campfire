@@ -71,6 +71,7 @@ import {
   GenerateMapParams,
   CoDmDraftTarget,
   CampaignDmRepair,
+  ParticipantSupportPreferenceUpsert,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
@@ -97,6 +98,7 @@ import { AiDmService } from '../ai-dm/ai-dm.service';
 import { CoDmService } from '../ai-dm/co-dm.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
+import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { CommentsService } from '../comments/comments.service';
@@ -347,6 +349,7 @@ export class McpToolsService {
     private readonly coDm: CoDmService,
     private readonly attachments: AttachmentsService,
     private readonly sessionZero: SessionZeroService,
+    private readonly supportPreferences: SupportPreferencesService,
     private readonly inventory: InventoryService,
     private readonly timeline: TimelineService,
     private readonly comments: CommentsService,
@@ -406,7 +409,9 @@ export class McpToolsService {
         'authoring prompts. Resources: the static campfire://campaigns index, plus the per-campaign templates ' +
         'campfire://campaign/{campaignId}/summary, /party, and /recaps (each returns the same JSON as the ' +
         'matching read tool, gated by the same membership/secrecy rules — resources/list enumerates one concrete ' +
-        'URI per accessible campaign). Prompts: recap-writer and session-prep, each taking a campaignId argument, ' +
+        'URI per accessible campaign). The access-support resource/tool returns only preferences whose participant ' +
+        'explicitly opted into AI use; facilitator visibility alone never grants model access. Prompts: recap-writer ' +
+        'and session-prep, each taking a campaignId argument, ' +
         'return a ready-to-run message that drives the corresponding tools.',
     });
     // When a collector is supplied (driver runtime), tool() records every tool onto it
@@ -615,6 +620,19 @@ export class McpToolsService {
       async ({ campaignId }) => {
         await this.access.requireMember(user, campaignId as number);
         return this.sessionZero.get(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_ai_support_preferences',
+      'Practical participation support preferences that their owners explicitly consented to AI use. Human ' +
+        'table/facilitator visibility is independent and never widens this result. Re-read before prep/live use so ' +
+        'revoked consent immediately stops disclosure; an empty array means no AI-authorized preferences.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.supportPreferences.listForAi(campaignId as number);
       },
     );
 
@@ -1317,6 +1335,37 @@ export class McpToolsService {
   // ---------- WRITE ----------
 
   private registerWriteTools(server: McpServer, user: RequestUser): void {
+    this.writeTool(
+      server,
+      user,
+      'set_my_support_preference',
+      'Create or replace the authenticated participant\'s own practical support preference. This cannot edit another ' +
+        'participant. Human visibility (table|facilitator) and AI use consent are independent required choices. When ' +
+        'aiUseConsent is false, the result confirms metadata without echoing the private support text.',
+      { campaignId: CampaignIdArg, ...ParticipantSupportPreferenceUpsert.shape },
+      async ({ campaignId, ...fields }) => {
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        const validated = ParticipantSupportPreferenceUpsert.parse(fields);
+        const saved = await this.supportPreferences.upsert(campaignId as number, validated, user, role);
+        return saved.aiUseConsent
+          ? saved
+          : { saved: true, id: saved.id, visibility: saved.visibility, aiUseConsent: false };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'delete_my_support_preference',
+      'Delete the authenticated participant\'s own support preference. This cannot delete another participant\'s row.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        await this.supportPreferences.removeOwn(campaignId as number, user, role);
+        return { ok: true, campaignId };
+      },
+    );
+
     this.writeTool(
       server,
       user,
@@ -3339,6 +3388,21 @@ export class McpToolsService {
         return this.sessionZero.get(campaignId);
       },
     );
+
+    perCampaign(
+      'campaign-ai-support-preferences',
+      'ai-support-preferences',
+      {
+        title: 'AI-authorized access supports',
+        description:
+          'Only practical support preferences whose participant explicitly opted into AI use. Facilitator visibility ' +
+          'alone never grants this resource access to the text.',
+      },
+      async (campaignId) => {
+        await this.access.requireMember(user, campaignId);
+        return this.supportPreferences.listForAi(campaignId);
+      },
+    );
   }
 
   // ---------- PROMPTS ----------
@@ -3408,7 +3472,9 @@ export class McpToolsService {
                 `You are the Dungeon Master's prep assistant for Campfire campaign ${campaignId}.\n\n` +
                 `1. Read campfire://campaign/${campaignId}/summary (or call get_campaign_summary) for the current state: ` +
                 `active quests and their objectives, the party's characters, the current location, and danger level.\n` +
-                `2. Call read_inbox { "campaignId": ${campaignId} } for open player questions, and list_proposals for anything pending your approval.\n` +
+                `2. Call get_ai_support_preferences { "campaignId": ${campaignId} } and apply only the returned, ` +
+                `participant-authorized practical supports. Then call read_inbox for open player questions and ` +
+                `list_proposals for anything pending your approval.\n` +
                 `3. Propose a focused prep plan for the next session: which active quests to advance, likely encounters to stat ` +
                 `up (use lookup_rule for monster statblocks), NPCs and locations to flesh out, and any secrets to seed. Offer to ` +
                 `create the encounters, quests, or locations you suggest via the matching tools.`,
