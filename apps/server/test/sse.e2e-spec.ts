@@ -252,6 +252,87 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     conn.close();
   });
 
+  it('invalidates the authoritative next-session projection on create, reschedule, RSVP, and cancellation', async () => {
+    const server = ctx.app.getHttpServer();
+    const conn = await openStream(campaignId, player);
+
+    let seen = conn.events.length;
+    const expectScheduleUpdate = async (scheduleId: number) => {
+      const event = await conn.waitFor(
+        (e) => e.type === 'schedule.updated' && e.scheduleId === scheduleId && conn.events.indexOf(e) >= seen,
+      );
+      seen = conn.events.length;
+      expect(event.campaignId).toBe(campaignId);
+      expect(typeof event.at).toBe('string');
+    };
+
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({
+        scheduledAt: '2098-08-10T18:00:00Z',
+        durationMinutes: 180,
+        title: 'First plan',
+        location: 'Old table',
+        notes: 'Bring dice',
+      });
+    expect(created.status).toBe(201);
+    const scheduleId = created.body.id as number;
+    await expectScheduleUpdate(scheduleId);
+
+    const afterCreate = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+    expect(afterCreate.status).toBe(200);
+    expect(afterCreate.body.nextSession).toMatchObject({
+      id: scheduleId,
+      scheduledAt: '2098-08-10T18:00:00.000Z',
+      durationMinutes: 180,
+      title: 'First plan',
+      location: 'Old table',
+      notes: 'Bring dice',
+      rsvps: [],
+    });
+
+    const rescheduled = await request(server)
+      .patch(`/api/v1/schedule/${scheduleId}`)
+      .set(dm)
+      .send({
+        scheduledAt: '2098-08-17T19:30:00Z',
+        durationMinutes: 240,
+        title: 'Replacement plan',
+        location: 'New table',
+        notes: 'Bring minis',
+      });
+    expect(rescheduled.status).toBe(200);
+    await expectScheduleUpdate(scheduleId);
+
+    const afterReschedule = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+    expect(afterReschedule.body.nextSession).toMatchObject({
+      id: scheduleId,
+      scheduledAt: '2098-08-17T19:30:00.000Z',
+      durationMinutes: 240,
+      title: 'Replacement plan',
+      location: 'New table',
+      notes: 'Bring minis',
+      rsvps: [],
+    });
+
+    const rsvp = await request(server).put(`/api/v1/schedule/${scheduleId}/rsvp`).set(player).send({ status: 'yes' });
+    expect(rsvp.status).toBe(200);
+    await expectScheduleUpdate(scheduleId);
+    const afterRsvp = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+    expect(afterRsvp.body.nextSession.rsvps).toEqual([
+      expect.objectContaining({ userId: 'dev:p-1', status: 'yes' }),
+    ]);
+
+    const cancelled = await request(server).delete(`/api/v1/schedule/${scheduleId}`).set(dm);
+    expect(cancelled.status).toBe(200);
+    await expectScheduleUpdate(scheduleId);
+    const afterCancel = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+    expect(afterCancel.body.nextSession).toBeNull();
+
+    conn.close();
+  });
+
   it('scopes events to their campaign — a stream on another campaign stays silent', async () => {
     const server = ctx.app.getHttpServer();
     const conn = await openStream(otherCampaignId, dm);

@@ -48,6 +48,23 @@
   --color-accent-2-800: #423e5d;
   --color-accent-2-900: #2b293a;
 
+  /* Semantic destructive controls; intentionally independent of the mutable
+     personal-accent family above. */
+  --color-danger: #fb7185;
+  --color-danger-solid: #be123c;
+  --color-danger-solid-hover: #c21845;
+  --color-danger-solid-active: #9f1239;
+  --color-danger-solid-busy: #881337;
+  --color-danger-solid-foreground: #fff1f2;
+  --color-danger-border: #fb7185;
+  --color-danger-focus: #fecdd3;
+  --color-danger-ghost-hover: color-mix(in srgb, #fb7185 14%, transparent);
+  --color-danger-ghost-active: color-mix(in srgb, #fb7185 24%, transparent);
+  --color-danger-ghost-busy: color-mix(in srgb, #fb7185 18%, transparent);
+  --color-danger-disabled-background: #4f2630;
+  --color-danger-disabled-foreground: #d6bdc2;
+  --color-danger-disabled-border: #8c5d68;
+
   /* Deck section-divider ground — review round 3: saturation as presence.
      Dividers take a saturated deep indigo (hue 277, the neutral ramp's own
      family; C 0.094 — written when the accent held C 0.030, before the
@@ -147,14 +164,57 @@ figcaption {
 .btn svg { display: block; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-primary { color: var(--color-accent); border-color: var(--color-accent); }
-.btn-primary:hover { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
-.btn-primary:active { background: color-mix(in srgb, var(--color-accent) 22%, transparent); }
+.btn-primary:not(:disabled):hover { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.btn-primary:not(:disabled):active { background: color-mix(in srgb, var(--color-accent) 22%, transparent); }
 .btn-secondary { border-color: var(--color-divider); }
-.btn-secondary:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
-.btn-secondary:active { background: color-mix(in srgb, var(--color-text) 14%, transparent); }
+.btn-secondary:not(:disabled):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+.btn-secondary:not(:disabled):active { background: color-mix(in srgb, var(--color-text) 14%, transparent); }
 .btn-ghost { color: var(--color-accent); padding-inline: var(--space-1); }
-.btn-ghost:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
-.btn-ghost:active { background: color-mix(in srgb, var(--color-accent) 18%, transparent); }
+.btn-ghost:not(:disabled):hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.btn-ghost:not(:disabled):active { background: color-mix(in srgb, var(--color-accent) 18%, transparent); }
+.btn-danger {
+  color: var(--color-danger-solid-foreground);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-solid);
+}
+.btn-danger:not(:disabled):hover { background: var(--color-danger-solid-hover); }
+.btn-danger:not(:disabled):active { background: var(--color-danger-solid-active); }
+.btn-danger:focus-visible { outline-color: var(--color-danger-focus); }
+.btn-danger.btn-ghost {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: transparent;
+}
+.btn-danger.btn-ghost:not(:disabled):hover {
+  color: var(--color-danger-focus);
+  background: var(--color-danger-ghost-hover);
+}
+.btn-danger.btn-ghost:not(:disabled):active { background: var(--color-danger-ghost-active); }
+.btn-danger:disabled {
+  color: var(--color-danger-disabled-foreground);
+  border-color: var(--color-danger-disabled-border);
+  background: var(--color-danger-disabled-background);
+  opacity: 1;
+}
+.btn-danger.btn-ghost:disabled { background: transparent; }
+.btn-danger[aria-busy='true'] {
+  color: var(--color-danger-solid-foreground);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-solid-busy);
+  cursor: wait;
+  opacity: 1;
+}
+.btn-danger.btn-ghost[aria-busy='true'] {
+  color: var(--color-danger);
+  background: var(--color-danger-ghost-busy);
+}
+@media (forced-colors: active) {
+  .btn-danger { color: MarkText; border-color: Mark; background: Mark; forced-color-adjust: none; }
+  .btn-danger.btn-ghost { color: Mark; border-color: Mark; background: Canvas; }
+  .btn-danger:focus-visible { outline-color: Highlight; }
+  .btn-danger:disabled,
+  .btn-danger.btn-ghost:disabled { color: GrayText; border-color: GrayText; background: Canvas; }
+}
 .btn-icon { width: 36px; height: 36px; padding: 0; }
 .btn-block { width: 100%; margin-top: var(--space-2); }
 
@@ -291,4 +351,3 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 .dialog-body { font-size: 14px; opacity: 0.85; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
-

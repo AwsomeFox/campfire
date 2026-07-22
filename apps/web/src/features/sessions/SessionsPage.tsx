@@ -12,7 +12,7 @@
  * Issue #13 adds a "Schedule" tab (?tab=schedule): planned sessions + availability + ICS
  * calendar feed — see SchedulePanel.tsx.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
@@ -30,6 +30,7 @@ import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
+import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
 
 export default function SessionsPage() {
   useFormattingLocale();
@@ -197,7 +198,10 @@ export default function SessionsPage() {
     );
   }
 
-  const showDetailOnMobile = Boolean(selected);
+  // The add form lives in the detail pane. Treat it like selected detail on
+  // mobile; otherwise tapping "+ Add recap" mounts the form inside a pane that
+  // remains `display: none` below the desktop breakpoint.
+  const showDetailOnMobile = Boolean(selected) || (isDm && (showAddForm || sessions.length === 0));
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
@@ -553,7 +557,7 @@ function SessionDetail({
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
           </Btn>
-          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} disabled={deleting}>
+          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} busy={deleting}>
             {deleting ? 'Deleting…' : 'Delete'}
           </Btn>
         </div>
@@ -858,7 +862,8 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
           <Btn
             className="!min-h-0 !py-2 text-xs !bg-violet-700 !border-violet-700 !text-white"
             onClick={create}
-            disabled={creating || (lifetime === 'never' && !acknowledgedNever)}
+            busy={creating}
+            disabled={lifetime === 'never' && !acknowledgedNever}
           >
             {creating ? 'Creating…' : 'Create link'}
           </Btn>
@@ -972,15 +977,15 @@ function ShareRow({
             value={draftLabel}
             onChange={(event) => setDraftLabel(event.target.value)}
           />
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy !== null || draftLabel === share.label} onClick={() => void mutate('label')}>
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'label'} disabled={busy !== null || draftLabel === share.label} onClick={() => void mutate('label')}>
             {busy === 'label' ? 'Saving…' : 'Save label'}
           </Btn>
           {share.expiresAt && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy !== null} onClick={() => void mutate('extend')}>
+            <Btn ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'extend'} disabled={busy !== null} onClick={() => void mutate('extend')}>
               {busy === 'extend' ? 'Extending…' : 'Extend 7 days'}
             </Btn>
           )}
-          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy !== null} onClick={() => void mutate('revoke')}>
+          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" busy={busy === 'revoke'} disabled={busy !== null} onClick={() => void mutate('revoke')}>
             {busy === 'revoke' ? 'Revoking…' : 'Revoke'}
           </Btn>
         </div>
@@ -1002,10 +1007,51 @@ function AddRecapForm({
   onCancel?: () => void;
 }) {
   const [title, setTitle] = useState('');
-  const [playedAt, setPlayedAt] = useState(new Date().toISOString().slice(0, 10));
+  const [playedAt, setPlayedAt] = useState(() => localDateInputValue());
+  const dateWasEdited = useRef(false);
   const [recap, setRecap] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // A form can stay open while a session runs across midnight. Keep the
+  // suggested date aligned with the user's local calendar until they make an
+  // explicit choice; after that, even an intentionally-cleared date belongs to
+  // the user and must not be replaced. Focus/visibility refreshes cover laptops
+  // that sleep through the scheduled midnight callback.
+  useEffect(() => {
+    let midnightTimer: number | undefined;
+
+    function updateSuggestedDate() {
+      if (!dateWasEdited.current) setPlayedAt(localDateInputValue());
+    }
+
+    function scheduleMidnightRefresh() {
+      if (midnightTimer !== undefined) window.clearTimeout(midnightTimer);
+      const now = new Date();
+      midnightTimer = window.setTimeout(() => {
+        updateSuggestedDate();
+        scheduleMidnightRefresh();
+      }, millisecondsUntilNextLocalDate(now) + 1);
+    }
+
+    function refreshAfterPause() {
+      updateSuggestedDate();
+      scheduleMidnightRefresh();
+    }
+
+    function refreshWhenVisible() {
+      if (document.visibilityState === 'visible') refreshAfterPause();
+    }
+
+    scheduleMidnightRefresh();
+    window.addEventListener('focus', refreshAfterPause);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      if (midnightTimer !== undefined) window.clearTimeout(midnightTimer);
+      window.removeEventListener('focus', refreshAfterPause);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, []);
 
   async function publish() {
     setSaving(true);
@@ -1028,27 +1074,49 @@ function AddRecapForm({
   }
 
   return (
-    <Card className="space-y-3">
+    <Card className="new-recap-form min-w-0 space-y-3">
       <h2 className="font-bold text-white text-sm">+ Add recap (Session {nextNumber})</h2>
       {error && <ErrorNote message={error} onRetry={publish} />}
-      <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder={'Title, e.g. "The Dragon’s Shadow"'} />
-      <TextInput type="date" value={playedAt} onChange={(e) => setPlayedAt(e.target.value)} />
+      <label htmlFor="new-recap-title" className="block text-xs font-bold text-slate-400 uppercase tracking-wide">
+        Title
+      </label>
+      <TextInput
+        id="new-recap-title"
+        className="min-w-0"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder={'e.g. "The Dragon’s Shadow"'}
+      />
+      <label htmlFor="new-recap-played-at" className="block text-xs font-bold text-slate-400 uppercase tracking-wide">
+        Played on
+      </label>
+      <TextInput
+        id="new-recap-played-at"
+        className="min-w-0"
+        type="date"
+        value={playedAt}
+        onChange={(e) => {
+          dateWasEdited.current = true;
+          setPlayedAt(e.target.value);
+        }}
+      />
       <div className="flex items-center gap-2">
-        <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Recap</label>
+        <label htmlFor="new-recap-body" className="text-xs font-bold text-slate-400 uppercase tracking-wide">Recap</label>
         <div className="flex-1" />
         <TemplateButton value={recap} onInsert={setRecap} />
       </div>
       <TextArea
+        id="new-recap-body"
         className="!min-h-[100px]"
         value={recap}
         onChange={(e) => setRecap(e.target.value)}
         placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."
       />
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-[11px] text-slate-500">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <p className="text-[11px] text-slate-400">
           Tip: start from the template, or ask your AI scribe to <em>"draft a recap from this session"</em>.
         </p>
-        <div className="flex gap-2 shrink-0">
+        <div className="flex flex-wrap gap-2 sm:shrink-0">
           {onCancel && (
             <Btn ghost className="!min-h-0 !py-2 text-sm" onClick={onCancel}>
               Cancel

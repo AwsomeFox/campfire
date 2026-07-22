@@ -105,7 +105,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     // Quests copied with giverNpcId remapped, status + objectives preserved.
     const clonedQuests = await dmAgent.get(`/api/v1/campaigns/${clone.id}/quests`);
     expect(clonedQuests.body.length).toBe(1);
-    const q = clonedQuests.body[0];
+    const qListItem = clonedQuests.body[0];
+    const clonedQuest = await dmAgent.get(`/api/v1/quests/${qListItem.id}`);
+    expect(clonedQuest.status).toBe(200);
+    const q = clonedQuest.body;
     expect(q.id).not.toBe(questId);
     expect(q.status).toBe('active');
     expect(q.dmSecret).toBe('the mayor did it');
@@ -176,8 +179,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     const clonedQuests = await dmAgent.get(`/api/v1/campaigns/${clone.id}/quests`);
     expect(clonedQuests.body.length).toBe(1);
     expect(clonedQuests.body[0].status).toBe('available');
-    expect(clonedQuests.body[0].objectives.length).toBe(1);
-    expect(clonedQuests.body[0].objectives[0].done).toBe(false);
+    const clonedQuest = await dmAgent.get(`/api/v1/quests/${clonedQuests.body[0].id}`);
+    expect(clonedQuest.status).toBe(200);
+    expect(clonedQuest.body.objectives.length).toBe(1);
+    expect(clonedQuest.body.objectives[0].done).toBe(false);
 
     // Play state stripped.
     const sessions = await dmAgent.get(`/api/v1/campaigns/${clone.id}/sessions`);

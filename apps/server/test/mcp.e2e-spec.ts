@@ -1554,7 +1554,12 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const entryResult = await dmClient.callTool({ name: 'get_rule_entry', arguments: { entryId: goblin.id } });
     expect(entryResult.isError).toBeFalsy();
-    expect((parseResult(entryResult) as { name: string }).name).toBe('Goblin');
+    const goblinEntry = parseResult(entryResult) as { name: string; dataJson: string };
+    expect(goblinEntry.name).toBe('Goblin');
+    expect(JSON.parse(goblinEntry.dataJson)).toMatchObject({
+      specialAbilities: [expect.objectContaining({ name: 'Nimble Escape' })],
+      actions: [expect.objectContaining({ name: 'Scimitar', attackBonus: 4 })],
+    });
 
     // install_rule_pack: non-admin (viewer PAT belongs to the same admin user, but scope caps
     // don't affect serverRole — use a real non-admin user instead, minted via the headless

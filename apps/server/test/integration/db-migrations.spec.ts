@@ -267,7 +267,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0051 upgrades legacy recap shares with a seven-day sunset and audit metadata columns', () => {
+  it('0052 upgrades legacy recap shares with a seven-day sunset and audit metadata columns', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);
     seeded.sqlite.close();
@@ -293,7 +293,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         );
       `);
       legacy.prepare('INSERT INTO session_shares VALUES (1, 1, 1, ?, ?, ?, ?, ?)').run('1', 'legacy-token-hash', 'cf_share_abcd', now, now);
-      legacy.prepare("DELETE FROM __migrations WHERE name = '0051_public_recap_share_policy'").run();
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0052_public_recap_share_policy'").run();
     } finally {
       legacy.close();
     }

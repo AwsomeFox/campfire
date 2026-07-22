@@ -29,13 +29,22 @@ export function statusVariant(status: string): ChipVariant {
   }
 }
 
-export const Btn = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLButtonElement> & { ghost?: boolean; danger?: boolean }>(
-  function Btn({ ghost, danger, className = '', ...rest }, ref) {
+type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  ghost?: boolean;
+  danger?: boolean;
+  /** Marks an in-flight action and keeps it natively disabled until it settles. */
+  busy?: boolean;
+};
+
+export const Btn = forwardRef<HTMLButtonElement, BtnProps>(
+  function Btn({ ghost, danger, busy = false, disabled = false, className = '', ...rest }, ref) {
     return (
       <button
         ref={ref}
-        className={`cf-btn ${ghost ? 'cf-btn-ghost' : ''} ${danger ? '!text-rose-400 !border-rose-400/40' : ''} ${className}`}
+        className={`cf-btn ${ghost ? 'cf-btn-ghost' : ''} ${danger ? 'cf-btn-danger' : ''} ${className}`}
         {...rest}
+        disabled={disabled || busy}
+        aria-busy={busy || undefined}
       />
     );
   },

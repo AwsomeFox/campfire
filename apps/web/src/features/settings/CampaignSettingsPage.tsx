@@ -204,13 +204,13 @@ function PublicRecapSharingCard({ campaign, onChanged }: { campaign: Campaign; o
       </p>
       <div className="flex flex-col sm:flex-row gap-2">
         {campaign.publicRecapSharingEnabled ? (
-          <button className="btn" disabled={busy} onClick={() => setConfirming('disable')}>Disable and revoke all</button>
+          <button className="btn" disabled={busy} aria-busy={busy || undefined} onClick={() => setConfirming('disable')}>Disable and revoke all</button>
         ) : (
-          <button className="btn btn-primary" disabled={busy || campaign.status !== 'active'} onClick={() => void setPolicy(true)}>
+          <button className="btn btn-primary" disabled={busy || campaign.status !== 'active'} aria-busy={busy || undefined} onClick={() => void setPolicy(true)}>
             Enable public sharing
           </button>
         )}
-        <button className="btn btn-danger" disabled={busy} onClick={() => setConfirming('revoke')}>Revoke all links</button>
+        <button className="btn btn-danger" disabled={busy} aria-busy={busy || undefined} onClick={() => setConfirming('revoke')}>Revoke all links</button>
       </div>
       {!campaign.publicRecapSharingEnabled && campaign.status !== 'active' && (
         <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>Unarchive the campaign before enabling public sharing.</p>
@@ -691,7 +691,7 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
             permanently removed until you purge it from the Trash on your campaigns page.
           </p>
           <div className="flex-1" />
-          <button className="btn btn-ghost" style={{ fontSize: 12.5, color: '#f87171' }} onClick={() => setOpen(true)}>
+          <button className="btn btn-ghost btn-danger" style={{ fontSize: 12.5 }} onClick={() => setOpen(true)}>
             Delete campaign…
           </button>
         </div>
@@ -722,9 +722,10 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
             </button>
             <div className="flex-1" />
             <button
-              className="btn btn-secondary"
-              style={{ fontSize: 12.5, color: '#f87171', borderColor: '#f87171' }}
+              className="btn btn-danger"
+              style={{ fontSize: 12.5 }}
               disabled={!canDelete || deleting}
+              aria-busy={deleting || undefined}
               onClick={remove}
             >
               {deleting ? 'Moving…' : 'Move to Trash'}

@@ -59,6 +59,23 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
     expect(res.body.info?.title).toBe('Campfire API');
   });
 
+  it('documents the bounded quest-list progress projection (issue #786)', async () => {
+    const res = await request(app.getHttpServer()).get('/api/openapi.json');
+    const operation = res.body.paths?.['/api/v1/campaigns/{campaignId}/quests']?.get;
+    expect(operation?.description).toContain('only its first incomplete objective');
+
+    const responseSchema = operation?.responses?.['200']?.content?.['application/json']?.schema;
+    expect(responseSchema?.type).toBe('array');
+    const schemaName = (responseSchema?.items?.$ref as string | undefined)?.split('/').pop();
+    expect(schemaName).toBeTruthy();
+    const properties = res.body.components?.schemas?.[schemaName!]?.properties;
+    expect(properties).toEqual(expect.objectContaining({
+      objectiveProgress: expect.any(Object),
+      nextObjective: expect.any(Object),
+    }));
+    expect(properties).not.toHaveProperty('objectives');
+  });
+
   it('documents exact XP recipients and the explicit non-active opt-in (issue #814)', async () => {
     const res = await request(app.getHttpServer()).get('/api/openapi.json');
     const operation = res.body.paths?.['/api/v1/campaigns/{campaignId}/characters/xp']?.post;

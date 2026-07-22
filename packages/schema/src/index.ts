@@ -416,6 +416,21 @@ export const ObjectivePatch = z.object({ text: z.string().min(1).max(500).option
 export const ObjectiveReorder = z.object({ objectiveIds: z.array(Id).min(1) });
 export type ObjectiveReorder = z.infer<typeof ObjectiveReorder>;
 
+// Bounded quest-board projection (issue #786). The list endpoint exposes objective
+// progress and at most one objective body: the first incomplete objective in the
+// DM-controlled order. Full objective collections remain on the quest detail and
+// campaign-summary contracts, so a large quest cannot inflate every board load.
+export const QuestListObjective = QuestObjective.pick({ id: true, text: true });
+export type QuestListObjective = z.infer<typeof QuestListObjective>;
+export const QuestListItem = Quest.extend({
+  objectiveProgress: z.object({
+    completed: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+  nextObjective: QuestListObjective.nullable(),
+});
+export type QuestListItem = z.infer<typeof QuestListItem>;
+
 // "What changed since last session" (issue #66). `since` is the reference instant
 // the diff was taken against — by default the campaign's latest session date
 // (max of each session's playedAt, falling back to its createdAt), or the caller's
@@ -1409,6 +1424,9 @@ export interface MonsterStatblockData {
   abilityScores: Record<string, unknown> | undefined;
   specialAbilities: unknown;
   actions: unknown;
+  /** Optional action categories used by systems that distinguish them in a statblock. */
+  legendaryActions?: unknown;
+  reactions?: unknown;
 }
 
 export interface RuleSystemAdapter {
@@ -1506,6 +1524,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
+      legendaryActions: d.legendaryActions ?? d.legendary_actions,
+      reactions: d.reactions,
     };
   },
   monsterHitPoints(d: Record<string, unknown>): number | null {
@@ -2539,6 +2559,51 @@ export const MeToken = z.object({
 });
 export type MeToken = z.infer<typeof MeToken>;
 
+/**
+ * Server instance + data-generation identity (issue #723).
+ *
+ * A whole-server backup restore reuses the same numeric user/campaign IDs but
+ * swaps out the entire dataset (DB rows + uploads) underneath. The PWA's
+ * `/api` runtime cache (Workbox, 7-day TTL) is keyed only by URL, so after a
+ * restore a cached GET for, say, `/api/v1/campaigns/3` would still serve the
+ * PRE-restore bytes offline — leaking data the operator just rolled back.
+ * Numeric IDs alone can't detect that; we need a token that changes whenever
+ * the underlying data is replaced.
+ *
+ *   - `instanceId`  is a per-install UUID generated once and persisted in the
+ *                   DB (server_meta). It differs across physically distinct
+ *                   installs (two homelabs, or a dev vs prod box) so an SW that
+ *                   somehow pointed at the wrong origin can never serve one
+ *                   install's cached data for another. It is STABLE across a
+ *                   backup/restore (it travels inside the restored DB), so it
+ *                   alone is not enough to invalidate on restore.
+ *   - `dataGeneration` is a monotonic integer (also persisted) that the server
+ *                   bumps on every whole-server restore. It is the actual
+ *                   "the bytes under these IDs have changed" signal: a restore
+ *                   bumps it, so a client that cached responses against the
+ *                   prior generation sees a mismatch and wipes them.
+ *
+ * Both fields ride on `/me` (already proven-live — see vite.config.ts) so the
+ * web client learns the current identity from a response that did NOT come
+ * from the SW cache, then namespaces its cached responses by
+ * `${instanceId}:${dataGeneration}`. On a restore the next proven-live `/me`
+ * carries a new generation; the client notices the change and purges the old
+ * cache, so stale pre-restore bytes can never render as truth (online or
+ * offline). The server itself does not need to know the client's cache key —
+ * the contract is just "this is who I am right now".
+ *
+ * The combined token is also surfaced as the response header
+ * `cf-data-generation` on `/me` so a non-/me caller that needs the current
+ * generation (e.g. a diagnostic) can read it without parsing JSON.
+ */
+export const ServerInstance = z.object({
+  /** Stable per-install UUID; travels inside a backup so the same box keeps it. */
+  instanceId: z.string().min(1),
+  /** Monotonic integer bumped on every whole-server restore. */
+  dataGeneration: z.number().int().nonnegative(),
+});
+export type ServerInstance = z.infer<typeof ServerInstance>;
+
 export const Me = z.object({
   user: User,
   // When `token` is present (PAT auth), memberships reflect the token's
@@ -2546,6 +2611,12 @@ export const Me = z.object({
   // campaign-bound token only lists that campaign. Cookie sessions see raw
   // membership roles and no `token` field.
   memberships: z.array(z.object({ campaignId: Id, role: Role, characterId: Id.nullable() })),
+  // Server instance + data-generation identity (issue #723) — see
+  // ServerInstance. Always present on a proven-live /me; the web client
+  // namespaces the SW runtime cache by this so a restore invalidates stale
+  // bytes. /me is excluded from the SW cache (vite.config.ts), so this value
+  // is always authoritative, never a cached copy.
+  instance: ServerInstance,
   token: MeToken.optional(),
 });
 export type Me = z.infer<typeof Me>;
@@ -3711,10 +3782,11 @@ export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 // ---------- persistent per-encounter combat log (issue #61) ----------
 // The in-encounter dice/turn history used to be client-only React state, capped and
 // lost on reload. `encounter_events` persists a per-encounter trail written by the
-// encounters service on the meaningful combat mutations (HP damage/heal, condition
-// add/remove, death, next-turn/round), so the DM can reconstruct "round 2: Ember
-// Hound took 8 damage" for a recap and a refresh no longer wipes it.
-export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note']);
+// encounters service on meaningful combat activity (HP damage/heal, condition
+// add/remove, death, rolls, next-turn/round, notes, overrides, and corrections), so
+// the DM can reconstruct "round 2: Ember Hound took 8 damage" for a recap and a
+// refresh no longer wipes it.
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction']);
 export type EncounterEventType = z.infer<typeof EncounterEventType>;
 
 export const EncounterEvent = z.object({
@@ -3868,6 +3940,7 @@ export const CampaignEventType = z.enum([
   'encounter.updated',
   'encounter.deleted',
   'encounter.ping',
+  'schedule.updated',
   'membership.revoked',
   'treasury.updated',
 ]);
@@ -3893,6 +3966,16 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     encounterId: Id,
     ping: MapPing,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #790: a scheduled session was created, edited, cancelled, or received
+    // an RSVP. This remains an id-only invalidation signal: clients refetch the
+    // permission-checked campaign projection so a reschedule replaces every detail
+    // together and a cancellation clears the card instead of merging stale fields.
+    type: z.literal('schedule.updated'),
+    campaignId: Id,
+    scheduleId: Id,
     at: IsoDate,
   }),
   z.object({

@@ -479,6 +479,33 @@ export const settings = sqliteTable('settings', {
   value: text('value').notNull(),
 });
 
+/**
+ * Single-row install-identity table (issue #723). Carries the per-install UUID
+ * (stable across backup/restore — it lives INSIDE the DB that gets restored) and
+ * a monotonic `data_generation` that the server bumps on every whole-server
+ * restore. Both are surfaced on /me (Me.instance) so the PWA can namespace its
+ * SW runtime cache by `${instanceId}:${dataGeneration}` — a restore bumps the
+ * generation, the next proven-live /me carries the new value, and the client
+ * purges the prior cache so stale pre-restore bytes can't render (online or
+ * offline). See modules/server-meta/server-meta.service.ts and
+ * apps/web/src/lib/swCache.ts.
+ *
+ * The row is seeded lazily on first read (ServerMetaService.get) so a fresh DB
+ * and a restored DB alike always have exactly one row with a real UUID.
+ */
+export const SERVER_META_KEY = 'singleton';
+export const serverMeta = sqliteTable('server_meta', {
+  key: text('key').primaryKey(),
+  // Per-install UUID (e.g. "550e8400-e29b-..."). Generated once, then stable for
+  // the life of the install — travels inside a backup so the same box keeps it
+  // across restores (which is exactly why we ALSO need data_generation).
+  instanceId: text('instance_id').notNull(),
+  // Monotonic integer bumped by ServerMetaService.bumpGeneration() on a restore.
+  // Starts at 0; the first restore moves it to 1, etc.
+  dataGeneration: integer('data_generation').notNull().default(0),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const campaignMembers = sqliteTable('campaign_members', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),

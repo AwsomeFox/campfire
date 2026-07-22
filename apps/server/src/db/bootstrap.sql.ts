@@ -404,6 +404,20 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+-- Single-row install-identity table (issue #723): the per-install UUID
+-- (stable across backup/restore — it lives INSIDE the restored DB) and a
+-- monotonic data_generation the server bumps on every restore. Surfaced on
+-- /me (Me.instance) so the PWA namespaces its SW runtime cache by
+-- instance_id:data_generation and a restore invalidates stale bytes.
+-- The row is seeded lazily by ServerMetaService; this DDL just guarantees the
+-- table exists. See db/schema.ts serverMeta + modules/server-meta.
+CREATE TABLE IF NOT EXISTS server_meta (
+  key TEXT PRIMARY KEY,
+  instance_id TEXT NOT NULL,
+  data_generation INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS campaign_members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,

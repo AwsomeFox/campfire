@@ -25,6 +25,7 @@ import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { SettingsModule } from './modules/settings/settings.module';
+import { ServerMetaModule } from './modules/server-meta/server-meta.module';
 import { MembershipModule } from './modules/membership/membership.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { CharactersModule } from './modules/characters/characters.module';
@@ -144,6 +145,7 @@ function serveStaticImports(): DynamicModule[] {
     TokensModule,
     UsersModule,
     SettingsModule,
+    ServerMetaModule,
     MembershipModule,
     AuditModule,
     CampaignsModule,

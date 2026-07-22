@@ -341,6 +341,19 @@ describe('allowLocalLogin=false blocks non-admin but not admin (e2e)', () => {
     expect(res.status).toBe(403);
   });
 
+  it('public auth status advertises the disabled local and signup paths', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get('/api/v1/auth/status');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      setupRequired: false,
+      localLoginEnabled: false,
+      signupEnabled: false,
+      oidcEnabled: false,
+      oidcProviderName: null,
+    });
+  });
+
   it('admin may still log in (lockout prevention)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).post('/api/v1/auth/login').send({ username: 'admin', password: 'admin-password-1' });

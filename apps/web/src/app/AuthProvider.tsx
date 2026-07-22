@@ -21,7 +21,7 @@
  * and an offline reload no longer wipes the very cache it depends on.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Me, Role, TextSize } from '@campfire/schema';
+import type { Me, Role, ServerInstance, TextSize } from '@campfire/schema';
 import { api, ApiError, API } from '../lib/api';
 import { queryClient } from '../lib/query';
 import {
@@ -29,6 +29,7 @@ import {
   clearMeSnapshot,
   persistMeSnapshot,
   readMeSnapshot,
+  subscribeToCachePurges,
 } from '../lib/swCache';
 import { AuthContext, type AuthState } from './auth';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
@@ -103,6 +104,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // proven-live change of identity (first sign-in or an account switch) so we can
   // drop any cached campaign data belonging to a prior session before it renders.
   const lastUserIdRef = useRef<number | null>(null);
+  // #723: last data-generation identity confirmed live THIS page-session. Lets us
+  // detect a restore mid-session (no reload): a polling /me that now reports a
+  // different generation than the one this tab already saw wipes the cache even
+  // though the user id is unchanged. Only a PROVEN-LIVE /me updates this (never a
+  // stale/restored identity), so it can't itself be poisoned by offline artifacts.
+  const lastInstanceRef = useRef<ServerInstance | null>(null);
 
   const refresh = useCallback(async () => {
     let outcome: MeFetchOutcome;
@@ -116,6 +123,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const snapshot = readMeSnapshot<Me>();
     const decision = decideAuthOutcome(outcome, {
       currentUserId: lastUserIdRef.current,
+      currentInstance: lastInstanceRef.current,
       snapshot,
     });
 
@@ -127,13 +135,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearMeSnapshot();
     }
     if (decision.snapshotToPersist) {
-      persistMeSnapshot(decision.snapshotToPersist.me, decision.snapshotToPersist.confirmedAt);
+      persistMeSnapshot(
+        decision.snapshotToPersist.me,
+        decision.snapshotToPersist.confirmedAt,
+        decision.snapshotToPersist.instance,
+      );
     }
     if (outcome.kind === 'live') {
       // Record the proven-live id so a later account switch on this same tab is
       // detected as a change. Stale/restored identities never update this — only
       // a confirmed live identity counts toward the "has the session changed?" test.
       lastUserIdRef.current = decision.me?.user.id ?? lastUserIdRef.current;
+      // #723: record the proven-live data-generation identity for the same reason
+      // — a later /me reporting a different generation (a restore happened) wipes
+      // the cache on this tab even without a reload.
+      lastInstanceRef.current = decision.me?.instance ?? lastInstanceRef.current;
     }
 
     setMe(decision.me);
@@ -157,12 +173,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // #723 cross-tab purge: when ANOTHER tab of this origin clears the SW cache
+  // (account switch, restore, logout — anything that calls clearApiCache), it
+  // broadcasts on 'cf.cache-purge'. The SW Cache Storage deletion is already
+  // origin-wide, but THIS tab's React Query cache is in-memory and per-tab;
+  // without this listener we'd keep rendering the now-stale data until our own
+  // next /me detects the change. Clearing the query cache forces the next read
+  // to revalidate against the network. We do NOT touch lastInstanceRef here:
+  // a peer's wipe doesn't tell us the NEW generation, so the next live /me is
+  // still the authority that re-validates it (and may wipe again if needed).
+  useEffect(() => {
+    const unsubscribe = subscribeToCachePurges(() => {
+      queryClient.clear();
+    });
+    return unsubscribe;
+  }, []);
+
   const logout = useCallback(async () => {
     await api.post(`${API}/auth/logout`);
     // Drop this account's cached campaign data so the next person to sign in on
     // this device never inherits it (issue #268), and clear the persisted
     // offline identity so an offline reload no longer restores this account.
     lastUserIdRef.current = null;
+    lastInstanceRef.current = null;
     await clearApiCache();
     queryClient.clear();
     clearMeSnapshot();
