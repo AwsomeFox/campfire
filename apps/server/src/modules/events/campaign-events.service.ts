@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Subject, type Observable } from 'rxjs';
 import { filter } from 'rxjs/operators';
-import type { CampaignEvent } from '@campfire/schema';
+import type { CampaignEvent, CampaignEventInput } from '@campfire/schema';
 import { nowIso } from '../../common/time';
 
 /**
@@ -19,8 +19,18 @@ import { nowIso } from '../../common/time';
 export class CampaignEventsService {
   private readonly subject = new Subject<CampaignEvent>();
 
-  emit(event: Omit<CampaignEvent, 'at'>): void {
-    this.subject.next({ ...event, at: nowIso() });
+  /**
+   * Accepts a single CampaignEvent variant minus its `at` timestamp (see
+   * CampaignEventInput — distributive so a caller passing `{type, campaignId,
+   * encounterId}` with `type` as a subset of the literals still type-checks).
+   * The `at` is stamped here so emitters can't forge or skew it. The spread
+   * preserves the caller's variant discriminant, and the `satisfies` check
+   * proves the stamped object still conforms to the union — no `as` cast that
+   * could silently bypass the compiler if the schema ever changes.
+   */
+  emit(event: CampaignEventInput): void {
+    const stamped = { ...event, at: nowIso() } satisfies CampaignEvent;
+    this.subject.next(stamped);
   }
 
   streamFor(campaignId: number): Observable<CampaignEvent> {

@@ -303,6 +303,14 @@ CREATE TABLE IF NOT EXISTS comments (
   author_name TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL,
   in_character INTEGER NOT NULL DEFAULT 0,
+  -- Soft delete / tombstone (issue #503). NULL = live; a timestamp tombstones the
+  -- row (body redacted, replies preserved). deleted_by records the actor. See
+  -- db/schema.ts for column docs. The parent_id ON DELETE CASCADE above only ever
+  -- fires on a HARD row removal (campaign purge); the comment service's remove()
+  -- never DELETEs a root with replies — it sets deleted_at so the FK cascade is
+  -- never the thing that destroys replies.
+  deleted_at TEXT,
+  deleted_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
