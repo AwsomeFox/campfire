@@ -557,7 +557,7 @@ function SessionDetail({
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setSharing((v) => !v)}>
             {sharing ? 'Hide sharing' : 'Share'}
           </Btn>
-          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} disabled={deleting}>
+          <Btn danger ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)} busy={deleting}>
             {deleting ? 'Deleting…' : 'Delete'}
           </Btn>
         </div>
@@ -855,7 +855,7 @@ function SharePanel({ sessionId }: { sessionId: number }) {
               <code className="text-slate-400">{s.tokenPrefix}…</code>
               <span className="text-muted">created {formatDate(s.createdAt)}</span>
               <div className="flex-1" />
-              <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={() => revoke(s.id)} disabled={revokingId === s.id}>
+              <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={() => revoke(s.id)} busy={revokingId === s.id}>
                 {revokingId === s.id ? 'Revoking…' : 'Revoke'}
               </Btn>
             </li>

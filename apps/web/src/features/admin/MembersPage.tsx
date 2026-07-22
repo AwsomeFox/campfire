@@ -343,8 +343,8 @@ function YourMembershipCard({
         </a>
         <button
           type="button"
-          className="btn btn-ghost"
-          style={{ fontSize: 12.5, color: '#f87171' }}
+          className="btn btn-ghost btn-danger"
+          style={{ fontSize: 12.5 }}
           onClick={() => setConfirming(true)}
         >
           Leave campaign…

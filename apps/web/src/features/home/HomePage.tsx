@@ -319,8 +319,8 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
               {busyId === c.id ? 'Working…' : 'Restore'}
             </button>
             <button
-              className="btn btn-ghost"
-              style={{ fontSize: 12.5, color: '#f87171' }}
+              className="btn btn-ghost btn-danger"
+              style={{ fontSize: 12.5 }}
               disabled={busyId === c.id}
               onClick={() => setPurgeTarget(c)}
             >

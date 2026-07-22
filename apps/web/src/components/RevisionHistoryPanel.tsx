@@ -220,7 +220,7 @@ function RevisionDialog({
               >
                 Cancel restore
               </Btn>
-              <Btn danger onClick={onRestore} disabled={restoring} className="w-full sm:w-auto">
+              <Btn danger onClick={onRestore} busy={restoring} className="w-full sm:w-auto">
                 {restoring ? 'Restoring…' : restoreError ? 'Try restore again' : 'Restore version'}
               </Btn>
             </div>

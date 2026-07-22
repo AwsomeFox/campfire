@@ -17,6 +17,16 @@
   --cf-accent: #f59e0b;    /* amber-500 — primary, active quests, DM elements */
   --cf-success: #10b981;   /* emerald-500 — completed, explored, healthy */
   --cf-danger: #f43f5e;    /* rose-500 — danger, failed, low HP */
+  --cf-danger-solid: #be123c;
+  --cf-danger-solid-hover: #c21845;
+  --cf-danger-solid-active: #9f1239;
+  --cf-danger-solid-busy: #881337;
+  --cf-danger-foreground: #fff1f2;
+  --cf-danger-focus: #fecdd3;
+  --cf-danger-ghost-busy: rgb(244 63 94 / .18);
+  --cf-danger-disabled-bg: #4f2630;
+  --cf-danger-disabled-fg: #d6bdc2;
+  --cf-danger-disabled-border: #8c5d68;
   --cf-arcane: #a78bfa;    /* violet-400 — lore, magic, proposals */
   --cf-threat: #38bdf8;    /* sky-400 — threats, movement paths */
   --cf-radius: 1rem;       /* rounded-2xl cards */
@@ -61,12 +71,41 @@ body {
   padding: .6rem 1.15rem; border-radius: .75rem; border: 0; cursor: pointer;
   min-height: 44px; /* tap target */
 }
-.cf-btn:hover { filter: brightness(1.08); }
+.cf-btn:not(:disabled):hover { filter: brightness(1.08); }
 .cf-btn-ghost {
   background: transparent; color: var(--cf-dim);
   border: 1px solid var(--cf-border);
 }
-.cf-btn-ghost:hover { color: var(--cf-ink); border-color: #475569; }
+.cf-btn-ghost:not(:disabled):hover { color: var(--cf-ink); border-color: #475569; }
+.cf-btn-danger {
+  background: var(--cf-danger-solid); color: var(--cf-danger-foreground);
+  border: 1px solid var(--cf-danger);
+}
+.cf-btn-danger:not(:disabled):hover { background: var(--cf-danger-solid-hover); filter: none; }
+.cf-btn-danger:not(:disabled):active { background: var(--cf-danger-solid-active); }
+.cf-btn-danger:focus-visible { outline: 2px solid var(--cf-danger-focus); outline-offset: 2px; }
+.cf-btn-danger.cf-btn-ghost { background: transparent; color: var(--cf-danger); border-color: var(--cf-danger); }
+.cf-btn-danger.cf-btn-ghost:not(:disabled):hover { background: rgb(244 63 94 / .14); color: var(--cf-danger-focus); }
+.cf-btn-danger.cf-btn-ghost:not(:disabled):active { background: rgb(244 63 94 / .24); }
+.cf-btn-danger:disabled {
+  background: var(--cf-danger-disabled-bg); color: var(--cf-danger-disabled-fg);
+  border-color: var(--cf-danger-disabled-border); cursor: not-allowed;
+}
+.cf-btn-danger.cf-btn-ghost:disabled { background: transparent; }
+.cf-btn-danger[aria-busy='true'] {
+  background: var(--cf-danger-solid-busy); color: var(--cf-danger-foreground);
+  border-color: var(--cf-danger); cursor: wait;
+}
+.cf-btn-danger.cf-btn-ghost[aria-busy='true'] {
+  background: var(--cf-danger-ghost-busy); color: var(--cf-danger);
+}
+@media (forced-colors: active) {
+  .cf-btn-danger { color: MarkText; border-color: Mark; background: Mark; forced-color-adjust: none; }
+  .cf-btn-danger.cf-btn-ghost { color: Mark; border-color: Mark; background: Canvas; }
+  .cf-btn-danger:focus-visible { outline-color: Highlight; }
+  .cf-btn-danger:disabled,
+  .cf-btn-danger.cf-btn-ghost:disabled { color: GrayText; border-color: GrayText; background: Canvas; }
+}
 
 .cf-input, .cf-textarea, .cf-select {
   width: 100%; background: var(--cf-surface); color: var(--cf-ink);
