@@ -133,6 +133,41 @@ export class AttachmentsService {
   }
 
   /**
+   * Short authorization-aware version token for an attachment URL (issue #498).
+   *
+   * Protected attachments are served with a long-lived browser cache, so the URL
+   * itself must change whenever the bytes OR the user's authorization to see them
+   * could change — otherwise a stale cached entry is served straight from the
+   * browser HTTP cache without the membership/hidden check ever running. The token
+   * folds together three row-level signals, all of which the client already
+   * receives in the attachment list (no extra file hashing on list/get):
+   *
+   *   - `id` — a re-upload always creates a new row with a new id, so the URL
+   *     changes automatically;
+   *   - `hidden` — toggling reveal/hide is an authorization change that must
+   *     invalidate any cached URL even though the bytes are identical; AND
+   *   - `updatedAt` — covers the delete-then-restore case where SQLite reuses an
+   *     id: the restored row is a fresh insert with a new updatedAt, so the token
+   *     changes even though the id collides with the deleted row.
+   *
+   * The web client (apps/web/src/components/ImageUpload.tsx → attachmentVersionToken)
+   * folds the SAME three fields with its own browser-side hash. The two do NOT need
+   * to produce identical bytes — `?v=` is a client-controlled cache-buster the server
+   * never validates; what matters is that BOTH are deterministic functions of
+   * (id, hidden, updatedAt), so a given authorization state yields a stable URL and
+   * a changed state yields a different one (modulo the extremely-unlikely 64-bit
+   * hash collision noted below). The server helper exists as the canonical
+   * implementation for any non-web caller (e.g. an MCP/REST consumer) and for tests.
+   *
+   * Returns the first 16 hex chars (64 bits) — plenty of entropy to make a stale
+   * URL effectively unguessable, short enough to keep the query string tidy.
+   */
+  versionToken(row: { id: number; hidden: boolean; updatedAt: string }): string {
+    const hash = crypto.createHash('sha256').update(`${row.id}|${row.hidden ? '1' : '0'}|${row.updatedAt}`).digest('hex');
+    return hash.slice(0, 16);
+  }
+
+  /**
    * Resolve the file to serve for a GET, honouring the `?size=thumb` variant.
    * Returns the on-disk path plus the metadata needed to set response headers.
    *
