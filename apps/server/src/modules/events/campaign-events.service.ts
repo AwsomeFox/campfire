@@ -23,10 +23,14 @@ export class CampaignEventsService {
    * Accepts a single CampaignEvent variant minus its `at` timestamp (see
    * CampaignEventInput — distributive so a caller passing `{type, campaignId,
    * encounterId}` with `type` as a subset of the literals still type-checks).
-   * The `at` is stamped here so emitters can't forge or skew it.
+   * The `at` is stamped here so emitters can't forge or skew it. The spread
+   * preserves the caller's variant discriminant, and the `satisfies` check
+   * proves the stamped object still conforms to the union — no `as` cast that
+   * could silently bypass the compiler if the schema ever changes.
    */
   emit(event: CampaignEventInput): void {
-    this.subject.next({ ...event, at: nowIso() } as CampaignEvent);
+    const stamped = { ...event, at: nowIso() } satisfies CampaignEvent;
+    this.subject.next(stamped);
   }
 
   streamFor(campaignId: number): Observable<CampaignEvent> {

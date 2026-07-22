@@ -235,7 +235,7 @@ async function bootstrap() {
     'SSE (campaign events + AI DM narration) is single-instance: the in-process RxJS pub/sub does NOT ' +
       'fan out across multiple server nodes. Run a single replica, or add a shared transport (Redis pub/sub) ' +
       'before scaling horizontally — otherwise members on other nodes miss events and revocation (issue #527) ' +
-      'will not disconnect a removed member connected elsewhere. (issue #527)',
+      'will not disconnect a removed member connected elsewhere.',
   );
 
   const port = process.env.PORT ? Number(process.env.PORT) : 8080;

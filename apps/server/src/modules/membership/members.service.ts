@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { MemberCreate, MemberUpdate } from '@campfire/schema';
@@ -253,27 +253,38 @@ export class MembersService {
       .set({ ownerUserId: null, updatedAt: nowIso() })
       .where(and(eq(characters.campaignId, campaignId), eq(characters.ownerUserId, String(existing.userId))));
 
-    await this.audit.log({
-      actor: auditActor(actor),
-      actorRole: opts?.selfLeave ? (existing.role as CampaignMember['role']) : 'dm',
-      action: opts?.selfLeave ? 'member.leave' : 'member.delete',
-      entityType: 'campaign_member',
-      entityId: memberId,
-      campaignId,
-    });
-
-    // Issue #527: notify every open SSE subscriber that this user was removed so the
-    // affected subscriber's own stream tears down immediately. The event is emitted AFTER
-    // the DB delete succeeds so a rolled-back remove never disconnects anyone. It carries
-    // no entity payload — only the affected userId/memberId — mirroring the thin-convention
-    // of every other campaign event (subscribers refetch through permission-checked REST,
-    // and the only consumer of THIS event type is the stream-termination filter). `userId`
-    // is the String form of campaignMembers.userId so it matches RequestUser.id directly.
+    // Issue #527: the revocation event MUST be emitted whenever the DB delete above
+    // succeeded, regardless of whether audit logging throws. If audit failure were
+    // allowed to skip the emit, the removed user's open SSE stream would keep flowing
+    // (authorization drift persists under partial failure) — the exact bug this issue
+    // fixes. So emit first (the delete already committed; a rolled-back remove can no
+    // longer happen), then log audit best-effort: an audit row is valuable but not
+    // load-bearing for authorization, and a thrown audit insert is caught here so it
+    // does not surface as a 500 to the actor who already succeeded in removing the
+    // member. (Audit errors are otherwise unexpected — they would indicate a DB issue
+    // worth investigating via server logs, which is why this logs rather than swallows
+    // silently.)
     this.events.emit({
       type: 'membership.revoked',
       campaignId,
       userId: String(existing.userId),
       memberId,
     });
+
+    try {
+      await this.audit.log({
+        actor: auditActor(actor),
+        actorRole: opts?.selfLeave ? (existing.role as CampaignMember['role']) : 'dm',
+        action: opts?.selfLeave ? 'member.leave' : 'member.delete',
+        entityType: 'campaign_member',
+        entityId: memberId,
+        campaignId,
+      });
+    } catch (err) {
+      new Logger(MembersService.name).error(
+        `membership.revoked emitted for memberId=${memberId} but audit log failed — the remove succeeded; ` +
+          `this row will be missing from the audit trail. Underlying error: ${String(err)}`,
+      );
+    }
   }
 }

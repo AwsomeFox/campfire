@@ -21,10 +21,24 @@ interface SseConnection {
   contentType: string | undefined;
   /** All JSON-parsed `data:` payloads seen so far (includes keepalive pings). */
   events: unknown[];
-  /** True once the server closed the response stream (issue #527 revocation teardown). */
+  /**
+   * True once the underlying response stream ended — i.e. Node emitted 'end'
+   * (clean completion) or 'close' (socket torn down). This fires for EITHER
+   * endpoint: the server completing the Observable (the issue #527 revocation
+   * teardown) OR the local client calling close() (req.destroy). A test that
+   * wants to assert the SERVER initiated the close must pair `ended` with a
+   * no-more-frames check (wait a beat, assert events.length is unchanged) and
+   * must NOT have called close() itself — otherwise this flag only proves the
+   * stream is no longer delivering frames, not who closed it.
+   */
   ended: boolean;
   waitFor: (pred: (event: Record<string, unknown>) => boolean, timeoutMs?: number) => Promise<Record<string, unknown>>;
-  /** Resolves when the server closes the stream, rejecting after timeoutMs if it stays open. */
+  /**
+   * Resolves when the response stream ends (see `ended`), rejecting after
+   * timeoutMs if frames keep flowing. Same caveat as `ended`: this resolves for
+   * either endpoint, so the revocation test pairs it with a no-more-frames
+   * assertion to prove the SERVER closed the stream rather than the client.
+   */
   waitForClose: (timeoutMs?: number) => Promise<void>;
   close: () => void;
 }
