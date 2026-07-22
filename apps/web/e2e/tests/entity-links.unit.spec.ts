@@ -1,12 +1,16 @@
 import { test, expect } from '@playwright/test';
 import type { EntityType, MentionTarget, Notification, Proposal, SearchResult } from '@campfire/schema';
 import {
+  cfLinkHref,
+  cfLinkToken,
   entityDomId,
   entityHref,
   mentionTargetHref,
   noteTargetHref,
   notificationHref,
+  parseCfLink,
   proposalTargetHref,
+  resolveUniqueByName,
   searchResultHref,
 } from '../../src/lib/entityLinks';
 
@@ -125,5 +129,73 @@ test.describe('source adapters', () => {
     expect(href('session_scheduled')).toBe('/c/7/sessions?tab=schedule');
     expect(href('ai_dm_alert')).toBe('/c/7/table');
     expect(href('added_to_campaign')).toBe('/c/7');
+  });
+});
+
+// --------------------------------------------------------------------------
+// Identity-persisted mention tokens + same-name disambiguation (issue #739).
+//
+// A typed mention authored as `[Vex](/.cf/npc/5)` binds the link to NPC #5 by
+// ID, so it survives renames and same-name collisions. The auto-linker refuses
+// to silently resolve an ambiguous name; only a typed token disambiguates.
+// --------------------------------------------------------------------------
+test.describe('typed mention tokens (issue #739)', () => {
+  test('cfLinkToken serializes a typed mention into the synthetic relative URL', () => {
+    expect(cfLinkToken('npc', 5)).toBe('/.cf/npc/5');
+    expect(cfLinkToken('arc', 42)).toBe('/.cf/arc/42');
+  });
+
+  test('parseCfLink accepts well-formed tokens and rejects everything else', () => {
+    expect(parseCfLink('/.cf/npc/5')).toEqual({ type: 'npc', id: 5 });
+    expect(parseCfLink(' /.cf/session/11 ')).toEqual({ type: 'session', id: 11 });
+    // Real app URLs, mailto, fragments, and bare strings are not typed tokens.
+    expect(parseCfLink('/c/7/npcs/5')).toBeNull();
+    expect(parseCfLink('mailto:x@y')).toBeNull();
+    expect(parseCfLink('#entity-npc-5')).toBeNull();
+    expect(parseCfLink('')).toBeNull();
+    expect(parseCfLink(null)).toBeNull();
+    // Malformed: non-numeric id, missing segments, mixed-case type.
+    expect(parseCfLink('/.cf/npc/abc')).toBeNull();
+    expect(parseCfLink('/.cf/npc/')).toBeNull();
+    expect(parseCfLink('/.cf/npc/0')).toBeNull(); // id must be a positive integer
+    expect(parseCfLink('/.cf/NPC/5')).toBeNull();
+  });
+
+  test('cfLinkHref resolves to the same canonical URL as a direct entityHref', () => {
+    // A typed token carries the same destination every other surface uses, so a
+    // mention picked today and a search result match land on the same page+focus.
+    expect(cfLinkHref(campaignId, parseCfLink('/.cf/npc/11')!)).toBe(expected.npc);
+    expect(cfLinkHref(campaignId, parseCfLink('/.cf/session/11')!)).toBe(expected.session);
+    expect(cfLinkHref(campaignId, parseCfLink('/.cf/beat/11')!)).toBe(expected.beat);
+    // A bare comment token has no parent context (a comment lives inside an
+    // entity's thread), so it is not a navigable surface on its own — degrade.
+    expect(cfLinkHref(campaignId, parseCfLink('/.cf/comment/19')!)).toBeNull();
+  });
+});
+
+test.describe('same-name disambiguation (issue #739)', () => {
+  const targets = (name: string) => [
+    { type: 'npc' as const, id: 5, name },
+    { type: 'npc' as const, id: 6, name }, // SAME name, different record
+    { type: 'quest' as const, id: 7, name: 'Unrelated' },
+  ];
+
+  test('a name shared by two targets does NOT auto-resolve (collision returns null)', () => {
+    expect(resolveUniqueByName(targets('Vex'), 'Vex')).toBeNull();
+  });
+
+  test('a uniquely-named target resolves to that single record', () => {
+    const hit = resolveUniqueByName(targets('Vex'), 'Unrelated');
+    expect(hit).toEqual({ type: 'quest', id: 7, name: 'Unrelated' });
+  });
+
+  test('a name with no match returns null', () => {
+    expect(resolveUniqueByName(targets('Vex'), 'Nobody')).toBeNull();
+  });
+
+  test('matching is case-insensitive and trims surrounding whitespace', () => {
+    const list = [{ type: 'npc' as const, id: 5, name: ' Vex ' }];
+    expect(resolveUniqueByName(list, 'vex')).toEqual({ type: 'npc', id: 5, name: ' Vex ' });
+    expect(resolveUniqueByName(list, ' VEX ')).toEqual({ type: 'npc', id: 5, name: ' Vex ' });
   });
 });
