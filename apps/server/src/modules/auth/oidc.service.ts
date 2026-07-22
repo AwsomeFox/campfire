@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import type * as client from 'openid-client';
 import {
   EMPTY_STORED_OIDC,
@@ -13,6 +13,7 @@ import {
 import { SettingsService } from '../settings/settings.service';
 import { UsersService } from '../users/users.service';
 import type { OidcSettings, OidcSettingsUpdate, OidcTestResult, User } from '@campfire/schema';
+import { OidcRecoveryFailure } from './oidc-recovery';
 
 /** Settings-store key under which the in-app OIDC config blob is persisted. */
 const OIDC_SETTINGS_KEY = 'oidcConfig';
@@ -232,9 +233,7 @@ export class OidcService {
       this.configPromise = this.discover(env).catch((err) => {
         // Allow retry on the next call — don't cache a rejected promise.
         this.configPromise = null;
-        // eslint-disable-next-line no-console
-        console.warn(`[oidc] discovery failed against issuer ${env.issuer}: ${(err as Error).message}`);
-        throw new ServiceUnavailableException('OIDC identity provider is unavailable');
+        throw new OidcRecoveryFailure('provider_unavailable', 'discovery_failed', { cause: err });
       });
     }
     const config = await this.configPromise;
@@ -282,8 +281,8 @@ export class OidcService {
       pkceCodeVerifier: codeVerifier,
     });
     const claims = tokens.claims();
-    if (!claims) {
-      throw new ServiceUnavailableException('OIDC identity provider did not return an ID token');
+    if (!claims || typeof claims.sub !== 'string' || claims.sub.length === 0) {
+      throw new OidcRecoveryFailure('missing_claims', 'required_claims_missing');
     }
     return claims as OidcClaims;
   }
@@ -319,21 +318,25 @@ export class OidcService {
    * When an allowed-group is configured (OIDC_ALLOWED_GROUP or the in-app
    * `allowedGroup`), membership in that group — or in the admin group, since
    * admins always retain access — is required to sign in at all: without it, no
-   * account is provisioned and existing accounts are denied a session with a
-   * 403. Checked on EVERY login, so removing a user from the allowed group at
+   * account is provisioned and existing accounts are redirected to the safe
+   * group-denied recovery page without a session. Checked on EVERY login, so
+   * removing a user from the allowed group at
    * the IdP locks them out on their next login. Unset = any authenticated IdP
    * user may sign in (previous behavior).
    */
   async provisionOrUpdateUser(claims: OidcClaims): Promise<User> {
     const env = await this.getEffectiveConfig();
     if (!env) throw new ServiceUnavailableException('OIDC is not configured');
+    if (typeof claims.sub !== 'string' || claims.sub.length === 0) {
+      throw new OidcRecoveryFailure('missing_claims', 'subject_claim_missing');
+    }
 
     const groups = extractGroups(claims, env.groupsClaim);
     const isAdminByGroup = env.adminGroup !== null && groups.includes(env.adminGroup);
     const desiredRole: 'admin' | 'user' = isAdminByGroup ? 'admin' : 'user';
 
     if (env.allowedGroup !== null && !groups.includes(env.allowedGroup) && !isAdminByGroup) {
-      throw new ForbiddenException('Your account is not allowed to sign in to Campfire');
+      throw new OidcRecoveryFailure('group_denied', 'required_group_missing');
     }
 
     const existingRow = await this.usersService.getRowByOidcSub(claims.sub);
