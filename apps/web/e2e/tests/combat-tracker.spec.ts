@@ -63,7 +63,7 @@ test.describe('combat tracker — DM view', () => {
 
     // The boss starts with a rolled initiative and a Clear ("×") control beside it.
     await expect(initInput).toHaveValue(String(boss.initiative));
-    const clearBtn = page.getByLabel(`Clear initiative for ${boss.name}`);
+    const clearBtn = page.getByLabel(`Clear ${boss.name} roll order`);
     await expect(clearBtn).toBeVisible();
 
     // Clear it — PATCH { initiative: null } lands, the server writes NULL, and the input
@@ -76,12 +76,12 @@ test.describe('combat tracker — DM view', () => {
     await initInput.fill('14');
     await initInput.press('Enter');
     await expect(initInput).toHaveValue('14');
-    await expect(page.getByLabel(`Clear initiative for ${boss.name}`)).toBeVisible();
+    await expect(page.getByLabel(`Clear ${boss.name} roll order`)).toBeVisible();
     await initInput.focus();
     await initInput.fill('');
     await initInput.press('Backspace');
     await expect(initInput).toHaveValue('');
-    await expect(page.getByLabel(`Clear initiative for ${boss.name}`)).toHaveCount(0);
+    await expect(page.getByLabel(`Clear ${boss.name} roll order`)).toHaveCount(0);
 
     // Restore for any later tests that assume a rolled initiative.
     await initInput.fill(String(boss.initiative));

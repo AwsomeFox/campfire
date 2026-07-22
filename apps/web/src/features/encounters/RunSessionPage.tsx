@@ -2539,7 +2539,7 @@ function CombatantRow({
           {combatant.initiative !== null && (
             <button
               type="button"
-              aria-label={`Clear initiative for ${combatant.name}`}
+              aria-label={`Clear ${combatant.name} roll order`}
               title={runningReorderNote}
               disabled={busy}
               onClick={() => {
