@@ -353,7 +353,7 @@ function mapVehicle(src: Record<string, unknown>): ImportedEntry {
   const hp = num(src.hp);
 
   return {
-    slug: slugify(name),
+    slug: slugOf(src, name),
     name,
     type: 'item',
     summary: truncate(body, 300) || 'Vehicle',
