@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { diceRolls } from '../src/db/schema';
-import { MAX_ROLLS_PER_CAMPAIGN } from '../src/modules/rolls/rolls.service';
+import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../src/modules/rolls/rolls.service';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -162,16 +162,52 @@ describe('shared dice log (e2e)', () => {
     expect(res.body).toEqual([]);
   });
 
-  it(`retention: history is pruned to the newest ${MAX_ROLLS_PER_CAMPAIGN} rolls per campaign`, async () => {
+  // -------- #614: disclosed, configurable retention (no silent delete) --------
+
+  it('#614 — rolling over the old silent cap does NOT evict history (no delete-on-insert)', async () => {
     const server = ctx.app.getHttpServer();
     const db = ctx.app.get<DrizzleDb>(DB);
 
-    // Seed a fresh campaign with MAX old rows directly (cheaper than 200+ HTTP posts),
-    // then one real roll over the top must push the oldest out.
+    // Regression for the old behavior: the service used to hard-prune to the
+    // newest 200 on every 201st insert. Under the new policy the insert path
+    // is append-only; pruning is a separate, disclosed sweep. So rolling well
+    // past the legacy 200-row watermark must leave ALL of those rows in place.
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'No Silent Delete' });
+    const capId = campRes.body.id;
+    const ts = new Date().toISOString();
+    const LEGACY_SILENT_CAP = 200;
+    for (let i = 0; i < LEGACY_SILENT_CAP + 5; i++) {
+      await db.insert(diceRolls).values({
+        campaignId: capId,
+        rollerUserId: 'dev:dm-1',
+        rollerName: 'dm-1',
+        expr: '1d20',
+        rolls: '[10]',
+        total: 10,
+        createdAt: ts,
+      });
+    }
+
+    // One more via the real endpoint — this used to trigger the synchronous prune.
+    const rollRes = await request(server).post(`/api/v1/campaigns/${capId}/roll`).set(dm).send({ expr: '1d4' });
+    expect(rollRes.status).toBe(201);
+
+    // Nothing was silently deleted: every seeded row + the new roll survives.
+    const stored = await db.select({ id: diceRolls.id }).from(diceRolls).where(eq(diceRolls.campaignId, capId));
+    expect(stored).toHaveLength(LEGACY_SILENT_CAP + 5 + 1);
+  });
+
+  it(`#614 — pruneOverCap trims to the disclosed retention (default ${DEFAULT_DICE_ROLLS_RETENTION}), keeping the newest`, async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rolls = ctx.app.get(RollsService);
+
     const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Prune Campaign' });
     const pruneId = campRes.body.id;
     const ts = new Date().toISOString();
-    for (let i = 0; i < MAX_ROLLS_PER_CAMPAIGN; i++) {
+    // Seed slightly over the default cap, then an explicit sweep must trim to it.
+    const seedCount = DEFAULT_DICE_ROLLS_RETENTION + 3;
+    for (let i = 0; i < seedCount; i++) {
       await db.insert(diceRolls).values({
         campaignId: pruneId,
         rollerUserId: 'dev:dm-1',
@@ -183,21 +219,62 @@ describe('shared dice log (e2e)', () => {
       });
     }
 
-    const rollRes = await request(server).post(`/api/v1/campaigns/${pruneId}/roll`).set(dm).send({ expr: '1d4' });
-    expect(rollRes.status).toBe(201);
+    const removed = await rolls.pruneOverCap();
+    expect(removed).toBe(seedCount - DEFAULT_DICE_ROLLS_RETENTION);
 
-    // Stored rows for this campaign are exactly the cap — the oldest was pruned,
-    // the fresh roll survived at the top.
     const stored = await db.select({ id: diceRolls.id }).from(diceRolls).where(eq(diceRolls.campaignId, pruneId));
-    expect(stored).toHaveLength(MAX_ROLLS_PER_CAMPAIGN);
+    expect(stored).toHaveLength(DEFAULT_DICE_ROLLS_RETENTION);
 
-    const feed = await request(server).get(`/api/v1/campaigns/${pruneId}/rolls`).query({ limit: 1 }).set(dm);
-    expect(feed.status).toBe(200);
-    expect(feed.body[0].id).toBe(rollRes.body.id);
-    expect(feed.body[0].expr).toBe('1d4');
+    // The NEWEST cap rows survive (highest ids), the oldest 3 are gone.
+    const minSurvivingId = Math.min(...stored.map((r) => r.id));
+    const oldest = await db
+      .select({ id: diceRolls.id })
+      .from(diceRolls)
+      .where(eq(diceRolls.campaignId, pruneId))
+      .orderBy(diceRolls.id)
+      .limit(1);
+    expect(oldest[0].id).toBe(minSurvivingId);
 
     // Cap is per campaign, not global: the main campaign's feed was untouched.
     const feedMain = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
     expect(feedMain.body.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('#614 — pruneOverCap with retention <= 0 is a no-op (keep-all policy)', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rolls = ctx.app.get(RollsService);
+
+    const campRes = await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(dm).send({ name: 'Keep All' });
+    const keepAllId = campRes.body.id;
+    const ts = new Date().toISOString();
+    for (let i = 0; i < 5; i++) {
+      await db.insert(diceRolls).values({
+        campaignId: keepAllId,
+        rollerUserId: 'dev:dm-1',
+        rollerName: 'dm-1',
+        expr: '1d20',
+        rolls: '[10]',
+        total: 10,
+        createdAt: ts,
+      });
+    }
+
+    expect(await rolls.pruneOverCap(0)).toBe(0);
+    expect(await rolls.pruneOverCap(-1)).toBe(0);
+    const stored = await db.select({ id: diceRolls.id }).from(diceRolls).where(eq(diceRolls.campaignId, keepAllId));
+    expect(stored).toHaveLength(5);
+  });
+
+  it('#614 — GET feed discloses the configured retention in response headers', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(res.status).toBe(200);
+    // Default policy is a bounded numeric cap (not the "keep all" mode), so the
+    // header carries the number; the unbounded flag is absent.
+    const retention = res.headers['x-dice-rolls-retention'];
+    expect(retention).toBeDefined();
+    expect(retention).not.toBe('unlimited');
+    expect(Number(retention)).toBe(DEFAULT_DICE_ROLLS_RETENTION);
+    expect(res.headers['x-dice-rolls-unbounded']).toBeUndefined();
   });
 });
