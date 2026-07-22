@@ -308,6 +308,11 @@ const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Sta
  * 5e death-save tracker (issue #57): three success pips + three failure pips for a
  * character at 0 HP. Clicking a pip sets the count to that position (clicking the
  * highest-lit pip clears it back down), committing via onSet. Read-only unless canEdit.
+ *
+ * Roll button (issue #619): rolls a d20 and posts `deathSaveRoll` to the server, which
+ * applies the 5e crit/fumble rules — nat 1 = two failure pips, nat 20 = revive at 1 HP
+ * (saves cleared), 10–19 = one success, 2–9 = one failure. The server's response is the
+ * source of truth for the counters + HP; the button just supplies the d20 face.
  */
 function DeathSaveTracker({
   successes,
@@ -315,12 +320,14 @@ function DeathSaveTracker({
   canEdit,
   busy,
   onSet,
+  onRoll,
 }: {
   successes: number;
   failures: number;
   canEdit: boolean;
   busy: boolean;
   onSet: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
+  onRoll: () => void;
 }) {
   function Pips({ kind, count, color }: { kind: 'deathSaveSuccesses' | 'deathSaveFailures'; count: number; color: string }) {
     return (
@@ -361,6 +368,19 @@ function DeathSaveTracker({
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Fails</span>
         <Pips kind="deathSaveFailures" count={failures} color="#e5484d" />
       </span>
+      {canEdit && (
+        <button
+          type="button"
+          className="btn btn-ghost"
+          aria-label="Roll a death save"
+          title="Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)"
+          disabled={busy}
+          onClick={onRoll}
+          style={{ fontSize: 10, minHeight: 20, padding: '1px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+        >
+          Roll
+        </button>
+      )}
     </div>
   );
 }
@@ -694,6 +714,28 @@ export default function RunSessionPage() {
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
     [combatantPatch],
+  );
+
+  /**
+   * Roll a death save (issue #619): roll a d20 client-side, POST it to the campaign's
+   * shared dice log so the whole table sees the roll, then PATCH the combatant with
+   * `deathSaveRoll`. The SERVER is the source of truth for the outcome (nat 1 = two
+   * failures, nat 20 = revive at 1 HP, 10–19 = one success, 2–9 = one failure) — its
+   * response drives the pips + HP, and the combatantPatch invalidation re-renders this
+   * row immediately. The dice-log post is fire-and-forget for table visibility; if it
+   * fails we still apply the roll outcome (the combat-log event records provenance too).
+   */
+  const rollDeathSave = useCallback(
+    (combatant: Combatant) => {
+      const face = 1 + Math.floor(Math.random() * 20); // 1–20, uniform
+      const label = `${combatant.name} · death save`;
+      // Visible in the shared dice tray. A plain 1d20 expr so crit/fumble flavor lights up.
+      void api.post(`${API}/campaigns/${cid}/roll`, { expr: '1d20', label }).catch(() => {
+        /* table-visibility best-effort; outcome is driven by the combatant PATCH below */
+      });
+      patchCombatant(combatant.id, { deathSaveRoll: face });
+    },
+    [cid, patchCombatant],
   );
 
   const rollInitiative = () => runControl.mutate('roll-initiative');
@@ -1043,6 +1085,7 @@ export default function RunSessionPage() {
               onHpDelta={(delta) => hpDelta.mutate({ combatantId: c.id, delta })}
               onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
               onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
+              onRollDeathSave={() => rollDeathSave(c)}
               onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
               onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
               onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
@@ -2285,6 +2328,7 @@ function CombatantRow({
   onHpDelta,
   onSetTempHp,
   onSetDeathSaves,
+  onRollDeathSave,
   onSetInitiative,
   onAddCondition,
   onRemoveCondition,
@@ -2317,6 +2361,8 @@ function CombatantRow({
   onHpDelta: (delta: number) => void;
   onSetTempHp: (value: number) => void;
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
+  /** Roll a death save (issue #619) — rolls d20, posts to the dice log, drives the server outcome. */
+  onRollDeathSave: () => void;
   onSetInitiative: (value: number) => void;
   onAddCondition: (cond: string) => void;
   onRemoveCondition: (cond: string) => void;
@@ -2535,6 +2581,7 @@ function CombatantRow({
               canEdit={canEdit}
               busy={busy}
               onSet={onSetDeathSaves}
+              onRoll={onRollDeathSave}
             />
           )}
         {combatant.conditions.length > 0 && (
