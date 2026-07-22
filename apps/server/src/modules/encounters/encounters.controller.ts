@@ -143,15 +143,22 @@ export class EncountersController {
   @Patch(':id')
   @ApiOperation({
     summary: 'Update an encounter',
-    description: "dm role required. Edit the name, attach/clear a location/quest/session link (issue #126), and/or attach/clear the battle map via mapAttachmentId (issue #39).",
+    description:
+      "dm role required. Edit the name, attach/clear a location/quest/session link (issue #126), and/or attach/clear the battle map via mapAttachmentId (issue #39). " +
+      'Optionally pass `expectedUpdatedAt` (the updatedAt you last read) to opt into optimistic concurrency (issue #532): ' +
+      'a stale value returns 409 Conflict instead of silently clobbering a fresher edit from another DM tab or a connected AI.',
   })
   @ApiResponse({ status: 200, description: 'Updated encounter with combatants.' })
   @ApiResponse({ status: 400, description: 'mapAttachmentId does not exist in this campaign.' })
   @ApiResponse({ status: 404, description: 'A linked location/quest/session id is not in this encounter\'s campaign.' })
+  @ApiResponse({ status: 409, description: 'Stale expectedUpdatedAt — another DM or the AI saved this encounter since you loaded it. Reload the latest before reapplying.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.encounters.updateEncounter(id, body, user, role);
+    // Split off the optimistic-concurrency guard (#532) from the entity fields, mirroring
+    // npcs.controller.ts / quests.controller.ts.
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.encounters.updateEncounter(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Post(':id/ping')
