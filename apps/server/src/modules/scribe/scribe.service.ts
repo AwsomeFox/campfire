@@ -26,6 +26,7 @@ import { AiDmService } from '../ai-dm/ai-dm.service';
 import { createAiProvider, type AiProvider } from '../ai-dm/providers';
 import { AI_DM_PROVIDER, type AiDmProvider } from '../ai-dm/ai-dm.provider';
 import { buildRecapDraft, type RecapDraftSource } from '../sessions/sessions.service';
+import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 
 type ScribeConfigUpdateInput = z.infer<typeof ScribeConfigUpdate>;
 
@@ -114,6 +115,7 @@ export class ScribeService implements OnApplicationBootstrap {
     private readonly proposalRecords: ProposalRecordsService,
     private readonly providerConfig: AiProviderConfigService,
     private readonly aiDm: AiDmService,
+    private readonly supportPreferences: SupportPreferencesService,
     @Inject(AI_DM_PROVIDER) private readonly fallbackProvider: AiDmProvider,
   ) {}
 
@@ -295,10 +297,17 @@ export class ScribeService implements OnApplicationBootstrap {
     let tokensUsed: number;
     let providerName: string;
     try {
+      // Read consent at provider-call time (never from a persisted job/source
+      // snapshot) so revocation immediately removes a preference from future runs.
+      const aiSupports = await this.supportPreferences.listForAi(campaignId);
+      const supportGuidance = aiSupports.length > 0
+        ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
+        : '';
       const system =
         (seat.instructions ? `${seat.instructions}\n\n` : '') +
         'You are the campaign scribe. Write a concise, in-voice session recap from the source material below. ' +
-        'Return only the finished recap prose (markdown allowed); do not include the raw source-notes appendix.';
+        'Return only the finished recap prose (markdown allowed); do not include the raw source-notes appendix.' +
+        supportGuidance;
       if (config) {
         const provider: AiProvider = createAiProvider({ ...config, params: { ...config.params, maxTokens } });
         const result = await provider.generate({

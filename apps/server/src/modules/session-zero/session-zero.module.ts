@@ -3,14 +3,16 @@ import { AuditModule } from '../audit/audit.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { SessionZeroService } from './session-zero.service';
 import { SessionZeroController } from './session-zero.controller';
+import { SupportPreferencesController } from './support-preferences.controller';
+import { SupportPreferencesService } from './support-preferences.service';
 
 // Session zero / table charter (issue #122) — a per-campaign safety & expectations
 // record (lines & veils, safety tools, house rules, tone). Exported so the MCP module
 // can expose it read-only to a connected AI DM.
 @Module({
   imports: [AuditModule, RoleAccessModule],
-  controllers: [SessionZeroController],
-  providers: [SessionZeroService],
-  exports: [SessionZeroService],
+  controllers: [SessionZeroController, SupportPreferencesController],
+  providers: [SessionZeroService, SupportPreferencesService],
+  exports: [SessionZeroService, SupportPreferencesService],
 })
 export class SessionZeroModule {}

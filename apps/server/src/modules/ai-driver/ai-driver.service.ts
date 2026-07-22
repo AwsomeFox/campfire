@@ -15,6 +15,7 @@ import type {
 } from '../ai-dm/providers/ai-provider';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -282,6 +283,7 @@ const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
   'list_campaigns',
   'get_campaign_summary', // player-scoped: hidden/dmSecret/redacted by the summary builder
   'get_session_zero', // member-readable safety charter
+  'get_ai_support_preferences', // service filters on explicit per-participant AI consent
   // quests / npcs / locations / characters / factions (per-entity reads; secrecy-aware)
   'get_quest',
   'list_quests',
@@ -464,6 +466,7 @@ export class AiDriverService {
     private readonly audit: AuditService,
     private readonly stream: AiDmStreamService,
     private readonly notifications: NotificationsService,
+    private readonly supportPreferences: SupportPreferencesService,
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
   ) {}
 
@@ -1508,6 +1511,14 @@ export class AiDriverService {
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
+
+    // This tool is model-specific by design: it ignores facilitator authority and
+    // returns only rows with explicit participant AI consent. It is read fresh for
+    // every turn, so revocation cannot linger in a cached prompt.
+    const supports = await this.supportPreferences.listForPublicAiNarration(campaignId);
+    if (supports.length > 0) {
+      parts.push(`## Participant-authorized practical supports\n${JSON.stringify(supports)}`);
+    }
 
     return parts.join('\n\n');
   }

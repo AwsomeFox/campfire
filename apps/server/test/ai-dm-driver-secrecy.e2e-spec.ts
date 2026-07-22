@@ -47,6 +47,49 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
     await h.close();
   });
 
+  it('#877 includes only explicitly AI-consented supports and applies revocation on the next turn', async () => {
+    const campaignId = await h.createCampaign('Support Consent Driver');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+    const route = `/api/v1/campaigns/${campaignId}/session-zero/support-preferences/me`;
+    const supportText = 'DRIVER_SUPPORT_SENTINEL_877';
+
+    await request(h.server).put(route).set(player).send({
+      supportText,
+      visibility: 'facilitator',
+      aiUseConsent: false,
+    });
+    h.script({ text: 'First turn.' });
+    await h.sendMessage(campaignId, { input: 'begin' });
+    expect(h.mock.received.at(-1)?.system ?? '').not.toContain(supportText);
+
+    await request(h.server).put(route).set(player).send({
+      supportText,
+      visibility: 'facilitator',
+      aiUseConsent: true,
+    });
+    h.script({ text: 'Second turn.' });
+    await h.sendMessage(campaignId, { input: 'continue' });
+    expect(h.mock.received.at(-1)?.system ?? '').not.toContain(supportText);
+
+    await request(h.server).put(route).set(player).send({
+      supportText,
+      visibility: 'table',
+      aiUseConsent: true,
+    });
+    h.script({ text: 'Third turn.' });
+    await h.sendMessage(campaignId, { input: 'continue at the table' });
+    expect(h.mock.received.at(-1)?.system ?? '').toContain(supportText);
+
+    await request(h.server).put(route).set(player).send({
+      supportText,
+      visibility: 'table',
+      aiUseConsent: false,
+    });
+    h.script({ text: 'Fourth turn.' });
+    await h.sendMessage(campaignId, { input: 'continue again' });
+    expect(h.mock.received.at(-1)?.system ?? '').not.toContain(supportText);
+  });
+
   // ── hidden NPC ──────────────────────────────────────────────────────────────
   it('a hidden NPC the model reads mid-turn 404s under the player-scoped principal (no secret reaches the provider)', async () => {
     const campaignId = await h.createCampaign('Secrecy Hidden NPC');

@@ -35,6 +35,39 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     await harness.close();
   });
 
+  it('#877 sends only AI-consented support to the provider and drops it after revocation', async () => {
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Support Consent');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await seedResolvedInbox(harness, campaignId, 'The party completed the first scene.');
+    const route = `${API}/campaigns/${campaignId}/session-zero/support-preferences/me`;
+    const supportText = 'SCRIBE_SUPPORT_SENTINEL_877';
+
+    await request(harness.server).put(route).set(dm).send({
+      supportText,
+      visibility: 'facilitator',
+      aiUseConsent: true,
+    });
+    harness.script({ text: 'First recap.' });
+    const first = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(first.status).toBe(201);
+    expect(harness.mock.received.at(-1)?.system ?? '').toContain(supportText);
+
+    const proposalId = first.body.proposalIds[0] as number;
+    expect((await request(harness.server).post(`${API}/proposals/${proposalId}/approve`).set(dm).send({})).status).toBe(201);
+    await seedResolvedInbox(harness, campaignId, 'The party completed a second scene.');
+    await request(harness.server).put(route).set(dm).send({
+      supportText,
+      visibility: 'facilitator',
+      aiUseConsent: false,
+    });
+    harness.script({ text: 'Second recap.' });
+    const second = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(second.status).toBe(201);
+    expect(second.body.job.status).toBe('succeeded');
+    expect(harness.mock.received.at(-1)?.system ?? '').not.toContain(supportText);
+  });
+
   it('drafts a recap from real material, files it as a pending proposal, meters the seat, and never touches canon', async () => {
     await harness.enableExperimental();
     const campaignId = await harness.createCampaign('Scribe On-Demand');

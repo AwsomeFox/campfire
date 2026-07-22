@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { MemberCreate, MemberUpdate } from '@campfire/schema';
 import type { CampaignMember } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, campaigns, users, characters } from '../../db/schema';
+import { campaignMembers, campaigns, users, characters, participantSupportPreferences } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -330,6 +330,16 @@ export class MembersService {
 
       tx.delete(campaignMembers)
         .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
+        .run();
+      // A support submission is participant-owned, not campaign history. Leaving
+      // or removal deletes it immediately, which also revokes future model use.
+      tx.delete(participantSupportPreferences)
+        .where(
+          and(
+            eq(participantSupportPreferences.campaignId, campaignId),
+            eq(participantSupportPreferences.ownerUserId, String(row.member.userId)),
+          ),
+        )
         .run();
       tx.update(characters)
         .set({ ownerUserId: null, updatedAt: nowIso() })

@@ -45,6 +45,7 @@ import {
   aiDmSeats,
   encounterEvents,
   auditLog,
+  participantSupportPreferences,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
@@ -1785,6 +1786,7 @@ export class CampaignsService {
       tx.delete(timelineEvents).where(eq(timelineEvents.campaignId, id)).run();
       tx.delete(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).run();
       tx.delete(sessionZero).where(eq(sessionZero.campaignId, id)).run();
+      tx.delete(participantSupportPreferences).where(eq(participantSupportPreferences.campaignId, id)).run();
       tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
       tx.delete(npcs).where(eq(npcs.campaignId, id)).run();
       tx.delete(factions).where(eq(factions.campaignId, id)).run();

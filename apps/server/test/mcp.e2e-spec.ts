@@ -19,6 +19,7 @@ const ALL_TOOLS = [
   'list_campaigns',
   'get_campaign_summary',
   'get_session_zero',
+  'get_ai_support_preferences',
   'get_quest',
   'list_quests',
   'list_arcs',
@@ -69,6 +70,8 @@ const ALL_TOOLS = [
   'get_next_session',
   'get_calendar_feed',
   // write
+  'set_my_support_preference',
+  'delete_my_support_preference',
   'create_campaign',
   'delete_campaign',
   'create_quest',
@@ -243,7 +246,8 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
-    expect(tools).toHaveLength(143);
+
+    expect(tools).toHaveLength(146);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -253,6 +257,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const summary = tools.find((t) => t.name === 'get_campaign_summary');
     expect(summary?.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
     expect((summary?.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty('campaignId');
+    const setSupport = tools.find((t) => t.name === 'set_my_support_preference');
+    expect(setSupport?.inputSchema.additionalProperties).toBe(false);
+    expect(setSupport?.inputSchema.required).toEqual(
+      expect.arrayContaining(['campaignId', 'supportText', 'visibility', 'aiUseConsent']),
+    );
 
     const awardXp = tools.find((t) => t.name === 'award_xp');
     const awardProps = awardXp?.inputSchema.properties as Record<string, { type?: string; description?: string }>;
@@ -1093,6 +1102,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const client = await mcpClient(scopedToken);
     const deniedResult = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId: otherCampaignId } });
     expect(deniedResult.isError).toBe(true);
+    const deniedSupports = await client.callTool({
+      name: 'get_ai_support_preferences',
+      arguments: { campaignId: otherCampaignId },
+    });
+    expect(deniedSupports.isError).toBe(true);
 
     // Sanity: the same token, same client, still works against ITS OWN campaign.
     const okResult = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
@@ -1127,6 +1141,78 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(parsed.error.status).toBe(400);
     expect(parsed.error.code).toBe('validation_failed');
     expect(parsed.error.message).toContain('campaignId');
+  });
+
+  it('#877 support tools keep facilitator visibility separate from AI consent and honor revocation immediately', async () => {
+    const client = await mcpClient(dmToken);
+    const route = `/api/v1/campaigns/${campaignId}/session-zero/support-preferences/me`;
+    const privateText = 'MCP_FACILITATOR_ONLY_NO_AI_877';
+    expect((await dmAgent.put(route).send({
+      supportText: privateText,
+      visibility: 'facilitator',
+      aiUseConsent: false,
+    })).status).toBe(200);
+
+    const withoutConsent = await client.callTool({ name: 'get_ai_support_preferences', arguments: { campaignId } });
+    expect(withoutConsent.isError).toBeFalsy();
+    expect(JSON.stringify(parseResult(withoutConsent))).not.toContain(privateText);
+
+    // Strict ownership schema: an MCP caller cannot select another owner.
+    const spoof = await client.callTool({
+      name: 'set_my_support_preference',
+      arguments: {
+        campaignId,
+        supportText: 'spoof',
+        visibility: 'table',
+        aiUseConsent: true,
+        ownerUserId: 'someone-else',
+      },
+    });
+    expect(spoof.isError).toBe(true);
+
+    const noEchoText = 'MCP_WRITE_NO_ECHO_877';
+    const noEcho = await client.callTool({
+      name: 'set_my_support_preference',
+      arguments: { campaignId, supportText: noEchoText, visibility: 'table', aiUseConsent: false },
+    });
+    expect(noEcho.isError).toBeFalsy();
+    expect(JSON.stringify(parseResult(noEcho))).not.toContain(noEchoText);
+    expect(parseResult(noEcho)).toMatchObject({ saved: true, visibility: 'table', aiUseConsent: false });
+
+    const consentedText = 'MCP_EXPLICIT_AI_CONSENT_877';
+    const consented = await client.callTool({
+      name: 'set_my_support_preference',
+      arguments: { campaignId, supportText: consentedText, visibility: 'facilitator', aiUseConsent: true },
+    });
+    expect(consented.isError).toBeFalsy();
+    expect(JSON.stringify(parseResult(consented))).toContain(consentedText);
+    const visible = parseResult(
+      await client.callTool({ name: 'get_ai_support_preferences', arguments: { campaignId } }),
+    );
+    expect(JSON.stringify(visible)).toContain(consentedText);
+
+    const viewerClient = await mcpClient(viewerToken);
+    const memberDenied = await viewerClient.callTool({
+      name: 'get_ai_support_preferences',
+      arguments: { campaignId },
+    });
+    expect(memberDenied.isError).toBe(true);
+    expect(parseResult(memberDenied)).toMatchObject({ error: { status: 403, code: 'forbidden' } });
+
+    // Human visibility stays facilitator-only while consent is revoked. The very
+    // next model-facing read must drop the text; there is no cache/grace period.
+    await dmAgent.put(route).send({ supportText: consentedText, visibility: 'facilitator', aiUseConsent: false });
+    const revoked = parseResult(
+      await client.callTool({ name: 'get_ai_support_preferences', arguments: { campaignId } }),
+    );
+    expect(JSON.stringify(revoked)).not.toContain(consentedText);
+
+    const deleted = await client.callTool({ name: 'delete_my_support_preference', arguments: { campaignId } });
+    expect(deleted.isError).toBeFalsy();
+    const afterDelete = await dmAgent.get(route);
+    expect(afterDelete.status).toBe(200);
+    expect(afterDelete.body).toBeNull();
+    expect(afterDelete.text).toBe('null');
   });
 
   it('structured errors: isError content is JSON {"error":{status,code,message}}', async () => {
@@ -1915,7 +2001,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(viewerGet.isError).toBe(true);
   });
 
-  it('resources/list exposes the static index + a summary/party/recaps URI per accessible campaign (issue #26)', async () => {
+  it('resources/list exposes the static index + per-campaign resources, including consent-filtered supports', async () => {
     const client = await mcpClient(dmToken);
 
     const { resources } = await client.listResources();
@@ -1927,6 +2013,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(uris).toContain(`campfire://campaign/${campaignId}/party`);
     expect(uris).toContain(`campfire://campaign/${campaignId}/recaps`);
     expect(uris).toContain(`campfire://campaign/${campaignId}/session-zero`);
+    expect(uris).toContain(`campfire://campaign/${campaignId}/ai-support-preferences`);
 
     // The URI templates themselves are advertised via resources/templates/list.
     const { resourceTemplates } = await client.listResourceTemplates();
@@ -1935,6 +2022,25 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(templates).toContain('campfire://campaign/{campaignId}/party');
     expect(templates).toContain('campfire://campaign/{campaignId}/recaps');
     expect(templates).toContain('campfire://campaign/{campaignId}/session-zero');
+    expect(templates).toContain('campfire://campaign/{campaignId}/ai-support-preferences');
+  });
+
+  it('#877 AI support resource uses the same consent filter as the tool', async () => {
+    const client = await mcpClient(dmToken);
+    const route = `/api/v1/campaigns/${campaignId}/session-zero/support-preferences/me`;
+    const text = 'MCP_RESOURCE_SUPPORT_877';
+    await dmAgent.put(route).send({ supportText: text, visibility: 'facilitator', aiUseConsent: false });
+    const hidden = await client.readResource({ uri: `campfire://campaign/${campaignId}/ai-support-preferences` });
+    expect(JSON.stringify(hidden.contents)).not.toContain(text);
+
+    await dmAgent.put(route).send({ supportText: text, visibility: 'facilitator', aiUseConsent: true });
+    const visible = await client.readResource({ uri: `campfire://campaign/${campaignId}/ai-support-preferences` });
+    expect(JSON.stringify(visible.contents)).toContain(text);
+
+    const viewerClient = await mcpClient(viewerToken);
+    await expect(
+      viewerClient.readResource({ uri: `campfire://campaign/${campaignId}/ai-support-preferences` }),
+    ).rejects.toThrow();
   });
 
   it('reading campfire://campaigns and campfire://campaign/{id}/summary returns the same JSON as the read tools (issue #26)', async () => {
