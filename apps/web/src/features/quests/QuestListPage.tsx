@@ -1,6 +1,6 @@
 /**
  * Quest list/board — design/claude-design/Campfire.dc.html "Quests" screen (~L541-568).
- * One card per root quest with inline objectives + subquest rows; DM gets "+ New quest".
+ * One card per root quest with bounded objective progress + subquest rows; DM gets "+ New quest".
  *
  * Route this page needs (wired by the app orchestrator, not by this feature):
  *   /c/:campaignId/quests  →  features/quests/QuestListPage.tsx (default export)
@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
-import type { Quest, QuestChanges } from '@campfire/schema';
+import type { Quest, QuestChanges, QuestListItem } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
@@ -63,11 +63,6 @@ function ChangeBadge({ quest, kind }: { quest: Quest; kind: ChangeKind | undefin
   );
 }
 
-// Quest objectives aren't included on the list endpoint (GET /campaigns/:id/quests returns
-// bare Quest rows, no `objectives`) — the design's per-quest objective checklist on this
-// screen can't be rendered here without an extra fetch. We show status + subquests only;
-// objective ticking still lives on the Quest detail screen. See report deviations.
-
 export default function QuestListPage() {
   const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -76,7 +71,7 @@ export default function QuestListPage() {
   const role = roleIn(cid);
   const isDm = role === 'dm';
 
-  const [quests, setQuests] = useState<Quest[]>([]);
+  const [quests, setQuests] = useState<QuestListItem[]>([]);
   const [changes, setChanges] = useState<Map<number, ChangeKind>>(new Map());
   const [changesSince, setChangesSince] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -92,7 +87,7 @@ export default function QuestListPage() {
       // board — never let it fail the whole page, so it's fetched alongside but
       // its own failure just drops the badges (empty change map).
       const [list, changeRes] = await Promise.all([
-        api.get<Quest[]>(`${API}/campaigns/${cid}/quests`),
+        api.get<QuestListItem[]>(`${API}/campaigns/${cid}/quests`),
         api.get<QuestChanges>(`${API}/campaigns/${cid}/quests/changes`).catch(() => null),
       ]);
       setQuests(list);
@@ -139,7 +134,7 @@ export default function QuestListPage() {
   // (cycle). Children exclude anything that is itself a root, so a cycle surfaces as
   // two standalone cards rather than an infinite/duplicated nesting.
   const byId = new Map(quests.map((q) => [q.id, q]));
-  const isRoot = (q: Quest): boolean => {
+  const isRoot = (q: QuestListItem): boolean => {
     if (q.parentId == null) return true;
     const seen = new Set<number>([q.id]);
     let cur = byId.get(q.parentId);
@@ -188,11 +183,12 @@ export default function QuestListPage() {
         roots.map((q) => {
           const kids = childrenOf(q.id);
           return (
-            <div key={q.id} className="card elev-sm">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div key={q.id} data-testid={`quest-card-${q.id}`} className="card elev-sm quest-list-card">
+              <div className="quest-card-heading">
                 <QuestStatusBadge status={q.status} />
                 <Link
                   to={`/c/${cid}/quests/${q.id}`}
+                  className="quest-card-title"
                   style={{
                     color: 'var(--color-text)',
                     fontFamily: 'var(--font-heading)',
@@ -221,12 +217,48 @@ export default function QuestListPage() {
                   </span>
                 )}
               </div>
+              {q.status === 'active' && (
+                <div className="quest-card-progress">
+                  <div className="quest-progress-summary">
+                    <span>{t('quests.objectiveProgress', q.objectiveProgress)}</span>
+                    {q.objectiveProgress.total > 0 && (
+                      <span
+                        className="quest-progress-track"
+                        role="progressbar"
+                        aria-label={t('quests.objectiveProgressLabel', { title: q.title })}
+                        aria-valuemin={0}
+                        aria-valuemax={q.objectiveProgress.total}
+                        aria-valuenow={q.objectiveProgress.completed}
+                        aria-valuetext={t('quests.objectiveProgress', q.objectiveProgress)}
+                      >
+                        <span
+                          className="quest-progress-fill"
+                          style={{ width: `${(q.objectiveProgress.completed / q.objectiveProgress.total) * 100}%` }}
+                        />
+                      </span>
+                    )}
+                  </div>
+                  {q.nextObjective && (
+                    <p className="quest-next-step">
+                      <strong>{t('quests.continue')}</strong>{' '}
+                      <span>{q.nextObjective.text}</span>
+                    </p>
+                  )}
+                  <Link
+                    to={`/c/${cid}/quests/${q.id}`}
+                    className="btn btn-secondary quest-detail-link"
+                    aria-label={t('quests.viewDetailsLabel', { title: q.title })}
+                  >
+                    {t('quests.viewDetails')}
+                  </Link>
+                </div>
+              )}
               {kids.map((s) => (
-                <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 28, paddingLeft: 4 }}>
+                <div key={s.id} className="quest-subquest-row">
                   <span className="text-muted">↳</span>
                   <Link
                     to={`/c/${cid}/quests/${s.id}`}
-                    style={{ color: 'var(--color-neutral-200)', fontSize: 13.5, textDecoration: 'none' }}
+                    style={{ color: 'var(--color-neutral-200)', fontSize: 13.5, textDecoration: 'none', overflowWrap: 'anywhere', minWidth: 0 }}
                   >
                     {s.title}
                   </Link>
