@@ -1516,6 +1516,17 @@ export interface RuleSystemAdapter {
    * (a free function) applies an injected roller to it.
    */
   attributeDicePool?(score: number): AttributeDicePool;
+  /**
+   * Whether this rule system is field-compatible with the D&D Beyond public-sheet importer
+   * (issue #714). The importer maps a DDB sheet into the D&D-5e character shape (six
+   * abilities, 5e AC/HP math, 5e conditions, 5e skills/saves), so importing into a
+   * Pathfinder/OSR/13th-Age/Open-Legend campaign would silently produce a character whose
+   * numbers belong to a different game. Only the 5e adapter opts in here; every other
+   * adapter leaves it undefined (treated as false), so `ddbImportSupported()` hides and
+   * rejects the import for them. This is the capability the UI checks to SHOW the import
+   * affordance and the server checks to REJECT a direct-API request that bypasses the UI.
+   */
+  readonly supportsDdbImport?: boolean;
 }
 
 /**
@@ -1539,6 +1550,13 @@ function dnd5eDexScore(abilities: Record<string, unknown> | null | undefined): n
 
 /** Family id of the built-in D&D 5e adapter (the default). */
 export const DND5E_ADAPTER_ID = 'dnd5e';
+/**
+ * Rule-pack slug the Open5e importer installs the D&D 5e SRD under — what a campaign's
+ * `ruleSystem` holds for a 5e campaign. Registered alongside the family id in the ADAPTERS
+ * map so a campaign storing the pack slug resolves to the 5e adapter explicitly (not via
+ * the unknown-slug fallback), which is what the DDB-import compatibility gate keys on.
+ */
+export const DND5E_PACK_SLUG = 'open5e-srd';
 
 export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
@@ -1578,6 +1596,9 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     const hp = d.hitPoints ?? d.hit_points ?? d.hp;
     return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
   },
+  // The D&D Beyond importer produces a 5e-shaped character (5e abilities/AC/HP/conditions),
+  // so 5e is the one system that is field-compatible with it (issue #714).
+  supportsDdbImport: true,
 };
 
 // ---------- Open Legend adapter (issue #299) ----------
@@ -2073,6 +2094,10 @@ export * from './osr-adapter';
  */
 const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [DND5E_ADAPTER_ID]: Dnd5eAdapter,
+  // Pack slug the Open5e importer installs the 5e SRD under — campaigns store the slug in
+  // `ruleSystem`, so it must resolve explicitly (not via the unknown-slug fallback) for the
+  // DDB-import compatibility gate to recognize a real 5e campaign (issue #714).
+  [DND5E_PACK_SLUG]: Dnd5eAdapter,
   // Open Legend (issue #299): registered under BOTH its family id and the pack slug a
   // campaign's `ruleSystem` actually holds (there is no 5e-style fallback for a non-default
   // system — an installed Open Legend campaign stores the pack slug, which must resolve here).
@@ -2100,6 +2125,25 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
 export function ruleSystemAdapter(ruleSystem?: string | null): RuleSystemAdapter {
   if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem];
   return Dnd5eAdapter;
+}
+
+/**
+ * Whether the D&D Beyond public-sheet import (issue #18) should be offered for a campaign
+ * whose `ruleSystem` is the given slug (issue #714). The importer maps a DDB sheet into the
+ * D&D-5e character shape, so it is only field-compatible with an explicitly-5e campaign.
+ *
+ * "Explicitly" matters: a homebrew campaign (empty/undefined slug) falls back to the 5e
+ * adapter for COMBAT math, but that fallback is a behaviour default, not a declaration that
+ * the campaign is running D&D 5e. The issue calls for hiding the import unless an explicitly
+ * compatible D&D pack is selected, so an empty/unknown slug is treated as INCOMPATIBLE here
+ * even though it resolves to the 5e adapter downstream. Only a slug registered in the adapter
+ * map AND whose adapter opts in via `supportsDdbImport` returns true.
+ */
+export function ddbImportSupported(ruleSystem?: string | null): boolean {
+  if (!ruleSystem) return false; // homebrew / none selected
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter) return false; // unrecognized slug — don't trust an unknown pack
+  return adapter.supportsDdbImport === true;
 }
 
 // ---------- generic uploaded rule packs (issue #19) ----------
