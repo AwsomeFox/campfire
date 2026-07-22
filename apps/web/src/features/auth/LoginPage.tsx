@@ -5,7 +5,7 @@
  * flame mark on a radial-gradient ground — extended into a two-column landing on
  * wide screens while preserving one semantic intro -> auth -> pitch order at
  * every viewport. SSO is first when OIDC is configured; local username/password
- * is primary when OIDC is off and secondary/collapsible when both are available.
+ * is the primary option when OIDC is off and secondary/collapsible when both are available.
  */
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
@@ -140,7 +140,7 @@ function LocalLoginForm({
   focusOnMount?: boolean;
 }) {
   return (
-    <form onSubmit={onSubmit} className="flex flex-col gap-3" aria-describedby={error ? 'login-error' : undefined}>
+    <form onSubmit={onSubmit} className="flex flex-col gap-3">
       <div className="field">
         <label htmlFor="username">Username</label>
         <input
@@ -151,6 +151,7 @@ function LocalLoginForm({
           autoComplete="username"
           autoFocus={primary || focusOnMount}
           aria-invalid={error ? true : undefined}
+          aria-describedby={error ? 'login-error' : undefined}
           required
         />
       </div>
@@ -164,6 +165,7 @@ function LocalLoginForm({
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="current-password"
           aria-invalid={error ? true : undefined}
+          aria-describedby={error ? 'login-error' : undefined}
           required
         />
       </div>
