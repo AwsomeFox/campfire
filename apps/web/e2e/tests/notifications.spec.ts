@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import { test, expect, type BrowserContext, type Page, type Route } from '@playwright/test';
 import type { Notification } from '@campfire/schema';
 import { seed, stateFor } from './seed';
@@ -31,6 +32,119 @@ async function closePanelFromBackdrop(page: Page) {
 
 test.describe('shared notification controller', () => {
   test.use({ storageState: stateFor('player'), serviceWorkers: 'block' });
+
+  test('is a named modal with an accurate item announcement and complete keyboard dismissal', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 2 } }));
+    await page.route(LIST_URL, (route) => route.fulfill({
+      json: [
+        notification('The western road changed', 9891),
+        notification('The eastern road changed', 9892),
+      ],
+    }));
+
+    await page.goto(`/c/${campaignId}`);
+    const bell = page.getByRole('button', { name: 'Notifications (2 unread)' });
+    await expect(bell).toHaveAttribute('aria-haspopup', 'dialog');
+    await expect(bell).toHaveAttribute('aria-expanded', 'false');
+    await expect(bell).not.toHaveAttribute('aria-controls');
+
+    await bell.focus();
+    await page.keyboard.press('Enter');
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    const markAllRead = dialog.getByRole('button', { name: 'Mark all read' });
+    const firstItem = dialog.getByRole('button', { name: /The western road changed/ });
+    const lastItem = dialog.getByRole('button', { name: /The eastern road changed/ });
+
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute('aria-modal', 'true');
+    await expect(dialog).toHaveAccessibleDescription('2 items.');
+    await expect(dialog.getByRole('status')).toHaveText('2 items.');
+    await expect(markAllRead).toBeFocused();
+    await expect(bell).toHaveAttribute('aria-expanded', 'true');
+    const controlledId = await bell.getAttribute('aria-controls');
+    expect(controlledId).toBeTruthy();
+    await expect(dialog).toHaveAttribute('id', controlledId!);
+    await expect.poll(() => bell.evaluate((element) => element.closest('[inert]') !== null)).toBe(true);
+
+    await page.keyboard.press('Tab');
+    await expect(firstItem).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(lastItem).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(markAllRead).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(lastItem).toBeFocused();
+
+    const accessibilityScan = await new AxeBuilder({ page }).include('[role="dialog"]').analyze();
+    expect(accessibilityScan.violations).toEqual([]);
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(bell).toBeFocused();
+    await expect(bell).toHaveAttribute('aria-expanded', 'false');
+    await expect(bell).not.toHaveAttribute('aria-controls');
+    await expect.poll(() => bell.evaluate((element) => element.closest('[inert]') !== null)).toBe(false);
+  });
+
+  test('keeps the empty dialog focus-safe and dismissible at a mobile viewport', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 0 } }));
+    await page.route(LIST_URL, (route) => route.fulfill({ json: [] }));
+
+    await page.goto(`/c/${campaignId}`);
+    const bell = page.getByRole('button', { name: 'Notifications', exact: true });
+    await bell.focus();
+    await page.keyboard.press('Enter');
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toBeFocused();
+    await expect(dialog).toHaveAccessibleDescription('0 items.');
+    await expect(dialog.getByRole('status')).toHaveText('0 items.');
+    await expect(dialog.getByText('Nothing yet')).toBeVisible();
+
+    const box = await dialog.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(12);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(363);
+    expect(box!.y).toBeGreaterThanOrEqual(12);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(655);
+
+    await page.keyboard.press('Tab');
+    await expect(dialog).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(dialog).toBeFocused();
+
+    const accessibilityScan = await new AxeBuilder({ page }).include('[role="dialog"]').analyze();
+    expect(accessibilityScan.violations).toEqual([]);
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(bell).toBeFocused();
+
+    await bell.click();
+    await expect(dialog).toBeVisible();
+    await page.mouse.click(2, 2);
+    await expect(dialog).toHaveCount(0);
+    await expect(bell).toBeFocused();
+  });
+
+  test('announces the same notification load failure that it displays', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 0 } }));
+    await page.route(LIST_URL, (route) => route.fulfill({ status: 503, json: { message: 'Unavailable' } }));
+
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: 'Notifications', exact: true }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog.locator('p').filter({ hasText: "Couldn't load notifications." })).toHaveText("Couldn't load notifications.");
+    await expect(dialog.getByRole('status')).toHaveText("Couldn't load notifications.");
+    await expect(dialog).toHaveAccessibleDescription("Couldn't load notifications.");
+  });
 
   test('renders one responsive bell and does not overlap route refreshes', async ({ page }) => {
     const { campaignId } = seed();

@@ -2,13 +2,13 @@
  * Campfire UI primitives — mirror the design package (design/tokens.html).
  * Feature screens compose these; do not restyle them locally.
  */
-import { forwardRef, useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { forwardRef, useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { GameIcon } from './GameIcon';
 import { chipClass, type ChipVariant } from './chipVariants';
 export type { ChipVariant } from './chipVariants';
 
-export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <section className={`cf-card p-5 ${className}`}>{children}</section>;
+export function Card({ children, className = '', ...props }: HTMLAttributes<HTMLElement> & { children: ReactNode }) {
+  return <section className={`cf-card p-5 ${className}`} {...props}>{children}</section>;
 }
 
 export function Inset({ children, className = '' }: { children: ReactNode; className?: string }) {
@@ -50,9 +50,11 @@ export const Btn = forwardRef<HTMLButtonElement, BtnProps>(
   },
 );
 
-export function TextInput({ className = '', ...props }: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={`cf-input ${className}`} {...props} />;
-}
+export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
+  function TextInput({ className = '', ...props }, ref) {
+    return <input ref={ref} className={`cf-input ${className}`} {...props} />;
+  },
+);
 
 export const TextArea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
   function TextArea({ className = '', ...props }, ref) {

@@ -19,12 +19,14 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import type { Notification } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
-import { Btn, EmptyState, Skeleton } from '../../components/ui';
+import { Btn, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
 
 const POLL_MS = 60_000;
+const NOTIFICATIONS_DIALOG_ID = 'notifications-dialog';
+const NOTIFICATIONS_COUNT_ID = 'notifications-dialog-item-count';
 
 type CountSnapshot = {
   count: number;
@@ -85,6 +87,8 @@ function parseSnapshot(value: string | null): CountSnapshot | null {
 function typeIcon(type: Notification['type']): string {
   switch (type) {
     case 'recap_posted':
+    case 'recap_share_enabled':
+    case 'recap_share_extended':
       return 'open-book';
     case 'note_reply':
       return 'chat-bubble';
@@ -510,11 +514,14 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
 /** Passive trigger. Layout renders exactly one at the active breakpoint. */
 export function NotificationsBell() {
-  const { count, togglePanel } = useNotifications();
+  const { count, open, togglePanel } = useNotifications();
   return (
     <button
       type="button"
       aria-label={count > 0 ? `Notifications (${count} unread)` : 'Notifications'}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-controls={open ? NOTIFICATIONS_DIALOG_ID : undefined}
       onClick={togglePanel}
       className="relative flex items-center justify-center h-8 w-8 rounded-full"
       style={{ color: 'var(--color-neutral-300)', border: '1px solid var(--color-divider)' }}
@@ -549,6 +556,9 @@ export function NotificationsPanel() {
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
   const { count, items, loadError, closePanel, markRead, markAllRead } = notifications;
   const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
+  const itemCountAnnouncement = items === null
+    ? (loadError ? "Couldn't load notifications." : 'Loading items.')
+    : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`;
 
   return (
     <div
@@ -557,11 +567,13 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
       onClick={closePanel}
     >
       <div
+        id={NOTIFICATIONS_DIALOG_ID}
         ref={dialogRef}
         className="cf-card elev-lg fixed flex flex-col"
         role="dialog"
         aria-modal="true"
         aria-label="Notifications"
+        aria-describedby={NOTIFICATIONS_COUNT_ID}
         style={{
           top: 12,
           right: 12,
@@ -578,6 +590,15 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
         >
           <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-heading)' }}>
             Notifications
+          </span>
+          <span
+            id={NOTIFICATIONS_COUNT_ID}
+            className="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {itemCountAnnouncement}
           </span>
           <div className="flex-1" />
           {count > 0 && (
@@ -598,7 +619,15 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
             </p>
           )}
           {items !== null && items.length === 0 && (
-            <EmptyState icon="ringing-bell" title="Nothing yet" hint="Recaps, replies, and session plans will land here." />
+            <div className="cf-inset border-dashed p-6 text-center space-y-1">
+              <p className="flex justify-center text-[var(--color-neutral-500)]">
+                <GameIcon slug="ringing-bell" size={30} reserveSpace />
+              </p>
+              <p className="text-sm font-semibold text-[var(--color-neutral-300)]">Nothing yet</p>
+              <p className="text-xs text-[var(--color-neutral-400)]">
+                Recaps, replies, and session plans will land here.
+              </p>
+            </div>
           )}
           {items?.map((notification) => (
             <button
@@ -637,7 +666,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
                     {notification.body}
                   </span>
                 )}
-                <span className="block text-[10.5px] mt-0.5" style={{ color: 'var(--color-neutral-600)' }}>
+                <span className="block text-[10.5px] mt-0.5" style={{ color: 'var(--color-neutral-400)' }}>
                   {timeAgo(notification.createdAt)}
                 </span>
               </span>

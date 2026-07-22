@@ -161,6 +161,22 @@ export function writeOldSchemaDb(dataDir: string): void {
       updated_at TEXT NOT NULL
     );
 
+    -- oauth_access_tokens: pre-#679 shape, before family/replay state.
+    CREATE TABLE oauth_access_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_hash TEXT NOT NULL UNIQUE,
+      refresh_hash TEXT UNIQUE,
+      client_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      scope TEXT,
+      resource TEXT,
+      role_scope TEXT NOT NULL DEFAULT 'dm',
+      campaign_id INTEGER,
+      expires_at TEXT NOT NULL,
+      refresh_expires_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
     -- proposals: no snapshot.
     CREATE TABLE proposals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,6 +303,9 @@ export function writeOldSchemaDb(dataDir: string): void {
   sqlite.prepare(
     "INSERT INTO api_tokens (user_id, name, scope, token_hash, token_prefix, created_at, updated_at) VALUES (1, 'legacy token', 'dm', 'legacy-token-hash', 'legacy', ?, ?)",
   ).run(now, now);
+  sqlite.prepare(
+    "INSERT INTO oauth_access_tokens (token_hash, refresh_hash, client_id, user_id, scope, role_scope, campaign_id, expires_at, refresh_expires_at, created_at) VALUES ('legacy-access-hash', 'legacy-refresh-hash', 'legacy-client', 1, 'mcp dm', 'dm', 1, '2026-02-01T00:00:00.000Z', '2026-04-01T00:00:00.000Z', ?)",
+  ).run(now);
   sqlite.prepare(
     "INSERT INTO proposals (campaign_id, entity_type, action, payload, proposer, created_at, updated_at) VALUES (1, 'quest', 'update', '{}', 'legacy-player', ?, ?)",
   ).run(now, now);

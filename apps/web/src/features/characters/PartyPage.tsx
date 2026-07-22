@@ -5,8 +5,8 @@
  * character (backup PC, familiar, companion) — the API allows it, so the UI no longer
  * silently caps a player at a single owned character (issue #129).
  */
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import type { Character, CampaignMember } from '@campfire/schema';
 import { levelForXp } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -19,6 +19,7 @@ import { STATUS_LABEL, StatusTag } from './status';
 export default function PartyPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
+  const [searchParams, setSearchParams] = useSearchParams();
   const { me, roleIn } = useAuth();
   const role = roleIn(id);
   const isDm = role === 'dm';
@@ -28,7 +29,22 @@ export default function PartyPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [awarding, setAwarding] = useState(false);
+  const awardXpRequested = searchParams.get('action') === 'award-xp';
+  // Keep the URL authoritative so Back/Forward closes and reopens the deep-linked
+  // form instead of leaving local state out of sync with browser history.
+  const awarding = isDm && awardXpRequested;
+
+  function setAwardingOpen(open: boolean) {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (open) next.set('action', 'award-xp');
+        else if (next.get('action') === 'award-xp') next.delete('action');
+        return next;
+      },
+      { replace: !open },
+    );
+  }
 
   const load = useCallback(async () => {
     setError(null);
@@ -80,7 +96,7 @@ export default function PartyPage() {
         <h1 className="text-2xl font-extrabold text-white">Party</h1>
         <div className="flex-1" />
         {isDm && !awarding && characters.length > 0 && (
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setAwarding(true)}>
+          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setAwardingOpen(true)}>
             ✦ Award XP
           </Btn>
         )}
@@ -97,8 +113,11 @@ export default function PartyPage() {
         <AwardXpForm
           campaignId={id}
           characters={characters}
-          onCancel={() => setAwarding(false)}
-          onAwarded={() => { setAwarding(false); void load(); }}
+          onCancel={() => setAwardingOpen(false)}
+          onAwarded={() => {
+            setAwardingOpen(false);
+            void load();
+          }}
         />
       )}
 
@@ -265,6 +284,7 @@ function AwardXpForm({
   onCancel: () => void;
   onAwarded: () => void;
 }) {
+  const amountInputRef = useRef<HTMLInputElement>(null);
   const [amount, setAmount] = useState('');
   const [includeNonActive, setIncludeNonActive] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(
@@ -272,6 +292,13 @@ function AwardXpForm({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Route-driven hand-offs should land keyboard users directly in the task.
+  // A frame delay wins over route/layout focus restoration after navigation.
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => amountInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   // Polling can refresh XP/status while this form is open. Keep the preview live,
   // drop removed characters, and never retain a newly non-active recipient unless
@@ -329,6 +356,7 @@ function AwardXpForm({
       <form id="party-xp-form" onSubmit={submit} className="space-y-4">
         <div className="w-40">
           <TextInput
+            ref={amountInputRef}
             type="number"
             min={1}
             max={1_000_000}

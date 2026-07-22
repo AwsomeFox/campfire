@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   current_location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
   danger_level TEXT NOT NULL DEFAULT 'low',
   dm_controls_progression INTEGER NOT NULL DEFAULT 0,
+  public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1,
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
@@ -236,9 +237,14 @@ CREATE TABLE IF NOT EXISTS session_shares (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  label TEXT NOT NULL DEFAULT '',
   created_by TEXT NOT NULL DEFAULT '',
   token_hash TEXT NOT NULL UNIQUE,
   token_prefix TEXT NOT NULL,
+  expires_at TEXT,
+  access_count INTEGER NOT NULL DEFAULT 0,
+  first_accessed_at TEXT,
+  last_accessed_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -506,6 +512,7 @@ CREATE TABLE IF NOT EXISTS oauth_access_tokens (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token_hash TEXT NOT NULL UNIQUE,
   refresh_hash TEXT UNIQUE,
+  family_id TEXT NOT NULL,
   client_id TEXT NOT NULL,
   user_id INTEGER NOT NULL,
   scope TEXT,
@@ -514,6 +521,9 @@ CREATE TABLE IF NOT EXISTS oauth_access_tokens (
   campaign_id INTEGER,
   expires_at TEXT NOT NULL,
   refresh_expires_at TEXT,
+  refresh_consumed_at TEXT,
+  revoked_at TEXT,
+  family_revoked_at TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -779,6 +789,7 @@ CREATE INDEX IF NOT EXISTS idx_session_attendees_session ON session_attendees(se
 CREATE INDEX IF NOT EXISTS idx_session_attendees_character ON session_attendees(character_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_session ON session_shares(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_session_shares_expiry ON session_shares(expires_at);
 CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign ON scheduled_sessions(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_session_rsvps_schedule ON session_rsvps(scheduled_session_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_ics_token ON campaigns(ics_token);
@@ -808,6 +819,7 @@ CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id
 CREATE INDEX IF NOT EXISTS idx_campaign_invites_campaign ON campaign_invites(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_user ON oauth_access_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_client ON oauth_auth_codes(client_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_campaign ON proposals(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);

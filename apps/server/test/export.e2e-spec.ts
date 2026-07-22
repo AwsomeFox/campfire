@@ -43,9 +43,12 @@ describe('export (e2e, real cookie sessions)', () => {
       .send({ title: 'Secret Quest', dmSecret: 'the vault code is 1234' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({ name: 'Mysterious Stranger', dmSecret: 'is a dragon' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/locations`).send({ name: 'Hidden Cave', dmSecret: 'trap inside' });
-    await dmAgent
+    const recap = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/sessions`)
       .send({ number: 1, recap: 'The party arrived.', dmSecret: 'next week: the betrayal' });
+    await dmAgent
+      .post(`/api/v1/sessions/${recap.body.id}/shares`)
+      .send({ label: 'Must not leave the server', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() });
     await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .send({ name: 'Cursed Paladin', dmSecret: 'secretly cursed' });
@@ -105,6 +108,10 @@ describe('export (e2e, real cookie sessions)', () => {
     // Issue #59: characters and sessions carry dmSecret too — included in the dm export.
     expect(res.body.sessions.length).toBe(1);
     expect(res.body.sessions[0].dmSecret).toBe('next week: the betrayal');
+    expect(res.body.campaign.publicRecapSharingEnabled).toBe(true);
+    expect(res.body.sessionShares).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toMatch(/cf_share_[0-9a-f]{48}/);
+    expect(JSON.stringify(res.body)).not.toContain('tokenHash');
     expect(res.body.characters[0].dmSecret).toBe('secretly cursed');
     expect(Array.isArray(res.body.members)).toBe(true);
     expect(Array.isArray(res.body.audit)).toBe(true);

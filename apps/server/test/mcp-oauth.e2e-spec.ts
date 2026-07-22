@@ -305,7 +305,7 @@ describe('mcp oauth authorization flow (e2e)', () => {
 
   it('refresh_token grant rotates and issues a working access token', async () => {
     const clientId = await registerClient();
-    const tokens = await runFlow({ clientId });
+    const tokens = await runFlow({ clientId, campaignId: String(campaignId) });
 
     const refreshRes = await request(server).post('/oauth/token').type('form').send({
       grant_type: 'refresh_token',
@@ -325,6 +325,54 @@ describe('mcp oauth authorization flow (e2e)', () => {
       grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId,
     });
     expect(reuse.status).toBe(400);
+    expect(reuse.body).toEqual({ error: 'invalid_grant', error_description: 'Refresh token not found' });
+
+    // Reuse is treated as a compromised refresh family: the successful
+    // successor is revoked too, and one token-free audit event is retained.
+    const revokedDescendant = await request(server)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${refreshRes.body.access_token}`)
+      .set('Content-Type', 'application/json')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 1 });
+    expect(revokedDescendant.status).toBe(401);
+
+    const repeatedReplay = await request(server).post('/oauth/token').type('form').send({
+      grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId,
+    });
+    expect(repeatedReplay.status).toBe(400);
+    expect(repeatedReplay.body).toEqual({ error: 'invalid_grant', error_description: 'Refresh token not found' });
+
+    const audit = await agent.get(`/api/v1/campaigns/${campaignId}/audit?limit=200`);
+    const replays = audit.body.filter((row: { action: string }) => row.action === 'oauth.refresh_replay');
+    expect(replays).toHaveLength(1);
+    expect(replays[0]).toMatchObject({
+      actor: `oauth:${clientId}`,
+      entityType: 'oauth_token',
+      campaignId,
+    });
+    expect(replays[0].detail).not.toContain(tokens.refresh_token);
+    expect(replays[0].detail).not.toContain(refreshRes.body.refresh_token);
+  });
+
+  it('a different client cannot claim a refresh token or prevent its rightful rotation', async () => {
+    const clientId = await registerClient();
+    const otherClientId = await registerClient();
+    const tokens = await runFlow({ clientId });
+
+    const wrongClient = await request(server).post('/oauth/token').type('form').send({
+      grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: otherClientId,
+    });
+    expect(wrongClient.status).toBe(400);
+    expect(wrongClient.body).toEqual({
+      error: 'invalid_grant',
+      error_description: 'Refresh token was issued to a different client',
+    });
+
+    const rightfulClient = await request(server).post('/oauth/token').type('form').send({
+      grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId,
+    });
+    expect(rightfulClient.status).toBe(200);
+    expect(rightfulClient.body.refresh_token).toMatch(/^cf_ref_/);
   });
 
   // ---------- role / campaign caps ----------
