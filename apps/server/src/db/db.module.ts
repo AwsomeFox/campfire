@@ -335,6 +335,26 @@ function migrateCampaignsTableForIcsToken(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for issue #554: `campaigns.ics_token_expires_at` didn't exist on
+ * pre-#554 DBs. Plain nullable ADD COLUMN — no table rebuild needed, same shape
+ * as migrateCampaignsTableForIcsToken above. Existing rows (which have no
+ * expiry) default to NULL and keep working until the DM rotates; rotating then
+ * stamps a fresh expiry on the new token (see SchedulingService.rotateFeed).
+ * New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForIcsTokenExpiresAt(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'ics_token_expires_at')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN ics_token_expires_at TEXT');
+}
+
+/**
  * Migration for DBs created before per-campaign storage quotas (issue #24):
  * `campaigns.storage_quota_bytes` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForIcsToken above. Existing
@@ -1264,6 +1284,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0046_campaign_members_user_fk', run: migrateCampaignMembersTableForUserFk },
   { name: '0047_comments_editor_provenance', run: migrateCommentsTableForEditorProvenance },
   { name: '0048_dice_rolls_terms', run: migrateDiceRollsTableForTerms },
+  { name: '0049_campaigns_ics_token_expires_at', run: migrateCampaignsTableForIcsTokenExpiresAt },
 ];
 
 /**

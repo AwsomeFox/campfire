@@ -29,6 +29,12 @@ export const campaigns = sqliteTable('campaigns', {
   // the feed URL can be re-displayed to members — see modules/sessions/scheduling.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   icsToken: text('ics_token'),
+  // Issue #554: absolute expiry (ISO UTC) after which the feed token stops authorizing
+  // the public .ics endpoint (a leaked URL self-destructs on a schedule). Nullable for
+  // back-compat — legacy rows written before this column existed have no expiry and keep
+  // working until the DM rotates (which always stamps a fresh expiry). Cleared alongside
+  // icsToken on disableFeed. See migrateCampaignsTableForIcsTokenExpiresAt.
+  icsTokenExpiresAt: text('ics_token_expires_at'),
   // Per-campaign upload quota in bytes, or NULL for no limit (issue #24). Admin-set
   // via the storage console; enforced on attachment upload. Nullable in older DBs
   // pre-migration; see db/db.module.ts ALTER TABLE note.
