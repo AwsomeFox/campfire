@@ -739,9 +739,16 @@ export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
 // may read it (the feed only exposes schedule data members already see);
 // enable/rotate/disable is DM-only.
+//
+// Issue #554: every issued token carries an `expiresAt` (ISO UTC). After it
+// passes, the public .ics endpoint stops serving that token (404) — a leaked
+// URL self-destructs on a schedule rather than living forever. Members see the
+// expiry so the UI can nudge the DM to rotate before it lapses. Null on legacy
+// rows written before #554 (no expiry) and after disable (no live token).
 export const CalendarFeed = z.object({
   token: z.string().nullable(),
   url: z.string().nullable(), // relative feed path, e.g. /api/v1/calendar/<token>.ics
+  expiresAt: z.string().nullable(), // ISO UTC when the current token stops authorizing the feed
 });
 export type CalendarFeed = z.infer<typeof CalendarFeed>;
 
