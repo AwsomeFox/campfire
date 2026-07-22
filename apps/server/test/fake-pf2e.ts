@@ -204,7 +204,7 @@ function parseType(q: unknown): string {
 export async function startFakePf2e(): Promise<FakePf2e> {
   const app = express();
 
-  app.get('/aon/_search', (req, res) => {
+  app.get(['/aon/_search', '/aonsf/_search'], (req, res) => {
     const type = parseType(req.query.q);
     const rows = BY_TYPE[type] ?? [];
     const from = Number(req.query.from ?? '0') || 0;

@@ -1,4 +1,4 @@
-import { fetchPf2eSection, entryTypeForSection, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
+import { fetchPf2eSection, fetchSf2eSection, entryTypeForSection, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
 import { startFakePf2e, startFakePf2eDuplicates, startFakePf2eMixed, type FakePf2e } from '../fake-pf2e';
 
 /**
@@ -32,6 +32,12 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(data.abilityMods).toEqual({ strength: 0, dexterity: 3, constitution: 1, intelligence: 0, wisdom: -1, charisma: 1 });
     expect(data.saves).toEqual({ fortitude: 5, reflex: 7, will: 3 });
     expect(data.traits).toEqual(['Goblin', 'Humanoid']);
+  });
+
+  it('fetches sf2e section using fetchSf2eSection', async () => {
+    const { entries } = await fetchSf2eSection(fake.baseUrl, 'creatures', silentLogger);
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries[0].name).toBe('Goblin Warrior');
   });
 
   it('strips art (image fields never make it into dataJson or body)', async () => {

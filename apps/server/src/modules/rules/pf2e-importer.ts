@@ -37,6 +37,11 @@ export const PF2E_PACK_NAME = 'Pathfinder 2e (Archives of Nethys)';
 /** Fallback pack-level license when an entry doesn't report its own (AoN OGC is OGL/ORC). */
 export const PF2E_DEFAULT_LICENSE = 'OGL / ORC';
 
+export const SF2E_DEFAULT_BASE_URL = 'https://elasticsearch.aonprd.com';
+export const SF2E_INDEX = 'aonsf';
+export const SF2E_PACK_NAME = 'Starfinder 2e (Archives of Nethys)';
+export const SF2E_DEFAULT_LICENSE = 'ORC / OGL';
+
 // Mirrors the Open5e importer's caps/timeouts (see open5e-importer.ts for the rationale):
 // large sections (creatures/spells/equipment run into the thousands) are page-fetched under
 // a hard per-section entry cap and a page cap so one install can't pull unbounded data.
@@ -417,6 +422,7 @@ export async function fetchPf2eSection(
   baseUrl: string,
   section: Pf2eSection,
   logger: Pf2eImportLogger = consoleLogger,
+  index: string = PF2E_INDEX,
 ): Promise<Pf2eSectionResult> {
   const aonType = SECTION_TO_AON_TYPE[section];
   const mapper = SECTION_MAPPER[section];
@@ -435,7 +441,7 @@ export async function fetchPf2eSection(
       break;
     }
     pagesFetched += 1;
-    const url = `${base}/${PF2E_INDEX}/_search?q=${encodeURIComponent(`type:${aonType}`)}&size=${PAGE_SIZE}&from=${from}`;
+    const url = `${base}/${index}/_search?q=${encodeURIComponent(`type:${aonType}`)}&size=${PAGE_SIZE}&from=${from}`;
     let res: Response;
     try {
       res = await fetchPageWithRetry(url, section, logger);
@@ -508,4 +514,12 @@ export async function fetchPf2eSection(
 
 export function entryTypeForSection(section: Pf2eSection): RuleEntryType {
   return SECTION_TO_ENTRY_TYPE[section];
+}
+
+export async function fetchSf2eSection(
+  baseUrl: string,
+  section: Pf2eSection,
+  logger: Pf2eImportLogger = consoleLogger,
+): Promise<Pf2eSectionResult> {
+  return fetchPf2eSection(baseUrl, section, logger, SF2E_INDEX);
 }
