@@ -597,6 +597,8 @@ export class AiProviderConfigService {
         error: null,
       });
     } catch (err) {
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`testConnection probe failed (scope=${scope}, target=${resolved.testedTarget}): ${rawMessage}`);
       return AiProviderTestResult.parse({
         ok: false,
         scope,
