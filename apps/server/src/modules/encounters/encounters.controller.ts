@@ -237,8 +237,13 @@ export class EncountersController {
   }
 
   @Post(':id/roll-initiative')
-  @ApiOperation({ summary: 'Roll initiative for all combatants missing one', description: 'dm role required. Only fills null initiatives — already-set values are untouched.' })
-  @ApiResponse({ status: 201, description: 'Encounter with updated combatants.' })
+  @ApiOperation({
+    summary: 'Roll initiative for all combatants missing one',
+    description:
+      'dm role required. Only fills null initiatives — already-set values are untouched. ' +
+      'Returns rolledCount of how many were filled this call; a fully-rolled roster is a no-op (no write, no audit, no broadcast).',
+  })
+  @ApiResponse({ status: 201, description: 'Encounter with combatants plus rolledCount.' })
   async rollInitiative(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
