@@ -195,13 +195,9 @@ export default function LocationListPage() {
         ) : (
           <div className="flex flex-col gap-2.5" style={{ maxWidth: 720 }}>
             {toTree(locations).map(({ loc, depth }) => (
-              <a
+              <Link
                 key={loc.id}
-                href={`/c/${id}/locations/${loc.id}`}
-                onClick={(e) => {
-                  e.preventDefault();
-                  navigate(`/c/${id}/locations/${loc.id}`);
-                }}
+                to={`/c/${id}/locations/${loc.id}`}
                 className="cf-card flex items-center gap-3 p-3.5 hover:border-amber-500/50"
                 style={depth > 0 ? { marginLeft: depth * 20 } : undefined}
               >
@@ -222,7 +218,7 @@ export default function LocationListPage() {
                     <GameIcon slug="position-marker" size={11} className="inline align-text-bottom mr-1" />{Math.round(loc.mapX)},{Math.round(loc.mapY)}
                   </span>
                 )}
-              </a>
+              </Link>
             ))}
           </div>
         )}

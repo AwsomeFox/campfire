@@ -6,7 +6,7 @@
  * -> POST + PATCH ruleSystem). Any user may create a campaign.
  */
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, ApiError, API } from '../../lib/api';
@@ -175,19 +175,19 @@ function ImportCampaignTile({
 function CampaignTile({
   campaign,
   role,
-  onOpen,
+  href,
   archived,
 }: {
   campaign: Campaign;
   role: string | null;
-  onOpen: () => void;
+  href: string;
   archived?: boolean;
 }) {
   return (
-    <button
-      onClick={onOpen}
+    <Link
+      to={href}
       className="card elev-sm text-left overflow-hidden"
-      style={{ padding: 0, gap: 0, ...(archived ? { opacity: 0.72 } : {}) }}
+      style={{ padding: 0, gap: 0, color: 'inherit', textDecoration: 'none', ...(archived ? { opacity: 0.72 } : {}) }}
     >
       <div
         className="h-[88px] grid place-items-center"
@@ -219,7 +219,7 @@ function CampaignTile({
           {campaign.sessionCount > 0 ? `Session ${campaign.sessionCount}` : 'No sessions yet'}
         </div>
       </div>
-    </button>
+    </Link>
   );
 }
 
@@ -428,7 +428,7 @@ export function HomePage() {
                 key={campaign.id}
                 campaign={campaign}
                 role={roleIn(campaign.id)}
-                onOpen={() => navigate(`/c/${campaign.id}`)}
+                href={`/c/${campaign.id}`}
               />
             ))}
             <NewCampaignTile onClick={() => setWizardOpen(true)} />
@@ -456,7 +456,7 @@ export function HomePage() {
                     key={campaign.id}
                     campaign={campaign}
                     role={roleIn(campaign.id)}
-                    onOpen={() => navigate(`/c/${campaign.id}`)}
+                    href={`/c/${campaign.id}`}
                     archived
                   />
                 ))}

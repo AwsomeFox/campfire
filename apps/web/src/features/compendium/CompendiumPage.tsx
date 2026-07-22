@@ -6,7 +6,7 @@
  * this pass (no backing endpoint per the BUILD spec) — search + browse only.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { RuleEntry, RuleEntryType, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
@@ -37,7 +37,6 @@ function useDebounced<T>(value: T, delayMs: number): T {
 export default function CompendiumPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const navigate = useNavigate();
   const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
   const { loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const campaignPack = campaign?.ruleSystem || '';
@@ -224,11 +223,11 @@ export default function CompendiumPage() {
               </div>
             ) : (
               (results ?? []).map((entry) => (
-                <button
+                <Link
                   key={entry.id}
-                  onClick={() => navigate(`/c/${id}/compendium/${entry.id}`)}
+                  to={`/c/${id}/compendium/${entry.id}`}
                   className="card elev-sm text-left"
-                  style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)' }}
+                  style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
                 >
                   {/* Type/school/monster glyph (issue #305): the DM's override if set,
                       else derived from the entry's type + dataJson. Decorative — the
@@ -253,7 +252,7 @@ export default function CompendiumPage() {
                   <span className="text-muted" style={{ flex: 'none', fontSize: 12 }}>
                     ›
                   </span>
-                </button>
+                </Link>
               ))
             )}
           </>

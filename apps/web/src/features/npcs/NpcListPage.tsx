@@ -4,7 +4,7 @@
  * DM can inline-create (name + role); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, Link } from 'react-router-dom';
 import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -154,13 +154,9 @@ export default function NpcListPage() {
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {npcs.map((npc) => (
-              <a
+              <Link
                 key={npc.id}
-                href={`/c/${id}/npcs/${npc.id}`}
-                onClick={(e) => {
-                  e.preventDefault();
-                  navigate(`/c/${id}/npcs/${npc.id}`);
-                }}
+                to={`/c/${id}/npcs/${npc.id}`}
                 className="cf-card p-3.5 space-y-2 hover:border-amber-500/50"
               >
                 <div className="flex items-center gap-2.5">
@@ -186,7 +182,7 @@ export default function NpcListPage() {
                     <span className="text-[11px] text-slate-400 ml-auto">{locationName(npc.locationId)}</span>
                   )}
                 </div>
-              </a>
+              </Link>
             ))}
           </div>
         )}
