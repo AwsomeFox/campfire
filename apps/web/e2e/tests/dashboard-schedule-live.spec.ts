@@ -50,7 +50,10 @@ test('dashboard next-session projection stays live across remote writes, campaig
     );
     await json<ScheduledSessionWithRsvps>(
       await writer.request.post(`/api/v1/campaigns/${secondCampaign.id}/schedule`, {
-        data: { scheduledAt: '2090-09-20T18:00:00Z', title: 'E2E790 Other campaign' },
+        // Dates stay before the global-setup seed 'DLRNAV Saturday Game'
+        // (2032-07-24) so the test-authored sessions remain the campaign's
+        // soonest "next session" projection, and after today so they are future.
+        data: { scheduledAt: '2027-09-20T18:00:00Z', title: 'E2E790 Other campaign' },
       }),
       'schedule second campaign',
     );
@@ -72,7 +75,7 @@ test('dashboard next-session projection stays live across remote writes, campaig
 
     const created = await json<ScheduledSessionWithRsvps>(
       await writer.request.post(`/api/v1/campaigns/${campaignId}/schedule`, {
-        data: { scheduledAt: '2090-08-10T18:00:00Z', title: 'E2E790 Alpha' },
+        data: { scheduledAt: '2027-08-10T18:00:00Z', title: 'E2E790 Alpha' },
       }),
       'create remote schedule',
     );
@@ -80,7 +83,7 @@ test('dashboard next-session projection stays live across remote writes, campaig
 
     await json<ScheduledSessionWithRsvps>(
       await writer.request.patch(`/api/v1/schedule/${created.id}`, {
-        data: { scheduledAt: '2090-08-17T19:30:00Z', title: 'E2E790 Beta', location: 'Replacement table' },
+        data: { scheduledAt: '2027-08-17T19:30:00Z', title: 'E2E790 Beta', location: 'Replacement table' },
       }),
       'reschedule remotely',
     );
@@ -134,7 +137,7 @@ test('dashboard next-session projection stays live across remote writes, campaig
     await expect(page.getByText('Offline — showing last-known next-session details.')).toBeVisible();
     await json<ScheduledSessionWithRsvps>(
       await writer.request.patch(`/api/v1/schedule/${created.id}`, {
-        data: { scheduledAt: '2090-08-24T20:00:00Z', title: 'E2E790 Gamma', location: 'Remote table' },
+        data: { scheduledAt: '2027-08-24T20:00:00Z', title: 'E2E790 Gamma', location: 'Remote table' },
       }),
       'reschedule while reader is offline',
     );
