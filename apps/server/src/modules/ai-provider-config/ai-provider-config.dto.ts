@@ -1,13 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
-import {
-  AiProviderConfigUpdate,
-  AiProviderRemovalConfirm,
-  AiProviderRemovalImpact,
-  AiProviderTestRequest,
-  AiProviderTestResult,
-} from '@campfire/schema';
+import { AiProviderConfigUpdate, AiProviderTestRequest, AiProviderTestResult } from '@campfire/schema';
 
 // .strict() at the DTO layer — an unknown/misspelled key is a 400, not a silent
 // drop (matches the AI-DM seat DTO). The write payload's `apiKey` is write-only;
@@ -55,9 +49,3 @@ export const AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA: SchemaObject = {
 
 /** Fully described, credential-free test response for OpenAPI. */
 export class AiProviderTestResultDto extends createZodDto(AiProviderTestResult) {}
-
-/** Server-authored, credential-free removal preview (issue #755). */
-export class AiProviderRemovalImpactDto extends createZodDto(AiProviderRemovalImpact) {}
-
-/** Mandatory optimistic-concurrency token returned by the latest preview. */
-export class AiProviderRemovalConfirmDto extends createZodDto(AiProviderRemovalConfirm) {}

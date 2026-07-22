@@ -1,12 +1,11 @@
-import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, randomBytes, scryptSync } from 'node:crypto';
-import { and, asc, eq } from 'drizzle-orm';
+import { randomBytes, scryptSync } from 'node:crypto';
+import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   AiProviderConfigView,
-  AiProviderRemovalImpact,
   AiProviderTestResult,
   type AiProviderConfigUpdate,
   type AiProviderCredentialSource,
@@ -14,7 +13,7 @@ import {
   type AiProviderTestRequest,
 } from '@campfire/schema';
 import { DB, type DrizzleDb, resolveDataDir } from '../../db/db.module';
-import { aiDmSeats, aiProviderConfigs, auditLog, campaigns } from '../../db/schema';
+import { aiProviderConfigs } from '../../db/schema';
 import { encryptSecret, decryptSecret, secretLast4 } from '../../common/crypto';
 import { nowIso } from '../../common/time';
 import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
@@ -29,7 +28,6 @@ type ConfigUpdateInput = z.infer<typeof AiProviderConfigUpdate>;
 type ConfigView = z.infer<typeof AiProviderConfigView>;
 type TestInput = z.infer<typeof AiProviderTestRequest>;
 type TestResult = z.infer<typeof AiProviderTestResult>;
-type RemovalImpact = z.infer<typeof AiProviderRemovalImpact>;
 type Scope = 'server' | 'campaign';
 type Row = typeof aiProviderConfigs.$inferSelect;
 type TestedTarget = TestResult['testedTarget'];
@@ -394,188 +392,28 @@ export class AiProviderConfigService {
     });
   }
 
-  /** Server-authored impact preview. No credential or ciphertext is returned. */
-  previewServerRemoval(): RemovalImpact {
-    return this.buildRemovalImpact('server', null, this.db);
-  }
-
-  previewCampaignRemoval(campaignId: number): RemovalImpact {
-    return this.buildRemovalImpact('campaign', campaignId, this.db);
-  }
-
-  /**
-   * Compare the submitted preview against current state, then delete and audit in
-   * one synchronous better-sqlite3 transaction. A stale preview (including a
-   * provider already removed by another caller) cannot delete anything.
-   */
-  deleteServer(impactRevision: string, user: RequestUser): void {
-    this.deleteWithRevision('server', null, impactRevision, user);
-  }
-
-  deleteCampaign(campaignId: number, impactRevision: string, user: RequestUser): void {
-    this.deleteWithRevision('campaign', campaignId, impactRevision, user);
-  }
-
-  private deleteWithRevision(
-    scope: Scope,
-    campaignId: number | null,
-    impactRevision: string,
-    user: RequestUser,
-  ): void {
-    this.db.transaction((tx) => {
-      const impact = this.buildRemovalImpact(scope, campaignId, tx as unknown as DrizzleDb, true);
-      if (impact.impactRevision !== impactRevision) throw staleRemovalImpact();
-
-      const condition =
-        scope === 'server'
-          ? eq(aiProviderConfigs.scope, 'server')
-          : and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.campaignId, campaignId!));
-      const deleted = tx.delete(aiProviderConfigs).where(condition).returning({ id: aiProviderConfigs.id }).all();
-      if (deleted.length !== 1) throw staleRemovalImpact();
-
-      const fallbackCount = impact.affectedCampaigns.filter((campaign) => campaign.result === 'fallback').length;
-      const disabledCount = impact.affectedCampaignCount - fallbackCount;
-      tx.insert(auditLog)
-        .values({
-          actor: auditActor(user),
-          actorRole: auditActorRole(user),
-          action: 'ai-provider.delete',
-          entityType: 'ai-provider',
-          campaignId,
-          detail:
-            `${scope} affected=${impact.affectedCampaignCount} fallback=${fallbackCount} disabled=${disabledCount} ` +
-            `stored-key=${impact.storedKeyWillBeLost ? 'deleted' : 'none'}`,
-          createdAt: nowIso(),
-        })
-        .run();
+  async deleteServer(user: RequestUser): Promise<void> {
+    await this.db.delete(aiProviderConfigs).where(eq(aiProviderConfigs.scope, 'server'));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: auditActorRole(user),
+      action: 'ai-provider.delete',
+      entityType: 'ai-provider',
+      detail: 'server',
     });
   }
 
-  /**
-   * Read and evaluate the complete state that can change a removal outcome. The
-   * returned revision hashes a server-side serialization of ciphertext and row
-   * metadata without returning or exposing either, plus campaign lifecycle,
-   * seat/budget state, and only the presence—not values—of environment
-   * credentials.
-   */
-  private buildRemovalImpact(
-    scope: Scope,
-    campaignId: number | null,
-    db: DrizzleDb,
-    missingAsConflict = false,
-  ): RemovalImpact {
-    const allProviders = db.select().from(aiProviderConfigs).orderBy(asc(aiProviderConfigs.id)).all();
-    const server = allProviders.find((row) => row.scope === 'server');
-    const target =
-      scope === 'server'
-        ? server
-        : allProviders.find((row) => row.scope === 'campaign' && row.campaignId === campaignId);
-    if (!target) {
-      if (missingAsConflict) throw staleRemovalImpact();
-      throw new NotFoundException(
-        scope === 'server'
-          ? 'No server-default AI provider is configured.'
-          : 'No campaign AI provider override is configured.',
-      );
-    }
-
-    const campaignRows =
-      scope === 'server'
-        ? db.select().from(campaigns).orderBy(asc(campaigns.id)).all()
-        : db.select().from(campaigns).where(eq(campaigns.id, campaignId!)).limit(1).all();
-    const providerRows =
-      scope === 'server'
-        ? allProviders
-        : allProviders.filter(
-            (row) => row.scope === 'server' || (row.scope === 'campaign' && row.campaignId === campaignId),
-          );
-    const seatRows =
-      scope === 'server'
-        ? db.select().from(aiDmSeats).orderBy(asc(aiDmSeats.campaignId)).all()
-        : db
-            .select()
-            .from(aiDmSeats)
-            .where(eq(aiDmSeats.campaignId, campaignId!))
-            .orderBy(asc(aiDmSeats.campaignId))
-            .all();
-    const campaignProviders = new Map(
-      providerRows
-        .filter((row) => row.scope === 'campaign' && row.campaignId !== null)
-        .map((row) => [row.campaignId!, row] as const),
-    );
-    const seatsByCampaign = new Map(seatRows.map((seat) => [seat.campaignId, seat] as const));
-
-    const revisionState = {
-      scope,
+  async deleteCampaign(campaignId: number, user: RequestUser): Promise<void> {
+    await this.db
+      .delete(aiProviderConfigs)
+      .where(and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.campaignId, campaignId)));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: auditActorRole(user),
+      action: 'ai-provider.delete',
+      entityType: 'ai-provider',
       campaignId,
-      providerRows,
-      campaignRows,
-      seatRows,
-      environmentCredentials: {
-        openai: !!environmentApiKey('openai'),
-        anthropic: !!environmentApiKey('anthropic'),
-      },
-    };
-    const impactRevision = createHash('sha256').update(JSON.stringify(revisionState)).digest('hex');
-    const affectedCampaigns = campaignRows
-      .map((campaign) => {
-        const campaignProvider = campaignProviders.get(campaign.id);
-        const current = effectiveRemovalState(campaignProvider, server);
-        const after =
-          scope === 'server'
-            ? effectiveRemovalState(campaignProvider, undefined)
-            : effectiveRemovalState(undefined, server);
-        if (scope === 'server' && sameEffectiveState(current, after)) return null;
-
-        const seat = seatsByCampaign.get(campaign.id);
-        const result: 'fallback' | 'disabled' = after.ready ? 'fallback' : 'disabled';
-        const enabledRuntimeWillStop =
-          result === 'disabled' && current.ready && !!seat?.enabled && (seat?.mode ?? 'off') !== 'off';
-        return {
-          campaignId: campaign.id,
-          campaignName: campaign.name,
-          campaignStatus: campaign.status,
-          trashed: campaign.deletedAt !== null,
-          current,
-          after,
-          result,
-          runtime: {
-            mode: (seat?.mode ?? 'off') as 'off' | 'co_dm' | 'driver',
-            enabled: seat?.enabled ?? false,
-            tokenBudget: seat?.tokenBudget ?? 0,
-            tokensUsed: seat?.tokensUsed ?? 0,
-            budgetRemaining: Math.max(0, (seat?.tokenBudget ?? 0) - (seat?.tokensUsed ?? 0)),
-            budgetsUnchanged: true as const,
-            implication:
-              result === 'fallback'
-                ? ('continues-with-fallback' as const)
-                : enabledRuntimeWillStop
-                  ? ('enabled-seat-will-stop' as const)
-                  : ('provider-disabled' as const),
-          },
-        };
-      })
-      .filter((campaign): campaign is NonNullable<typeof campaign> => campaign !== null);
-
-    if (scope === 'campaign' && affectedCampaigns.length === 0) {
-      // A provider row without its owning campaign is corrupt legacy state. It
-      // must not be silently deleted without an intelligible impact target.
-      throw new NotFoundException(`Campaign ${campaignId} not found.`);
-    }
-
-    const credentialSource =
-      scope === 'server' ? localCredentialSource(target) : campaignCredentialSource(target, server);
-    return AiProviderRemovalImpact.parse({
-      scope,
-      campaignId,
-      providerType: target.providerType,
-      model: target.model,
-      credentialSource,
-      storedKeyWillBeLost: !!target.encryptedApiKey,
-      impactRevision,
-      previewedAt: nowIso(),
-      affectedCampaignCount: affectedCampaigns.length,
-      affectedCampaigns,
+      detail: 'campaign',
     });
   }
 
@@ -916,57 +754,6 @@ export class AiProviderConfigService {
       params: safeJson(server.params, {}),
     };
   }
-}
-
-type RemovalEffectiveState = RemovalImpact['affectedCampaigns'][number]['current'];
-
-/** Credential-free mirror of resolveEffectiveConfig for before/after previews. */
-function effectiveRemovalState(campaign: Row | undefined, server: Row | undefined): RemovalEffectiveState {
-  const primary = campaign ?? server;
-  if (!primary) {
-    return {
-      configured: false,
-      providerType: null,
-      model: null,
-      source: null,
-      credentialSource: 'none',
-      ready: false,
-    };
-  }
-
-  const credentialSource = campaign
-    ? campaignCredentialSource(campaign, server)
-    : localCredentialSource(primary);
-  const providerType =
-    campaign && server && (credentialSource === 'server' || credentialSource === 'environment')
-      ? server.providerType
-      : primary.providerType;
-  return {
-    configured: true,
-    providerType: providerType as RemovalEffectiveState['providerType'],
-    model: primary.model,
-    source: campaign ? 'campaign' : 'server',
-    credentialSource,
-    ready: credentialSource !== 'none',
-  };
-}
-
-function sameEffectiveState(a: RemovalEffectiveState, b: RemovalEffectiveState): boolean {
-  return (
-    a.configured === b.configured &&
-    a.providerType === b.providerType &&
-    a.model === b.model &&
-    a.source === b.source &&
-    a.credentialSource === b.credentialSource &&
-    a.ready === b.ready
-  );
-}
-
-function staleRemovalImpact(): ConflictException {
-  return new ConflictException({
-    code: 'AI_PROVIDER_REMOVAL_STALE',
-    message: 'AI provider removal impact changed. Request a fresh preview; nothing was deleted.',
-  });
 }
 
 /** Standard vendor credentials used only when the matching configured row has no stored key. */
