@@ -457,6 +457,7 @@ export interface CombatantHpPatch {
   hpTemp?: number;
   deathSaveSuccesses?: number;
   deathSaveFailures?: number;
+  deathSaveRoll?: number;
 }
 
 export type CombatantHpResult = Pick<
@@ -479,6 +480,10 @@ export type CombatantHpResult = Pick<
  *     - hp == 0       -> `dead` (instant death / 3 failures), `stable` (3 successes),
  *                        else `dying`. Damage taken while already at 0 is a death-save
  *                        failure (and un-stabilizes a `stable` creature).
+ *     - a rolled death save (`deathSaveRoll`, issue #619) at 0 HP applies the 5e
+ *                        crit/fumble rules: nat 1 = two failures; nat 20 = revive at 1 HP
+ *                        (deathState none, saves cleared); 10–19 = one success; 2–9 = one
+ *                        failure. The roll is applied to a dying/stable character only.
  *
  * Returns only the mutated fields; hpMax/kind are inputs, not outputs.
  */
@@ -536,9 +541,36 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
       if (deathState === 'stable') succ = 0;
       fail = Math.min(3, fail + 1);
     }
-    if (fail >= 3 || deathState === 'dead') deathState = 'dead';
-    else if (succ >= 3) deathState = 'stable';
-    else deathState = 'dying';
+    // A rolled death save applies the 5e crit/fumble rules (issue #619) to a character
+    // still at 0 HP (dying or stable). A nat 20 revives at 1 HP — set hpCurrent so the
+    // final derivation treats it as "regained HP" (none + cleared saves). A nat 1 is two
+    // failures; 2–9 a single failure; 10–19 a single success. The roll does NOT un-stabilize
+    // a stable creature beyond its own outcome (the 5e rule), so we apply it regardless of
+    // the prior stable/dying band — a success just adds to the slate, a failure adds a fail.
+    if (patch.deathSaveRoll !== undefined && deathState !== 'dead') {
+      const roll = patch.deathSaveRoll;
+      if (roll === 20) {
+        hpCurrent = Math.min(hpMax, 1); // revive at 1 HP (capped at max defensively)
+        deathState = 'none';
+        succ = 0;
+        fail = 0;
+      } else if (roll === 1) {
+        fail = Math.min(3, fail + 2);
+      } else if (roll >= 10) {
+        succ = Math.min(3, succ + 1);
+      } else {
+        fail = Math.min(3, fail + 1);
+      }
+    }
+    if (hpCurrent > 0) {
+      // The nat-20 revival path set hpCurrent above; keep death-state already computed.
+    } else if (fail >= 3 || deathState === 'dead') {
+      deathState = 'dead';
+    } else if (succ >= 3) {
+      deathState = 'stable';
+    } else {
+      deathState = 'dying';
+    }
   }
   return { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail };
 }
