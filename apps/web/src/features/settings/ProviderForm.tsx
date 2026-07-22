@@ -11,12 +11,42 @@
  * "configured" + its last 4 chars; the input is blank-keeps / value-sets-or-rotates,
  * and the plaintext is never retained in state after a save.
  */
-import { useEffect, useState } from 'react';
-import type { AiProviderConfigType, AiProviderConfigView, AiProviderTestResult } from '@campfire/schema';
+import { useEffect, useRef, useState } from 'react';
+import type {
+  AiProviderConfigType,
+  AiProviderConfigView,
+  AiProviderTestRequest,
+  AiProviderTestResult,
+} from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const PROVIDER_TYPES: AiProviderConfigType[] = ['openai', 'anthropic', 'mock'];
+
+interface ProviderDraft {
+  providerType: AiProviderConfigType;
+  model: string;
+  baseUrl: string;
+  apiKey: string;
+}
+
+/**
+ * A local-only fingerprint used to bind an async result to the exact draft
+ * revision that launched it. The write-only key is represented only as
+ * blank/present plus the revision nonce — plaintext is never copied into the
+ * fingerprint, rendered, logged, or returned by the API.
+ */
+function draftFingerprint(scope: 'server' | 'campaign', basePath: string, draft: ProviderDraft, revision: number): string {
+  return JSON.stringify([
+    scope,
+    basePath,
+    draft.providerType,
+    draft.model,
+    draft.baseUrl,
+    draft.apiKey === '' ? 'key:blank' : 'key:present',
+    revision,
+  ]);
+}
 
 export function ProviderForm({
   basePath,
@@ -43,20 +73,66 @@ export function ProviderForm({
 
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<AiProviderTestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const draftRevision = useRef(0);
+  const currentDraftFingerprint = useRef('');
   const [removing, setRemoving] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
 
   function hydrate(p: AiProviderConfigView | null) {
+    const nextDraft: ProviderDraft = {
+      providerType: p?.providerType ?? 'openai',
+      model: p?.model ?? '',
+      baseUrl: p?.baseUrl ?? '',
+      apiKey: '',
+    };
+    draftRevision.current += 1;
+    currentDraftFingerprint.current = draftFingerprint(scope, basePath, nextDraft, draftRevision.current);
     setProvider(p);
-    setProviderType(p?.providerType ?? 'openai');
-    setModel(p?.model ?? '');
-    setBaseUrl(p?.baseUrl ?? '');
-    setApiKey('');
+    setProviderType(nextDraft.providerType);
+    setModel(nextDraft.model);
+    setBaseUrl(nextDraft.baseUrl);
+    setApiKey(nextDraft.apiKey);
+    setTestResult(null);
+    setTestError(null);
+    setTesting(false);
+  }
+
+  function editDraft(field: keyof ProviderDraft, value: string) {
+    const nextDraft: ProviderDraft = { providerType, model, baseUrl, apiKey, [field]: value } as ProviderDraft;
+    draftRevision.current += 1;
+    currentDraftFingerprint.current = draftFingerprint(scope, basePath, nextDraft, draftRevision.current);
+    setTestResult(null);
+    setTestError(null);
+    setTesting(false);
+    setSaved(false);
+    if (field === 'providerType') setProviderType(value as AiProviderConfigType);
+    else if (field === 'model') setModel(value);
+    else if (field === 'baseUrl') setBaseUrl(value);
+    else setApiKey(value);
+  }
+
+  function invalidateTestForAction() {
+    draftRevision.current += 1;
+    currentDraftFingerprint.current = draftFingerprint(
+      scope,
+      basePath,
+      { providerType, model, baseUrl, apiKey },
+      draftRevision.current,
+    );
+    setTestResult(null);
+    setTestError(null);
+    setTesting(false);
   }
 
   useEffect(() => {
     let alive = true;
+    draftRevision.current += 1;
+    currentDraftFingerprint.current = `scope-change:${scope}:${basePath}:${draftRevision.current}`;
+    setTestResult(null);
+    setTestError(null);
+    setTesting(false);
     setLoading(true);
     setLoadError(null);
     api
@@ -74,13 +150,14 @@ export function ProviderForm({
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [basePath]);
+  }, [basePath, scope]);
 
   async function save() {
     if (!model.trim()) {
       setError('A model is required.');
       return;
     }
+    invalidateTestForAction();
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -90,8 +167,7 @@ export function ProviderForm({
       // Only send apiKey when one was typed — an omitted key keeps the stored value.
       if (apiKey !== '') body.apiKey = apiKey;
       const updated = await api.put<AiProviderConfigView>(`${API}${basePath}`, body);
-      setProvider(updated);
-      setApiKey(''); // never retain the plaintext key in state
+      hydrate(updated); // also drops the plaintext key and fingerprints the saved draft
       onChanged?.(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -103,28 +179,39 @@ export function ProviderForm({
   }
 
   async function test() {
+    if (!model.trim()) {
+      invalidateTestForAction();
+      setError('A model is required.');
+      return;
+    }
+    const body: AiProviderTestRequest = {
+      providerType,
+      model: model.trim(),
+      // Sending '' makes the blank-key reuse/inheritance semantics explicit.
+      apiKey,
+      ...(baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
+    };
+    const fingerprint = currentDraftFingerprint.current;
     setTesting(true);
     setTestResult(null);
+    setTestError(null);
+    setError(null);
     try {
-      const r = await api.post<AiProviderTestResult>(`${API}${basePath}/test`);
-      setTestResult(r);
+      const r = await api.post<AiProviderTestResult>(`${API}${basePath}/test`, body);
+      if (currentDraftFingerprint.current === fingerprint) setTestResult(r);
     } catch (err) {
-      setTestResult({
-        ok: false,
-        scope,
-        providerType,
-        model,
-        error: err instanceof ApiError ? err.message : 'Test failed.',
-      });
+      if (currentDraftFingerprint.current === fingerprint) {
+        setTestError(err instanceof ApiError ? err.message : 'Test failed.');
+      }
     } finally {
-      setTesting(false);
+      if (currentDraftFingerprint.current === fingerprint) setTesting(false);
     }
   }
 
   async function remove() {
+    invalidateTestForAction();
     setRemoving(true);
     setError(null);
-    setTestResult(null);
     try {
       await api.delete(`${API}${basePath}`);
       hydrate(null);
@@ -137,13 +224,13 @@ export function ProviderForm({
   }
 
   async function clearStoredKey() {
+    invalidateTestForAction();
     setClearing(true);
     setError(null);
-    setTestResult(null);
     try {
       const updated = await api.delete<AiProviderConfigView>(`${API}${basePath}/key`);
       setProvider(updated);
-      setApiKey('');
+      editDraft('apiKey', '');
       setConfirmClear(false);
       onChanged?.(updated);
     } catch (err) {
@@ -181,9 +268,23 @@ export function ProviderForm({
     none: 'No credential available',
   };
 
+  const testedCredentialLabel: Record<AiProviderTestResult['credentialSource'], string> = {
+    candidate: 'Unsaved candidate key',
+    stored: 'Stored key for this scope',
+    environment: 'Environment credential',
+    server: 'Stored server-default credential',
+    'not-required': 'No credential required',
+    none: 'No credential available',
+  };
+  const testedScopeLabel: Record<AiProviderTestResult['testedTarget'], string> = {
+    'server-default': 'Server default draft',
+    'campaign-override': 'Campaign override draft',
+    'inherited-server-default': 'Campaign draft using the inherited server default',
+  };
+
   return (
     <>
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-2" data-testid={`ai-provider-form-${scope}`}>
         <div className="flex gap-2 items-center flex-wrap" aria-live="polite">
           <span className={`tag ${provider?.ready ? 'tag-accent' : 'tag-neutral'}`} style={{ fontSize: 10 }}>
             {provider?.ready ? 'Ready' : 'Not ready'}
@@ -200,7 +301,7 @@ export function ProviderForm({
               id={`ai-provider-type-${scope}`}
               className="input"
               value={providerType}
-              onChange={(e) => setProviderType(e.target.value as AiProviderConfigType)}
+              onChange={(e) => editDraft('providerType', e.target.value)}
             >
               {PROVIDER_TYPES.map((t) => (
                 <option key={t} value={t}>{t}</option>
@@ -213,7 +314,7 @@ export function ProviderForm({
               id={`ai-provider-model-${scope}`}
               className="input"
               value={model}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => editDraft('model', e.target.value)}
               placeholder="e.g. gpt-4o-mini"
             />
           </div>
@@ -224,7 +325,7 @@ export function ProviderForm({
             id={`ai-provider-baseurl-${scope}`}
             className="input"
             value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
+            onChange={(e) => editDraft('baseUrl', e.target.value)}
             placeholder="Leave blank for the provider default"
           />
         </div>
@@ -237,18 +338,43 @@ export function ProviderForm({
             className="input"
             type="password"
             autoComplete="off"
+            aria-describedby={`ai-provider-key-help-${scope}`}
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => editDraft('apiKey', e.target.value)}
             placeholder={provider?.configured ? '•••• (unchanged)' : 'Paste a key to set it'}
           />
+          <p id={`ai-provider-key-help-${scope}`} className="text-muted" style={{ margin: '3px 0 0', fontSize: 11 }}>
+            For testing and saving, blank reuses this scope&apos;s stored key or its permitted environment/server
+            fallback. A value tests or saves that new key.
+          </p>
         </div>
         {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+        {testError && <p role="alert" className="text-sm" style={{ color: '#f87171' }}>Test failed: {testError}</p>}
         {testResult && (
-          <p className="text-sm" style={{ color: testResult.ok ? 'var(--color-accent, #4ade80)' : '#f87171' }}>
-            {testResult.ok
-              ? `Connection OK — ${testResult.providerType} / ${testResult.model}`
-              : `Connection failed: ${testResult.error ?? 'unknown error'}`}
-          </p>
+          <div
+            role="status"
+            aria-label="Connection test result"
+            className="text-sm"
+            style={{ color: testResult.ok ? 'var(--color-accent, #4ade80)' : '#f87171' }}
+          >
+            <p style={{ margin: 0, fontWeight: 600 }}>
+              {testResult.ok ? 'Connection OK' : `Connection failed: ${testResult.error ?? 'unknown error'}`}
+            </p>
+            <dl style={{ margin: '4px 0 0', display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '2px 8px' }}>
+              <dt>Target</dt>
+              <dd style={{ margin: 0 }}>
+                {testResult.providerType} / {testResult.model} · {testResult.baseUrl ?? 'provider default endpoint'}
+              </dd>
+              <dt>Scope</dt>
+              <dd style={{ margin: 0 }}>{testedScopeLabel[testResult.testedTarget]}</dd>
+              <dt>Credential</dt>
+              <dd style={{ margin: 0 }}>{testedCredentialLabel[testResult.credentialSource]}</dd>
+              <dt>Tested</dt>
+              <dd style={{ margin: 0 }}>
+                <time dateTime={testResult.testedAt}>{new Date(testResult.testedAt).toLocaleString()}</time>
+              </dd>
+            </dl>
+          </div>
         )}
         <div className="flex gap-2 items-center flex-wrap">
           <button
@@ -262,7 +388,7 @@ export function ProviderForm({
           <button
             className="btn btn-secondary"
             style={{ fontSize: 12.5 }}
-            disabled={testing || clearing}
+            disabled={testing || clearing || saving || removing}
             onClick={() => void test()}
           >
             {testing ? 'Testing…' : 'Test connection'}

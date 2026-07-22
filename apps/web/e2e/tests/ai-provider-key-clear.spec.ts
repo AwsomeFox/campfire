@@ -19,11 +19,37 @@ test.describe('AI provider stored-key clearing', () => {
     });
     expect(put.ok()).toBeTruthy();
 
+    await page.route('**/api/v1/settings/ai-provider/test', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          scope: 'server',
+          testedTarget: 'server-default',
+          providerType: 'openai',
+          model: 'gpt-4.1-mini',
+          baseUrl: 'https://openai-compatible.example/v1',
+          credentialSource: 'stored',
+          testedAt: '2026-07-22T12:34:56.000Z',
+          error: null,
+        }),
+      });
+    });
+
     await page.goto('/admin/ai');
     await expect(page.getByRole('heading', { level: 1, name: 'AI console' })).toBeVisible();
     await expect(page.getByText('Credential: Stored encrypted key')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Clear stored key' })).toBeVisible();
     await expect(page.getByText(STORED_KEY)).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Test connection' }).click();
+    const testResult = page.getByRole('status', { name: 'Connection test result' });
+    await expect(testResult).toContainText('Connection OK');
 
     await page.getByRole('button', { name: 'Clear stored key' }).click();
     const dialog = page.getByRole('dialog', { name: 'Clear stored API key?' });
@@ -33,6 +59,7 @@ test.describe('AI provider stored-key clearing', () => {
     await dialog.getByRole('button', { name: 'Clear stored key' }).click();
 
     await expect(dialog).toHaveCount(0);
+    await expect(testResult).toHaveCount(0);
     await expect(page.getByText('Credential: Environment credential')).toBeVisible();
     await expect(page.getByText('Ready', { exact: true }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Clear stored key' })).toHaveCount(0);
