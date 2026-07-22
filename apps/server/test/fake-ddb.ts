@@ -97,13 +97,24 @@ export const PUBLIC_DDB_CHARACTER = {
 export interface FakeDdb {
   baseUrl: string;
   server: Server;
+  /**
+   * Issue #714: number of GET /character/:id requests the fake has served since the last
+   * `resetHitCount()`. The system-gate tests assert this stays 0 — the gate must reject an
+   * incompatible campaign BEFORE any DDB fetch — so a leak shows up as a hard test failure
+   * rather than a silent pass.
+   */
+  hitCount: number;
+  resetHitCount(): void;
   close(): Promise<void>;
 }
 
 export async function startFakeDdb(): Promise<FakeDdb> {
   const app = express();
+  // Mutable counter captured by the request handler below and exposed on the returned handle.
+  let hitCount = 0;
 
   app.get('/character/:id', (req, res) => {
+    hitCount += 1;
     const id = req.params.id;
     if (id === String(PUBLIC_DDB_CHARACTER_ID)) {
       res.json({ id: PUBLIC_DDB_CHARACTER_ID, success: true, message: '', data: PUBLIC_DDB_CHARACTER });
@@ -132,6 +143,12 @@ export async function startFakeDdb(): Promise<FakeDdb> {
   return {
     baseUrl,
     server,
+    get hitCount() {
+      return hitCount;
+    },
+    resetHitCount() {
+      hitCount = 0;
+    },
     close() {
       return new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
