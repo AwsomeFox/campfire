@@ -311,6 +311,12 @@ CREATE TABLE IF NOT EXISTS comments (
   -- never the thing that destroys replies.
   deleted_at TEXT,
   deleted_by TEXT,
+  -- Editor provenance for the trust case (issue #783). NULL on a live row a user
+  -- only ever self-edits; stamped ONLY when a non-author (a DM moderating) edits
+  -- the body, so the original author is never the apparent writer of rewritten
+  -- prose. See db/schema.ts for the full column docs.
+  edited_at TEXT,
+  edited_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

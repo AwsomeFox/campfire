@@ -729,6 +729,33 @@ function migrateCommentsTableForSoftDelete(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before comment editor provenance (issue #783): the
+ * comments table gained `edited_at` + `edited_by` (nullable), stamped ONLY when a
+ * non-author (a DM moderating) edits another member's comment so the original
+ * author is never the apparent writer of rewritten prose. Plain nullable ADD
+ * COLUMNs — no table rebuild, same idempotent shape as the soft-delete migration
+ * above. Existing rows come in with both NULL (== self-authored / never edited by
+ * anyone else), which is exactly the pre-migration state. New DBs never hit this
+ * path — BOOTSTRAP_SQL already declares both columns.
+ *
+ * Deliberately separate from 0045_comments_soft_delete: that migration predates
+ * this trust fix and the two address distinct concerns (tombstone lifecycle vs.
+ * honest edit attribution). Keeping them as their own recorded, idempotent steps
+ * means an operator reading the migration log can tell the two apart.
+ */
+function migrateCommentsTableForEditorProvenance(sqlite: Database.Database): void {
+  const hasCommentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'")
+    .get();
+  if (!hasCommentsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(comments)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('edited_at')) sqlite.exec('ALTER TABLE comments ADD COLUMN edited_at TEXT');
+  if (!has('edited_by')) sqlite.exec('ALTER TABLE comments ADD COLUMN edited_by TEXT');
+}
+
+/**
  * Migration for DBs created before the VTT grid + fog of war (issue #40, phases 2–3):
  * `encounters` gained `grid_size` / `grid_scale` / `grid_unit` / `grid_snap` / `fog`.
  * Plain nullable/defaulted ADD COLUMNs. Existing encounters get NULL grid (no grid) and
@@ -1217,6 +1244,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0044_combatants_npc_id', run: migrateCombatantsTableForNpcId },
   { name: '0045_comments_soft_delete', run: migrateCommentsTableForSoftDelete },
   { name: '0046_campaign_members_user_fk', run: migrateCampaignMembersTableForUserFk },
+  { name: '0047_comments_editor_provenance', run: migrateCommentsTableForEditorProvenance },
 ];
 
 /**

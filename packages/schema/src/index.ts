@@ -970,6 +970,16 @@ export const Comment = z.object({
   // by author]" from a DM removal. It is cleared on restore, so durable
   // provenance of a past tombstone (who/when) lives in the AUDIT LOG, not here.
   deletedBy: z.string().max(120).nullable().default(null),
+  // Editor provenance for the trust case (issue #783): null on a comment whose
+  // only edits are by its own author. Stamped ONLY when a non-author (a DM
+  // moderating) edits the body — edited_at then and edited_by (same identity
+  // space as authorUserId / deletedBy) record that editor. The original
+  // authorUserId/authorName are NEVER overwritten, so the player who wrote the
+  // comment stays its author of record and the UI can render "Author: X (edited
+  // by DM Y)". A self-edit leaves both null (the usual updated_at "edited" badge
+  // already covers the author touching their own prose).
+  editedAt: IsoDate.nullable().default(null),
+  editedBy: z.string().max(120).nullable().default(null),
   ...timestamps,
 });
 export type Comment = z.infer<typeof Comment>;
@@ -980,6 +990,8 @@ export const CommentCreate = Comment.omit({
   authorName: true,
   deletedAt: true,
   deletedBy: true,
+  editedAt: true,
+  editedBy: true,
   createdAt: true,
   updatedAt: true,
 })

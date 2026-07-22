@@ -85,7 +85,14 @@ export class CommentsController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Edit a comment', description: 'Author or DM only. Requires campaign membership (write).' })
+  @ApiOperation({
+    summary: 'Edit a comment',
+    description:
+      'Author or DM only. Requires campaign membership (write). ' +
+      'A DM editing another member\'s comment is allowed (moderation) but attributed honestly (issue #783): ' +
+      'the original author is preserved and the editor is recorded (editedAt/editedBy) so the body is never ' +
+      'rewritten under a player who didn\'t write it. A self-edit just bumps updatedAt.',
+  })
   @ApiResponse({ status: 200, description: 'Updated comment.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: CommentUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.comments.getRowOrThrow(id);
