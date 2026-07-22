@@ -20,6 +20,7 @@ campaign fixtures described below.
 | `dmsecret-visibility.spec.ts` | A DM sees an NPC's `dmSecret` panel; a player and a viewer never do (the secret string is absent from their DOM). |
 | `combat-tracker.spec.ts` | DM sees exact initiative + HP math (`30 / 30`), running state / round, and the DM-only run controls (Next turn / End / Cast). Player & viewer get a monster's HP **redacted to a band** ("Healthy") and see **no** DM controls or edit inputs. |
 | `role-navigation.spec.ts` | Login-per-role smoke + role-appropriate nav: DM gets the "Dungeon master" section (Members/Settings/…), player/viewer don't and read as Player/Viewer; the server-admin console (`/admin`) is reachable by admin and refused to a non-admin. |
+| `ai-dialog-accessibility.spec.ts` | AI drafting modal and Co-DM disclosure keyboard flow, focus trap/restoration, inert background, persistent prompt/quantity names and announcements, request-in-flight dismissal, responsive positioning, and axe scans. |
 
 ## How auth / seeding works
 
