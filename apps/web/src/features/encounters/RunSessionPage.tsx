@@ -781,6 +781,14 @@ export default function RunSessionPage() {
   const reopenEncounter = () => runControl.mutate('reopen', { onSuccess: () => setConfirmReopen(false) });
   const deleteEncounter = () => deleteEncounterMut.mutate();
 
+  // Issue #702: how many combatants still need an initiative roll. Used to keep the
+  // Roll-initiative button honest — disabled (rather than a silent no-op server call)
+  // once everyone has a value, and relabeled to "Roll remaining (N)" for a partial
+  // roster (e.g. reinforcements landing at null initiative mid-fight).
+  const needsInitiativeCount = encounter
+    ? encounter.combatants.filter((c) => c.initiative === null || c.initiative === undefined).length
+    : 0;
+
   const removeCombatant = (combatantId: number) => {
     setActionError(null);
     markCombatantPending(combatantId, true);
@@ -989,8 +997,18 @@ export default function RunSessionPage() {
             </Btn>
             {encounter.status === 'preparing' && (
               <>
-                <Btn ghost disabled={headerBusy} onClick={rollInitiative}>
-                  Roll initiative
+                {/* Issue #702: the server treats a fully-rolled roster as a no-op (no
+                    write, no audit), so the button must reflect that — disabled when
+                    nobody needs initiative, and labeled "Roll remaining (N)" when the
+                    roster is partial (e.g. a manually-set combatant alongside unrolled
+                    ones). Hidden entirely rather than dead weight once Start is live. */}
+                <Btn
+                  ghost
+                  disabled={headerBusy || needsInitiativeCount === 0}
+                  onClick={rollInitiative}
+                  title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
+                >
+                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
                 <Btn disabled={headerBusy} onClick={startEncounter}>
                   Start
@@ -1001,9 +1019,16 @@ export default function RunSessionPage() {
               <>
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
                     keep Roll initiative reachable so the DM can fill them (issue #54).
-                    Already-set initiatives are left untouched server-side. */}
-                <Btn ghost disabled={headerBusy} onClick={rollInitiative}>
-                  Roll initiative
+                    Already-set initiatives are left untouched server-side. Once every
+                    combatant has a value, disable the control rather than firing a no-op
+                    roll (issue #702), and surface how many still need rolling. */}
+                <Btn
+                  ghost
+                  disabled={headerBusy || needsInitiativeCount === 0}
+                  onClick={rollInitiative}
+                  title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
+                >
+                  {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
                 <Btn disabled={headerBusy} onClick={nextTurn}>
                   Next turn →
