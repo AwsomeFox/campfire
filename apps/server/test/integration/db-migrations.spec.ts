@@ -1,5 +1,6 @@
 import fs from 'node:fs';
-import { openDatabase, MIGRATION_NAMES } from '../../src/db/db.module';
+import Database from 'better-sqlite3';
+import { dbFilePath, openDatabase, MIGRATION_NAMES } from '../../src/db/db.module';
 import { makeTempDataDir, writeOldSchemaDb, columnNames, countRows } from './fixtures';
 
 /**
@@ -300,6 +301,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const { sqlite } = openDatabase(dataDir);
     try {
       const now = '2026-01-01T00:00:00.000Z';
+      sqlite
+        .prepare("INSERT INTO users (id, username, display_name, password_hash, created_at, updated_at) VALUES (7, 'fk-player', '', 'hash', ?, ?)")
+        .run(now, now);
       sqlite.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'FK Camp', ?, ?)").run(now, now);
       sqlite
         .prepare("INSERT INTO characters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Hero', ?, ?)")
@@ -340,6 +344,79 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       ).toThrow(/FOREIGN KEY/i);
     } finally {
       sqlite.close();
+    }
+  });
+
+  it('0046 removes ghost memberships, records safe repair metadata, and enforces the user FK on upgrade', () => {
+    dataDir = makeTempDataDir();
+
+    // Start with the complete current schema, then replace campaign_members with
+    // its legacy unconstrained shape and mark 0046 unapplied. This isolates the
+    // real production upgrade path without hand-maintaining every unrelated table.
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.pragma('foreign_keys = OFF');
+      const now = '2026-07-22T00:00:00.000Z';
+      legacy.prepare("INSERT INTO users (id, username, display_name, password_hash, server_role, disabled, created_at, updated_at) VALUES (1, 'real-dm', 'Real DM', 'hash', 'user', 0, ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO users (id, username, display_name, password_hash, server_role, disabled, created_at, updated_at) VALUES (2, 'linked-player', 'Linked Player', 'hash', 'user', 0, ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Legacy Ghost Campaign', ?, ?)").run(now, now);
+      legacy.exec(`
+        DROP TABLE campaign_members;
+        CREATE TABLE campaign_members (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          campaign_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          role TEXT NOT NULL,
+          character_id INTEGER,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(campaign_id, user_id)
+        );
+      `);
+      legacy.prepare("INSERT INTO campaign_members VALUES (1, 1, 1, 'dm', NULL, ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO campaign_members VALUES (2, 1, 999999, 'dm', NULL, ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO campaign_members VALUES (3, 1, 2, 'player', 888888, ?, ?)").run(now, now);
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0046_campaign_members_user_fk'").run();
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      const memberships = upgraded.sqlite
+        .prepare('SELECT id, user_id, role, character_id FROM campaign_members ORDER BY id')
+        .all();
+      expect(memberships).toEqual([
+        { id: 1, user_id: 1, role: 'dm', character_id: null },
+        { id: 3, user_id: 2, role: 'player', character_id: null },
+      ]);
+
+      const repairs = upgraded.sqlite
+        .prepare('SELECT member_id, user_id, reason, action, invalid_reference_id FROM membership_integrity_repairs ORDER BY member_id')
+        .all();
+      expect(repairs).toEqual([
+        { member_id: 2, user_id: 999999, reason: 'missing_user', action: 'removed_membership', invalid_reference_id: 999999 },
+        { member_id: 3, user_id: 2, reason: 'missing_character', action: 'cleared_character', invalid_reference_id: 888888 },
+      ]);
+
+      const fks = upgraded.sqlite.pragma('foreign_key_list(campaign_members)') as Array<{ table: string; from: string; on_delete: string }>;
+      expect(fks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ table: 'users', from: 'user_id', on_delete: 'CASCADE' }),
+      ]));
+      expect(() =>
+        upgraded.sqlite
+          .prepare("INSERT INTO campaign_members (campaign_id, user_id, role, created_at, updated_at) VALUES (1, 123456, 'player', '', '')")
+          .run(),
+      ).toThrow(/FOREIGN KEY/i);
+
+      upgraded.sqlite.prepare('DELETE FROM users WHERE id = 2').run();
+      expect(
+        (upgraded.sqlite.prepare('SELECT COUNT(*) AS n FROM campaign_members WHERE user_id = 2').get() as { n: number }).n,
+      ).toBe(0);
+    } finally {
+      upgraded.sqlite.close();
     }
   });
 });

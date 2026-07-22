@@ -459,11 +459,31 @@ export const settings = sqliteTable('settings', {
 export const campaignMembers = sqliteTable('campaign_members', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
-  userId: integer('user_id').notNull(),
+  // A membership without a real account can never authenticate. Keep this FK in
+  // the ORM schema as well as bootstrap/migration DDL so every write path and
+  // every upgraded database enforces the same authority boundary (#849).
+  userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   role: text('role').notNull(),
   characterId: integer('character_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+// Safe, server-admin-visible history of membership rows repaired while adding
+// the campaign_members.user_id FK (#849). This deliberately has no campaign/user
+// FKs: it records references that were already missing and remains useful after
+// later account/campaign cleanup. It contains identifiers and roles only — never
+// campaign content or secrets.
+export const membershipIntegrityRepairs = sqliteTable('membership_integrity_repairs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  memberId: integer('member_id').notNull(),
+  userId: integer('user_id').notNull(),
+  role: text('role').notNull(),
+  reason: text('reason').notNull(),
+  action: text('action').notNull(),
+  invalidReferenceId: integer('invalid_reference_id'),
+  createdAt: text('created_at').notNull(),
 });
 
 // DM invite links / join codes — see modules/membership/invites.service.ts.

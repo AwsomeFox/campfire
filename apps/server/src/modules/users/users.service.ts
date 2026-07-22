@@ -1,16 +1,29 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, like, ne, or } from 'drizzle-orm';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, count, eq, like, ne, or } from 'drizzle-orm';
 import type { z } from 'zod';
-import { UserCreate, UserUpdate, PreferencesUpdate } from '@campfire/schema';
-import type { User } from '@campfire/schema';
+import { CampaignDmRepair, UserCreate, UserUpdate, PreferencesUpdate } from '@campfire/schema';
+import type { MembershipIntegrityCampaign, MembershipIntegrityReport, User } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { users, userSessions, apiTokens, campaignMembers, campaigns, passwordResetRequests, characters } from '../../db/schema';
+import {
+  users,
+  userSessions,
+  apiTokens,
+  campaignMembers,
+  campaigns,
+  passwordResetRequests,
+  characters,
+  membershipIntegrityRepairs,
+} from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { hashPassword } from '../../common/crypto';
+import { AuditService } from '../audit/audit.service';
+import { auditActor, type RequestUser } from '../../common/user.types';
 
 type UserCreateInput = z.infer<typeof UserCreate>;
 type UserUpdateInput = z.infer<typeof UserUpdate>;
 type PreferencesUpdateInput = z.infer<typeof PreferencesUpdate>;
+type CampaignDmRepairInput = z.infer<typeof CampaignDmRepair>;
+type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 function toDomain(row: typeof users.$inferSelect): User {
   return {
@@ -28,7 +41,10 @@ function toDomain(row: typeof users.$inferSelect): User {
 
 @Injectable()
 export class UsersService {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    private readonly audit: AuditService,
+  ) {}
 
   async count(): Promise<number> {
     const rows = await this.db.select().from(users);
@@ -65,8 +81,51 @@ export class UsersService {
     const rows = await this.db
       .select()
       .from(users)
-      .where(or(like(users.username, pattern), like(users.displayName, pattern)));
+      .where(
+        and(
+          eq(users.disabled, false),
+          or(like(users.username, pattern), like(users.displayName, pattern)),
+        ),
+      );
     return rows.slice(0, limit).map((r) => ({ id: r.id, username: r.username, displayName: r.displayName }));
+  }
+
+  private enabledAdminCountTx(tx: SyncDb, excludeId?: number): number {
+    const conditions = [eq(users.serverRole, 'admin'), eq(users.disabled, false)];
+    if (excludeId !== undefined) conditions.push(ne(users.id, excludeId));
+    return tx
+      .select({ value: count() })
+      .from(users)
+      .where(and(...conditions))
+      .get()?.value ?? 0;
+  }
+
+  private usableDmCountTx(tx: SyncDb, campaignId: number, excludeUserId?: number): number {
+    const conditions = [
+      eq(campaignMembers.campaignId, campaignId),
+      eq(campaignMembers.role, 'dm'),
+      eq(users.disabled, false),
+    ];
+    if (excludeUserId !== undefined) conditions.push(ne(campaignMembers.userId, excludeUserId));
+    return tx
+      .select({ value: count() })
+      .from(campaignMembers)
+      .innerJoin(users, eq(campaignMembers.userId, users.id))
+      .where(and(...conditions))
+      .get()?.value ?? 0;
+  }
+
+  /** Campaign names for which making this enabled DM unusable would remove all authority. */
+  private orphanedCampaignNamesTx(tx: SyncDb, userId: number): string[] {
+    const dmMemberships = tx
+      .select({ campaignId: campaignMembers.campaignId, campaignName: campaigns.name })
+      .from(campaignMembers)
+      .innerJoin(campaigns, eq(campaignMembers.campaignId, campaigns.id))
+      .where(and(eq(campaignMembers.userId, userId), eq(campaignMembers.role, 'dm')))
+      .all();
+    return dmMemberships
+      .filter((membership) => this.usableDmCountTx(tx, membership.campaignId, userId) === 0)
+      .map((membership) => membership.campaignName);
   }
 
   /** Public wrapper — used by OidcService to decide whether a group-based demotion is safe. */
@@ -150,24 +209,33 @@ export class UsersService {
   }
 
   async update(id: number, input: UserUpdateInput): Promise<User> {
-    const existing = await this.getRowOrThrow(id);
+    return this.db.transaction((tx) => {
+      const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
+      if (!existing) throw new NotFoundException(`User ${id} not found`);
 
-    const demotingAdmin = input.serverRole !== undefined && input.serverRole !== 'admin' && existing.serverRole === 'admin';
-    const disablingAdmin = input.disabled === true && existing.serverRole === 'admin' && !existing.disabled;
-    if (demotingAdmin || disablingAdmin) {
-      const remaining = await this.countEnabledAdmins(id);
-      if (remaining === 0) {
+      const demotingAdmin = input.serverRole !== undefined && input.serverRole !== 'admin' && existing.serverRole === 'admin';
+      const disablingAdmin = input.disabled === true && existing.serverRole === 'admin' && !existing.disabled;
+      if ((demotingAdmin || disablingAdmin) && this.enabledAdminCountTx(tx, id) === 0) {
         throw new ConflictException('Cannot demote or disable the last enabled admin');
       }
-    }
 
-    const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
-    if (input.displayName !== undefined) update.displayName = input.displayName;
-    if (input.serverRole !== undefined) update.serverRole = input.serverRole;
-    if (input.disabled !== undefined) update.disabled = input.disabled;
+      if (input.disabled === true && !existing.disabled) {
+        const orphanedCampaignNames = this.orphanedCampaignNamesTx(tx, id);
+        if (orphanedCampaignNames.length > 0) {
+          throw new ConflictException(
+            `Cannot disable: assign an enabled DM first for: ${orphanedCampaignNames.join(', ')}`,
+          );
+        }
+      }
 
-    const [row] = await this.db.update(users).set(update).where(eq(users.id, id)).returning();
-    return toDomain(row);
+      const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };
+      if (input.displayName !== undefined) update.displayName = input.displayName;
+      if (input.serverRole !== undefined) update.serverRole = input.serverRole;
+      if (input.disabled !== undefined) update.disabled = input.disabled;
+
+      const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
+      return toDomain(row);
+    });
   }
 
   /** Self-service preferences (display name + accent color + text size) — PATCH /me/preferences. */
@@ -184,65 +252,174 @@ export class UsersService {
   }
 
   async remove(id: number): Promise<void> {
-    const existing = await this.getRowOrThrow(id);
-    if (existing.serverRole === 'admin') {
-      const remaining = await this.countEnabledAdmins(id);
-      if (remaining === 0) {
+    this.db.transaction((tx) => {
+      const existing = tx.select().from(users).where(eq(users.id, id)).limit(1).get();
+      if (!existing) throw new NotFoundException(`User ${id} not found`);
+      if (existing.serverRole === 'admin' && !existing.disabled && this.enabledAdminCountTx(tx, id) === 0) {
         throw new ConflictException('Cannot delete the last enabled admin');
       }
-    }
 
-    // Last-dm guard: deleting a user cascades their campaign_members rows, which
-    // silently orphans any campaign where they're the ONLY dm — MembersService's
-    // own DELETE endpoint already refuses this (see members.service.ts `remove()`),
-    // but that guard is bypassed entirely when the user row itself is deleted
-    // instead. Mirror the same check here: for every campaign this user dms,
-    // count OTHER dms; if any campaign would be left with zero, 409 listing them
-    // by name so the admin can reassign a dm first instead of losing the campaign.
-    const dmMemberships = await this.db
-      .select()
-      .from(campaignMembers)
-      .where(and(eq(campaignMembers.userId, id), eq(campaignMembers.role, 'dm')));
-
-    if (dmMemberships.length > 0) {
-      const orphanedCampaignNames: string[] = [];
-      for (const membership of dmMemberships) {
-        const otherDms = await this.db
-          .select()
-          .from(campaignMembers)
-          .where(and(eq(campaignMembers.campaignId, membership.campaignId), eq(campaignMembers.role, 'dm')));
-        const remainingDms = otherDms.filter((m) => m.userId !== id);
-        if (remainingDms.length === 0) {
-          const [campaign] = await this.db.select().from(campaigns).where(eq(campaigns.id, membership.campaignId)).limit(1);
-          orphanedCampaignNames.push(campaign?.name ?? `campaign ${membership.campaignId}`);
+      if (!existing.disabled) {
+        const orphanedCampaignNames = this.orphanedCampaignNamesTx(tx, id);
+        if (orphanedCampaignNames.length > 0) {
+          throw new ConflictException(
+            `Cannot delete: assign an enabled DM first for: ${orphanedCampaignNames.join(', ')}`,
+          );
         }
       }
-      if (orphanedCampaignNames.length > 0) {
-        throw new ConflictException(
-          `Cannot delete: reassign DM first for: ${orphanedCampaignNames.join(', ')}`,
-        );
+
+      // Keep every invariant-dependent read and all account/membership writes in
+      // this synchronous transaction so delete races serialize with #654 paths.
+      tx.delete(userSessions).where(eq(userSessions.userId, id)).run();
+      tx.delete(apiTokens).where(eq(apiTokens.userId, id)).run();
+      tx.delete(passwordResetRequests).where(eq(passwordResetRequests.userId, id)).run();
+      tx.delete(campaignMembers).where(eq(campaignMembers.userId, id)).run();
+      tx.update(characters)
+        .set({ ownerUserId: null, updatedAt: nowIso() })
+        .where(eq(characters.ownerUserId, String(id)))
+        .run();
+      tx.delete(users).where(eq(users.id, id)).run();
+    });
+  }
+
+  /** Server-admin-only, secret-free authority diagnostics (#849). */
+  async membershipIntegrity(): Promise<MembershipIntegrityReport> {
+    const [campaignRows, dmRows, repairRows] = await Promise.all([
+      this.db.select({ id: campaigns.id, name: campaigns.name }).from(campaigns),
+      this.db
+        .select({ campaignId: campaignMembers.campaignId, userId: campaignMembers.userId, disabled: users.disabled })
+        .from(campaignMembers)
+        .innerJoin(users, eq(campaignMembers.userId, users.id))
+        .where(eq(campaignMembers.role, 'dm')),
+      this.db
+        .select({ repair: membershipIntegrityRepairs, campaignName: campaigns.name })
+        .from(membershipIntegrityRepairs)
+        .leftJoin(campaigns, eq(membershipIntegrityRepairs.campaignId, campaigns.id)),
+    ]);
+
+    const usableByCampaign = new Map<number, number>();
+    const disabledByCampaign = new Map<number, number[]>();
+    for (const dm of dmRows) {
+      if (dm.disabled) {
+        disabledByCampaign.set(dm.campaignId, [...(disabledByCampaign.get(dm.campaignId) ?? []), dm.userId]);
+      } else {
+        usableByCampaign.set(dm.campaignId, (usableByCampaign.get(dm.campaignId) ?? 0) + 1);
+      }
+    }
+    const ghostsByCampaign = new Map<number, number>();
+    for (const row of repairRows) {
+      if (row.repair.reason === 'missing_user' && row.repair.action === 'removed_membership') {
+        ghostsByCampaign.set(row.repair.campaignId, (ghostsByCampaign.get(row.repair.campaignId) ?? 0) + 1);
       }
     }
 
-    // Cascade: sessions + api_tokens + campaign_members + open password-reset
-    // requests. (Orphaned api_tokens rows would be dead anyway — resolveByRawToken()
-    // refuses tokens whose owner row is gone — but deleting them keeps hashes of
-    // once-live credentials out of the DB.)
-    await this.db.delete(userSessions).where(eq(userSessions.userId, id));
-    await this.db.delete(apiTokens).where(eq(apiTokens.userId, id));
-    await this.db.delete(passwordResetRequests).where(eq(passwordResetRequests.userId, id));
-    await this.db.delete(campaignMembers).where(eq(campaignMembers.userId, id));
+    const affectedCampaigns: MembershipIntegrityCampaign[] = campaignRows
+      .map((campaign) => {
+        const usableDmCount = usableByCampaign.get(campaign.id) ?? 0;
+        const disabledDmUserIds = disabledByCampaign.get(campaign.id) ?? [];
+        const removedGhostMembershipCount = ghostsByCampaign.get(campaign.id) ?? 0;
+        return {
+          campaignId: campaign.id,
+          campaignName: campaign.name,
+          usableDmCount,
+          disabledDmUserIds,
+          removedGhostMembershipCount,
+          repairRequired: usableDmCount === 0,
+        };
+      })
+      .filter(
+        (campaign) =>
+          campaign.repairRequired ||
+          campaign.disabledDmUserIds.length > 0 ||
+          campaign.removedGhostMembershipCount > 0,
+      )
+      .sort((a, b) => Number(b.repairRequired) - Number(a.repairRequired) || a.campaignId - b.campaignId);
 
-    // De-link owned characters (issue #128): the character sheets are NOT deleted —
-    // that would destroy party/campaign data others rely on — but their
-    // ownerUserId (string form of users.id) is cleared so it no longer dangles at
-    // a gone user. Notes keep authorUserId as authored-history attribution.
-    await this.db
-      .update(characters)
-      .set({ ownerUserId: null, updatedAt: nowIso() })
-      .where(eq(characters.ownerUserId, String(id)));
+    return {
+      generatedAt: nowIso(),
+      campaigns: affectedCampaigns,
+      repairs: repairRows.map(({ repair, campaignName }) => ({
+        id: repair.id,
+        campaignId: repair.campaignId,
+        campaignName,
+        memberId: repair.memberId,
+        userId: repair.userId,
+        role: repair.role as 'dm' | 'player' | 'viewer',
+        reason: repair.reason as 'missing_user' | 'missing_campaign' | 'missing_character',
+        action: repair.action as 'removed_membership' | 'cleared_character',
+        invalidReferenceId: repair.invalidReferenceId,
+        createdAt: repair.createdAt,
+      })),
+    };
+  }
 
-    await this.db.delete(users).where(eq(users.id, id));
+  /**
+   * Restore authority only when a campaign currently has zero enabled DMs.
+   * This narrow operation does not read/return campaign content and does not make
+   * the calling server admin a member unless they explicitly select themselves.
+   */
+  async repairCampaignDm(input: CampaignDmRepairInput, actor: RequestUser): Promise<MembershipIntegrityCampaign> {
+    this.db.transaction((tx) => {
+      const campaign = tx.select({ id: campaigns.id }).from(campaigns).where(eq(campaigns.id, input.campaignId)).limit(1).get();
+      if (!campaign) throw new NotFoundException(`Campaign ${input.campaignId} not found`);
+      const user = tx.select().from(users).where(eq(users.id, input.userId)).limit(1).get();
+      if (!user) throw new NotFoundException(`User ${input.userId} not found`);
+      if (user.disabled) throw new BadRequestException(`User ${input.userId} is disabled and cannot be assigned as dm`);
+      if (this.usableDmCountTx(tx, input.campaignId) > 0) {
+        throw new ConflictException('Campaign already has an enabled dm; use normal campaign membership controls');
+      }
+
+      const ts = nowIso();
+      const existing = tx
+        .select({ id: campaignMembers.id })
+        .from(campaignMembers)
+        .where(and(eq(campaignMembers.campaignId, input.campaignId), eq(campaignMembers.userId, input.userId)))
+        .limit(1)
+        .get();
+      if (existing) {
+        tx.update(campaignMembers)
+          .set({ role: 'dm', updatedAt: ts })
+          .where(eq(campaignMembers.id, existing.id))
+          .run();
+      } else {
+        tx.insert(campaignMembers)
+          .values({
+            campaignId: input.campaignId,
+            userId: input.userId,
+            role: 'dm',
+            characterId: null,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
+      }
+    });
+
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: 'dm',
+      action: 'membership.integrity_repair',
+      entityType: 'campaign_member',
+      campaignId: input.campaignId,
+      detail: `assigned enabled user ${input.userId} as recovery dm`,
+    });
+
+    const report = await this.membershipIntegrity();
+    const campaign = await this.db
+      .select({ name: campaigns.name })
+      .from(campaigns)
+      .where(eq(campaigns.id, input.campaignId))
+      .limit(1);
+    return (
+      report.campaigns.find((campaign) => campaign.campaignId === input.campaignId) ?? {
+        campaignId: input.campaignId,
+        campaignName: campaign[0]?.name ?? `campaign ${input.campaignId}`,
+        usableDmCount: 1,
+        disabledDmUserIds: [],
+        removedGhostMembershipCount: 0,
+        repairRequired: false,
+      }
+    );
   }
 
   /**

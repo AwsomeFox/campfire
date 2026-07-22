@@ -31,7 +31,7 @@ Design goals:
 >   **AI scribe** that drafts recaps into the proposal queue.
 >
 > The same service layer is exposed as a REST API (OpenAPI/Swagger) **and** an MCP
-> server with **134 tools**, so any MCP-capable client (e.g. Claude, via `claude mcp
+> server with **137 tools**, so any MCP-capable client (e.g. Claude, via `claude mcp
 > add`) can read and write — or fully drive — a campaign directly. See
 > [`design/`](design/) for the original approved mockups the UI was built from.
 
@@ -240,7 +240,7 @@ then a DM configures the seat per-campaign under **Settings → AI Dungeon Maste
 shipped provider is a no-op scaffold. You get real narration one of two ways:
 
 1. **Over MCP** — connect any agent (e.g. Claude) with a **dm-scoped** personal access
-   token; it drives the campaign through the same 134 MCP tools, or
+   token; it drives the campaign through the same 137 MCP tools, or
 2. **A per-campaign provider** — set a provider (OpenAI / Anthropic / a custom base URL)
    and a **write-only** API key in the seat config, with an optional model allowlist.
 
@@ -251,7 +251,7 @@ takeover), and — like everything else — every action is audit-logged with ac
 
 ## Roadmap
 
-Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (134 tools), media & maps
+Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (137 tools), media & maps
 (attachments) with fog of war, real rule systems from open sources (5e / PF2e / Open
 Legend live), encounter/combat tracker, the full game-icons.net icon set, a DM-approval
 proposal queue, the **AI Dungeon Master** (co-DM + driver) and a **scheduled AI scribe**

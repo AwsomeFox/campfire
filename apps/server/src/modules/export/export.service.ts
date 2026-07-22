@@ -217,6 +217,7 @@ export class ExportService {
       characterId: m.characterId,
       username: m.username,
       displayName: m.displayName,
+      disabled: m.disabled,
       createdAt: m.createdAt,
       updatedAt: m.updatedAt,
     }));

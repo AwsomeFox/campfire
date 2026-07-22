@@ -25,6 +25,8 @@ export class MembersController {
   @Post()
   @ApiOperation({ summary: 'Add a member to a campaign', description: 'dm role required.' })
   @ApiResponse({ status: 201, description: 'Created membership.' })
+  @ApiResponse({ status: 400, description: 'Target user is disabled or character link is invalid.' })
+  @ApiResponse({ status: 404, description: 'Target user does not exist.' })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: MemberCreateDto,
@@ -37,6 +39,8 @@ export class MembersController {
   @Patch(':memberId')
   @ApiOperation({ summary: "Update a member's role/character link", description: 'dm role required.' })
   @ApiResponse({ status: 200, description: 'Updated membership.' })
+  @ApiResponse({ status: 400, description: 'Cannot promote a disabled account to DM, or character link is invalid.' })
+  @ApiResponse({ status: 409, description: 'Would demote the last enabled DM.' })
   async update(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Param('memberId', ParseIntPipe) memberId: number,

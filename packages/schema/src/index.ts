@@ -2282,11 +2282,55 @@ export const CampaignMember = z.object({
   characterId: Id.nullable().default(null),
   username: z.string().default(''), // denormalized for display
   displayName: z.string().default(''),
+  disabled: z.boolean().default(false), // unusable accounts never count as DM authority (#849)
   ...timestamps,
 });
 export type CampaignMember = z.infer<typeof CampaignMember>;
 export const MemberCreate = z.object({ userId: Id, role: Role, characterId: Id.nullable().optional() });
 export const MemberUpdate = z.object({ role: Role.optional(), characterId: Id.nullable().optional() });
+
+// Server-admin-only membership integrity diagnostics/recovery (#849). These
+// shapes expose operational metadata only: campaign identity/name, account ids,
+// roles and migration actions — never campaign entities or DM-secret content.
+export const MembershipIntegrityRepairReason = z.enum([
+  'missing_user',
+  'missing_campaign',
+  'missing_character',
+]);
+export const MembershipIntegrityRepairAction = z.enum(['removed_membership', 'cleared_character']);
+export const MembershipIntegrityRepair = z.object({
+  id: Id,
+  campaignId: Id,
+  campaignName: z.string().nullable(),
+  memberId: Id,
+  userId: Id,
+  role: Role,
+  reason: MembershipIntegrityRepairReason,
+  action: MembershipIntegrityRepairAction,
+  invalidReferenceId: Id.nullable(),
+  createdAt: IsoDate,
+});
+export type MembershipIntegrityRepair = z.infer<typeof MembershipIntegrityRepair>;
+
+export const MembershipIntegrityCampaign = z.object({
+  campaignId: Id,
+  campaignName: z.string(),
+  usableDmCount: z.number().int().nonnegative(),
+  disabledDmUserIds: z.array(Id),
+  removedGhostMembershipCount: z.number().int().nonnegative(),
+  repairRequired: z.boolean(),
+});
+export type MembershipIntegrityCampaign = z.infer<typeof MembershipIntegrityCampaign>;
+
+export const MembershipIntegrityReport = z.object({
+  generatedAt: IsoDate,
+  campaigns: z.array(MembershipIntegrityCampaign),
+  repairs: z.array(MembershipIntegrityRepair),
+});
+export type MembershipIntegrityReport = z.infer<typeof MembershipIntegrityReport>;
+
+export const CampaignDmRepair = z.object({ campaignId: Id, userId: Id });
+export type CampaignDmRepair = z.infer<typeof CampaignDmRepair>;
 
 // ---------- campaign invites (DM invite links / join codes) ----------
 // A DM-generated, shareable link that onboards a player without a server admin:
