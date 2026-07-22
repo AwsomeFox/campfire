@@ -6,7 +6,7 @@ const ADMIN = {
   password: 'campfire-first-run-admin-1',
 } as const;
 
-test('first admin reaches the campaign hub without reload or stale auth routes', async ({ page, browser }) => {
+test('first admin reaches the campaign hub without reload or stale auth routes', async ({ page, browser, baseURL }) => {
   let setupStarted = false;
   const postSetupAuthReads = new Set<string>();
   page.on('request', (request) => {
@@ -61,10 +61,30 @@ test('first admin reaches the campaign hub without reload or stale auth routes',
   await expect(page.getByRole('heading', { name: 'Your campaigns' })).toBeVisible();
 
   // Once configured, a signed-out visitor who guesses /setup is sent to the
-  // ordinary login screen rather than seeing the first-admin form.
-  const signedOut = await browser.newContext();
+  // ordinary login screen rather than seeing the first-admin form. Hold /me
+  // briefly to prove the configured route renders a neutral state while auth
+  // identity is still loading instead of flashing the sensitive setup form.
+  const signedOut = await browser.newContext({ baseURL, serviceWorkers: 'block' });
   const signedOutPage = await signedOut.newPage();
+  await signedOutPage.route('**/api/v1/auth/status', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ setupRequired: false, oidcEnabled: false, signupEnabled: false }),
+    });
+  });
+  let releaseMe!: () => void;
+  const meGate = new Promise<void>((resolve) => {
+    releaseMe = resolve;
+  });
+  await signedOutPage.route('**/api/v1/me', async (route) => {
+    await meGate;
+    await route.continue();
+  });
   await signedOutPage.goto('/setup');
+  await expect(signedOutPage.getByText('Checking your session…')).toBeVisible();
+  await expect(signedOutPage.getByRole('button', { name: 'Light the fire' })).toHaveCount(0);
+  releaseMe();
   await expect(signedOutPage).toHaveURL(/\/login$/);
   await expect(signedOutPage.getByRole('button', { name: 'Sign in' })).toBeVisible();
   await signedOut.close();

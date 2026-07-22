@@ -42,7 +42,14 @@ export function SetupPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  if (!loading && ready && status && !status.setupRequired) {
+  if (!loading && status && !status.setupRequired) {
+    if (!ready) {
+      return (
+        <div className="min-h-screen grid place-items-center p-6" aria-live="polite">
+          <p className="text-muted">Checking your session…</p>
+        </div>
+      );
+    }
     return <Navigate to={me ? '/' : '/login'} replace />;
   }
 
