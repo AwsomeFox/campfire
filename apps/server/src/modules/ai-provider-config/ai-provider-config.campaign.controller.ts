@@ -94,7 +94,7 @@ export class AiProviderCampaignConfigController {
   @ApiResponse({ status: 200, description: 'Credential-free authoritative removal preview.', type: AiProviderRemovalImpactDto })
   @ApiResponse({ status: 404, description: 'No campaign provider override exists.' })
   async removalImpact(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    await this.access.requireRole(user, id, 'dm');
     return this.configs.previewCampaignRemoval(id);
   }
 

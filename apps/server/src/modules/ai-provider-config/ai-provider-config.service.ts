@@ -482,19 +482,27 @@ export class AiProviderConfigService {
       scope === 'server'
         ? db.select().from(campaigns).orderBy(asc(campaigns.id)).all()
         : db.select().from(campaigns).where(eq(campaigns.id, campaignId!)).limit(1).all();
-    const campaignIds = new Set(campaignRows.map((campaign) => campaign.id));
     const providerRows =
       scope === 'server'
         ? allProviders
         : allProviders.filter(
             (row) => row.scope === 'server' || (row.scope === 'campaign' && row.campaignId === campaignId),
           );
-    const seatRows = db
-      .select()
-      .from(aiDmSeats)
-      .orderBy(asc(aiDmSeats.campaignId))
-      .all()
-      .filter((seat) => campaignIds.has(seat.campaignId));
+    const seatRows =
+      scope === 'server'
+        ? db.select().from(aiDmSeats).orderBy(asc(aiDmSeats.campaignId)).all()
+        : db
+            .select()
+            .from(aiDmSeats)
+            .where(eq(aiDmSeats.campaignId, campaignId!))
+            .orderBy(asc(aiDmSeats.campaignId))
+            .all();
+    const campaignProviders = new Map(
+      providerRows
+        .filter((row) => row.scope === 'campaign' && row.campaignId !== null)
+        .map((row) => [row.campaignId!, row] as const),
+    );
+    const seatsByCampaign = new Map(seatRows.map((seat) => [seat.campaignId, seat] as const));
 
     const revisionState = {
       scope,
@@ -510,9 +518,7 @@ export class AiProviderConfigService {
     const impactRevision = createHash('sha256').update(JSON.stringify(revisionState)).digest('hex');
     const affectedCampaigns = campaignRows
       .map((campaign) => {
-        const campaignProvider = providerRows.find(
-          (row) => row.scope === 'campaign' && row.campaignId === campaign.id,
-        );
+        const campaignProvider = campaignProviders.get(campaign.id);
         const current = effectiveRemovalState(campaignProvider, server);
         const after =
           scope === 'server'
@@ -520,7 +526,7 @@ export class AiProviderConfigService {
             : effectiveRemovalState(undefined, server);
         if (scope === 'server' && sameEffectiveState(current, after)) return null;
 
-        const seat = seatRows.find((candidate) => candidate.campaignId === campaign.id);
+        const seat = seatsByCampaign.get(campaign.id);
         const result: 'fallback' | 'disabled' = after.ready ? 'fallback' : 'disabled';
         const enabledRuntimeWillStop =
           result === 'disabled' && current.ready && !!seat?.enabled && (seat?.mode ?? 'off') !== 'off';

@@ -289,6 +289,25 @@ describe('ai-provider-config (e2e)', () => {
       .send({ providerType: 'mock', model: 'mock-model', apiKey: '' });
     expect(test.status).toBe(403);
   });
+
+  it('does not offer a removal preview when an archived campaign cannot confirm it', async () => {
+    const paused = await request(server)
+      .patch(`/api/v1/campaigns/${campaignId}`)
+      .set(dm)
+      .send({ status: 'paused' });
+    expect(paused.status).toBe(200);
+
+    const preview = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-provider/removal-impact`)
+      .set(dm);
+    expect(preview.status).toBe(403);
+
+    const resumed = await request(server)
+      .patch(`/api/v1/campaigns/${campaignId}`)
+      .set(dm)
+      .send({ status: 'active' });
+    expect(resumed.status).toBe(200);
+  });
 });
 
 /**
