@@ -234,7 +234,8 @@ export class EncountersService {
    * unique index rejects our INSERT, we re-read the winner so the 409 body can
    * carry its id deterministically. Exactly one row can match (the partial unique
    * index guarantees it), so `.limit(1)` is belt-and-suspenders. `characterId`
-   * and `npcId` are never both set on the same combatant, so the OR is safe.
+   * and `npcId` are never both set on the same combatant, so selecting one
+   * predicate based on which id is non-null is safe (no OR is needed).
    */
   private async findExistingIdentityCombatant(
     encounterId: number,
@@ -1060,8 +1061,9 @@ export class EncountersService {
         // probe and our INSERT. Re-read the winning row so the 409 carries its id
         // (deterministic — exactly one row can match the partial unique index now).
         // If the re-read somehow finds nothing (the winner was rolled back, or the
-        // constraint fired for an unrelated reason), fall back to a plain 409 with
-        // no id rather than mask the original error.
+        // constraint fired for an unrelated reason), rethrow the original
+        // SQLITE_CONSTRAINT error so the caller sees the real failure rather than
+        // a generic 409 that masks it.
         const winner = await this.findExistingIdentityCombatant(encounterId, characterId, npcId);
         if (winner) {
           throw new ConflictException({

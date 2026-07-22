@@ -1308,6 +1308,43 @@ function migrateCombatantsUniqueIdentity(sqlite: Database.Database): void {
     .get();
   if (!hasCombatantsTable) return; // fresh DB — BOOTSTRAP_SQL creates the table + indexes.
 
+  // Before collapsing duplicates, repoint encounters.current_combatant_id away
+  // from any combatant row we are ABOUT to delete, so turn tracking does not end
+  // up dangling. For each identity we keep MIN(id) per (encounter, identity); any
+  // to-be-deleted duplicate whose id is the encounter's current pointer is
+  // remapped to that surviving id. Migrations run with foreign_keys OFF, so
+  // without this repoint the FK would dangle (and on fresh-DB shapes where the FK
+  // is enforced, the post-migrate foreign-key check would flag it).
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  const hasNpcId = columns.some((c) => c.name === 'npc_id');
+  const hasCurrentPointer =
+    sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+      .get() !== undefined &&
+    (sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>).some(
+      (c) => c.name === 'current_combatant_id',
+    );
+  if (hasCurrentPointer) {
+    const remapForIdentity = (identityCol: 'character_id' | 'npc_id') => {
+      // Pairs of (encounter_id, surviving_min_id, all_duplicate_ids_csv) for the
+      // identity column. Build the remap per encounter from the duplicate set.
+      const survivors = sqlite
+        .prepare(
+          `SELECT encounter_id, MIN(id) AS keep_id FROM combatants WHERE ${identityCol} IS NOT NULL GROUP BY encounter_id, ${identityCol}`,
+        )
+        .all() as Array<{ encounter_id: number; keep_id: number }>;
+      for (const { encounter_id, keep_id } of survivors) {
+        sqlite
+          .prepare(
+            `UPDATE encounters SET current_combatant_id = ? WHERE id = ? AND current_combatant_id IS NOT NULL AND current_combatant_id != ? AND current_combatant_id IN (SELECT id FROM combatants WHERE encounter_id = ? AND ${identityCol} IS NOT NULL)`,
+          )
+          .run(keep_id, encounter_id, keep_id, encounter_id);
+      }
+    };
+    remapForIdentity('character_id');
+    if (hasNpcId) remapForIdentity('npc_id');
+  }
+
   // Collapse exact (encounter_id, character_id) duplicates, keeping the earliest
   // row. character_id IS NULL rows are left alone (the partial index ignores them
   // anyway, and "duplicate monster" rows are legitimate — three Goblins, #114).
@@ -1321,8 +1358,7 @@ function migrateCombatantsUniqueIdentity(sqlite: Database.Database): void {
   // Same dedupe for NPC identity. npc_id may not exist on the oldest DBs
   // (migration 0044 adds it), but by the time this runs 0044 has already applied,
   // so the column is present on every table that survived to this point.
-  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
-  if (columns.some((c) => c.name === 'npc_id')) {
+  if (hasNpcId) {
     sqlite.exec(`
       DELETE FROM combatants
       WHERE npc_id IS NOT NULL
