@@ -58,24 +58,33 @@ export function uniqueFilename(seen: Set<string>, base: string): string {
 
 /**
  * Builds one human-readable warning line per slug that collided in a folder
- * (issue #530). `slugs` is the full ordered list of slugified names the loop
- * visited; `seen` is what uniqueFilename populated (base, base-2, …). A slug
- * appears here only when it occurred 2+ times. The line names the count, the
- * original (display) entity label, and every filename produced, so a reader can
- * see exactly what was de-duplicated.
+ * (issue #530). `allocations` is the ordered list of [originalSlug, allocatedBase]
+ * pairs the loop recorded — one entry per entity, in iteration order. A slug
+ * appears in a warning only when it occurred 2+ times, and the filenames listed
+ * are the ACTUAL bases uniqueFilename handed out for those occurrences — NOT a
+ * reconstruction from the count. Reconstruction would lie when a real entity's
+ * slug is itself a de-dup suffix (e.g. slugs `bob`, `bob`, `bob-2`: the allocator
+ * hands out `bob`, `bob-3`, `bob-2`, but naive `bob, bob-2` reconstruction would
+ * claim the second file is `bob-2` when it is actually `bob-3`). Tracking the
+ * real allocations keeps the warning truthful in every case.
  */
-function pushCollisionWarning(warnings: string[], label: string, slugs: string[], seen: Set<string>): void {
-  const counts = new Map<string, number>();
-  for (const s of slugs) counts.set(s, (counts.get(s) ?? 0) + 1);
-  for (const [base, count] of counts) {
-    if (count < 2) continue;
-    // The exact filenames uniqueFilename allocated for this slug, in order.
-    const names = [base];
-    for (let n = 2; n <= count; n++) names.push(`${base}-${n}`);
-    // Sanity: every allocated name should be present in `seen`.
-    const allNames = names.filter((nm) => seen.has(nm));
+function pushCollisionWarning(
+  warnings: string[],
+  label: string,
+  allocations: Array<[originalSlug: string, allocatedBase: string]>,
+): void {
+  // Group the allocated bases by the ORIGINAL slug each entity passed in, keeping
+  // insertion order so the filenames read in the order they were written.
+  const bySlug = new Map<string, string[]>();
+  for (const [slug, allocated] of allocations) {
+    const list = bySlug.get(slug);
+    if (list) list.push(allocated);
+    else bySlug.set(slug, [allocated]);
+  }
+  for (const [slug, allocatedBases] of bySlug) {
+    if (allocatedBases.length < 2) continue;
     warnings.push(
-      `${count} ${label}s shared the name '${base}' and were exported as ${allNames.map((nm) => `${nm}.md`).join(', ')}.`,
+      `${allocatedBases.length} ${label}s shared the name '${slug}' and were exported as ${allocatedBases.map((b) => `${b}.md`).join(', ')}.`,
     );
   }
 }
@@ -321,59 +330,75 @@ export class ExportService {
     zip.file('campaign.md', this.campaignMarkdown(data.campaign, data.notes));
 
     // Per-folder seen-sets drive uniqueFilename (issue #530): each folder de-dups
-    // independently, so a quest and an NPC sharing a slug don't interfere.
+    // independently, so a quest and an NPC sharing a slug don't interfere. Each
+    // loop also records its [originalSlug, allocatedBase] allocations so the
+    // collision warning can name the ACTUAL filenames written (see
+    // pushCollisionWarning for why reconstruction-from-counts would lie).
     const questsFolder = zip.folder('quests')!;
     const questsSeen = new Set<string>();
+    const questsAllocated: Array<[string, string]> = [];
     for (const q of data.quests) {
-      const base = uniqueFilename(questsSeen, slugify(q.title));
+      const slug = slugify(q.title);
+      const base = uniqueFilename(questsSeen, slug);
+      questsAllocated.push([slug, base]);
       questsFolder.file(`${base}.md`, this.questMarkdown(q));
     }
-    pushCollisionWarning(warnings, 'quest', data.quests.map((q) => slugify(q.title)), questsSeen);
+    pushCollisionWarning(warnings, 'quest', questsAllocated);
 
     const npcsFolder = zip.folder('npcs')!;
     const npcsSeen = new Set<string>();
+    const npcsAllocated: Array<[string, string]> = [];
     for (const n of data.npcs) {
-      const base = uniqueFilename(npcsSeen, slugify(n.name));
+      const slug = slugify(n.name);
+      const base = uniqueFilename(npcsSeen, slug);
+      npcsAllocated.push([slug, base]);
       npcsFolder.file(`${base}.md`, this.npcMarkdown(n));
     }
-    pushCollisionWarning(warnings, 'NPC', data.npcs.map((n) => slugify(n.name)), npcsSeen);
+    pushCollisionWarning(warnings, 'NPC', npcsAllocated);
 
     const locationsFolder = zip.folder('locations')!;
     const locationsSeen = new Set<string>();
+    const locationsAllocated: Array<[string, string]> = [];
     for (const l of data.locations) {
-      const base = uniqueFilename(locationsSeen, slugify(l.name));
+      const slug = slugify(l.name);
+      const base = uniqueFilename(locationsSeen, slug);
+      locationsAllocated.push([slug, base]);
       locationsFolder.file(`${base}.md`, this.locationMarkdown(l));
     }
-    pushCollisionWarning(warnings, 'location', data.locations.map((l) => slugify(l.name)), locationsSeen);
+    pushCollisionWarning(warnings, 'location', locationsAllocated);
 
     const sessionsFolder = zip.folder('sessions')!;
     const sessionsSeen = new Set<string>();
+    const sessionsAllocated: Array<[string, string]> = [];
     for (const s of data.sessions) {
-      const base = uniqueFilename(sessionsSeen, slugify(s.title || `session-${s.number}`));
+      const slug = slugify(s.title || `session-${s.number}`);
+      const base = uniqueFilename(sessionsSeen, slug);
+      sessionsAllocated.push([slug, base]);
       sessionsFolder.file(`${base}.md`, this.sessionMarkdown(s));
     }
-    pushCollisionWarning(
-      warnings,
-      'session',
-      data.sessions.map((s) => slugify(s.title || `session-${s.number}`)),
-      sessionsSeen,
-    );
+    pushCollisionWarning(warnings, 'session', sessionsAllocated);
 
     const charactersFolder = zip.folder('characters')!;
     const charactersSeen = new Set<string>();
+    const charactersAllocated: Array<[string, string]> = [];
     for (const c of data.characters) {
-      const base = uniqueFilename(charactersSeen, slugify(c.name));
+      const slug = slugify(c.name);
+      const base = uniqueFilename(charactersSeen, slug);
+      charactersAllocated.push([slug, base]);
       charactersFolder.file(`${base}.md`, this.characterMarkdown(c));
     }
-    pushCollisionWarning(warnings, 'character', data.characters.map((c) => slugify(c.name)), charactersSeen);
+    pushCollisionWarning(warnings, 'character', charactersAllocated);
 
     const encountersFolder = zip.folder('encounters')!;
     const encountersSeen = new Set<string>();
+    const encountersAllocated: Array<[string, string]> = [];
     for (const e of data.encounters) {
-      const base = uniqueFilename(encountersSeen, slugify(e.name));
+      const slug = slugify(e.name);
+      const base = uniqueFilename(encountersSeen, slug);
+      encountersAllocated.push([slug, base]);
       encountersFolder.file(`${base}.md`, this.encounterMarkdown(e));
     }
-    pushCollisionWarning(warnings, 'encounter', data.encounters.map((e) => slugify(e.name)), encountersSeen);
+    pushCollisionWarning(warnings, 'encounter', encountersAllocated);
 
     // Issue #87: embed the actual attachment bytes (maps, portraits, images) under
     // uploads/ so the export is self-contained and its references resolve. A file

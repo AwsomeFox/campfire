@@ -235,4 +235,60 @@ describe('buildMarkdownZip — filename collisions (issue #530)', () => {
     expect(manifest.warnings).toBeUndefined();
     expect(manifest._exportWarnings).toBeUndefined();
   });
+
+  it('warns with the ACTUAL allocated names when a real slug collides with a de-dup suffix', async () => {
+    // Regression for the warning-truthfulness bug surfaced in review: when a real
+    // entity's slug is itself a de-dup suffix, the allocator hands out names that
+    // a naive reconstruction-from-counts would mis-state in the warning.
+    //
+    // Three NPCs: two "Bob" (slug `bob`) and one "Bob-2" (slug `bob-2`). The
+    // allocator visits them in iteration order and hands out, first-come:
+    //   1st `Bob`   (slug `bob`)   -> `bob`      (first use)
+    //   2nd `Bob`   (slug `bob`)   -> `bob-2`    (first free de-dup slot)
+    //   `Bob-2`     (slug `bob-2`) -> `bob-2-2`  (`bob-2` already taken above)
+    //
+    // So the two `bob` NPCs are written as `bob.md` and `bob-2.md`, while the
+    // distinct "Bob-2" NPC is displaced to `bob-2-2.md`. The collision warning
+    // is ONLY for the two `bob` occurrences (the lone `bob-2` slug is distinct
+    // and does not collide with itself). The warning must name the ACTUAL files
+    // the allocator produced for the colliding slug — `bob.md` and `bob-2.md` —
+    // which (deliberately, for this test) happen to coincide with the naive
+    // reconstruction here, BUT the displaced `bob-2-2.md` file belongs to a
+    // DIFFERENT slug and must not be swept into the `bob` warning. A
+    // reconstruction-from-counts that walked `seen` could not distinguish these.
+    const service = buildService({
+      npcs: [
+        { id: 1, name: 'Bob', role: 'merchant', disposition: 'friendly', body: 'bob-one', dmSecret: null },
+        { id: 2, name: 'Bob', role: 'guard', disposition: 'neutral', body: 'bob-two', dmSecret: null },
+        { id: 3, name: 'Bob-2', role: 'scout', disposition: 'hostile', body: 'bob-two-real', dmSecret: null },
+      ],
+    });
+    const result = (await service.buildMarkdownZip(1, USER)) as unknown as ZipResult;
+    const zip = await zipFrom(result);
+    const warnings = warningsOf(result);
+
+    // All three NPCs are present with distinct files, and the displaced "Bob-2"
+    // NPC lands at `bob-2-2.md` because `bob-2.md` was taken by the second "Bob".
+    const npcFiles = Object.keys(zip.files)
+      .filter((n) => n.startsWith('npcs/') && n.endsWith('.md'))
+      .sort();
+    expect(npcFiles).toEqual(['npcs/bob-2-2.md', 'npcs/bob-2.md', 'npcs/bob.md'].sort());
+
+    // Exactly ONE collision warning — for the two `bob` NPCs. The lone `bob-2`
+    // slug is a distinct name (one occurrence), so it does NOT warn, and the
+    // displaced `bob-2-2.md` file must not appear in the `bob` warning.
+    expect(warnings.length).toBe(1);
+    const warning = warnings[0];
+    expect(warning).toContain("2 NPCs shared the name 'bob'");
+    expect(warning).toContain('bob.md');
+    expect(warning).toContain('bob-2.md');
+    expect(warning).not.toContain('bob-2-2.md');
+
+    // And the file contents back the allocation: `bob-2.md` holds the SECOND
+    // "Bob" (body 'bob-two'), while `bob-2-2.md` holds the displaced "Bob-2" NPC.
+    const bob2 = await zip.file('npcs/bob-2.md')!.async('string');
+    const bob22 = await zip.file('npcs/bob-2-2.md')!.async('string');
+    expect(bob2).toContain('bob-two');
+    expect(bob22).toContain('bob-two-real');
+  });
 });
