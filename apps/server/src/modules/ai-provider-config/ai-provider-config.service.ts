@@ -6,8 +6,11 @@ import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   AiProviderConfigView,
+  AiProviderTestResult,
   type AiProviderConfigUpdate,
   type AiProviderCredentialSource,
+  type AiProviderTestCredentialSource,
+  type AiProviderTestRequest,
 } from '@campfire/schema';
 import { DB, type DrizzleDb, resolveDataDir } from '../../db/db.module';
 import { aiProviderConfigs } from '../../db/schema';
@@ -23,8 +26,17 @@ import {
 
 type ConfigUpdateInput = z.infer<typeof AiProviderConfigUpdate>;
 type ConfigView = z.infer<typeof AiProviderConfigView>;
+type TestInput = z.infer<typeof AiProviderTestRequest>;
+type TestResult = z.infer<typeof AiProviderTestResult>;
 type Scope = 'server' | 'campaign';
 type Row = typeof aiProviderConfigs.$inferSelect;
+type TestedTarget = TestResult['testedTarget'];
+
+interface ResolvedTestCandidate {
+  config: AiProviderConfig | null;
+  testedTarget: TestedTarget;
+  credentialSource: AiProviderTestCredentialSource;
+}
 
 /**
  * The KDF salt for deriving a 32-byte key from an `AI_CONFIG_KEY` passphrase. A
@@ -225,17 +237,21 @@ export class AiProviderConfigService {
    */
   async putCampaign(campaignId: number, input: ConfigUpdateInput, user: RequestUser): Promise<ConfigView> {
     const server = await this.serverRow();
-    const allow = server ? safeJson<string[]>(server.allowedModels, []) : [];
-    if (allow.length > 0 && !allow.includes(input.model)) {
-      throw new BadRequestException(
-        `Model '${input.model}' is not in the server admin's allowlist (${allow.join(', ')}).`,
-      );
-    }
+    this.assertCampaignModelAllowed(input.model, server);
     const existing = await this.campaignRow(campaignId);
     await this.upsert('campaign', campaignId, existing, input, user, campaignId);
     const row = await this.campaignRow(campaignId);
     const serverAfter = await this.serverRow();
     return this.toView(row!, campaignCredentialSource(row!, serverAfter));
+  }
+
+  private assertCampaignModelAllowed(model: string, server: Row | undefined): void {
+    const allow = server ? safeJson<string[]>(server.allowedModels, []) : [];
+    if (allow.length > 0 && !allow.includes(model)) {
+      throw new BadRequestException(
+        `Model '${model}' is not in the server admin's allowlist (${allow.join(', ')}).`,
+      );
+    }
   }
 
   private async upsert(
@@ -498,31 +514,192 @@ export class AiProviderConfigService {
   // ── test-connection (builds the real provider via #309's factory) ────────────
 
   /**
-   * Live probe: resolve the effective config, build the provider through #309's
-   * factory, and run a minimal generation. Returns a plain ok/error — never any
-   * credential. Real providers make a network call here; the `mock` type does not.
+   * Live, NON-PERSISTING probe (issue #852). Controllers always supply `input`, so
+   * the visible draft is what gets tested. The optional branch is retained only for
+   * the admin "test all" health readout, which intentionally probes stored configs.
+   *
+   * Blank candidate-key semantics mirror a save with a blank key:
+   *  - server: reuse its stored key, else the matching environment credential;
+   *  - campaign: reuse its stored key, else inherit the server credential together
+   *    with the server-owned provider/baseUrl (the issue #373 SSRF invariant);
+   *  - mock: no credential is required.
    */
-  async testConnection(campaignId: number | null): Promise<{ ok: boolean; providerType: AiProviderType; model: string; error: string | null }> {
-    const config = campaignId === null ? await this.serverEffectiveConfig() : await this.resolveEffectiveConfig(campaignId);
+  async testConnection(campaignId: number | null, input?: TestInput): Promise<TestResult> {
+    const scope: Scope = campaignId === null ? 'server' : 'campaign';
+    const resolved = input
+      ? await this.resolveDraftTestCandidate(campaignId, input)
+      : await this.resolveStoredTestCandidate(campaignId);
+    const config = resolved.config;
     if (!config) {
-      return { ok: false, providerType: 'mock', model: '', error: 'No provider is configured for this scope.' };
+      return AiProviderTestResult.parse({
+        ok: false,
+        scope,
+        testedTarget: resolved.testedTarget,
+        providerType: 'mock',
+        model: '',
+        baseUrl: null,
+        credentialSource: 'none',
+        testedAt: nowIso(),
+        error: 'No provider is configured for this scope.',
+      });
     }
     try {
       const provider = createAiProvider(config);
-      const result = await provider.generate({
+      await provider.generate({
         model: config.model,
         maxTokens: 16,
         messages: [{ role: 'user', content: 'ping' }],
       });
-      return { ok: true, providerType: config.providerType, model: result.model || config.model, error: null };
-    } catch (err) {
-      return {
-        ok: false,
+      return AiProviderTestResult.parse({
+        ok: true,
+        scope,
+        testedTarget: resolved.testedTarget,
         providerType: config.providerType,
         model: config.model,
-        error: err instanceof Error ? err.message : String(err),
+        baseUrl: config.baseUrl ?? null,
+        credentialSource: resolved.credentialSource,
+        testedAt: nowIso(),
+        error: null,
+      });
+    } catch (err) {
+      return AiProviderTestResult.parse({
+        ok: false,
+        scope,
+        testedTarget: resolved.testedTarget,
+        providerType: config.providerType,
+        model: config.model,
+        baseUrl: config.baseUrl ?? null,
+        credentialSource: resolved.credentialSource,
+        testedAt: nowIso(),
+        error: redactCredential(err instanceof Error ? err.message : String(err), config.apiKey),
+      });
+    }
+  }
+
+  /** Resolve a submitted draft without writing it or auditing it. */
+  private async resolveDraftTestCandidate(
+    campaignId: number | null,
+    input: TestInput,
+  ): Promise<ResolvedTestCandidate> {
+    const [server, campaign] = await Promise.all([
+      this.serverRow(),
+      campaignId === null ? Promise.resolve(undefined) : this.campaignRow(campaignId),
+    ]);
+    if (campaignId !== null) this.assertCampaignModelAllowed(input.model, server);
+
+    const candidate: AiProviderConfig = {
+      providerType: input.providerType,
+      model: input.model,
+      baseUrl: input.baseUrl?.trim() || undefined,
+      params: {},
+    };
+
+    // Mock never consumes a credential, even if a stale/typed key exists.
+    if (input.providerType === 'mock') {
+      return {
+        config: candidate,
+        testedTarget: campaignId === null ? 'server-default' : 'campaign-override',
+        credentialSource: 'not-required',
       };
     }
+
+    // A non-empty candidate key is used only for this probe and never persisted.
+    if (input.apiKey) {
+      return {
+        config: { ...candidate, apiKey: input.apiKey },
+        testedTarget: campaignId === null ? 'server-default' : 'campaign-override',
+        credentialSource: 'candidate',
+      };
+    }
+
+    if (campaignId === null) {
+      if (server?.encryptedApiKey) {
+        return {
+          config: { ...candidate, apiKey: decryptSecret(server.encryptedApiKey, this.key) },
+          testedTarget: 'server-default',
+          credentialSource: 'stored',
+        };
+      }
+      const environmentKey = environmentApiKey(input.providerType);
+      return {
+        config: { ...candidate, apiKey: environmentKey },
+        testedTarget: 'server-default',
+        credentialSource: environmentKey ? 'environment' : 'none',
+      };
+    }
+
+    // A blank campaign key first reuses that campaign row's stored credential. It
+    // may therefore test the visible campaign provider/base URL exactly as a save
+    // that keeps the key would.
+    if (campaign?.encryptedApiKey) {
+      return {
+        config: { ...candidate, apiKey: decryptSecret(campaign.encryptedApiKey, this.key) },
+        testedTarget: 'campaign-override',
+        credentialSource: 'stored',
+      };
+    }
+
+    // Otherwise a campaign may borrow an admin/operator credential only as one
+    // coherent unit with the server-owned provider and endpoint. The visible model
+    // remains the draft model; provider/baseUrl metadata reports what was truly hit.
+    if (server?.encryptedApiKey) {
+      return {
+        config: {
+          providerType: server.providerType as AiProviderType,
+          model: input.model,
+          apiKey: decryptSecret(server.encryptedApiKey, this.key),
+          baseUrl: server.baseUrl ?? undefined,
+          params: {},
+        },
+        testedTarget: 'inherited-server-default',
+        credentialSource: 'server',
+      };
+    }
+    const inheritedEnvironmentKey = server ? environmentApiKey(server.providerType) : undefined;
+    if (server && inheritedEnvironmentKey) {
+      return {
+        config: {
+          providerType: server.providerType as AiProviderType,
+          model: input.model,
+          apiKey: inheritedEnvironmentKey,
+          baseUrl: server.baseUrl ?? undefined,
+          params: {},
+        },
+        testedTarget: 'inherited-server-default',
+        credentialSource: 'environment',
+      };
+    }
+
+    return {
+      config: candidate,
+      testedTarget: 'campaign-override',
+      credentialSource: 'none',
+    };
+  }
+
+  /** Stored-config path used only by the existing admin provider-health action. */
+  private async resolveStoredTestCandidate(campaignId: number | null): Promise<ResolvedTestCandidate> {
+    if (campaignId === null) {
+      const server = await this.serverRow();
+      return {
+        config: await this.serverEffectiveConfig(),
+        testedTarget: 'server-default',
+        credentialSource: server ? localCredentialSource(server) : 'none',
+      };
+    }
+
+    const [campaign, server] = await Promise.all([this.campaignRow(campaignId), this.serverRow()]);
+    const source = campaign
+      ? campaignCredentialSource(campaign, server)
+      : server
+        ? localCredentialSource(server)
+        : 'none';
+    const inherited = !campaign || source === 'server' || source === 'environment';
+    return {
+      config: await this.resolveEffectiveConfig(campaignId),
+      testedTarget: inherited ? 'inherited-server-default' : 'campaign-override',
+      credentialSource: source,
+    };
   }
 
   /** The server-default effective config (server scope has no campaign fallback). */
@@ -571,6 +748,11 @@ function campaignCredentialSource(campaign: Row, server: Row | undefined): AiPro
   if (fallback === 'stored') return 'server';
   if (fallback === 'environment') return 'environment';
   return 'none';
+}
+
+/** Remove the exact credential from provider-supplied error text before serialization. */
+function redactCredential(message: string, credential: string | undefined): string {
+  return credential ? message.split(credential).join('[REDACTED]') : message;
 }
 
 /** Parse a stored JSON blob, falling back to `fallback` on absence/corruption. */

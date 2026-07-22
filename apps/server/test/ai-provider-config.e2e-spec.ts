@@ -3,6 +3,7 @@ import request from 'supertest';
 import { createTestApp, closeTestApp, createTestAppNoDevAuth, type TestAppContext } from './test-app';
 import { dbFilePath } from '../src/db/db.module';
 import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
+import { startFakeAiProvider, type FakeAiProvider } from './fake-ai-provider';
 
 /**
  * Encrypted API-key & provider config storage (issue #310).
@@ -186,7 +187,10 @@ describe('ai-provider-config (e2e)', () => {
       .put('/api/v1/settings/ai-provider')
       .set(dm)
       .send({ providerType: 'mock', model: 'mock-model' });
-    const res = await request(server).post('/api/v1/settings/ai-provider/test').set(dm);
+    const res = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-model', apiKey: '' });
     expect(res.status).toBe(201);
     expect(res.body.ok).toBe(true);
     expect(res.body.scope).toBe('server');
@@ -247,6 +251,229 @@ describe('ai-provider-config (e2e)', () => {
       .delete(`/api/v1/campaigns/${campaignId}/ai-provider/key`)
       .set(player);
     expect(clear.status).toBe(403);
+    const test = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(player)
+      .send({ providerType: 'mock', model: 'mock-model', apiKey: '' });
+    expect(test.status).toBe(403);
+  });
+});
+
+/**
+ * Issue #852: draft tests run through the real Nest app + real SQLite database and
+ * an in-process fake OpenAI-compatible provider. This proves the wire target and
+ * credential choice without touching a live vendor or persisting the candidate.
+ */
+describe('ai-provider-config visible draft connection tests (issue #852, e2e)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let campaignId: number;
+  let fake: FakeAiProvider;
+
+  beforeAll(async () => {
+    fake = await startFakeAiProvider();
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Draft Test Campaign' });
+    campaignId = camp.body.id;
+  });
+
+  beforeEach(async () => {
+    fake.calls.length = 0;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    await request(server).delete(`/api/v1/campaigns/${campaignId}/ai-provider`).set(dm);
+    await request(server).delete('/api/v1/settings/ai-provider').set(dm);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+    await fake.close();
+  });
+
+  function persistedRows(): Array<Record<string, unknown>> {
+    const sqlite = new Database(dbFilePath(ctx.dataDir), { readonly: true });
+    try {
+      return sqlite.prepare('SELECT * FROM ai_provider_configs ORDER BY id').all() as Array<Record<string, unknown>>;
+    } finally {
+      sqlite.close();
+    }
+  }
+
+  it('tests a first-time server draft and candidate key without persisting or echoing it', async () => {
+    const candidateKey = 'sk-first-time-candidate-never-return-8521';
+    const res = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'unsaved-first-model',
+        baseUrl: fake.baseUrl,
+        apiKey: candidateKey,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      ok: true,
+      scope: 'server',
+      testedTarget: 'server-default',
+      providerType: 'openai',
+      model: 'unsaved-first-model',
+      baseUrl: fake.baseUrl,
+      credentialSource: 'candidate',
+      error: null,
+    });
+    expect(Date.parse(res.body.testedAt)).not.toBeNaN();
+    expect(JSON.stringify(res.body)).not.toContain(candidateKey);
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]).toMatchObject({
+      url: '/v1/chat/completions',
+      authorization: `Bearer ${candidateKey}`,
+      body: { model: 'unsaved-first-model' },
+    });
+    expect(persistedRows()).toHaveLength(0);
+  });
+
+  it('rejects unknown fields and unsafe/incomplete candidates through the strict DTO', async () => {
+    const unknown = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-model', apiKey: '', surprise: true });
+    expect(unknown.status).toBe(400);
+
+    const unsafe = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(dm)
+      .send({ providerType: 'openai', model: 'draft-model', baseUrl: 'https://user:pass@attacker.example' });
+    expect(unsafe.status).toBe(400);
+
+    const missingModel = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({ providerType: 'mock', apiKey: '' });
+    expect(missingModel.status).toBe(400);
+    expect(fake.calls).toHaveLength(0);
+    expect(persistedRows()).toHaveLength(0);
+  });
+
+  it('tests unsaved server edits, candidate key rotation, then blank-key stored reuse while preserving the row', async () => {
+    const storedKey = 'sk-stored-server-8522';
+    const rotatedCandidate = 'sk-unsaved-rotation-8523';
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'persisted-model', baseUrl: fake.baseUrl, apiKey: storedKey });
+
+    const rotated = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'unsaved-rotated-model', baseUrl: fake.baseUrl, apiKey: rotatedCandidate });
+    expect(rotated.body).toMatchObject({
+      ok: true,
+      model: 'unsaved-rotated-model',
+      credentialSource: 'candidate',
+    });
+    expect(fake.calls[0].authorization).toBe(`Bearer ${rotatedCandidate}`);
+
+    const reused = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'unsaved-blank-key-model', baseUrl: fake.baseUrl, apiKey: '' });
+    expect(reused.body).toMatchObject({
+      ok: true,
+      model: 'unsaved-blank-key-model',
+      credentialSource: 'stored',
+    });
+    expect(fake.calls[1].authorization).toBe(`Bearer ${storedKey}`);
+
+    const persisted = await request(server).get('/api/v1/settings/ai-provider').set(dm);
+    expect(persisted.body).toMatchObject({ model: 'persisted-model', keyLast4: '8522' });
+    expect(persistedRows()).toHaveLength(1);
+    expect(JSON.stringify(persisted.body)).not.toContain(rotatedCandidate);
+  });
+
+  it('distinguishes a campaign candidate key from blank-key inherited server targeting', async () => {
+    const serverKey = 'sk-inherited-server-8524';
+    const campaignCandidateKey = 'sk-campaign-candidate-8525';
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'server-model', baseUrl: fake.baseUrl, apiKey: serverKey });
+
+    const own = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'campaign-own-draft',
+        baseUrl: fake.baseUrl,
+        apiKey: campaignCandidateKey,
+      });
+    expect(own.body).toMatchObject({
+      ok: true,
+      scope: 'campaign',
+      testedTarget: 'campaign-override',
+      providerType: 'openai',
+      model: 'campaign-own-draft',
+      baseUrl: fake.baseUrl,
+      credentialSource: 'candidate',
+    });
+    expect(fake.calls[0].authorization).toBe(`Bearer ${campaignCandidateKey}`);
+
+    const inherited = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(dm)
+      .send({
+        providerType: 'anthropic',
+        model: 'campaign-inherited-draft',
+        baseUrl: 'https://campaign-controlled.example',
+        apiKey: '',
+      });
+    expect(inherited.body).toMatchObject({
+      ok: true,
+      scope: 'campaign',
+      testedTarget: 'inherited-server-default',
+      providerType: 'openai',
+      model: 'campaign-inherited-draft',
+      baseUrl: fake.baseUrl,
+      credentialSource: 'server',
+    });
+    expect(inherited.body.baseUrl).not.toBe('https://campaign-controlled.example');
+    expect(fake.calls[1].authorization).toBe(`Bearer ${serverKey}`);
+    expect(fake.calls[1].body.model).toBe('campaign-inherited-draft');
+    expect(persistedRows()).toHaveLength(1); // server row only; neither campaign draft persisted
+  });
+
+  it('reuses a campaign-stored key for a blank draft and redacts provider text that echoes a candidate key', async () => {
+    const storedCampaignKey = 'sk-campaign-stored-8526';
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'openai', model: 'saved-campaign-model', baseUrl: fake.baseUrl, apiKey: storedCampaignKey });
+
+    const reused = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(dm)
+      .send({ providerType: 'openai', model: 'unsaved-campaign-model', baseUrl: fake.baseUrl, apiKey: '' });
+    expect(reused.body).toMatchObject({
+      ok: true,
+      testedTarget: 'campaign-override',
+      credentialSource: 'stored',
+      model: 'unsaved-campaign-model',
+    });
+    expect(fake.calls[0].authorization).toBe(`Bearer ${storedCampaignKey}`);
+
+    const echoedCandidate = 'sk-provider-echo-must-redact-8527';
+    fake.failNext(401, JSON.stringify({ error: `bad credential ${echoedCandidate}` }));
+    const failed = await request(server)
+      .post('/api/v1/settings/ai-provider/test')
+      .set(dm)
+      .send({ providerType: 'openai', model: 'failing-draft', baseUrl: fake.baseUrl, apiKey: echoedCandidate });
+    expect(failed.status).toBe(201);
+    expect(failed.body.ok).toBe(false);
+    expect(failed.body.error).toContain('[REDACTED]');
+    expect(JSON.stringify(failed.body)).not.toContain(echoedCandidate);
+    expect(JSON.stringify(failed.body)).not.toContain(storedCampaignKey);
   });
 });
 
@@ -648,6 +875,11 @@ describe('ai-provider-config server default is admin-gated (e2e, no dev auth)', 
 
     const deniedClear = await userAgent.delete('/api/v1/settings/ai-provider/key');
     expect(deniedClear.status).toBe(403);
+
+    const deniedTest = await userAgent
+      .post('/api/v1/settings/ai-provider/test')
+      .send({ providerType: 'mock', model: 'unsaved-model', apiKey: '' });
+    expect(deniedTest.status).toBe(403);
 
     // Sanity: the endpoint is actually mounted for the admin.
     const adminGet = await request(server).get('/api/v1/settings/ai-provider').set({});

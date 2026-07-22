@@ -74,6 +74,45 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
       default: false,
     });
   });
+
+  it('documents the strict write-only AI provider draft test contract (issue #852)', async () => {
+    const res = await request(app.getHttpServer()).get('/api/openapi.json');
+    for (const path of [
+      '/api/v1/settings/ai-provider/test',
+      '/api/v1/campaigns/{id}/ai-provider/test',
+    ]) {
+      const operation = res.body.paths?.[path]?.post;
+      const requestSchema = operation?.requestBody?.content?.['application/json']?.schema;
+      expect(requestSchema).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: expect.arrayContaining(['providerType', 'model']),
+      });
+      expect(requestSchema.properties).toEqual(expect.objectContaining({
+        providerType: expect.any(Object),
+        model: expect.objectContaining({ type: 'string', minLength: 1, maxLength: 120 }),
+        baseUrl: expect.any(Object),
+        apiKey: expect.objectContaining({ type: 'string', maxLength: 4096, writeOnly: true }),
+      }));
+
+      const responseRef = operation?.responses?.['201']?.content?.['application/json']?.schema?.$ref as string | undefined;
+      const responseName = responseRef?.split('/').pop();
+      expect(responseName).toBeTruthy();
+      const responseProperties = res.body.components?.schemas?.[responseName!]?.properties;
+      expect(responseProperties).toEqual(expect.objectContaining({
+        ok: expect.any(Object),
+        scope: expect.any(Object),
+        testedTarget: expect.any(Object),
+        providerType: expect.any(Object),
+        model: expect.any(Object),
+        baseUrl: expect.any(Object),
+        credentialSource: expect.any(Object),
+        testedAt: expect.any(Object),
+        error: expect.any(Object),
+      }));
+      expect(responseProperties).not.toHaveProperty('apiKey');
+    }
+  });
 });
 
 describe('api docs exposure: API_DOCS=0 disables the docs (e2e)', () => {
