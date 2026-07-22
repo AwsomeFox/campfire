@@ -19,21 +19,10 @@ import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../.
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
 import { ENTITY_ICON } from '../../lib/uiIcons';
+import { entityHref as targetHref } from '../../lib/entityLinks';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 type ViewValue = 'open' | 'history';
-
-/** Sub-path under /c/:cid for each linkable entity type (null = campaign dashboard). */
-const entityRoute: Record<EntityTypeValue, string | null> = {
-  quest: 'quests',
-  npc: 'npcs',
-  faction: 'factions',
-  location: 'locations',
-  character: 'characters',
-  session: 'sessions',
-  encounter: 'encounters',
-  campaign: null,
-};
 
 const entityIcon: Record<EntityTypeValue, string> = {
   quest: ENTITY_ICON.quest,
@@ -212,11 +201,7 @@ export default function InboxPage() {
 
 function entityHref(campaignId: number, item: Note): string | null {
   if (!item.entityType) return null;
-  const sub = entityRoute[item.entityType];
-  if (sub === null) return `/c/${campaignId}`;
-  // Sessions have no per-id detail route — link to the sessions list.
-  if (item.entityType === 'session') return `/c/${campaignId}/sessions`;
-  return item.entityId !== null ? `/c/${campaignId}/${sub}/${item.entityId}` : null;
+  return targetHref(campaignId, { type: item.entityType, id: item.entityId });
 }
 
 function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) {

@@ -17,6 +17,7 @@ import { useDialog } from '../components/useDialog';
 import { NotificationsBell } from '../features/notifications/NotificationsBell';
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
+import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
 
 function initials(name: string): string {
   const trimmed = name.trim();
@@ -673,6 +674,7 @@ export function Layout() {
 
         <main className="flex-1 w-full pb-20 md:pb-10">
           <MentionsProvider campaignId={campaignId}>
+            <EntityDeepLinkFocus />
             <Outlet />
           </MentionsProvider>
         </main>

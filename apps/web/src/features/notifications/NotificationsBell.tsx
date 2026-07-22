@@ -13,42 +13,9 @@ import type { Notification } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { Btn, EmptyState, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { notificationHref } from '../../lib/entityLinks';
 
 const POLL_MS = 60_000;
-
-function targetPath(n: Notification): string {
-  switch (n.type) {
-    case 'recap_posted':
-    case 'session_scheduled':
-    case 'session_rsvp':
-      // Scheduling + RSVPs live in the schedule panel on the sessions page.
-      return `/c/${n.campaignId}/sessions`;
-    case 'quest_updated':
-      return n.entityType === 'quest' && n.entityId
-        ? `/c/${n.campaignId}/quests?quest=${n.entityId}`
-        : `/c/${n.campaignId}/quests`;
-    case 'proposal_submitted':
-    case 'proposal_resolved':
-      return `/c/${n.campaignId}/proposals`;
-    case 'note_reply':
-    case 'note_shared':
-      return `/c/${n.campaignId}/notes`;
-    case 'ai_dm_alert':
-      // Stuck ladder / dispute / vote / takeover (#314) — land the reader on the Table
-      // page (#339) where the levers + composer live. #339 owns the route itself; this
-      // link is stable even before that page ships.
-      return `/c/${n.campaignId}/table`;
-    case 'comment_reply':
-      // Discussion threads currently render on the session/recap page; deep-link
-      // to the thread's session when we know it, else the session log.
-      return n.entityType === 'session' && n.entityId
-        ? `/c/${n.campaignId}/sessions?session=${n.entityId}`
-        : `/c/${n.campaignId}/sessions`;
-    case 'added_to_campaign':
-    default:
-      return `/c/${n.campaignId}`;
-  }
-}
 
 function typeIcon(type: Notification['type']): string {
   switch (type) {
@@ -152,7 +119,7 @@ export function NotificationsBell() {
       }
       void refreshCount();
     }
-    navigate(targetPath(n));
+    navigate(notificationHref(n));
   }
 
   async function onMarkAllRead() {

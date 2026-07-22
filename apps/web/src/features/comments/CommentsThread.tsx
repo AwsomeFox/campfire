@@ -12,6 +12,7 @@ import { useAuth } from '../../app/auth';
 import { Btn, TextArea, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { entityTargetProps } from '../../lib/entityLinks';
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -205,7 +206,7 @@ function CommentCard({
   }
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-2">
+    <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-2" {...entityTargetProps('comment', comment.id)}>
       <div className="flex items-center gap-2 flex-wrap text-xs">
         <span className="font-bold text-slate-300">{comment.authorName || comment.authorUserId}</span>
         {comment.inCharacter && <span className="tag tag-accent">In character</span>}
