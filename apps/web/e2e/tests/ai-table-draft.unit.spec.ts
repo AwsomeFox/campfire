@@ -3,6 +3,7 @@ import {
   aiTableDraftStorageKey,
   aiTableSendBlockReason,
   clearAiTableDraft,
+  isAiTableDraftPersisted,
   loadAiTableDraft,
   saveAiTableDraft,
   type AiTableDraftScope,
@@ -57,6 +58,8 @@ test.describe('AI Table local draft persistence', () => {
     ]).size).toBe(3);
 
     expect(saveAiTableDraft(first, { input: 'first action', scene: 'first scene' }, storage)).toBe(true);
+    expect(isAiTableDraftPersisted(first, { input: 'first action', scene: 'first scene' }, storage)).toBe(true);
+    expect(isAiTableDraftPersisted(first, { input: 'edited action', scene: 'first scene' }, storage)).toBe(false);
     expect(saveAiTableDraft(otherCampaign, { input: 'second action', scene: '' }, storage)).toBe(true);
     expect(loadAiTableDraft(first, storage)).toEqual({ input: 'first action', scene: 'first scene' });
     expect(loadAiTableDraft(otherCampaign, storage)).toEqual({ input: 'second action', scene: '' });

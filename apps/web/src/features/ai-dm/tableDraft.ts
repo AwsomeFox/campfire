@@ -5,6 +5,7 @@
  * never participate in runtime authority: the server still owns role, mode, pause,
  * budget, and per-campaign turn-concurrency checks when Send is explicitly invoked.
  */
+import type { AiDmStreamConnectionState } from '../../lib/useAiDmStream';
 
 export interface AiTableDraftScope {
   campaignId: number;
@@ -122,7 +123,22 @@ export function aiTableDraftEquals(a: AiTableDraft, b: AiTableDraft): boolean {
   return a.input === b.input && a.scene === b.scene;
 }
 
-export type AiTableConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'closed';
+/** Whether durable storage already contains this exact draft without writing. */
+export function isAiTableDraftPersisted(
+  scope: AiTableDraftScope,
+  draft: AiTableDraft,
+  storage = defaultStorage(),
+): boolean {
+  if (!storage) return false;
+  try {
+    const stored = parseDraft(storage.getItem(aiTableDraftStorageKey(scope)));
+    return stored !== null && aiTableDraftEquals(stored, draft);
+  } catch {
+    return false;
+  }
+}
+
+export type AiTableConnectionState = AiDmStreamConnectionState;
 
 export type AiTableSendBlockReason =
   | 'composing'

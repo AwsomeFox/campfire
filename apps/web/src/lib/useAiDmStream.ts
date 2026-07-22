@@ -239,15 +239,13 @@ export function useAiDmStream(
           }
           if (!res.ok || !res.body) throw new Error(`AI-DM SSE connect failed (${res.status})`);
 
-          if (attempt > 0) {
-            try {
-              await handlersRef.current.onReconnect?.();
-            } catch {
-              // The stream is healthy even if a best-effort reconciliation read failed.
-            }
-          }
+          const reconciliation = attempt > 0
+            ? Promise.resolve(handlersRef.current.onReconnect?.()).catch(() => undefined)
+            : Promise.resolve();
           attempt = 0;
-          setConnectionState('connected');
+          // Consume the established stream immediately. Send remains gated by the
+          // reconnecting state until the best-effort authority refresh settles.
+          void reconciliation.finally(() => setConnectionState('connected'));
 
           const reader = res.body.getReader();
           const decoder = new TextDecoder();

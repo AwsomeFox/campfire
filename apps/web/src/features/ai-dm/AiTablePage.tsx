@@ -63,6 +63,7 @@ import {
   aiTableDraftStorageKey,
   aiTableSendBlockReason,
   clearAiTableDraft,
+  isAiTableDraftPersisted,
   loadAiTableDraft,
   saveAiTableDraft,
   type AiTableDraft,
@@ -491,7 +492,9 @@ function AiTableComposer({
   const scope = useMemo<AiTableDraftScope>(() => ({ campaignId, userId }), [campaignId, userId]);
   const [draft, setDraft] = useState<AiTableDraft>(() => loadAiTableDraft(scope));
   const draftRef = useRef(draft);
-  const [persisted, setPersisted] = useState(() => !hasDraft(draft) || saveAiTableDraft(scope, draft));
+  const [persisted, setPersisted] = useState(
+    () => !hasDraft(draft) || isAiTableDraftPersisted(scope, draft),
+  );
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
@@ -509,6 +512,11 @@ function AiTableComposer({
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!hasDraft(draft) || persisted) return;
+    setPersisted(saveAiTableDraft(scope, draft));
+  }, [draft, persisted, scope]);
 
   useEffect(() => {
     if (persisted || !hasDraft(draft)) return;

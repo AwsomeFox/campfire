@@ -31,7 +31,7 @@
     "composerLockedPaused": "The AI DM is paused. Keep drafting; Send will be available after the DM resumes it.",
     "composerLockedHuman": "A human has the DM seat. Keep drafting; Send will be available after handback.",
     "composerLockedAwaiting": "The AI DM is waiting on the table. Keep drafting; Send will be available after the table recovers the turn.",
-    "sendBlockedComposing": "Finish composing this character before sending.",
+    "sendBlockedComposing": "Finish entering text with your keyboard or input method before sending.",
     "sendBlockedSubmitting": "Your action is sending. You can keep drafting while it finishes.",
     "sendBlockedConnecting": "Connecting to the live table. Your draft is saved locally; Send will be available after the table state is verified.",
     "sendBlockedReconnecting": "Reconnecting to the live table. Your draft is saved locally; Send will be available after the table state is verified.",
