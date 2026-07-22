@@ -29,8 +29,13 @@ export interface AiProviderResolver {
    * effective provider config, never from the legacy `seat.model`. Throws
    * `BadRequestException` when the resolved model is not on the (non-empty) allowlist.
    * Returns `null` when no provider is configured.
+   *
+   * OPTIONAL: the production {@link ConfigAiProviderResolver} implements this, but the
+   * offline eval/test harness resolvers do not (no provider is ever executed there).
+   * Callers that need execution resolution must go through {@link resolveProviderForExecution},
+   * which presence-checks this method so a harness resolver without it is handled cleanly.
    */
-  resolveForExecution(campaignId: number): Promise<{ provider: AiProvider; model: string } | null>;
+  resolveForExecution?(campaignId: number): Promise<{ provider: AiProvider; model: string } | null>;
 }
 
 /**

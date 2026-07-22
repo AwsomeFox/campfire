@@ -163,9 +163,12 @@ export class CoDmService {
     return {
       target: input.target,
       provider: this.provider.name,
-      // Issue #564: report the EXACT model that served the draft (resolved + allowlisted),
-      // not the legacy seat.model label.
-      model: execModel,
+      // Issue #564: report the EXACT model that served the draft (resolved + allowlisted)
+      // when a provider is configured. When NO provider is configured (the legacy no-op
+      // seam — execModel is ''), fall back to the legacy seat.model label so the response
+      // still carries an informational model string (the field is documented as "the seat's
+      // model label"), matching the proposer attribution label below.
+      model: execModel || seat.model || '',
       entityType,
       proposalIds: proposals.map((p) => p.id),
       proposals,
