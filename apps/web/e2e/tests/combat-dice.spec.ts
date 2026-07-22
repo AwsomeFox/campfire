@@ -47,6 +47,15 @@ test.describe('encounter dice — apply rolled damage', () => {
       expect(character.id).toBeTruthy();
       characterId = character.id;
       // A fresh encounter auto-adds the active character; add a monster the player can't edit.
+      // Issue #744: a campaign can have at most one live fight. The seeded "Ambush"
+      // encounter is RUNNING and must stay running for the combat-tracker suite, so end
+      // it before this drill starts and reopen it in the finally block below (/reopen
+      // preserves round/turnIndex — the seed fight is still at Round 1 with its seeded
+      // initiatives intact).
+      const live = await (await dm.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
+      for (const e of live as { id: number }[]) {
+        await dm.post(`/api/v1/encounters/${e.id}/end`);
+      }
       const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill' } })).json();
       encounterId = enc.id;
       await dm.post(`/api/v1/encounters/${enc.id}/combatants`, { data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 } });
@@ -72,6 +81,11 @@ test.describe('encounter dice — apply rolled damage', () => {
     } finally {
       if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
       if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
+      // Issue #744: the seeded "Ambush" encounter was ended above so the drill could
+      // start; reopen it so the combat-tracker suite finds it RUNNING again. Safe to
+      // call unconditionally — /reopen 400s on a non-'ended' status, which we ignore.
+      const seedEncounterId = seed().encounterId;
+      await dm.post(`/api/v1/encounters/${seedEncounterId}/reopen`).catch(() => undefined);
       // Dispose the API contexts so they don't leak across the worker.
       await playerCtx.dispose();
       await dm.dispose();

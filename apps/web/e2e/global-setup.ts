@@ -444,27 +444,22 @@ export default async function globalSetup(config: FullConfig) {
   }
   const navProposal = (await proposed.json()).proposal;
 
-  const encounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
-    name: 'Ambush at the Ember Hearth',
-  });
-  const encounterId: number = encounter.id;
+  // Issue #744: a campaign can have at most one live fight at a time, and the
+  // main "Ambush" encounter below must be the RUNNING fight downstream
+  // combat-tracker/log tests key off of. Create and fully retire the ended
+  // fixtures FIRST (each goes preparing -> running -> ended), so the live-fight
+  // slot is free when "Ambush" is started and stays that way.
 
-  for (const m of MONSTERS) {
-    const c = await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/combatants`, {
-      kind: 'monster',
-      name: m.name,
-      hpMax: m.hpMax,
-    });
-    // Fix initiative deterministically (roll-initiative is random) so turn order is stable.
-    const patched = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
-      data: { initiative: m.initiative },
-    });
-    if (!patched.ok()) {
-      throw new Error(`PATCH combatant initiative -> ${patched.status()}: ${await patched.text()}`);
-    }
-  }
-  // Start the fight: status -> running, round 1, current actor = highest initiative.
-  await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/start`);
+  // A linked ended encounter exercises the session-aware branch of the concise
+  // post-encounter hand-off (#663). It intentionally has no combatants: the fixture
+  // only needs a completed lifecycle plus a valid same-campaign session relation.
+  const linkedEndedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'Linked Aftermath at the Moon Gate',
+    sessionId: navSession.id,
+  });
+  const linkedEndedEncounterId: number = linkedEndedEncounter.id;
+  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/start`);
+  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/end`);
 
   // A second encounter that gets started then ENDED — used to assert the run screen is
   // read-only once status is 'ended' (issue #368): no per-combatant HP controls fire a
@@ -489,16 +484,29 @@ export default async function globalSetup(config: FullConfig) {
   await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/start`);
   await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/end`);
 
-  // A linked ended encounter exercises the session-aware branch of the concise
-  // post-encounter hand-off (#663). It intentionally has no combatants: the fixture
-  // only needs a completed lifecycle plus a valid same-campaign session relation.
-  const linkedEndedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
-    name: 'Linked Aftermath at the Moon Gate',
-    sessionId: navSession.id,
+  const encounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'Ambush at the Ember Hearth',
   });
-  const linkedEndedEncounterId: number = linkedEndedEncounter.id;
-  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/start`);
-  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/end`);
+  const encounterId: number = encounter.id;
+
+  for (const m of MONSTERS) {
+    const c = await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/combatants`, {
+      kind: 'monster',
+      name: m.name,
+      hpMax: m.hpMax,
+    });
+    // Fix initiative deterministically (roll-initiative is random) so turn order is stable.
+    const patched = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
+      data: { initiative: m.initiative },
+    });
+    if (!patched.ok()) {
+      throw new Error(`PATCH combatant initiative -> ${patched.status()}: ${await patched.text()}`);
+    }
+  }
+  // Start the fight: status -> running, round 1, current actor = highest initiative.
+  // Started LAST (issue #744) so it remains the campaign's single authoritative live
+  // fight for the combat-tracker and combat-log-accessibility suites.
+  await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/start`);
 
   // Party-XP fixtures (#814) are created after encounter setup so the active PC
   // does not alter the combat-trackers' already-pinned rosters.
