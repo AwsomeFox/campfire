@@ -13,12 +13,13 @@ export function QuestStatusBadge({
   iconSize?: number;
 }) {
   const presentation = questStatusPresentation(status);
+  const semanticValue = status.trim() || 'unknown';
   return (
     <Chip variant={presentation.variant} className={className}>
       <span
         className="inline-flex items-center gap-1"
         data-semantic="quest-status"
-        data-semantic-value={status}
+        data-semantic-value={semanticValue}
         data-semantic-variant={presentation.variant}
       >
         <GameIcon slug={presentation.icon} size={iconSize} />

@@ -39,17 +39,19 @@ function hasOwn<T extends object>(record: T, value: PropertyKey): value is keyof
 }
 
 export function questStatusPresentation(status: string): SemanticPresentation {
-  if (hasOwn(QUEST_STATUS_SEMANTICS, status)) return QUEST_STATUS_SEMANTICS[status];
-  return { ...UNKNOWN_QUEST_STATUS, label: status.trim() || UNKNOWN_QUEST_STATUS.label };
+  const normalized = status.trim();
+  if (hasOwn(QUEST_STATUS_SEMANTICS, normalized)) return QUEST_STATUS_SEMANTICS[normalized];
+  return { ...UNKNOWN_QUEST_STATUS, label: normalized || UNKNOWN_QUEST_STATUS.label };
 }
 
 export function npcDispositionPresentation(disposition: string | null | undefined): SemanticPresentation {
-  if (disposition && hasOwn(NPC_DISPOSITION_SEMANTICS, disposition)) {
-    return NPC_DISPOSITION_SEMANTICS[disposition];
+  const normalized = disposition?.trim() ?? '';
+  if (hasOwn(NPC_DISPOSITION_SEMANTICS, normalized)) {
+    return NPC_DISPOSITION_SEMANTICS[normalized];
   }
   return {
     ...UNKNOWN_NPC_DISPOSITION,
-    label: disposition?.trim() || UNKNOWN_NPC_DISPOSITION.label,
+    label: normalized || UNKNOWN_NPC_DISPOSITION.label,
   };
 }
 

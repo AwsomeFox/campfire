@@ -59,9 +59,11 @@ test.describe('typed semantic mappings', () => {
 
     expect(questStatusVariant('active-ish')).toBe('neutral');
     expect(questStatusPresentation('active-ish')).toMatchObject({ variant: 'neutral', label: 'active-ish' });
+    expect(questStatusPresentation(' active ')).toMatchObject(QUEST_EXPECTATIONS.active);
     expect(npcDispositionVariant('trusted ally')).toBe('neutral');
     expect(npcDispositionPresentation('trusted ally')).toMatchObject({ variant: 'neutral', label: 'trusted ally' });
     expect(npcDispositionPresentation('  trusted ally  ')).toMatchObject({ variant: 'neutral', label: 'trusted ally' });
+    expect(npcDispositionPresentation(' friendly ')).toMatchObject(NPC_EXPECTATIONS.friendly);
     expect(npcDispositionVariant('Friendly')).toBe('neutral');
     expect(npcDispositionVariant('')).toBe('neutral');
     expect(npcDispositionPresentation('').label).toBe('Neutral');
