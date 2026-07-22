@@ -178,6 +178,32 @@ export const api = {
 export const API = '/api/v1';
 
 /**
+ * Classify an error from {@link request} as TRANSIENT (worth retrying) vs PERSISTENT
+ * (definitive — retrying won't change the outcome). Used by retry affordances such as
+ * the invite-preview recovery on the join page (issue #709).
+ *
+ * Transient:
+ *   - a non-{@link ApiError} thrown by `fetch` itself (network failure, DNS, CORS,
+ *     timeout, offline) — these carry no HTTP status and almost always clear on retry;
+ *   - HTTP 408 Request Timeout, 425 Too Early, 429 Too Many Requests;
+ *   - HTTP 5xx (server error / gateway / service unavailable).
+ *
+ * Persistent:
+ *   - any {@link ApiError} with a 4xx status (404 invalid/expired/used invite, 403
+ *     forbidden, 409 conflict, 422 validation, …). The server has answered; that
+ *     answer is final for this request.
+ */
+export function isTransientError(err: unknown): boolean {
+  // A failure from `fetch` itself (network/offline/DNS/CORS) has no HTTP status —
+  // it surfaces as a bare TypeError. Treat any non-ApiError as transient: the
+  // request never reached a definitive HTTP answer, so retrying is the right move.
+  if (!(err instanceof ApiError)) return true;
+  // 5xx and the retryable 4xx codes mean "try again later".
+  if (err.status >= 500) return true;
+  return err.status === 408 || err.status === 425 || err.status === 429;
+}
+
+/**
  * i18n seam for server errors (issue #94). Maps an {@link ApiError}'s server-provided `code`
  * to a translated string under the `errors.<code>` catalog key, falling back to the server's
  * human-readable `message` when there's no code or no matching translation. Field-level

@@ -7,10 +7,10 @@
  *  - signed in: one-click join -> POST /invites/:code/join,
  * and lands in the campaign.
  */
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { InvitePreview } from '@campfire/schema';
-import { api, ApiError, API } from '../../lib/api';
+import { api, ApiError, API, isTransientError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 
 function FlameMark() {
@@ -44,6 +44,7 @@ export function JoinPage() {
 
   const [preview, setPreview] = useState<InvitePreview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [transient, setTransient] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const [username, setUsername] = useState('');
@@ -53,28 +54,58 @@ export function JoinPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const p = await api.get<InvitePreview>(`${API}/invites/${encodeURIComponent(code)}`);
-        if (!cancelled) setPreview(p);
-      } catch (err) {
-        if (!cancelled) {
-          setLoadError(
-            err instanceof ApiError && err.status === 404
-              ? 'This invite link is invalid or no longer active. Ask your DM for a fresh one.'
-              : 'Couldn’t check the invite. Is the server reachable?',
-          );
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
+  // Resolve the invite code via the public preview endpoint. Kept as a stable
+  // callback so the Retry button can re-run the SAME fetch (preserving the join
+  // code) without abandoning the join link (issue #709). Transient failures
+  // (network/offline/5xx/429/408) set `transient=true` and surface a Retry;
+  // persistent failures (404 invalid/expired/used, other 4xx) set the
+  // definitive error with no retry — retrying a 404 invite won't bring it back.
+  const controllerRef = useRef<AbortController | null>(null);
+  const loadPreview = useCallback(async () => {
+    // Abort any in-flight load (prior mount or a previous Retry click) so two
+    // concurrent fetches can never race to clobber state.
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const { signal } = controller;
+    setLoading(true);
+    setError(null);
+    setTransient(false);
+    try {
+      const p = await api.get<InvitePreview>(`${API}/invites/${encodeURIComponent(code)}`, { signal });
+      if (!signal.aborted) {
+        setPreview(p);
+        setLoadError(null);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    } catch (err) {
+      if (signal.aborted) return;
+      if (isTransientError(err)) {
+        // The request never reached a definitive answer — don't abandon the
+        // join link. Offer a Retry that re-resolves the SAME code.
+        setTransient(true);
+        setLoadError('Couldn’t load this invite. Check your connection and try again.');
+      } else {
+        // Persistent: the server answered definitively. Unknown/expired/used
+        // codes all collapse to 404 per the controller — anything else here is
+        // a 4xx that retrying won't change.
+        setTransient(false);
+        setLoadError(
+          err instanceof ApiError && err.status === 404
+            ? 'This invite link is invalid or no longer active. Ask your DM for a fresh one.'
+            : err instanceof ApiError
+              ? err.message
+              : 'This invite could not be loaded.',
+        );
+      }
+    } finally {
+      if (!signal.aborted) setLoading(false);
+    }
   }, [code]);
+
+  useEffect(() => {
+    void loadPreview();
+    return () => controllerRef.current?.abort();
+  }, [loadPreview]);
 
   const alreadyMember = Boolean(preview && me?.memberships.some((m) => m.campaignId === preview.campaignId));
 
@@ -150,20 +181,45 @@ export function JoinPage() {
           <FlameMark />
 
           {loading || !ready ? (
-            <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-              Checking your invite…
+            <p
+              className="text-muted"
+              style={{ margin: 0, fontSize: 13 }}
+              role="status"
+              aria-live="polite"
+            >
+              {loading ? 'Checking your invite…' : 'Almost there…'}
             </p>
           ) : loadError ? (
             <>
-              <div>
+              <div role="alert" aria-live="assertive">
                 <h3 style={{ margin: 0 }}>Campfire</h3>
                 <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
                   {loadError}
                 </p>
               </div>
-              <Link to="/login" className="btn btn-secondary btn-block" style={{ minHeight: 44 }}>
-                Go to sign in
-              </Link>
+              {transient ? (
+                <div className="w-full flex flex-col gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-block"
+                    style={{ minHeight: 44 }}
+                    onClick={() => void loadPreview()}
+                  >
+                    Retry
+                  </button>
+                  <Link
+                    to="/login"
+                    className="btn btn-secondary btn-block"
+                    style={{ minHeight: 44 }}
+                  >
+                    Go to sign in
+                  </Link>
+                </div>
+              ) : (
+                <Link to="/login" className="btn btn-secondary btn-block" style={{ minHeight: 44 }}>
+                  Go to sign in
+                </Link>
+              )}
             </>
           ) : preview ? (
             <>
