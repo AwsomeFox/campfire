@@ -1279,6 +1279,70 @@ function migrateCampaignMembersTableForUserFk(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for issue #749: combatants previously had only a plain
+ * (encounter_id) index, so nothing at the DB boundary stopped two concurrent
+ * `addCombatant` calls from inserting the same character/NPC twice — the
+ * service layer's SELECT-then-INSERT probe is a TOCTOU race. The fix adds two
+ * partial UNIQUE indexes (one per non-NULL identity column), declared in
+ * BOOTSTRAP_SQL so fresh DBs get them automatically. This migration:
+ *
+ *   1. Collapses any pre-existing duplicate (encounter_id, character_id) /
+ *      (encounter_id, npc_id) rows (keeping the lowest id), so the partial
+ *      unique indexes can be CREATED on an upgraded DB without throwing. Live
+ *      duplicates were only ever reachable through the very race this fixes
+ *      (or a hand-edited DB), so the "keep earliest" policy matches how the
+ *      rule_entries dedupe migration (0027) handled its pre-index duplicates.
+ *   2. Creates the two partial unique indexes idempotently. BOOTSTRAP_SQL also
+ *      declares them (CREATE ... IF NOT EXISTS), so this step just makes sure
+ *      they exist before bootstrap runs on an upgraded DB that already had the
+ *      combatants table; on a fresh DB the migration is a no-op and bootstrap
+ *      owns the canonical DDL.
+ *
+ * Runs with foreign_keys OFF (the default at open time), same as every other
+ * migration. New DBs never hit the dedupe DELETE (the table is empty) and
+ * record this migration as applied without doing any real work.
+ */
+function migrateCombatantsUniqueIdentity(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return; // fresh DB — BOOTSTRAP_SQL creates the table + indexes.
+
+  // Collapse exact (encounter_id, character_id) duplicates, keeping the earliest
+  // row. character_id IS NULL rows are left alone (the partial index ignores them
+  // anyway, and "duplicate monster" rows are legitimate — three Goblins, #114).
+  sqlite.exec(`
+    DELETE FROM combatants
+    WHERE character_id IS NOT NULL
+      AND id NOT IN (
+        SELECT MIN(id) FROM combatants WHERE character_id IS NOT NULL GROUP BY encounter_id, character_id
+      );
+  `);
+  // Same dedupe for NPC identity. npc_id may not exist on the oldest DBs
+  // (migration 0044 adds it), but by the time this runs 0044 has already applied,
+  // so the column is present on every table that survived to this point.
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'npc_id')) {
+    sqlite.exec(`
+      DELETE FROM combatants
+      WHERE npc_id IS NOT NULL
+        AND id NOT IN (
+          SELECT MIN(id) FROM combatants WHERE npc_id IS NOT NULL GROUP BY encounter_id, npc_id
+        );
+    `);
+  }
+
+  // Idempotent partial unique indexes. These match the BOOTSTRAP_SQL declarations
+  // exactly (same names) so a subsequent boot's CREATE ... IF NOT EXISTS is a no-op.
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_character
+      ON combatants(encounter_id, character_id) WHERE character_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_npc
+      ON combatants(encounter_id, npc_id) WHERE npc_id IS NOT NULL;
+  `);
+}
+
+/**
  * Issue #788: privacy metadata and policy for public recap capabilities.
  * Existing links were created without an explicit "never" decision, so the
  * upgrade gives them a conservative seven-day sunset. A deliberately never-
@@ -1436,6 +1500,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0051_server_meta', run: migrateServerMetaTable },
   { name: '0052_public_recap_share_policy', run: migratePublicRecapSharePolicy },
   { name: '0053_oauth_atomic_rotation', run: migrateOAuthAccessTokensForAtomicRotation },
+  { name: '0054_combatants_unique_identity', run: migrateCombatantsUniqueIdentity },
 ];
 
 /**
