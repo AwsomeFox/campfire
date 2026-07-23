@@ -826,9 +826,20 @@ export class McpToolsService {
         const encounters = await Promise.all(
           encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
         );
+        // Combat-log events only matter for encounters that were run (issue #1068). DM-only tool
+        // → full DM view (no role redaction).
+        const foughtEncounterIds = new Set(
+          encounterList.filter((e) => e.status === 'running' || e.status === 'ended').map((e) => e.id),
+        );
+        const events = await Promise.all(
+          encounterList.map((e) =>
+            foughtEncounterIds.has(e.id) ? this.encounters.listEvents(e.id) : Promise.resolve([]),
+          ),
+        );
+        const eventsByEncounter = new Map(encounterList.map((e, i) => [e.id, events[i]]));
         const source = {
           resolvedInbox: resolvedInbox.map((n) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
-          encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants })),
+          encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants, events: eventsByEncounter.get(e.id) ?? [] })),
         };
         return {
           template: RECAP_TEMPLATE,
@@ -977,6 +988,26 @@ export class McpToolsService {
         // non-DM the same way get_encounter's roster is (issue #262).
         const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.getDifficulty(encounterId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_encounter_events',
+      'List an encounter\'s persistent combat log (issue #1068) — the round-by-round event trail of damage, healing, ' +
+        'conditions, deaths, rolls, turns, notes, and DM overrides/corrections, in chronological (insertion) order. ' +
+        'Read-only; persists NOTHING. Use this to reconstruct "what happened during the fight" for a recap or to ' +
+        'narrate consequences — it complements get_encounter (current roster/turn state) with the historical trail. ' +
+        'Role-aware (issue #869): a hidden encounter 404s for non-DM callers, and for non-DMs actor/target names (and ' +
+        'name-bearing detail) are projected from CURRENT hidden-NPC visibility so a later reveal unmasks historical ' +
+        'lines; stable actorId/targetId are always returned.',
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        // Same role-scoped redaction the REST GET :id/events route applies (issue #869):
+        // a non-DM PAT must not read raw names/detail on a hidden encounter or hidden NPCs.
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.listEvents(encounterId as number, role);
       },
     );
 
