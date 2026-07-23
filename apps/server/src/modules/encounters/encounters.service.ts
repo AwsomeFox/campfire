@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, estimateEncounterDifficultyForRuleSystem, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, estimateEncounterDifficultyForRuleSystem, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -1714,6 +1714,22 @@ export class EncountersService {
       const [character] = await this.db.select().from(characters).where(eq(characters.id, existing.characterId)).limit(1);
       if (!character || character.ownerUserId !== user.id) {
         throw new ForbiddenException('Only dm or the owning player may modify this combatant');
+      }
+    }
+
+    // Issue #495: non-DM adds must be in the active rule system's condition
+    // vocabulary. The wire schema stays free-text (so DMs can mint homebrew /
+    // custom labels), but a player cannot inject arbitrary mechanical text into
+    // the shared tracker. Matching is case-insensitive; the stored string is
+    // still whatever the caller sent. MCP `update_combatant` shares this path.
+    if (!isDm && patch.addConditions !== undefined && patch.addConditions.length > 0) {
+      const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+      const unknown = patch.addConditions.filter((c) => !isKnownCondition(adapter.conditions, c));
+      if (unknown.length > 0) {
+        throw new BadRequestException(
+          `Unknown condition(s) for this rule system: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
+            'Players may only add conditions from the active rule vocabulary; the DM may mint custom entries.',
+        );
       }
     }
 
