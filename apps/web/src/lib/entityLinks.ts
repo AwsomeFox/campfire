@@ -4,7 +4,7 @@ import { normalizeMentionName } from './mentionMatching';
 import { cancelledScheduleDetailHref } from './scheduleNotificationCopy';
 
 /** Every campaign record that can be the destination of a cross-entity link. */
-export type NavigableEntityType = EntityType | MentionTarget['type'] | SearchResult['type'];
+export type NavigableEntityType = EntityType | MentionTarget['type'] | SearchResult['type'] | 'inbox';
 
 export type EntityLinkTarget = {
   type: NavigableEntityType;
@@ -28,6 +28,7 @@ const LIST_ROUTES: Partial<Record<NavigableEntityType, { path: string; query: st
   timeline: { path: 'timeline', query: 'event' },
   item: { path: 'inventory', query: 'item' },
   note: { path: 'notes', query: 'note' },
+  inbox: { path: 'inbox', query: 'inbox' },
   arc: { path: 'storylines', query: 'arc' },
   beat: { path: 'storylines', query: 'beat' },
 };
@@ -238,6 +239,10 @@ export function notificationHref(notification: Notification): string {
     case 'proposal_submitted':
     case 'proposal_resolved':
       return `/c/${campaignId}/proposals`;
+    case 'inbox_submitted':
+      return validId(notification.entityId)
+        ? entityHref(campaignId, { type: 'inbox', id: notification.entityId })
+        : `/c/${campaignId}/inbox`;
     case 'ai_dm_alert':
       return `/c/${campaignId}/table`;
     case 'session_scheduled':

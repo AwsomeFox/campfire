@@ -1253,7 +1253,8 @@ export const CommentUpdate = z.object({
 // campaign, the next session gets scheduled (session_scheduled) or a member
 // RSVPs to one (session_rsvp), a quest is completed or revealed to the party
 // (quest_updated), a member submits a proposal to the DM (proposal_submitted) or
-// the DM approves/rejects it (proposal_resolved). Read via
+// the DM approves/rejects it (proposal_resolved), or a member posts to the DM
+// scribe inbox (inbox_submitted, issue #832). Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
 export const NotificationType = z.enum([
@@ -1271,6 +1272,8 @@ export const NotificationType = z.enum([
   'quest_updated',
   'proposal_submitted',
   'proposal_resolved',
+  // Issue #832: a player (or any member) posted to the DM scribe inbox.
+  'inbox_submitted',
   // The driver AI-DM got stuck / a recovery lever was pulled (issue #314): AI errored/looped,
   // budget exhausted, a ruling was disputed, a table vote resolved, or a human took the seat.
   'ai_dm_alert',
