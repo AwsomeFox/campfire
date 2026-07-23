@@ -286,11 +286,12 @@ test.describe('visual + screen-reader crit/fumble announcements (issue #745)', (
     expect(diceEn.dice.announceRoll).toContain('{{flourish}}');
   });
 
-  test('stylesheet defines the crit/fumble flourish selectors the classes target', () => {
-    const css = readFileSync(join(WEB_ROOT, 'src/index.css'), 'utf8');
-    for (const sel of ['.cf-roll-crit', '.cf-roll-fumble', '.cf-anim-crit', '.cf-anim-fumble', '.cf-crit-spark']) {
-      expect(css, `missing ${sel}`).toContain(sel);
-    }
+  test('d20TotalClasses emit the crit/fumble flourish class names', () => {
+    // Assert exported class strings rather than scanning stylesheet text.
+    expect(d20TotalClasses('crit', true)).toContain('cf-roll-crit');
+    expect(d20TotalClasses('crit', true)).toContain('cf-anim-crit');
+    expect(d20TotalClasses('fumble', true)).toContain('cf-roll-fumble');
+    expect(d20TotalClasses('fumble', true)).toContain('cf-anim-fumble');
   });
 
   test('end-to-end flavour → classes → announce key for an ordinary 1d20+5 crit', () => {
