@@ -2838,7 +2838,7 @@ function CombatantRow({
   const kindLabel = combatant.kind === 'npc' ? 'NPC' : combatant.kind;
   // Issue #107: a combatant at 0 HP got no visual treatment mid-fight — the row
   // looked identical bar an empty HP bar, so a "dead" creature was invisible in the
-  // order (the end-of-combat summary already counted it as Fallen). Dim + desaturate
+  // order (the end-of-combat summary counts dead/downed separately — issue #492). Dim + desaturate
   // the whole row and skull/strike-through the name. `isDown` works off the HP band
   // too, so a redacted monster (exact HP hidden, band 'down') gets the same treatment.
   const down = isDown(combatant);
