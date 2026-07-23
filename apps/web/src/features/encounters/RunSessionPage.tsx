@@ -101,14 +101,6 @@ function gridDefaultAttemptKey(encounterId: number, patch: EncounterGridPatch): 
   return `${encounterId}:${Object.keys(patch).sort().join(',')}`;
 }
 
-// 5e difficulty band badge (issue #58) — party XP thresholds vs adjusted monster XP.
-const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {
-  trivial: 'Trivial',
-  easy: 'Easy',
-  medium: 'Medium',
-  hard: 'Hard',
-  deadly: 'Deadly',
-};
 // Band colors live as --cf-difficulty-* tokens in index.css (issue #668) so a
 // theme or dark/light swap can reach them; difficulty wants a green→red ramp
 // distinct from the accent-colored status chips and from the destructive family.
@@ -119,24 +111,51 @@ const DIFFICULTY_STYLE: Record<DifficultyBand, { background: string; color: stri
   hard: { background: 'var(--cf-difficulty-hard-bg)', color: 'var(--cf-difficulty-hard-fg)' },
   deadly: { background: 'var(--cf-difficulty-deadly-bg)', color: 'var(--cf-difficulty-deadly-fg)' },
 };
+const DIFFICULTY_NEUTRAL_STYLE = {
+  background: 'var(--color-neutral-800)',
+  color: 'var(--color-neutral-200)',
+};
 
 /**
- * Difficulty badge shown in the encounter header (issue #58). Reads the computed
- * Easy/Medium/Hard/Deadly band from GET /encounters/:id/difficulty. Hidden when there
- * are no monsters to score (band trivial + no monster XP) so a prep-only party list
- * doesn't show a misleading "Trivial" chip. `title` surfaces the underlying XP math.
+ * Difficulty badge shown in the encounter header (issues #58 + #429). Reads
+ * GET /encounters/:id/difficulty. Hidden when there are no monsters. Zero-data
+ * fights show the adapter's "Unknown—add XP/CR" label (never a fake Trivial);
+ * unsupported rulesets explain the limitation. `title` surfaces XP math + warnings.
  */
 function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | null }) {
   if (!difficulty) return null;
   if (difficulty.monsterCount === 0) return null;
-  const title =
+
+  if (difficulty.status === 'unsupported') {
+    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
+    return (
+      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
+        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+        {difficulty.label}
+      </span>
+    );
+  }
+
+  if (difficulty.status === 'unknown' || difficulty.band === null) {
+    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
+    return (
+      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
+        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+        {difficulty.label}
+      </span>
+    );
+  }
+
+  const breakdown =
     `Adjusted monster XP ${difficulty.adjustedXp.toLocaleString()} ` +
     `(${difficulty.totalMonsterXp.toLocaleString()} × ${difficulty.multiplier}) vs party thresholds — ` +
     `easy ${difficulty.thresholds.easy.toLocaleString()}, medium ${difficulty.thresholds.medium.toLocaleString()}, ` +
     `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
+  const title = [breakdown, ...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' · ');
   return (
     <span className="tag" style={DIFFICULTY_STYLE[difficulty.band]} title={title}>
-      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />{DIFFICULTY_LABEL[difficulty.band]}
+      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+      {difficulty.label}
     </span>
   );
 }

@@ -11,6 +11,35 @@
  *  - Create/Update input schemas are derived from the entity schema
  */
 import { z } from 'zod';
+import {
+  DifficultyBand,
+  EncounterDifficulty,
+  EncounterDifficultyStatus,
+  DIFFICULTY_BAND_LABELS,
+  UNKNOWN_DIFFICULTY_LABEL,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeDnd5eEncounterDifficulty,
+  unsupportedEncounterDifficulty,
+  type EncounterDifficultyInput,
+} from './encounter-difficulty';
+
+export {
+  DifficultyBand,
+  EncounterDifficultyStatus,
+  EncounterDifficulty,
+  DIFFICULTY_BAND_LABELS,
+  UNKNOWN_DIFFICULTY_LABEL,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeDnd5eEncounterDifficulty,
+  unsupportedEncounterDifficulty,
+};
+export type { EncounterDifficultyInput };
 
 // ---------- shared ----------
 export const Role = z.enum(['dm', 'player', 'viewer']);
@@ -1579,6 +1608,17 @@ export interface RuleSystemAdapter {
    * affordance and the server checks to REJECT a direct-API request that bypasses the UI.
    */
   readonly supportsDdbImport?: boolean;
+  /**
+   * Whether this adapter owns encounter-difficulty math (issue #429). Only D&D 5e opts in;
+   * other systems omit it so `encounterDifficultySupported()` / getDifficulty return an
+   * explicit unsupported result instead of a misleading 5e "Trivial" band.
+   */
+  readonly supportsEncounterDifficulty?: boolean;
+  /**
+   * Estimate encounter difficulty for this ruleset. Required when
+   * `supportsEncounterDifficulty` is true; unsupported adapters omit it.
+   */
+  estimateEncounterDifficulty?(input: EncounterDifficultyInput): EncounterDifficulty;
 }
 
 /**
@@ -1671,6 +1711,11 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // The D&D Beyond importer produces a 5e-shaped character (5e abilities/AC/HP/conditions),
   // so 5e is the one system that is field-compatible with it (issue #714).
   supportsDdbImport: true,
+  // 5e owns the DMG XP-budget difficulty estimate (issues #58 + #429).
+  supportsEncounterDifficulty: true,
+  estimateEncounterDifficulty(input: EncounterDifficultyInput): EncounterDifficulty {
+    return computeDnd5eEncounterDifficulty(input);
+  },
 };
 
 // ---------- Open Legend adapter (issue #299) ----------
@@ -2228,6 +2273,40 @@ export function ddbImportSupported(ruleSystem?: string | null): boolean {
   const adapter = ADAPTERS[ruleSystem];
   if (!adapter) return false; // unrecognized slug — don't trust an unknown pack
   return adapter.supportsDdbImport === true;
+}
+
+/**
+ * Whether encounter-difficulty estimation should run for a campaign whose `ruleSystem`
+ * is the given slug (issue #429).
+ *
+ * - Empty / unrecognized slugs fall back to the 5e estimator (same default as combat math)
+ *   so homebrew tables still get XP guidance — zero-data fights surface as `unknown`, not
+ *   a fake Trivial band.
+ * - A registered non-5e adapter (PF2e, OSR, …) that does not opt in returns unsupported.
+ */
+export function encounterDifficultySupported(ruleSystem?: string | null): boolean {
+  if (!ruleSystem) return true; // homebrew → 5e fallback
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter) return true; // unrecognized → 5e fallback
+  return adapter.supportsEncounterDifficulty === true;
+}
+
+/**
+ * Resolve difficulty for a campaign rule-system slug (issue #429). Supported adapters own
+ * the math/labels; registered non-supporting systems return an explicit unsupported result.
+ */
+export function estimateEncounterDifficultyForRuleSystem(
+  ruleSystem: string | null | undefined,
+  input: EncounterDifficultyInput,
+): EncounterDifficulty {
+  if (!ruleSystem || !ADAPTERS[ruleSystem]) {
+    return Dnd5eAdapter.estimateEncounterDifficulty!(input);
+  }
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter.supportsEncounterDifficulty || !adapter.estimateEncounterDifficulty) {
+    return unsupportedEncounterDifficulty(adapter.label, input);
+  }
+  return adapter.estimateEncounterDifficulty(input);
 }
 
 // ---------- generic uploaded rule packs (issue #19) ----------
@@ -3794,29 +3873,7 @@ export const ImportMapAttribution = z.object({
 });
 export type ImportMapAttribution = z.infer<typeof ImportMapAttribution>;
 
-// ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
-// Computed (read-only) difficulty band for an encounter: the party's summed 5e XP
-// thresholds vs the total adjusted monster XP (monster CR->XP with the standard
-// number-of-monsters multiplier). `trivial` is below the party's Easy threshold.
-export const DifficultyBand = z.enum(['trivial', 'easy', 'medium', 'hard', 'deadly']);
-export type DifficultyBand = z.infer<typeof DifficultyBand>;
-export const EncounterDifficulty = z.object({
-  band: DifficultyBand,
-  // Party XP thresholds (sum across the PC combatants' per-level thresholds).
-  thresholds: z.object({
-    easy: z.number().int().nonnegative(),
-    medium: z.number().int().nonnegative(),
-    hard: z.number().int().nonnegative(),
-    deadly: z.number().int().nonnegative(),
-  }),
-  partySize: z.number().int().nonnegative(), // number of PC (character) combatants counted
-  partyLevels: z.array(z.number().int()), // the PC levels that fed the thresholds
-  monsterCount: z.number().int().nonnegative(), // number of monster combatants counted
-  totalMonsterXp: z.number().int().nonnegative(), // raw summed monster XP (pre-multiplier)
-  multiplier: z.number(), // 5e encounter multiplier for the monster count
-  adjustedXp: z.number().int().nonnegative(), // totalMonsterXp * multiplier, compared to thresholds
-});
-export type EncounterDifficulty = z.infer<typeof EncounterDifficulty>;
+// Encounter difficulty schemas + 5e math live in ./encounter-difficulty (issues #58 + #429).
 
 // ---------- encounter generator (issue #304) ----------
 // First-party, offline & deterministic encounter builder. There is no open dataset of
