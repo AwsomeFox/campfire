@@ -33,7 +33,8 @@ export type AiDmStopReason =
   | 'complete' // the model produced narration with no further tool calls
   | 'budget_exhausted' // the per-campaign token budget hit its hard cap
   | 'tool_error' // a tool call returned an error (hand-off point for the stuck ladder, #314)
-  | 'max_steps'; // the tool loop hit its iteration ceiling
+  | 'max_steps' // the tool loop hit its iteration ceiling
+  | 'aborted'; // seat left Driver mid-turn; session was torn down (#1071)
 
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
 export interface AiDmExecutedTool {
@@ -134,6 +135,12 @@ export interface AiDmSessionState {
    * literal so existing snapshots deserialize unchanged).
    */
   secretReadApprovals?: Record<string, AiDmSecretReadApproval>;
+  /**
+   * Set when {@link AiDriverService.teardownSession} detaches this object from the live map
+   * (#1071). An in-flight `runTurn` that still holds this reference must stop streaming and
+   * must not write ladder/status updates that would race a replacement session.
+   */
+  detached?: boolean;
 }
 
 /**
@@ -487,8 +494,21 @@ export class AiDriverService {
    * Clears actingDm / vote / stuck / status / state (and the rest of the session snapshot) so a
    * later re-select of Driver starts clean — not stranded behind a human_control handback.
    * Emits a lifecycle `state` SSE so open stream clients refetch.
+   *
+   * Coordinates with the #381 turn lock: if a `runTurn` still owns the previous object with
+   * `status === 'running'`, mark that object `detached` (and clear `running`) BEFORE replacing
+   * the map entry. The orphaned turn checks `detached` between steps / stream chunks and stops,
+   * so a driver→off/co_dm→driver cycle cannot interleave narration from the old turn with a new
+   * one on the fresh idle session.
    */
   teardownSession(campaignId: number): AiDmSessionState {
+    const existing = this.sessions.get(campaignId);
+    if (existing) {
+      existing.detached = true;
+      // Release the turn slot on the detached object so its finally compare-and-set no-ops,
+      // and so any late status reads on the orphaned reference do not look "still running".
+      if (existing.status === 'running') existing.status = 'idle';
+    }
     const fresh = this.freshSession(campaignId);
     this.sessions.set(campaignId, fresh);
     this.lastInputs.delete(campaignId);
@@ -698,6 +718,12 @@ export class AiDriverService {
 
     try {
       for (let step = 0; step < maxSteps; step++) {
+        // Mode-switch teardown (#1071) detaches this object while we still hold it — stop
+        // before the next provider call so we cannot interleave with a replacement session.
+        if (session.detached) {
+          stopReason = 'aborted';
+          break;
+        }
         if (budgetRemaining <= 0) {
           stopReason = 'budget_exhausted';
           break;
@@ -705,7 +731,7 @@ export class AiDriverService {
         steps = step + 1;
 
         const maxTokens = Math.min(perStepCap, budgetRemaining);
-        const { text, result } = await this.streamStep(campaignId, provider, {
+        const { text, result, aborted } = await this.streamStep(campaignId, provider, session, {
           system,
           messages,
           // Issue #564: the executable model derives ONLY from the effective provider
@@ -714,6 +740,11 @@ export class AiDriverService {
           maxTokens,
           tools: toolSchemas,
         });
+        if (aborted || session.detached) {
+          stopReason = 'aborted';
+          if (text) finalNarration = text;
+          break;
+        }
 
         // Meter this step's REAL usage against the budget (atomic; hard cap). Every step
         // is audited via AiDmService.meterTurn (actor = the seat). The audit records the
@@ -728,6 +759,12 @@ export class AiDriverService {
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
+
+        if (session.detached) {
+          stopReason = 'aborted';
+          if (text) finalNarration = text;
+          break;
+        }
 
         if (text) {
           finalNarration = text;
@@ -753,6 +790,10 @@ export class AiDriverService {
           messages,
           executed,
         );
+        if (session.detached) {
+          stopReason = 'aborted';
+          break;
+        }
         if (toolErrored) {
           stopReason = 'tool_error';
           break;
@@ -765,10 +806,30 @@ export class AiDriverService {
       // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
       // pause-vote — will have flipped `status` to `paused`; do NOT stomp it back to `idle` and
       // silently accept new input, defeating the freeze the table just asked for.
+      // Teardown (#1071) already cleared `running` on this detached object; the CAS no-ops.
       if (session.status === 'running') session.status = 'idle';
-      session.lastNarration = finalNarration || session.lastNarration;
-      session.lastTurnAt = nowIso();
-      session.turnCount += 1;
+      // Never write ladder counters onto a detached (replaced) session object.
+      if (!session.detached) {
+        session.lastNarration = finalNarration || session.lastNarration;
+        session.lastTurnAt = nowIso();
+        session.turnCount += 1;
+      }
+    }
+
+    // Detached mid-turn: skip stuck detection (would mutate/emit against a dead object) and
+    // just signal turn.end so open stream clients close the orphaned bubble cleanly.
+    if (session.detached) {
+      this.stream.emit({ type: 'turn.end', campaignId, stopReason: 'aborted', steps, tokensUsed: totalTokens, budgetRemaining });
+      return {
+        narration: finalNarration,
+        stopReason: 'aborted',
+        steps,
+        toolCalls: executed,
+        tokensUsed: totalTokens,
+        tokenBudget: seat.tokenBudget,
+        budgetRemaining,
+        seat: latestSeat,
+      };
     }
 
     // #314 — stuck detection: classify the turn's outcome and move the ladder. A stuck turn
@@ -798,10 +859,12 @@ export class AiDriverService {
   private async streamStep(
     campaignId: number,
     provider: AiProvider,
+    session: AiDmSessionState,
     req: { system: string; messages: AiMessage[]; model: string; maxTokens: number; tools: AiToolSchema[] },
-  ): Promise<{ text: string; result: AiGenerateResult | undefined }> {
+  ): Promise<{ text: string; result: AiGenerateResult | undefined; aborted: boolean }> {
     let text = '';
     let result: AiGenerateResult | undefined;
+    let aborted = false;
     for await (const ev of provider.stream({
       system: req.system,
       messages: req.messages,
@@ -810,6 +873,12 @@ export class AiDriverService {
       tools: req.tools,
       toolChoice: req.tools.length > 0 ? 'auto' : undefined,
     })) {
+      // Mode-switch teardown detached this session mid-stream (#1071): stop forwarding
+      // deltas so an orphaned turn cannot splice narration onto the live SSE channel.
+      if (session.detached) {
+        aborted = true;
+        break;
+      }
       if (ev.type === 'text') {
         text += ev.delta;
         this.stream.emit({ type: 'narration.delta', campaignId, text: ev.delta });
@@ -819,7 +888,7 @@ export class AiDriverService {
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
-    return { text, result };
+    return { text, result, aborted };
   }
 
   /**
@@ -1679,6 +1748,8 @@ function classifyStuck(ctx: {
   narration: string;
   prevNarration: string | null;
 }): AiDmStuckReason | null {
+  // Mode-switch teardown is not a stuck condition — the seat was intentionally reset.
+  if (ctx.stopReason === 'aborted') return null;
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
