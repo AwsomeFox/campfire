@@ -59,7 +59,7 @@ async function mockDriverTable(page: Page, campaignId: number) {
   });
 }
 
-function seedLongTranscript(campaignId: number): TranscriptEntry[] {
+function seedLongTranscript(_campaignId: number): TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
   for (let i = 0; i < 80; i += 1) {
     entries.push({
