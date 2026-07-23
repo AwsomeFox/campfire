@@ -6,6 +6,7 @@ import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
+import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -41,7 +42,8 @@ describe('encounter death/temp-HP reconciliation (real SQLite, service layer)', 
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm, audit);
-    const encountersService = new EncountersService(orm, audit, events, rolls, revisions);
+    const attachments = new AttachmentsService(orm, audit);
+    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments);
     return { orm, encountersService };
   }
 
