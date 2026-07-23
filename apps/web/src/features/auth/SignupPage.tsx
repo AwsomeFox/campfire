@@ -10,6 +10,7 @@ import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+import { PasswordInput } from '../../components/PasswordInput';
 
 function FlameMark() {
   return (
@@ -135,9 +136,8 @@ export function SignupPage() {
             </div>
             <div className="field">
               <label htmlFor="password">Password</label>
-              <input
+              <PasswordInput
                 id="password"
-                type="password"
                 className="input"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -147,13 +147,13 @@ export function SignupPage() {
             </div>
             <div className="field">
               <label htmlFor="confirm">Confirm password</label>
-              <input
+              <PasswordInput
                 id="confirm"
-                type="password"
                 className="input"
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
                 autoComplete="new-password"
+                revealNoun="confirm password"
                 required
               />
             </div>

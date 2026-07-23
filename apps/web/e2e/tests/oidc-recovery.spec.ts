@@ -89,7 +89,8 @@ test.describe('OIDC recovery page', () => {
     await local.click();
     await expect(page).toHaveURL(/\/login\?local=1$/);
     await expect(page.getByLabel('Username')).toBeVisible();
-    await expect(page.getByLabel('Password')).toBeVisible();
+    await expect(page.getByLabel('Password', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show password' })).toBeVisible();
   });
 
   test('does not show a local-login affordance when public status says it is unavailable', async ({ page }) => {

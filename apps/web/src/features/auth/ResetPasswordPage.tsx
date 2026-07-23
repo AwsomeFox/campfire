@@ -8,6 +8,7 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
+import { PasswordInput } from '../../components/PasswordInput';
 
 export function ResetPasswordPage() {
   const [searchParams] = useSearchParams();
@@ -135,14 +136,14 @@ export function ResetPasswordPage() {
               </div>
               <div className="field">
                 <label htmlFor="reset-new-password">New password</label>
-                <input
+                <PasswordInput
                   id="reset-new-password"
-                  type="password"
                   className="input"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   placeholder="Min 8 characters"
                   autoComplete="new-password"
+                  revealNoun="new password"
                   required
                   minLength={8}
                 />

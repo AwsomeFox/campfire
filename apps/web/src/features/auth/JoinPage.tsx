@@ -12,6 +12,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { InvitePreview } from '@campfire/schema';
 import { api, ApiError, API, isTransientError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { PasswordInput } from '../../components/PasswordInput';
 
 function FlameMark() {
   return (
@@ -286,9 +287,8 @@ export function JoinPage() {
                   </div>
                   <div className="field">
                     <label htmlFor="password">Password</label>
-                    <input
+                    <PasswordInput
                       id="password"
-                      type="password"
                       className="input"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
@@ -298,13 +298,13 @@ export function JoinPage() {
                   </div>
                   <div className="field">
                     <label htmlFor="confirm">Confirm password</label>
-                    <input
+                    <PasswordInput
                       id="confirm"
-                      type="password"
                       className="input"
                       value={confirm}
                       onChange={(e) => setConfirm(e.target.value)}
                       autoComplete="new-password"
+                      revealNoun="confirm password"
                       required
                     />
                   </div>

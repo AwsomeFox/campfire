@@ -14,6 +14,7 @@ import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { GameIcon } from '../../components/GameIcon';
+import { PasswordInput } from '../../components/PasswordInput';
 
 function FlameMark({ size = 44 }: { size?: number }) {
   return (
@@ -157,9 +158,8 @@ function LocalLoginForm({
       </div>
       <div className="field">
         <label htmlFor="password">Password</label>
-        <input
+        <PasswordInput
           id="password"
-          type="password"
           className="input"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
