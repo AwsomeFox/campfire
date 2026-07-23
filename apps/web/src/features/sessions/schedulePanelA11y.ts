@@ -4,8 +4,11 @@
  * SchedulePanel used placeholder-only session fields and styled buttons for
  * RSVP without radiogroup semantics or spoken save outcomes. These pure helpers
  * own the stable form id contract, RSVP vocabulary, and announcement strings
- * so unit tests can pin behavior without a browser. Form control ids use
- * `${SCHEDULE_FORM_ID_PREFIX}-${sessionId}` when editing or `${SCHEDULE_FORM_ID_PREFIX}-${useId}` on create.
+ * so unit tests can pin behavior without a browser. SchedulePanel builds an
+ * id prefix as `${SCHEDULE_FORM_ID_PREFIX}-${sessionId}` when editing or
+ * `${SCHEDULE_FORM_ID_PREFIX}-${sanitizedUseId}` on create; each labeled control
+ * then uses Field.fieldIds — `${idPrefix}-${fieldName}` for the input (+ `-help` /
+ * `-error`), with fieldName from SCHEDULE_FIELD_NAMES.
  */
 import type { RsvpStatus } from '@campfire/schema';
 
