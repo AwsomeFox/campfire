@@ -149,7 +149,7 @@ describe('sessions (e2e) — latestSessionNumber vs sessionCount (issue #841)', 
 
     const list = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(dm);
     expect(list.status).toBe(200);
-    const twelve = list.body.find((s: { number: number }) => s.number === 12);
+    const twelve = list.body.find((s: { id: number; number: number }) => s.number === 12);
     expect(twelve).toBeTruthy();
 
     const del = await request(server).delete(`/api/v1/sessions/${twelve.id}`).set(dm);
@@ -181,7 +181,7 @@ describe('sessions (e2e) — latestSessionNumber vs sessionCount (issue #841)', 
     const server = ctx.app.getHttpServer();
 
     const list = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(dm);
-    const seven = list.body.find((s: { number: number }) => s.number === 7);
+    const seven = list.body.find((s: { id: number; number: number }) => s.number === 7);
     expect(seven).toBeTruthy();
 
     const before = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
