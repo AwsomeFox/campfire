@@ -71,6 +71,14 @@ import {
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
 import {
+  cellSizePx,
+  computeContainedRect,
+  mapPercentDistanceCells,
+  mapPercentToLayerPx,
+  pointerToMapPercent,
+  snapMapPercent,
+} from './mapRenderedBounds';
+import {
   deleteConfirmCopy,
   dmLifecycleActions,
   isLifecycleConfirmValid,
@@ -1800,43 +1808,34 @@ function BattleMap({
   // treat them as Unplaced (that offered a no-op place-at-center for the owner).
   const { placed, unplaced, hiddenByFog } = partitionMapTokens(encounter.combatants);
 
-  const gridSize = encounter.gridSize; // cell edge as % of width; null = no grid
+  const gridSize = encounter.gridSize; // cell edge as % of map width; null = no grid
   const gridScale = encounter.gridScale;
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
   const gridOn = gridSize != null && gridSize > 0;
-  // One cell in rendered pixels — cells are square in pixels regardless of the 16:9 surface.
-  const cellPx = gridOn && surfaceW > 0 ? (gridSize! / 100) * surfaceW : 0;
-  // Distance readout needs both a cell size (px) and a real-world scale.
-  const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
-  const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
 
   // A new map starts with unknown natural size until its <img> fires onLoad.
   useEffect(() => {
     setImgNatural(null);
   }, [mapImageUrl]);
 
-  // Rendered rect of the map image inside the 16:9 surface. `object-contain` letterboxes a
-  // non-16:9 image, leaving dark bands the grid must not draw over (issue #273b). Until the
-  // natural size is known we fall back to the full surface (no clipping regression).
-  const mapRect = useMemo(() => {
-    if (surfaceW <= 0 || surfaceH <= 0) return null;
-    if (!imgNatural || imgNatural.w <= 0 || imgNatural.h <= 0) {
-      return { left: 0, top: 0, width: surfaceW, height: surfaceH };
-    }
-    const scale = Math.min(surfaceW / imgNatural.w, surfaceH / imgNatural.h);
-    const width = imgNatural.w * scale;
-    const height = imgNatural.h * scale;
-    return { left: (surfaceW - width) / 2, top: (surfaceH - height) / 2, width, height };
-  }, [surfaceW, surfaceH, imgNatural]);
+  // Rendered rect of the map image inside the 16:9 surface (issue #464 / #273b).
+  // object-contain letterboxes non-16:9 images; every tool shares this transform.
+  const mapRect = useMemo(
+    () => computeContainedRect({ w: surfaceW, h: surfaceH }, imgNatural),
+    [surfaceW, surfaceH, imgNatural],
+  );
+  // One cell in rendered pixels — derived from the map width, never the surface (#464).
+  const cellPx = gridOn && mapRect ? cellSizePx(gridSize, mapRect.width) : 0;
+  // Distance readout needs both a cell size (px) and a real-world scale.
+  const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
+  const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
 
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
   // A non-DM whose token sits outside revealed fog never receives its coordinates (issue #40).
   // Those combatants land in `hiddenByFog` via tokenHiddenByFog (issue #418), not Unplaced.
-
-  const clampPct = (v: number) => Math.max(0, Math.min(100, v));
 
   async function uploadMapFile(file: File) {
     setUploading(true);
@@ -1850,29 +1849,30 @@ function BattleMap({
     }
   }
 
-  function pointerToPercent(e: ReactPointerEvent): MapPoint | null {
+  /**
+   * Pointer → map-image percent (issue #464). Letterbox hits return null unless
+   * `clamp` is set (in-progress drags stay pinned to the map edge).
+   */
+  function pointerToPercent(e: ReactPointerEvent, clamp = false): MapPoint | null {
+    if (!mapRect) return null;
     const rect = surfaceRef.current?.getBoundingClientRect();
-    if (!rect || rect.width === 0 || rect.height === 0) return null;
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
-    return { x: clampPct(x), y: clampPct(y) };
+    if (!rect) return null;
+    return pointerToMapPercent(e.clientX, e.clientY, rect, mapRect, { clamp });
   }
 
   /** Snap a drop point to the nearest cell centre when the grid + snap are on (issue #40). */
   function snapPoint(pt: MapPoint): MapPoint {
-    if (!gridOn || !encounter.gridSnap || cellPx <= 0 || surfaceW === 0 || surfaceH === 0) return pt;
-    const px = (pt.x / 100) * surfaceW;
-    const py = (pt.y / 100) * surfaceH;
-    const sx = (Math.floor(px / cellPx) + 0.5) * cellPx;
-    const sy = (Math.floor(py / cellPx) + 0.5) * cellPx;
-    return { x: clampPct((sx / surfaceW) * 100), y: clampPct((sy / surfaceH) * 100) };
+    if (!mapRect) return pt;
+    return snapMapPercent(pt, cellPx, mapRect, gridOn && encounter.gridSnap);
   }
 
   function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
     if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
     e.preventDefault();
     e.stopPropagation();
-    const point = pointerToPercent(e);
+    // Token handles live on the map layer; clamp so a press on the token edge still binds.
+    const point = pointerToPercent(e, true);
+    if (!point) return;
     const captureTarget = e.currentTarget;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
@@ -1883,6 +1883,7 @@ function BattleMap({
 
   function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     if (!e.isPrimary || activeGestureRef.current) return;
+    // Letterbox bands are inert — do not start ping/measure/reveal/deselect there (#464).
     const pct = pointerToPercent(e);
     if (!pct) return;
     if (tool === 'ping') {
@@ -1909,7 +1910,8 @@ function BattleMap({
   function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
     const gesture = activeGestureRef.current;
     if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
-    const pct = pointerToPercent(e);
+    // Keep an in-flight gesture alive across the letterbox by clamping to the map edge.
+    const pct = pointerToPercent(e, true);
     if (!pct) return;
 
     if (gesture.kind === 'token') {
@@ -1930,7 +1932,7 @@ function BattleMap({
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
     const gesture = activeGestureRef.current;
     if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
-    const finalPoint = pointerToPercent(e);
+    const finalPoint = pointerToPercent(e, true);
     successfulPointerUpRef.current = e.pointerId;
     activeGestureRef.current = null;
     // Pointer capture is normally released implicitly after pointerup, but doing it explicitly
@@ -1990,7 +1992,7 @@ function BattleMap({
     if (!e.isPrimary || activeGestureRef.current || !isDm) return;
     e.preventDefault();
     e.stopPropagation();
-    const pct = pointerToPercent(e);
+    const pct = pointerToPercent(e, true);
     const point = pct ?? { x: t.x, y: t.y };
     const captureTarget = e.currentTarget;
     captureTarget.setPointerCapture?.(e.pointerId);
@@ -2018,10 +2020,8 @@ function BattleMap({
   // Measurement readout (5e: distance counts whole squares along the longer axis is common,
   // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
   const rulerReadout = (() => {
-    if (!ruler || !canMeasure) return null;
-    const dpxX = ((ruler.end.x - ruler.start.x) / 100) * surfaceW;
-    const dpxY = ((ruler.end.y - ruler.start.y) / 100) * surfaceH;
-    const cells = Math.hypot(dpxX, dpxY) / cellPx;
+    if (!ruler || !canMeasure || !mapRect) return null;
+    const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
     const feet = Math.round(cells) * (gridScale ?? 0);
     return { cells, feet };
   })();
@@ -2029,11 +2029,14 @@ function BattleMap({
   const revealPreview = revealCorners ? rectFromCorners(revealCorners.start, revealCorners.end) : null;
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
 
-  // Hex overlay polygons (issue #238). Memoized on the geometry inputs so a token/AoE drag —
-  // which changes none of them — never recomputes the (potentially hundreds of) hexes.
+  // Hex overlay polygons (issue #238). Tiled in map-layer space so letterboxing never
+  // stretches cells (#464). Memoized on geometry inputs so a token/AoE drag never recomputes.
   const hexCells = useMemo(
-    () => (gridOn && gridType === 'hex' ? hexPolygons(surfaceW, surfaceH, cellPx) : []),
-    [gridOn, gridType, surfaceW, surfaceH, cellPx],
+    () =>
+      gridOn && gridType === 'hex' && mapRect
+        ? hexPolygons(mapRect.width, mapRect.height, cellPx)
+        : [],
+    [gridOn, gridType, mapRect, cellPx],
   );
 
   function changeTool(next: MapTool) {
@@ -2279,275 +2282,275 @@ function BattleMap({
               onLoad={(e) => setImgNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
             />
 
-            {/* Grid overlay (issue #40 / #238) — a square CSS grid, or a pointy-top hex SVG.
-                Both are clipped to the map image's letterboxed rendered rect (issue #273b) so the
-                grid never bleeds onto the dark object-contain bands. The inner layer stays anchored
-                to the surface origin (offset by -mapRect) so grid lines keep aligning with token
-                snapping, which works in surface coordinates. */}
-            {gridOn && gridType === 'square' && cellPx > 1 && mapRect && (
+            {/* Map layer (issue #464): every interactive/visual tool is positioned in the
+                object-contain image rect. Percents are relative to this layer (matching the
+                server fog renderer), so letterbox bands never receive tokens or grid ink. */}
+            {mapRect && (
               <div
-                className="absolute"
-                style={{ pointerEvents: 'none', overflow: 'hidden', left: mapRect.left, top: mapRect.top, width: mapRect.width, height: mapRect.height }}
-              >
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: -mapRect.left,
-                    top: -mapRect.top,
-                    width: surfaceW,
-                    height: surfaceH,
-                    backgroundImage:
-                      `repeating-linear-gradient(to right, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px),` +
-                      `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
-                  }}
-                />
-              </div>
-            )}
-            {gridOn && gridType === 'hex' && hexCells.length > 0 && mapRect && (
-              <div
-                className="absolute"
-                style={{ pointerEvents: 'none', overflow: 'hidden', left: mapRect.left, top: mapRect.top, width: mapRect.width, height: mapRect.height }}
-              >
-                <svg style={{ position: 'absolute', left: -mapRect.left, top: -mapRect.top }} width={surfaceW} height={surfaceH}>
-                  {hexCells.map((pts, i) => (
-                    <polygon key={i} points={pts} fill="none" stroke="rgba(148,163,184,.35)" strokeWidth={1} />
-                  ))}
-                </svg>
-              </div>
-            )}
-
-            {placed.map((c) => {
-              const isDragging = draggingId === c.id && dragPos != null;
-              const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
-              const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
-              const movable = tool === 'move' && canMoveToken(c);
-              const isCharacter = c.kind === 'character';
-              const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
-              return (
-                <div
-                  key={c.id}
-                  data-testid={`map-token-${c.id}`}
-                  className="absolute -translate-x-1/2 -translate-y-1/2"
-                  style={{
-                    left: `${left}%`,
-                    top: `${top}%`,
-                    // In measure/reveal mode tokens must not eat the surface drag.
-                    pointerEvents: tool === 'move' ? 'auto' : 'none',
-                    touchAction: 'none',
-                    cursor: movable ? 'grab' : 'default',
-                    opacity: isDragging ? 0.85 : 1,
-                    zIndex: isDragging ? 10 : 2,
-                  }}
-                  onPointerDown={(e) => onTokenPointerDown(e, c)}
-                  title={`${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}`}
-                >
-                  <span
-                    style={{
-                      display: 'grid',
-                      placeItems: 'center',
-                      width: sizePx,
-                      height: sizePx,
-                      borderRadius: '50%',
-                      fontSize: Math.max(9, Math.round(sizePx * 0.34)),
-                      fontWeight: 700,
-                      color: '#fff',
-                      background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
-                      border: '2px solid rgba(15,23,42,.85)',
-                      boxShadow: '0 1px 3px rgba(0,0,0,.5)',
-                    }}
-                  >
-                    {tokenInitials(c.name)}
-                  </span>
-                  {/* Unplace control (issue #271): remove the token from the board without
-                      deleting the combatant. Only offered to whoever may move this token, and
-                      only in move mode. stopPropagation on pointer-down so tapping it never
-                      starts a token drag. */}
-                  {movable && (
-                    <button
-                      type="button"
-                      aria-label={`Remove ${c.name} from the map`}
-                      title="Remove from map"
-                      disabled={busy}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onUnplaceToken(c.id);
-                      }}
-                      style={{
-                        position: 'absolute',
-                        top: -6,
-                        right: -6,
-                        width: 16,
-                        height: 16,
-                        display: 'grid',
-                        placeItems: 'center',
-                        padding: 0,
-                        borderRadius: '50%',
-                        border: '1px solid rgba(15,23,42,.85)',
-                        background: 'var(--color-danger, #b91c1c)',
-                        color: '#fff',
-                        fontSize: 11,
-                        lineHeight: 1,
-                        cursor: busy ? 'default' : 'pointer',
-                        zIndex: 3,
-                      }}
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Shared AoE templates (issue #238) — circle/cone/line drawn in pixel space so every
-                client sees the same shapes. Drawn under an SVG (pointer-inert); the DM gets a
-                draggable origin handle per template (move mode only, so it never eats a drag). */}
-            {canAoe && aoeTemplates.length > 0 && (
-              <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none', zIndex: 6 }} width={surfaceW} height={surfaceH}>
-                {aoeTemplates.map((t) => {
-                  const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
-                  const ox = ((drag ? drag.x : t.x) / 100) * surfaceW;
-                  const oy = ((drag ? drag.y : t.y) / 100) * surfaceH;
-                  const lengthPx = (t.sizeFt / gridScale!) * cellPx;
-                  if (lengthPx <= 0) return null;
-                  const selected = t.id === selectedAoeId;
-                  const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
-                  const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
-                  if (t.shape === 'circle') {
-                    return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
-                  }
-                  const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
-                  return <polygon key={t.id} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
-                })}
-              </svg>
-            )}
-            {isDm && canAoe &&
-              aoeTemplates.map((t) => {
-                const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
-                const x = drag ? drag.x : t.x;
-                const y = drag ? drag.y : t.y;
-                return (
-                  <div
-                    key={t.id}
-                    data-testid={`map-aoe-${t.id}`}
-                    className="absolute -translate-x-1/2 -translate-y-1/2"
-                    style={{
-                      left: `${x}%`,
-                      top: `${y}%`,
-                      width: 14,
-                      height: 14,
-                      borderRadius: '50%',
-                      background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
-                      border: '2px solid rgba(15,23,42,.85)',
-                      // Only grab the pointer in move mode, so reveal/measure drags pass through.
-                      pointerEvents: tool === 'move' ? 'auto' : 'none',
-                      cursor: 'grab',
-                      touchAction: 'none',
-                      zIndex: 7,
-                    }}
-                    onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
-                    title={`${t.shape} · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''} — drag to move, click to edit`}
-                  />
-                );
-              })}
-
-            {/* Fog of war (issue #40). A dark overlay with the revealed rectangles punched out.
-                DM sees through it (semi-transparent) to prep; players see it solid. Coordinates
-                are 0–100, so a viewBox of 0 0 100 100 with no aspect preservation maps directly. */}
-            {fogOn && (
-              <svg
-                className="absolute inset-0 w-full h-full"
-                viewBox="0 0 100 100"
-                preserveAspectRatio="none"
-                style={{ pointerEvents: 'none', zIndex: 4 }}
-              >
-                <defs>
-                  <mask id={`fogmask-${encounter.id}`}>
-                    <rect x={0} y={0} width={100} height={100} fill="#fff" />
-                    {(fog?.revealed ?? []).map((r, i) => (
-                      <rect key={i} x={r.x} y={r.y} width={r.w} height={r.h} fill="#000" />
-                    ))}
-                  </mask>
-                </defs>
-                <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={isDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
-              </svg>
-            )}
-
-            {/* In-progress reveal rectangle (DM). */}
-            {revealPreview && (
-              <div
-                className="absolute"
-                data-testid="map-fog-preview"
+                data-testid="battle-map-layer"
+                className="absolute overflow-hidden"
                 style={{
-                  left: `${revealPreview.x}%`,
-                  top: `${revealPreview.y}%`,
-                  width: `${revealPreview.w}%`,
-                  height: `${revealPreview.h}%`,
-                  border: '2px dashed var(--color-accent)',
-                  background: 'rgba(56,189,248,.12)',
+                  left: mapRect.left,
+                  top: mapRect.top,
+                  width: mapRect.width,
+                  height: mapRect.height,
+                  // Surface owns pointer gestures; children opt in (tokens/AoE handles).
                   pointerEvents: 'none',
-                  zIndex: 8,
                 }}
-              />
-            )}
-
-            {/* Measurement ruler (issue #40). */}
-            {ruler && canMeasure && (
-              <>
-                <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none', zIndex: 7 }}>
-                  <line
-                    data-testid="map-ruler-line"
-                    x1={`${ruler.start.x}%`}
-                    y1={`${ruler.start.y}%`}
-                    x2={`${ruler.end.x}%`}
-                    y2={`${ruler.end.y}%`}
-                    stroke="var(--color-accent)"
-                    strokeWidth={2}
-                    strokeDasharray="5 4"
+              >
+                {/* Grid overlay (issue #40 / #238) — square CSS grid or pointy-top hex SVG. */}
+                {gridOn && gridType === 'square' && cellPx > 1 && (
+                  <div
+                    className="absolute inset-0"
+                    style={{
+                      backgroundImage:
+                        `repeating-linear-gradient(to right, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px),` +
+                        `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
+                    }}
                   />
-                </svg>
-                {rulerReadout && (
+                )}
+                {gridOn && gridType === 'hex' && hexCells.length > 0 && (
+                  <svg className="absolute inset-0" width={mapRect.width} height={mapRect.height}>
+                    {hexCells.map((pts, i) => (
+                      <polygon key={i} points={pts} fill="none" stroke="rgba(148,163,184,.35)" strokeWidth={1} />
+                    ))}
+                  </svg>
+                )}
+
+                {placed.map((c) => {
+                  const isDragging = draggingId === c.id && dragPos != null;
+                  const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
+                  const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
+                  const movable = tool === 'move' && canMoveToken(c);
+                  const isCharacter = c.kind === 'character';
+                  const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
+                  return (
+                    <div
+                      key={c.id}
+                      data-testid={`map-token-${c.id}`}
+                      className="absolute -translate-x-1/2 -translate-y-1/2"
+                      style={{
+                        left: `${left}%`,
+                        top: `${top}%`,
+                        // In measure/reveal mode tokens must not eat the surface drag.
+                        pointerEvents: tool === 'move' ? 'auto' : 'none',
+                        touchAction: 'none',
+                        cursor: movable ? 'grab' : 'default',
+                        opacity: isDragging ? 0.85 : 1,
+                        zIndex: isDragging ? 10 : 2,
+                      }}
+                      onPointerDown={(e) => onTokenPointerDown(e, c)}
+                      title={`${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}`}
+                    >
+                      <span
+                        style={{
+                          display: 'grid',
+                          placeItems: 'center',
+                          width: sizePx,
+                          height: sizePx,
+                          borderRadius: '50%',
+                          fontSize: Math.max(9, Math.round(sizePx * 0.34)),
+                          fontWeight: 700,
+                          color: '#fff',
+                          background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
+                          border: '2px solid rgba(15,23,42,.85)',
+                          boxShadow: '0 1px 3px rgba(0,0,0,.5)',
+                        }}
+                      >
+                        {tokenInitials(c.name)}
+                      </span>
+                      {/* Unplace control (issue #271): remove the token from the board without
+                          deleting the combatant. Only offered to whoever may move this token, and
+                          only in move mode. stopPropagation on pointer-down so tapping it never
+                          starts a token drag. */}
+                      {movable && (
+                        <button
+                          type="button"
+                          aria-label={`Remove ${c.name} from the map`}
+                          title="Remove from map"
+                          disabled={busy}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onUnplaceToken(c.id);
+                          }}
+                          style={{
+                            position: 'absolute',
+                            top: -6,
+                            right: -6,
+                            width: 16,
+                            height: 16,
+                            display: 'grid',
+                            placeItems: 'center',
+                            padding: 0,
+                            borderRadius: '50%',
+                            border: '1px solid rgba(15,23,42,.85)',
+                            background: 'var(--color-danger, #b91c1c)',
+                            color: '#fff',
+                            fontSize: 11,
+                            lineHeight: 1,
+                            cursor: busy ? 'default' : 'pointer',
+                            zIndex: 3,
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* Shared AoE templates (issue #238) — drawn in map-layer pixel space. */}
+                {canAoe && aoeTemplates.length > 0 && (
+                  <svg
+                    className="absolute inset-0"
+                    style={{ zIndex: 6 }}
+                    width={mapRect.width}
+                    height={mapRect.height}
+                  >
+                    {aoeTemplates.map((t) => {
+                      const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
+                      const { x: ox, y: oy } = mapPercentToLayerPx(
+                        { x: drag ? drag.x : t.x, y: drag ? drag.y : t.y },
+                        mapRect,
+                      );
+                      const lengthPx = (t.sizeFt / gridScale!) * cellPx;
+                      if (lengthPx <= 0) return null;
+                      const selected = t.id === selectedAoeId;
+                      const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
+                      const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
+                      if (t.shape === 'circle') {
+                        return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
+                      }
+                      const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
+                      return <polygon key={t.id} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
+                    })}
+                  </svg>
+                )}
+                {isDm && canAoe &&
+                  aoeTemplates.map((t) => {
+                    const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
+                    const x = drag ? drag.x : t.x;
+                    const y = drag ? drag.y : t.y;
+                    return (
+                      <div
+                        key={t.id}
+                        data-testid={`map-aoe-${t.id}`}
+                        className="absolute -translate-x-1/2 -translate-y-1/2"
+                        style={{
+                          left: `${x}%`,
+                          top: `${y}%`,
+                          width: 14,
+                          height: 14,
+                          borderRadius: '50%',
+                          background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
+                          border: '2px solid rgba(15,23,42,.85)',
+                          // Only grab the pointer in move mode, so reveal/measure drags pass through.
+                          pointerEvents: tool === 'move' ? 'auto' : 'none',
+                          cursor: 'grab',
+                          touchAction: 'none',
+                          zIndex: 7,
+                        }}
+                        onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
+                        title={`${t.shape} · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''} — drag to move, click to edit`}
+                      />
+                    );
+                  })}
+
+                {/* Fog of war (issue #40). Percents match the image / server fog renderer. */}
+                {fogOn && (
+                  <svg
+                    className="absolute inset-0 w-full h-full"
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                    style={{ zIndex: 4 }}
+                  >
+                    <defs>
+                      <mask id={`fogmask-${encounter.id}`}>
+                        <rect x={0} y={0} width={100} height={100} fill="#fff" />
+                        {(fog?.revealed ?? []).map((r, i) => (
+                          <rect key={i} x={r.x} y={r.y} width={r.w} height={r.h} fill="#000" />
+                        ))}
+                      </mask>
+                    </defs>
+                    <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={isDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
+                  </svg>
+                )}
+
+                {/* In-progress reveal rectangle (DM). */}
+                {revealPreview && (
                   <div
                     className="absolute"
+                    data-testid="map-fog-preview"
                     style={{
-                      left: `${ruler.end.x}%`,
-                      top: `${ruler.end.y}%`,
-                      transform: 'translate(8px, 8px)',
-                      background: 'rgba(15,23,42,.9)',
-                      color: '#fff',
-                      fontSize: 11,
-                      fontWeight: 600,
-                      padding: '2px 6px',
-                      borderRadius: 4,
-                      pointerEvents: 'none',
-                      whiteSpace: 'nowrap',
-                      zIndex: 9,
+                      left: `${revealPreview.x}%`,
+                      top: `${revealPreview.y}%`,
+                      width: `${revealPreview.w}%`,
+                      height: `${revealPreview.h}%`,
+                      border: '2px dashed var(--color-accent)',
+                      background: 'rgba(56,189,248,.12)',
+                      zIndex: 8,
                     }}
-                  >
-                    {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
-                  </div>
+                  />
                 )}
-              </>
-            )}
 
-            {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
-            {pings.map((p) => (
-              <div
-                key={p.key}
-                className="absolute -translate-x-1/2 -translate-y-1/2"
-                style={{
-                  left: `${p.x}%`,
-                  top: `${p.y}%`,
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  border: '3px solid var(--color-accent)',
-                  pointerEvents: 'none',
-                  zIndex: 10,
-                  animation: 'cfPing 2.4s ease-out forwards',
-                }}
-              />
-            ))}
+                {/* Measurement ruler (issue #40). */}
+                {ruler && canMeasure && (
+                  <>
+                    <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 7 }}>
+                      <line
+                        data-testid="map-ruler-line"
+                        x1={`${ruler.start.x}%`}
+                        y1={`${ruler.start.y}%`}
+                        x2={`${ruler.end.x}%`}
+                        y2={`${ruler.end.y}%`}
+                        stroke="var(--color-accent)"
+                        strokeWidth={2}
+                        strokeDasharray="5 4"
+                      />
+                    </svg>
+                    {rulerReadout && (
+                      <div
+                        className="absolute"
+                        style={{
+                          left: `${ruler.end.x}%`,
+                          top: `${ruler.end.y}%`,
+                          transform: 'translate(8px, 8px)',
+                          background: 'rgba(15,23,42,.9)',
+                          color: '#fff',
+                          fontSize: 11,
+                          fontWeight: 600,
+                          padding: '2px 6px',
+                          borderRadius: 4,
+                          whiteSpace: 'nowrap',
+                          zIndex: 9,
+                        }}
+                      >
+                        {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
+                {pings.map((p) => (
+                  <div
+                    key={p.key}
+                    className="absolute -translate-x-1/2 -translate-y-1/2"
+                    style={{
+                      left: `${p.x}%`,
+                      top: `${p.y}%`,
+                      width: 20,
+                      height: 20,
+                      borderRadius: '50%',
+                      border: '3px solid var(--color-accent)',
+                      zIndex: 10,
+                      animation: 'cfPing 2.4s ease-out forwards',
+                    }}
+                  />
+                ))}
+              </div>
+            )}
             <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
           </div>
 
