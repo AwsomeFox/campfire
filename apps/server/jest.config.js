@@ -20,17 +20,49 @@ module.exports = {
   // until the GitHub runner's Node heap is exhausted.
   workerIdleMemoryLimit: '1024MB',
   // Floor for CI `test:cov` (#562) — previously unset, so a coverage regression
-  // could land silently forever. Set a few points below the observed full-suite
-  // levels (~89% stmts / ~68% branches / ~89% funcs / ~90.5% lines) so normal
-  // variance across CI runs doesn't flake the job, but a real drop still fails
-  // it. Branches run lowest (importer error paths, OAuth/OIDC edge cases, and
-  // provider-specific branches are the main drag).
+  // could land silently forever. Global floors sit a few points below the
+  // observed full-suite CI levels (~88.6% stmts / ~70% branches / ~89.5% funcs /
+  // ~90% lines). Issue #562 estimated ~75% branches; measured CI is ~70% because
+  // auth/OIDC, rules importers, ai-dm providers, and mcp drag the average — those
+  // known-low areas get per-path carve-outs below so they cannot freefall either.
   coverageThreshold: {
     global: {
       statements: 85,
-      branches: 64,
-      functions: 84,
+      branches: 66,
+      functions: 86,
       lines: 87,
+    },
+    // Per-module carve-outs (#562 acceptance): floors near current CI coverage
+    // for the modules that keep global branches below the issue's ~75% estimate.
+    './src/modules/auth/': {
+      statements: 55,
+      branches: 28,
+      functions: 55,
+      lines: 55,
+    },
+    './src/modules/rules/': {
+      statements: 78,
+      branches: 54,
+      functions: 86,
+      lines: 80,
+    },
+    './src/modules/ai-dm/': {
+      statements: 78,
+      branches: 60,
+      functions: 70,
+      lines: 80,
+    },
+    './src/modules/mcp/': {
+      statements: 73,
+      branches: 55,
+      functions: 72,
+      lines: 73,
+    },
+    './src/modules/scribe/': {
+      statements: 78,
+      branches: 48,
+      functions: 58,
+      lines: 80,
     },
   },
 };
