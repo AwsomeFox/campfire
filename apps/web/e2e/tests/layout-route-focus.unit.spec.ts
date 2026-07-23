@@ -41,6 +41,7 @@ test.describe('route focus helpers (#591)', () => {
     expect(fallbackPageTitle('/c/42')).toBe('Dashboard');
     expect(fallbackPageTitle('/c/42/party')).toBe('Party');
     expect(fallbackPageTitle('/c/42/compendium')).toBe('Compendium');
+    expect(fallbackPageTitle('/c/42/notes')).toBe('My Notes');
     expect(fallbackPageTitle('/admin/users')).toBe('Users');
   });
 

@@ -6,6 +6,7 @@ import {
   formatDocumentTitle,
   isEntityDeepLinkHash,
   pageTitleFromMain,
+  shouldMoveFocusOnNavigation,
 } from './routeFocus';
 
 type Props = {
@@ -42,9 +43,10 @@ export function RouteChangeFocus({ mainRef, campaignName = null }: Props) {
       });
     };
 
-    // Entity deep-links: EntityDeepLinkFocus owns keyboard focus, but we still
-    // observe async h1 text so document.title does not stick on the path fallback.
-    if (isEntityDeepLinkHash(location.hash)) {
+    if (!shouldMoveFocusOnNavigation(previousPathname, location.pathname, location.hash)) {
+      // Entity deep-links: EntityDeepLinkFocus owns keyboard focus, but we still
+      // observe async h1 text so document.title does not stick on the path fallback.
+      if (!isEntityDeepLinkHash(location.hash)) return;
       return focusMainDestination(main, {
         fallbackPageTitle: pathFallback,
         onPageTitle,

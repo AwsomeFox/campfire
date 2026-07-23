@@ -39,6 +39,7 @@ export function isModalDialogOpen(doc: Document): boolean {
 const NATURALLY_FOCUSABLE = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA']);
 
 export function isNaturallyFocusable(el: HTMLElement): boolean {
+  if (el.tagName === 'A') return el.hasAttribute('href');
   if (NATURALLY_FOCUSABLE.has(el.tagName)) return true;
   return el.tabIndex >= 0;
 }
@@ -50,10 +51,9 @@ export function isNaturallyFocusable(el: HTMLElement): boolean {
  */
 export function shouldPreserveFocusInsideMain(main: HTMLElement, doc: Document): boolean {
   const active = doc.activeElement;
-  if (active == null || typeof active !== 'object') return false;
-  const el = active as HTMLElement;
-  if (el === doc.body || el === main) return false;
-  return main.contains(el);
+  if (!(active instanceof HTMLElement)) return false;
+  if (active === doc.body || active === main) return false;
+  return main.contains(active);
 }
 
 /** Prefer the page h1; fall back to the stable main landmark. */
@@ -87,7 +87,7 @@ const PATH_SEGMENT_TITLES: Record<string, string> = {
   encounters: 'Encounters',
   table: 'Table',
   compendium: 'Compendium',
-  notes: 'My notes',
+  notes: 'My Notes',
   proposals: 'Proposals',
   storylines: 'Storylines',
   settings: 'Settings',
@@ -166,11 +166,9 @@ export type FocusMainOptions = {
  * Waits briefly for async h1 text via MutationObserver, mirroring EntityDeepLinkFocus.
  */
 export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions = {}): () => void {
-  if (opts.skipWhenModalOpen !== false && isModalDialogOpen(document)) {
-    return () => {};
-  }
-
-  const moveFocus = opts.moveFocus !== false;
+  const modalBlocksFocus =
+    opts.skipWhenModalOpen !== false && isModalDialogOpen(document);
+  const moveFocus = !modalBlocksFocus && opts.moveFocus !== false;
   let observer: MutationObserver | null = null;
   const frames = new Set<number>();
   let timeout = 0;
@@ -229,13 +227,14 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   if (!tryFocusHeading()) {
     const focusMainIfStillHeadless = () => {
       if (settled || main.querySelector('h1')) return;
-      publishTitle();
       if (moveFocus) {
         scheduleFrame(() => {
           if (shouldPreserveFocusInsideMain(main, document)) return;
-          if (!main.querySelector('h1')) focusProgrammatically(main);
+          if (!main.querySelector('h1')) settleOnTarget(main);
         });
+        return;
       }
+      publishTitle();
     };
 
     // Many list screens have no h1 — do not leave focus on nav chrome for seconds.
