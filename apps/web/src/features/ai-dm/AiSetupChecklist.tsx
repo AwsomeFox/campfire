@@ -328,19 +328,29 @@ export function AiDmDashboardOnboarding({
   return (
     <section className="cf-card p-4">
       {!expanded ? (
-        <div className="flex items-start gap-3 flex-wrap">
-          <span className="flex text-[var(--color-accent)]" aria-hidden>
-            <GameIcon slug="sparkles" size={20} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="font-bold text-[var(--color-text)]">{t('aiOnboarding.dashboard.hintTitle')}</p>
-            <p className="text-xs text-[var(--color-neutral-400)] mt-0.5">{t('aiOnboarding.dashboard.hintBody')}</p>
+        // Mobile reflow (issue #675): below `sm` the actions used to sit in the
+        // same row as the icon + copy. Because the copy block carries `min-w-0`
+        // it would collapse to an unreadable narrow column (≈73px at 390px) while
+        // the two buttons held ≈199px. Instead we stack: icon + copy on a top row,
+        // then a full-width actions row underneath. Above `sm` the original inline
+        // row (icon + copy + actions together) is preserved so the hint stays
+        // compact on wide viewports. The copy block keeps `min-w-0` for ellipsis
+        // safety but never has to fight the buttons for width on mobile.
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-3 sm:flex-wrap">
+          <div className="flex items-start gap-3">
+            <span className="flex shrink-0 text-[var(--color-accent)]" aria-hidden>
+              <GameIcon slug="sparkles" size={20} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="font-bold text-[var(--color-text)]">{t('aiOnboarding.dashboard.hintTitle')}</p>
+              <p className="text-xs text-[var(--color-neutral-400)] mt-0.5">{t('aiOnboarding.dashboard.hintBody')}</p>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button type="button" className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs" onClick={dismiss}>
+          <div className="flex items-center gap-2 sm:shrink-0 w-full sm:w-auto sm:ml-auto">
+            <button type="button" className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs flex-1 sm:flex-none" onClick={dismiss}>
               {t('aiOnboarding.dashboard.hide')}
             </button>
-            <button type="button" className="cf-btn !min-h-0 !py-1.5 text-xs" onClick={() => setExpanded(true)}>
+            <button type="button" className="cf-btn !min-h-0 !py-1.5 text-xs flex-1 sm:flex-none" onClick={() => setExpanded(true)}>
               {t('aiOnboarding.dashboard.setUp')}
             </button>
           </div>
