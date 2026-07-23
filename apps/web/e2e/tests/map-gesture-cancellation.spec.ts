@@ -112,7 +112,7 @@ async function openGestureFixture(page: Page) {
   await page.route(`**/api/v1/encounters/${encounterId}/map*`, (route) =>
     route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
   );
-  await page.route(`**/api/v1/encounters/${encounterId}`, async (route) => {
+  await page.route(new RegExp(`/api/v1/encounters/${encounterId}$`), async (route) => {
     const request = route.request();
     if (request.method() === 'GET') {
       await route.fulfill({ status: 200, contentType: 'application/json', json: encounter });
@@ -127,7 +127,7 @@ async function openGestureFixture(page: Page) {
     }
     await route.continue();
   });
-  await page.route(`**/api/v1/encounters/${encounterId}/combatants/*`, async (route) => {
+  await page.route(new RegExp(`/api/v1/encounters/${encounterId}/combatants/`), async (route) => {
     const request = route.request();
     if (request.method() !== 'PATCH') {
       await route.continue();
