@@ -202,6 +202,21 @@ function failureMessage(error: unknown): string {
 }
 
 /**
+ * After a sequenced refresh fails: keep the prior paint on transient blips, but
+ * drop this campaign's projection on persistent errors (404/403/…) so the
+ * initiative rail cannot keep showing a fight the server no longer treats as live.
+ */
+export function projectionAfterLoadFailure(
+  current: PlayerDisplayProjection | null,
+  campaignId: number,
+  keepLastKnown: boolean,
+): PlayerDisplayProjection | null {
+  if (keepLastKnown) return current;
+  if (current?.campaignId === campaignId) return null;
+  return current;
+}
+
+/**
  * Run one sequenced load. Superseded/aborted work returns `ignored`; transient
  * failures ask the caller to keep last-known state rather than clearing the rail.
  */

@@ -16,6 +16,7 @@ import {
   PlayerDisplayLoadSequencer,
   playerDisplaySyncMessage,
   playerDisplaySyncState,
+  projectionAfterLoadFailure,
   runPlayerDisplayLoad,
   type PlayerDisplayFetchers,
   type PlayerDisplayProjection,
@@ -327,6 +328,36 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
       keepLastKnown: false,
       message: 'server exploded',
     });
+  });
+
+  test('persistent 404/403 with keepLastKnown:false clears prior projection (no stale rail)', async () => {
+    const sequencer = new PlayerDisplayLoadSequencer();
+    const prior: PlayerDisplayProjection = {
+      campaignId: 7,
+      summary: summaryFor(7, 'Ashfall'),
+      encounter: detailFor(9, 7, 2),
+    };
+    const fetchers: PlayerDisplayFetchers = {
+      getSummary: async () => summaryFor(7, 'Ashfall'),
+      getRunningEncounters: async () => [runningEncounter(9, 7)],
+      getEncounter: async () => {
+        throw new ApiError(404, 'Encounter not found');
+      },
+    };
+
+    const result = await runPlayerDisplayLoad(sequencer, 7, fetchers, { hadProjection: true });
+    expect(result).toMatchObject({
+      kind: 'failed',
+      keepLastKnown: false,
+      transient: false,
+      message: 'Encounter not found',
+    });
+    // Page applies this helper when keepLastKnown is false — rail must drop.
+    expect(projectionAfterLoadFailure(prior, 7, false)).toBeNull();
+    expect(projectionAfterLoadFailure(prior, 7, true)).toBe(prior);
+    // Other campaign's paint is left alone.
+    const other = { ...prior, campaignId: 99 };
+    expect(projectionAfterLoadFailure(other, 7, false)).toBe(other);
   });
 
   test('campaign identity change invalidates in-flight work for the prior id', async () => {

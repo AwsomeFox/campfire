@@ -46,6 +46,7 @@ import {
   PlayerDisplayLoadSequencer,
   playerDisplaySyncMessage,
   playerDisplaySyncState,
+  projectionAfterLoadFailure,
   runPlayerDisplayLoad,
   type PlayerDisplayFetchers,
   type PlayerDisplayProjection,
@@ -168,7 +169,11 @@ export default function PlayerDisplayPage() {
       setLoading(false);
       return;
     }
+    // Persistent failure (404/403/…): invalidate prior projection so a fight the
+    // server no longer treats as live cannot linger on the cast rail.
+    setProjection((current) => projectionAfterLoadFailure(current, cid, false));
     setFailure({ campaignId: cid, message: result.message });
+    setDisplayStale(false);
     setLoading(false);
   }, [cid]);
 
