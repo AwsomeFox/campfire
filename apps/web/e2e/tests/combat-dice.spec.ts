@@ -77,7 +77,10 @@ test.describe('encounter dice — apply rolled damage', () => {
       // Apply → HP drops, the combat log records the damage, and the bar dismisses.
       await applyBar.getByRole('button', { name: 'Brixi Applybar' }).click();
       await expect(applyBar).toHaveCount(0);
-      await expect(page.getByText(/Brixi Applybar took \d+ damage/i)).toBeVisible();
+      // Issue #620: the damage may be attributed to the current-turn combatant (rendered
+      // as "X to Brixi Applybar: took N damage") when Brixi didn't win initiative, or
+      // unattributed ("Brixi Applybar took N damage") when she did. Accept either form.
+      await expect(page.getByText(/Brixi Applybar.*took \d+ damage/i)).toBeVisible();
     } finally {
       if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
       if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);

@@ -3914,6 +3914,14 @@ export const CombatantUpdate = z.object({
   hpSet: z.number().int().nonnegative().optional(),
   // Temp HP absolute set (issue #57). 0 clears it.
   hpTemp: z.number().int().min(0).optional(),
+  // Issue #620: explicit attacker attribution for damage/heal log events. When set,
+  // the combat-log entry records this combatant as the actor ("Ember hit Goblin 3 for
+  // 8"). Omit it and the server falls back to the current-turn combatant when one is
+  // set and distinct from the target. Ignored for non-HP patches. The id must reference
+  // a combatant in the same encounter (validated server-side); an unknown id is ignored
+  // rather than 400ing so a stale client (e.g. one that removed the attacker) can still
+  // apply damage without a second round-trip.
+  actorId: Id.nullable().optional(),
   // Death-save counters, absolute set 0–3 (issue #57). Reaching 3 failures -> dead;
   // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
   deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
