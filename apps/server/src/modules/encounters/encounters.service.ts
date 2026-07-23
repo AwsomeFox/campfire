@@ -357,13 +357,16 @@ export class EncountersService {
 
   /**
    * Sort combatants with the campaign ruleset's initiative tiebreak when running
-   * (issue #611: 5e DEX-desc, PF2e preserved roll order, …).
+   * (issue #611: 5e DEX-desc, PF2e preserved roll order, …). Non-running statuses
+   * ignore the adapter (sortOrder only) — callers should still avoid fetching the
+   * adapter when status is not `running`.
    */
   private sortCombatantsWithAdapter(
     rows: Combatant[],
     status: EncounterStatus,
     adapter: RuleSystemAdapter,
   ): Combatant[] {
+    if (status !== 'running') return sortCombatants(rows, status);
     return sortCombatants(rows, status, (a, b) => adapter.initiativeTiebreak(a, b));
   }
 
@@ -730,8 +733,15 @@ export class EncountersService {
     }
     const combatantRows = await this.listCombatantRows(id);
     const status = row.status as EncounterStatus;
-    const adapter = await this.adapterForCampaign(row.campaignId);
-    let list = this.sortCombatantsWithAdapter(combatantRows.map(combatantToDomain), status, adapter);
+    // Initiative tiebreak only affects running order — skip the campaign/adapter
+    // lookup for preparing/ended reads (hot path; issue #611 review).
+    let list: Combatant[];
+    if (status === 'running') {
+      const adapter = await this.adapterForCampaign(row.campaignId);
+      list = this.sortCombatantsWithAdapter(combatantRows.map(combatantToDomain), status, adapter);
+    } else {
+      list = sortCombatants(combatantRows.map(combatantToDomain), status);
+    }
     if (viewerRole !== undefined && viewerRole !== 'dm') {
       list = list.map(redactMonsterHp);
       // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant

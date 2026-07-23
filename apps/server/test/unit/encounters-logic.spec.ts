@@ -153,6 +153,17 @@ describe('encounters — sortCombatants', () => {
         sortCombatants(rows, 'running', (a, b) => Pf2eAdapter.initiativeTiebreak(a, b)).map((c) => c.id),
       ).toEqual([1, 2, 3]);
     });
+
+    it('5e: unrolled (null/null) combatants keep sortOrder — adapter DEX must not reshuffle', () => {
+      // Higher DEX on the later-added unrolled combatant must NOT jump ahead before roll.
+      const rows = [
+        combatant({ id: 1, initiative: null, initMod: 1, sortOrder: 0 }),
+        combatant({ id: 2, initiative: null, initMod: 5, sortOrder: 1 }),
+      ];
+      expect(
+        sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id),
+      ).toEqual([1, 2]);
+    });
   });
 });
 
