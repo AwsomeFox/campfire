@@ -205,6 +205,7 @@ export default function CompendiumPage() {
 
   async function loadMore() {
     if (!nextCursor || loadingMore || loading) return;
+    const gen = fetchGeneration.current;
     setLoadingMore(true);
     setError(null);
     try {
@@ -214,6 +215,8 @@ export default function CompendiumPage() {
       if (campaignPack) params.set('pack', campaignPack);
       params.set('cursor', nextCursor);
       const page = await api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`);
+      // A filter change started a fresh primary fetch — discard this stale page.
+      if (gen !== fetchGeneration.current) return;
       // Append in memory only — writing `cursor` to the URL would re-fire the
       // primary fetch and replace the accumulated list with a single page.
       setResults((prev) => [...(prev ?? []), ...page.items]);
@@ -221,6 +224,7 @@ export default function CompendiumPage() {
       setHasMore(page.hasMore);
       setNextCursor(page.nextCursor);
     } catch (err) {
+      if (gen !== fetchGeneration.current) return;
       setError(err instanceof ApiError ? err.message : "Couldn't load more results.");
     } finally {
       setLoadingMore(false);
