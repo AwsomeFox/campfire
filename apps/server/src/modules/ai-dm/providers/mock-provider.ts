@@ -23,6 +23,7 @@ import type {
   AiFinishReason,
   AiUsage,
 } from './ai-provider';
+import { AiProviderError } from './errors';
 
 /** A single canned reply. Any field omitted gets a deterministic default. */
 export interface MockResponse {
@@ -40,6 +41,11 @@ export interface MockResponse {
    * Defaults to 0 (throw before any chunk) when `throwError` is set.
    */
   throwAfterChunks?: number;
+  /**
+   * After yielding this many text chunks, hang until `opts.signal` aborts (#1063).
+   * Simulates a provider stream that stalls mid-body with no error.
+   */
+  stallAfterChunks?: number;
   /** Throw this error from `generate`/`stream` instead of returning a reply (#1046). */
   throwError?: Error;
 }
@@ -100,7 +106,7 @@ export class MockAiProvider implements AiProvider {
     return this.build(req, canned);
   }
 
-  async *stream(req: AiGenerateRequest, _opts?: AiGenerateOptions): AsyncIterable<AiStreamEvent> {
+  async *stream(req: AiGenerateRequest, opts?: AiGenerateOptions): AsyncIterable<AiStreamEvent> {
     this.received.push(req);
     const canned = this.next();
     const result = this.build(req, canned);
@@ -119,6 +125,10 @@ export class MockAiProvider implements AiProvider {
       if (canned.throwError && throwAfter !== undefined && yielded >= throwAfter) {
         throw canned.throwError;
       }
+      // Stall mid-body until the driver's idle AbortSignal fires (#1063).
+      if (canned.stallAfterChunks !== undefined && yielded >= canned.stallAfterChunks) {
+        await hangUntilAbort(opts?.signal);
+      }
     }
     for (let index = 0; index < result.toolCalls.length; index++) {
       const tc = result.toolCalls[index];
@@ -133,6 +143,28 @@ export class MockAiProvider implements AiProvider {
     yield { type: 'usage', usage: result.usage };
     yield { type: 'done', result };
   }
+}
+
+/** Hang until `signal` aborts; reject with a timeout-shaped provider error. */
+function hangUntilAbort(signal?: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const fail = () =>
+      reject(
+        new AiProviderError('timeout', 'mock: stream idle timeout', {
+          provider: 'mock',
+          cause: signal?.reason,
+        }),
+      );
+    if (!signal) {
+      // No signal → hang forever (test misconfiguration); still reject sync if already aborted.
+      return;
+    }
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener('abort', fail, { once: true });
+  });
 }
 
 /** Split a string into `n` roughly-equal contiguous chunks (deterministic). */

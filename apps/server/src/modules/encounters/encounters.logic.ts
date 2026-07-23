@@ -1,5 +1,81 @@
 import { Dnd5eAdapter } from '@campfire/schema';
-import type { Combatant, CombatantKind, DeathState, DifficultyBand, EncounterDifficulty, EncounterShape, EncounterStatus, HpBand } from '@campfire/schema';
+import type {
+  Combatant,
+  CombatantKind,
+  DeathState,
+  DifficultyBand,
+  EncounterDifficulty,
+  EncounterEvent,
+  EncounterShape,
+  EncounterStatus,
+  HpBand,
+} from '@campfire/schema';
+
+/** Display label for a combatant whose linked NPC is currently hidden from non-DMs (#374/#869). */
+export const UNKNOWN_COMBATANT_LABEL = 'Unknown combatant';
+
+/** Minimal combatant shape needed to project combat-log secrecy (issue #869). */
+export type EncounterEventRedactionCombatant = {
+  id: number;
+  name: string;
+  npcId: number | null;
+};
+
+/**
+ * Role-aware combat-log projection (issue #869).
+ *
+ * Policy: historical events reveal names after the entity is revealed — redaction
+ * uses the CURRENT hidden-NPC set, not the secrecy at write time. Stable
+ * `actorId`/`targetId` drive the mask when present; denormalized actor/target
+ * strings and any name-bearing `detail` prose are scrubbed as a backstop for
+ * legacy rows (and for turn lines written before detail was name-free).
+ *
+ * Combatant ids themselves stay on the event so clients can correlate with the
+ * initiative roster (which already shows the masked token under the same id).
+ */
+export function redactEncounterEventsForViewer(
+  events: EncounterEvent[],
+  combatants: EncounterEventRedactionCombatant[],
+  hiddenNpcIds: ReadonlySet<number>,
+): EncounterEvent[] {
+  if (events.length === 0 || hiddenNpcIds.size === 0) return events;
+
+  const hiddenCombatantIds = new Set<number>();
+  const hiddenNames = new Set<string>();
+  for (const c of combatants) {
+    if (c.npcId !== null && hiddenNpcIds.has(c.npcId)) {
+      hiddenCombatantIds.add(c.id);
+      if (c.name) hiddenNames.add(c.name);
+    }
+  }
+  if (hiddenCombatantIds.size === 0 && hiddenNames.size === 0) return events;
+
+  return events.map((ev) => {
+    const actorHidden =
+      (ev.actorId != null && hiddenCombatantIds.has(ev.actorId)) ||
+      (ev.actor != null && hiddenNames.has(ev.actor));
+    const targetHidden =
+      (ev.targetId != null && hiddenCombatantIds.has(ev.targetId)) ||
+      (ev.target != null && hiddenNames.has(ev.target));
+
+    let detail = ev.detail;
+    if (hiddenNames.size > 0 && detail) {
+      for (const name of hiddenNames) {
+        if (name && detail.includes(name)) {
+          detail = detail.split(name).join(UNKNOWN_COMBATANT_LABEL);
+        }
+      }
+    }
+
+    if (!actorHidden && !targetHidden && detail === ev.detail) return ev;
+    return {
+      ...ev,
+      actor: actorHidden ? UNKNOWN_COMBATANT_LABEL : ev.actor,
+      target: targetHidden ? UNKNOWN_COMBATANT_LABEL : ev.target,
+      detail,
+    };
+  });
+}
 
 /**
  * Pure combat-order / HP-band math for encounters, extracted from

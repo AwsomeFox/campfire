@@ -24,6 +24,7 @@ import { AiProviderError } from './errors';
 import {
   DEFAULT_RETRY,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
   type FetchLike,
   type RetryConfig,
   postJson,
@@ -160,7 +161,12 @@ export class GeminiProvider implements AiProvider {
     let usage: AiUsage | undefined;
     let finishReason = 'unknown';
 
-    for await (const event of parseSse(res.body)) {
+    // Idle/read timeout stays armed until the body completes or aborts (#1063).
+    for await (const event of parseSse(res.body, {
+      signal: opts?.signal,
+      idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+      provider: this.name,
+    })) {
       if (!event.data || event.data === '[DONE]') continue;
       let chunk: GeminiResponse;
       try {

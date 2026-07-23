@@ -4083,11 +4083,20 @@ export const EncounterEvent = z.object({
   // Free-text names, denormalized so the log renders without joining combatants
   // (which may since have been removed). `actor` is who acted (turn events, or a
   // heal source when known); `target` is who it happened to. Either may be null.
+  // Issue #869: for non-DMs these are projected from current hidden-NPC visibility
+  // (names appear after reveal); prefer `actorId`/`targetId` for stable identity.
   actor: z.string().max(200).nullable().default(null),
   target: z.string().max(200).nullable().default(null),
-  // Human phrasing of the event, deliberately kept free of exact monster HP totals
-  // so listing the log to a non-DM viewer can't leak what issue #43 redacts on the
-  // combatant rows (only the damage/heal delta is recorded, never the resulting HP).
+  // Stable combatant ids for role-aware projection (issue #869). Nullable when the
+  // event has no actor/target, or for rows written before the columns existed.
+  // Survives rename; listing re-derives display names from current combatant/NPC
+  // secrecy so a later reveal unmasks historical log lines.
+  actorId: Id.nullable().default(null),
+  targetId: Id.nullable().default(null),
+  // Human phrasing of the event. Must stay free of exact monster HP totals (issue
+  // #43) AND of combatant names that could bypass actor/target redaction (issue
+  // #869) — store deltas/outcomes only ("took 8 damage", "Combat started"); the
+  // UI composes names from actor/target.
   detail: z.string().max(500).default(''),
   createdAt: IsoDate,
 });
