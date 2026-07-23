@@ -159,11 +159,18 @@
        notification panel:                    --cf-layer-notification (50)
        undo / recovery snackbar:              --cf-layer-snackbar (60)
      Nested overlays share a tier; later DOM order wins. ConfirmDialog portals
-     to <body> so a page stacking context cannot trap it under chrome. */
+     to <body> so a page stacking context cannot trap it under chrome.
+     Keyboard clearance is not a z-index — it feeds --cf-keyboard-inset
+     for the undo snackbar bottom offset (issue #794). */
   --cf-layer-tabbar: 40;
   --cf-layer-dialog: 50;
   --cf-layer-notification: 50;
   --cf-layer-snackbar: 60;
+  /* Measured by useUndoSnackbarChrome while the bar is mounted; defaults keep
+     desktop (no tab bar) clear of the home-indicator safe-area alone. */
+  --cf-tabbar-content-height: 0px;
+  --cf-keyboard-inset: 0px;
+  --cf-snackbar-gap: 12px;
 
   color-scheme: dark;
 }
@@ -1230,6 +1237,73 @@ h1, h2, h3, h4, h5, h6 {
   border-top: 1px solid var(--color-divider);
   display: grid;
   grid-template-columns: repeat(5, 1fr);
+}
+
+/* Undo snackbar (issue #794) — clears measured tab bar + safe-area + keyboard.
+   Wraps on narrow viewports; Undo / Dismiss keep 44×44 hit targets. */
+.cf-undo-snackbar {
+  position: fixed;
+  left: 50%;
+  bottom: calc(
+    var(--cf-tabbar-content-height, 0px) + env(safe-area-inset-bottom, 0px) +
+      var(--cf-keyboard-inset, 0px) + var(--cf-snackbar-gap, 12px)
+  );
+  transform: translateX(-50%);
+  z-index: var(--cf-layer-snackbar);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 8px 10px 8px 16px;
+  border-radius: var(--radius-md, 10px);
+  background: var(--color-neutral-800, #1c1c22);
+  color: var(--color-neutral-100, #f2f2f5);
+  border: 1px solid var(--color-neutral-700, #333);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+}
+.cf-undo-snackbar--failed {
+  border-color: var(--color-danger, #fb7185);
+}
+.cf-undo-snackbar__message {
+  flex: 1 1 12ch;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cf-undo-snackbar__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.cf-undo-snackbar__action {
+  font-size: 12.5px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 12px;
+}
+.cf-undo-snackbar__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--color-neutral-400, #999);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+.cf-undo-snackbar__dismiss:disabled,
+.cf-undo-snackbar__action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .cf-tabbar a,
 .cf-tabbar button {

@@ -16,6 +16,8 @@ import { safeInternalPath } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { useAnnounce, useClearAnnouncements } from '../../components/Announcer';
+import { BootstrapRecoveryScreen } from '../../app/BootstrapRecoveryScreen';
+import { loginBootstrapSurface, retryAuthBootstrap } from '../../app/authBootstrapState';
 import { GameIcon } from '../../components/GameIcon';
 import { PasswordInput } from '../../components/PasswordInput';
 import {
@@ -226,7 +228,7 @@ function LocalLoginForm({
 
 export function LoginPage() {
   const { t } = useTranslation();
-  const { status, loading } = useAuthStatus();
+  const { status, loading, phase: statusPhase, refresh: refreshStatus } = useAuthStatus();
   const { me, ready, refresh } = useAuth();
   const announce = useAnnounce();
   const clearAnnouncements = useClearAnnouncements();
@@ -319,13 +321,32 @@ export function LoginPage() {
     setShowLocalForm(new URLSearchParams(location.search).get('local') === '1');
   }, [location.search]);
 
-  if (!loading && status?.setupRequired) {
-    return <Navigate to="/setup" replace />;
-  }
+  const bootstrap = loginBootstrapSurface({
+    statusPhase,
+    setupRequired: Boolean(status?.setupRequired),
+  });
+
+  // Session present (live or stale #579): prefer redirect over recovery so a
+  // status outage does not trap a signed-in user on Retry — matches AuthedLayout
+  // allowing `authed` when hasMe is true even if statusPhase is error.
   // During a successful submit, onSubmit owns the single history-replacing
   // navigation after refreshing identity. Do not race it with this guard.
-  if (!submitting && !loading && ready && me) {
+  if (!submitting && ready && me) {
     return <Navigate to={redirectTo} replace />;
+  }
+
+  // Do not choose setup vs Sign in until /auth/status is known (#801).
+  if (bootstrap === 'recovery') {
+    return (
+      <BootstrapRecoveryScreen
+        onRetry={() => {
+          void retryAuthBootstrap(refreshStatus, refresh);
+        }}
+      />
+    );
+  }
+  if (bootstrap === 'setup') {
+    return <Navigate to="/setup" replace />;
   }
 
   async function onSubmit(e: FormEvent) {

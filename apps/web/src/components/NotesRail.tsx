@@ -115,7 +115,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
   function onVisibilityKeyDown(e: KeyboardEvent<HTMLButtonElement>, current: Note['visibility']) {
     const idx = NOTE_VISIBILITY_ORDER.indexOf(current);
     if (idx < 0) return;
-    let nextIdx = idx;
+    let nextIdx: number;
     if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
       nextIdx = (idx + 1) % NOTE_VISIBILITY_ORDER.length;
     } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
