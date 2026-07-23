@@ -9,8 +9,13 @@
  * The AI scribe card is live — MCP is a real, shipped API (see /tokens +
  * apps/mcp) — so it links to token creation instead of claiming "not
  * available".
+ *
+ * Issue #795 — custom accent safety: drafting a hex builds a full tonal ramp
+ * with contrast repair, previews real button/link/chip/focus/hover/selected
+ * states immediately, and commits only via explicit Apply (Cancel restores the
+ * prior theme; Reset returns to the Nocturne default).
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
 import type { TextSize, User } from '@campfire/schema';
@@ -23,6 +28,13 @@ import {
   type LocalePreference,
 } from '../../i18n';
 import { useAuth } from '../../app/auth';
+import {
+  applyAccentColor,
+  buildAccentPalette,
+  DEFAULT_ACCENT,
+  normalizeHex,
+  paletteToCssVars,
+} from '../../app/accentPalette';
 import { Card, ErrorNote } from '../../components/ui';
 
 // Swatch hexes converted from the design's accent palette (Campfire.dc.html
@@ -30,14 +42,12 @@ import { Card, ErrorNote } from '../../components/ui';
 // oklch(0.72 0.11 235) "tide") to #rrggbb, since PreferencesUpdate.accentColor
 // is a strict hex regex and the design's tokens are OKLCH-only.
 const ACCENT_SWATCHES: Array<{ name: string; hex: string }> = [
-  { name: 'Nocturne', hex: '#9184d9' }, // server default (Nocturne blurple) — same as null
+  { name: 'Nocturne', hex: DEFAULT_ACCENT }, // server default (Nocturne blurple) — same as null
   { name: 'Ember', hex: '#e28d4f' },
   { name: 'Moss', hex: '#69ba7c' },
   { name: 'Tide', hex: '#57afe0' },
 ];
 
-const DEFAULT_ACCENT = '#9184d9';
-const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 const READING_MODES = ['default', 'comfortable', 'large'] as const satisfies readonly TextSize[];
 
 export default function PreferencesPage() {
@@ -58,21 +68,45 @@ export default function PreferencesPage() {
 
   const [displayName, setDisplayName] = useState(user?.displayName ?? '');
   const [accentColor, setAccentColor] = useState<string | null>(user?.accentColor ?? null);
+  const [appliedAccent, setAppliedAccent] = useState<string | null>(user?.accentColor ?? null);
   const [textSize, setTextSize] = useState<TextSize>(user?.textSize ?? 'default');
   const [hexInput, setHexInput] = useState(user?.accentColor ?? '');
   const [hexError, setHexError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [applyingAccent, setApplyingAccent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [accentSaved, setAccentSaved] = useState(false);
+  const savedFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const accentSavedFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!user) return;
     setDisplayName(user.displayName ?? '');
     setAccentColor(user.accentColor ?? null);
+    setAppliedAccent(user.accentColor ?? null);
     setTextSize(user.textSize ?? 'default');
     setHexInput(user.accentColor ?? '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
+
+  useEffect(() => () => {
+    if (savedFlashTimerRef.current) clearTimeout(savedFlashTimerRef.current);
+    if (accentSavedFlashTimerRef.current) clearTimeout(accentSavedFlashTimerRef.current);
+  }, []);
+
+  const draftPalette = useMemo(() => {
+    // null draft = Nocturne default — still build a palette so the preview panel
+    // shows default states even when the document still carries a prior override.
+    const seed = accentColor === null ? DEFAULT_ACCENT : normalizeHex(accentColor);
+    if (!seed) return null;
+    return buildAccentPalette(seed);
+  }, [accentColor]);
+
+  const previewVars = useMemo(() => {
+    if (!draftPalette) return undefined;
+    return paletteToCssVars(draftPalette) as CSSProperties;
+  }, [draftPalette]);
 
   if (!user) {
     return (
@@ -84,11 +118,11 @@ export default function PreferencesPage() {
     );
   }
 
-  const dirty =
+  const profileDirty =
     displayName !== (user.displayName ?? '') ||
-    accentColor !== (user.accentColor ?? null) ||
     textSize !== (user.textSize ?? 'default');
-  const previewColor = accentColor ?? DEFAULT_ACCENT;
+  const accentDirty = accentColor !== appliedAccent;
+  const previewSeed = accentColor ?? DEFAULT_ACCENT;
 
   function pickSwatch(hex: string) {
     // "Nocturne" swatch matches the server default — picking it clears the override (null),
@@ -106,8 +140,8 @@ export default function PreferencesPage() {
       setHexError(null);
       return;
     }
-    const normalized = value.startsWith('#') ? value : `#${value}`;
-    if (HEX_RE.test(normalized)) {
+    const normalized = normalizeHex(value);
+    if (normalized) {
       setAccentColor(normalized);
       setHexError(null);
     } else {
@@ -115,24 +149,60 @@ export default function PreferencesPage() {
     }
   }
 
-  async function save() {
+  function cancelAccent() {
+    setAccentColor(appliedAccent);
+    setHexInput(appliedAccent ?? '');
+    setHexError(null);
+    applyAccentColor(appliedAccent);
+  }
+
+  function resetAccent() {
+    setAccentColor(null);
+    setHexInput('');
+    setHexError(null);
+  }
+
+  async function applyAccent() {
     if (hexError) return;
+    setApplyingAccent(true);
+    setError(null);
+    setAccentSaved(false);
+    try {
+      const updated = await api.patch<User>(`${API}/me/preferences`, {
+        accentColor,
+      });
+      const next = updated.accentColor ?? null;
+      setAccentColor(next);
+      setAppliedAccent(next);
+      setHexInput(next ?? '');
+      applyAccentColor(next);
+      await refresh();
+      setAccentSaved(true);
+      if (accentSavedFlashTimerRef.current) clearTimeout(accentSavedFlashTimerRef.current);
+      accentSavedFlashTimerRef.current = setTimeout(() => setAccentSaved(false), 2000);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t('preferences.saveError'));
+      applyAccentColor(appliedAccent);
+    } finally {
+      setApplyingAccent(false);
+    }
+  }
+
+  async function save() {
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
       const updated = await api.patch<User>(`${API}/me/preferences`, {
         displayName: displayName.trim(),
-        accentColor,
         textSize,
       });
       setDisplayName(updated.displayName ?? '');
-      setAccentColor(updated.accentColor ?? null);
       setTextSize(updated.textSize ?? 'default');
-      setHexInput(updated.accentColor ?? '');
       await refresh();
       setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      if (savedFlashTimerRef.current) clearTimeout(savedFlashTimerRef.current);
+      savedFlashTimerRef.current = setTimeout(() => setSaved(false), 2000);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t('preferences.saveError'));
     } finally {
@@ -194,23 +264,118 @@ export default function PreferencesPage() {
         </div>
         {hexError && <p className="text-sm" style={{ color: '#f87171' }}>{hexError}</p>}
 
-        <div className="flex items-center gap-3">
-          <span
-            aria-hidden
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: '50%',
-              background: previewColor,
-              border: '1px solid var(--color-divider)',
-              flex: 'none',
-            }}
-          />
-          <span className="text-muted" style={{ fontSize: 12 }}>
+        <div
+          className="cf-inset accent-state-preview"
+          data-testid="accent-state-preview"
+          style={{
+            padding: '12px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+            ...(previewVars ?? {}),
+          }}
+        >
+          <span className="card-kicker">{t('preferences.accentPreview')}</span>
+          <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
             {accentColor
-              ? t('preferences.livePreview', { color: accentColor })
+              ? draftPalette?.repaired
+                ? t('preferences.accentPreviewRepaired', { color: previewSeed, applied: draftPalette.accent })
+                : t('preferences.livePreview', { color: accentColor })
               : t('preferences.livePreviewDefault')}
-          </span>
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-testid="accent-preview-link"
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                color: 'var(--color-accent)',
+                textDecoration: 'underline',
+                textUnderlineOffset: 3,
+                cursor: 'pointer',
+                font: 'inherit',
+              }}
+            >
+              {t('preferences.accentPreviewLink')}
+            </button>
+            <button type="button" className="btn btn-primary" data-testid="accent-preview-button">
+              {t('preferences.accentPreviewButton')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="accent-preview-hover"
+              style={{
+                // Forced hover sample: tint + lighter accent text so the demo
+                // stays WCAG AA (real :hover is transient; axe always sees this).
+                background: 'color-mix(in srgb, var(--color-accent) 12%, transparent)',
+                color: 'var(--color-accent-300)',
+              }}
+            >
+              {t('preferences.accentPreviewHover')}
+            </button>
+            <span className="tag tag-accent" data-testid="accent-preview-chip">
+              {t('preferences.accentPreviewChip')}
+            </span>
+            <span
+              data-testid="accent-preview-selected"
+              style={{
+                fontSize: 12.5,
+                padding: '4px 10px',
+                borderRadius: 'var(--radius-md)',
+                color: 'var(--color-accent-300)',
+                boxShadow: 'inset 0 0 0 1px var(--color-accent)',
+                background: 'color-mix(in srgb, var(--color-accent) 9%, transparent)',
+              }}
+            >
+              {t('preferences.accentPreviewSelected')}
+            </span>
+            <span
+              data-testid="accent-preview-focus"
+              style={{
+                fontSize: 12.5,
+                padding: '4px 10px',
+                borderRadius: 'var(--radius-sm)',
+                outline: '2px solid var(--color-accent)',
+                outlineOffset: 2,
+              }}
+            >
+              {t('preferences.accentPreviewFocus')}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex gap-2 items-center flex-wrap">
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={applyingAccent || !accentDirty || !!hexError}
+            onClick={applyAccent}
+            data-testid="accent-apply"
+          >
+            {applyingAccent ? t('preferences.applying') : t('preferences.applyAccent')}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={applyingAccent || !accentDirty}
+            onClick={cancelAccent}
+            data-testid="accent-cancel"
+          >
+            {t('preferences.cancelAccent')}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={applyingAccent || accentColor === null}
+            onClick={resetAccent}
+            data-testid="accent-reset"
+          >
+            {t('preferences.resetAccent')}
+          </button>
+          {accentSaved && <span className="text-muted" style={{ fontSize: 12 }}>{t('preferences.accentApplied')}</span>}
         </div>
 
         <fieldset className="reading-preference-fieldset" aria-describedby="reading-mode-help">
@@ -312,7 +477,7 @@ export default function PreferencesPage() {
       </div>
 
       <div className="flex gap-2 items-center">
-        <button className="btn btn-primary" disabled={saving || !dirty || !!hexError} onClick={save}>
+        <button className="btn btn-primary" disabled={saving || !profileDirty} onClick={save}>
           {saving ? t('preferences.saving') : t('preferences.save')}
         </button>
         {saved && <span className="text-muted" style={{ fontSize: 12 }}>{t('preferences.saved')}</span>}
