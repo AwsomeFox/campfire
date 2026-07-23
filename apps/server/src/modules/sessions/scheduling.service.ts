@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   ScheduledSessionCreate,
@@ -13,6 +13,7 @@ import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
+import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -122,22 +123,24 @@ export class SchedulingService {
    */
   async searchForCampaign(campaignId: number, needle: string, limit: number): Promise<ScheduledSession[]> {
     const boundedLimit = Math.max(1, Math.min(limit, 50));
-    needle = needle.trim().toLowerCase();
-    if (!needle) return [];
+    // SearchService passes an already-folded needle; fold again for idempotent callers (#624).
+    const folded = foldForSearch(needle.trim());
+    if (!folded) return [];
+    // Fold-match in JS — SQLite lower()/instr is ASCII-only (#624).
     const rows = await this.db
       .select()
       .from(scheduledSessions)
-      .where(and(
-        eq(scheduledSessions.campaignId, campaignId),
-        or(
-          sql`instr(lower(${scheduledSessions.title}), ${needle}) > 0`,
-          sql`instr(lower(${scheduledSessions.scheduledAt}), ${needle}) > 0`,
-          sql`instr(lower(${scheduledSessions.notes}), ${needle}) > 0`,
-        ),
-      ))
-      .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id))
-      .limit(boundedLimit);
-    return rows.map(toDomain);
+      .where(eq(scheduledSessions.campaignId, campaignId))
+      .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
+    return rows
+      .filter(
+        (r) =>
+          foldedIncludes(r.title, folded)
+          || foldedIncludes(r.scheduledAt, folded)
+          || foldedIncludes(r.notes, folded),
+      )
+      .slice(0, boundedLimit)
+      .map(toDomain);
   }
 
   /**
