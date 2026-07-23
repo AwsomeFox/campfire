@@ -806,6 +806,9 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
 
+// Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
+export * from './scheduleWindow';
+
 // Per-campaign ICS calendar feed. `token` is an unguessable capability secret
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
 // may read it (the feed only exposes schedule data members already see);
@@ -2346,7 +2349,12 @@ export const CampaignSummary = z.object({
   }),
   inventoryCount: z.number().int().nonnegative(), // number of loot/inventory items tracked
   commentCount: z.number().int().nonnegative(), // discussion comments the caller may see (anchor-visibility redacted)
-  nextSession: ScheduledSessionWithRsvps.nullable(), // the soonest not-yet-past game night (with RSVPs), or null
+  // Issue #818: split "happening now" from "next" so an in-progress game night stays
+  // visible without hiding the later upcoming event. `nextSession` is the soonest
+  // not-yet-started night (scheduledAt >= now); `inProgressSession` is the soonest
+  // still inside its [scheduledAt, scheduledAt+duration) window.
+  inProgressSession: ScheduledSessionWithRsvps.nullable(),
+  nextSession: ScheduledSessionWithRsvps.nullable(),
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;
