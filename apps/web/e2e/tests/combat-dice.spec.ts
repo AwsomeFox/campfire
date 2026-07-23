@@ -84,13 +84,15 @@ test.describe('encounter dice — apply rolled damage', () => {
       // Outcome: took N damage.") does not create a strict-mode double match.
       await expect(page.getByRole('log', { name: 'Combat log' }).getByText(/Brixi Applybar.*took \d+ damage/i)).toBeVisible();
     } finally {
-      if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
+      // End before delete so a failed DELETE cannot leave a RUNNING fight that
+      // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
+      if (encounterId != null) {
+        await dm.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+        await dm.delete(`/api/v1/encounters/${encounterId}`);
+      }
       if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
       // Issue #744: the seeded "Ambush" encounter was ended above so the drill could
-      // start; reopen it so the combat-tracker suite finds it RUNNING again. Safe to
-      // call unconditionally — /reopen 400s on a non-'ended' status, which we ignore.
-      // Restoring the seed fight keeps the one-live-fight invariant intact for every
-      // subsequent serial spec that assumes a single RUNNING encounter.
+      // start; restore it so the combat-tracker suite finds it RUNNING again.
       await restoreSeedEncounter();
       // Dispose the API contexts so they don't leak across the worker.
       await playerCtx.dispose();
