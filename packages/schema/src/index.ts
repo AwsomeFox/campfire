@@ -777,15 +777,28 @@ export const ScheduledSession = z.object({
   id: Id,
   campaignId: Id,
   scheduledAt: IsoDateTime, // when the session starts (stored as ISO UTC)
-  durationMinutes: z.number().int().min(15).max(24 * 60).default(240), // drives DTEND in the ICS feed
+  // min 0 allows mid-session "End session" to shrink the window immediately
+  // (issue #818). Create still requires ≥15 via ScheduledSessionCreate.
+  durationMinutes: z.number().int().min(0).max(24 * 60).default(240), // drives DTEND in the ICS feed
   title: z.string().max(200).default(''),
   location: z.string().max(200).default(''), // "Sam's place", a VTT link…
   notes: z.string().max(5000).default(''),
   ...timestamps,
 });
 export type ScheduledSession = z.infer<typeof ScheduledSession>;
-export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ scheduledAt: true });
-export const ScheduledSessionUpdate = ScheduledSessionCreate.partial();
+export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ scheduledAt: true })
+  .extend({
+    // Planned game nights stay at least 15 minutes; updates may shrink to 0 to end now.
+    durationMinutes: z.number().int().min(15).max(24 * 60).optional(),
+  });
+export const ScheduledSessionUpdate = ScheduledSession.omit({
+  id: true,
+  campaignId: true,
+  createdAt: true,
+  updatedAt: true,
+}).partial();
 
 export const RsvpStatus = z.enum(['yes', 'no', 'maybe']);
 export type RsvpStatus = z.infer<typeof RsvpStatus>;

@@ -54,8 +54,11 @@ describe('schedule window helpers (issue #818)', () => {
   });
 
   it('clamps end/extend duration helpers to schema bounds', () => {
-    expect(endSessionDurationMinutes(start, Date.parse(start) + 5 * 60_000)).toBe(15);
+    // Ending early must clear in-progress (floor, not create-time min of 15).
+    expect(endSessionDurationMinutes(start, Date.parse(start) + 5 * 60_000)).toBe(5);
+    expect(endSessionDurationMinutes(start, Date.parse(start) + 30_000)).toBe(0);
     expect(endSessionDurationMinutes(start, Date.parse(start) + 90 * 60_000)).toBe(90);
+    expect(schedulePhase(start, endSessionDurationMinutes(start, Date.parse(start) + 5 * 60_000), Date.parse(start) + 5 * 60_000)).toBe('past');
     expect(extendSessionDurationMinutes(240, 30)).toBe(270);
     expect(extendSessionDurationMinutes(1430, 30)).toBe(1440);
   });

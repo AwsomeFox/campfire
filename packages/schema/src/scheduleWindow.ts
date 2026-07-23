@@ -77,12 +77,15 @@ export function partitionSchedules<T extends ScheduleWindowFields>(
 /**
  * Duration minutes that ends the session at `nowMs` (clamped to schema bounds).
  * Editing duration mid-session redefines the end as scheduledAt + duration.
+ * Uses floor so the exclusive end is never after `nowMs` — including the first
+ * fifteen minutes, where clamping to the create-time minimum of 15 would leave
+ * the night incorrectly classified as in progress.
  */
 export function endSessionDurationMinutes(scheduledAt: string, nowMs: number = Date.now()): number {
   const start = Date.parse(scheduledAt);
-  if (!Number.isFinite(start)) return 15;
-  const elapsed = Math.ceil((nowMs - start) / 60_000);
-  return Math.min(24 * 60, Math.max(15, elapsed));
+  if (!Number.isFinite(start)) return 0;
+  const elapsed = Math.floor((nowMs - start) / 60_000);
+  return Math.min(24 * 60, Math.max(0, elapsed));
 }
 
 /** Extend a session's planned duration, clamped to the schema maximum (24h). */

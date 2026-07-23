@@ -59,7 +59,9 @@ test.describe('schedule window UI helpers (#818)', () => {
 
   test('end/extend helpers stay within durationMinutes validation bounds', () => {
     const start = '2026-07-23T18:00:00.000Z';
-    expect(endSessionDurationMinutes(start, Date.parse(start) + 3 * 60_000)).toBe(15);
+    // End-now uses floor elapsed (0 allowed on update) so live cards clear immediately.
+    expect(endSessionDurationMinutes(start, Date.parse(start) + 3 * 60_000)).toBe(3);
+    expect(endSessionDurationMinutes(start, Date.parse(start) + 45_000)).toBe(0);
     expect(extendSessionDurationMinutes(240, 30)).toBe(270);
     expect(extendSessionDurationMinutes(1440, 30)).toBe(1440);
   });
