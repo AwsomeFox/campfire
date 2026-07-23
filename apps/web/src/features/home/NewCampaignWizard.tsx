@@ -3,8 +3,8 @@
  * "New campaign" screen (design/claude-design/Campfire.dc.html ~117-180),
  * extended with a second step for rule-system selection per the BUILD spec:
  * step 1 (name/description) -> step 2 (pick an installed rule pack, or
- * "None / homebrew") -> POST /campaigns, then PATCH ruleSystem if one was
- * chosen. Rendered as an overlay rather than a route since Router/Layout are
+ * "None / homebrew") -> POST /campaigns with ruleSystem when selected (issue #539).
+ * Rendered as an overlay rather than a route since Router/Layout are
  * orchestrator-owned; this keeps the flow reachable from the "+ New campaign"
  * tile on the hub without new route wiring.
  */
@@ -71,15 +71,8 @@ export function NewCampaignWizard({
       const campaign = await api.post<Campaign>(`${API}/campaigns`, {
         name: name.trim(),
         description: description.trim() || undefined,
+        ...(ruleSystem ? { ruleSystem } : {}),
       });
-      if (ruleSystem) {
-        try {
-          await api.patch<Campaign>(`${API}/campaigns/${campaign.id}`, { ruleSystem });
-        } catch {
-          // Campaign exists even if the ruleSystem patch fails (e.g. backend not
-          // wired up yet) — don't block the user from entering their new campaign.
-        }
-      }
       // Awaited so the button stays in its "Creating…" state while the parent
       // refreshes memberships/campaigns before navigating (issue #103) — no
       // flash back to the idle label mid-transition.
