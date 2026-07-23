@@ -32,11 +32,14 @@ export function inviteRoleOptions(): ReadonlyArray<InviteRoleOption> {
   ];
 }
 
-/** Accessible name for a generated invite URL field. */
-export function inviteLinkFieldLabel(role: InviteRole): string {
+/**
+ * Accessible name for a generated invite URL field.
+ * Include `inviteId` so multiple active invites with the same role stay distinguishable.
+ */
+export function inviteLinkFieldLabel(role: InviteRole, inviteId: number): string {
   const opt = inviteRoleOptions().find((o) => o.role === role);
   const label = opt?.label ?? role;
-  return `${label} invite link, read-only`;
+  return `${label} invite link ${inviteId}, read-only`;
 }
 
 export const INVITE_COPY_SUCCESS = 'Invite link copied to clipboard.';

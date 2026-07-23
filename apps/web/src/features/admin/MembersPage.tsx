@@ -273,7 +273,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
         <div key={invite.id} className="flex gap-2 flex-wrap items-center">
           <div className="field !mb-0" style={{ flex: 1, minWidth: 190 }}>
             <label className="sr-only" htmlFor={linkFieldId}>
-              {inviteLinkFieldLabel(invite.role)}
+              {inviteLinkFieldLabel(invite.role, invite.id)}
             </label>
             <input
               id={linkFieldId}
@@ -294,7 +294,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
             type="button"
             className="btn btn-primary"
             style={{ minHeight: 36 }}
-            aria-label={`Copy ${inviteLinkFieldLabel(invite.role)}`}
+            aria-label={`Copy ${inviteLinkFieldLabel(invite.role, invite.id)}`}
             onClick={() => copy(invite)}
           >
             {copiedId === invite.id ? 'Copied!' : 'Copy link'}

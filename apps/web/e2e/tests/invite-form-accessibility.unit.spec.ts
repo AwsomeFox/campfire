@@ -29,9 +29,13 @@ test.describe('invite role options (issue #516)', () => {
 });
 
 test.describe('invite link field labels (issue #516)', () => {
-  test('names the read-only purpose for each role', () => {
-    expect(inviteLinkFieldLabel('player')).toMatch(/player invite link, read-only/i);
-    expect(inviteLinkFieldLabel('viewer')).toMatch(/viewer invite link, read-only/i);
+  test('names the read-only purpose for each role and invite id', () => {
+    expect(inviteLinkFieldLabel('player', 12)).toMatch(/player invite link 12, read-only/i);
+    expect(inviteLinkFieldLabel('viewer', 34)).toMatch(/viewer invite link 34, read-only/i);
+  });
+
+  test('keeps same-role invites distinguishable by id', () => {
+    expect(inviteLinkFieldLabel('player', 1)).not.toBe(inviteLinkFieldLabel('player', 2));
   });
 });
 

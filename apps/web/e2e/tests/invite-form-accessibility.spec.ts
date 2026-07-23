@@ -32,12 +32,14 @@ test.describe('invite form accessibility (issue #516)', () => {
     expect(createResponse.status()).toBe(201);
     const created = (await createResponse.json()) as { id: number; role: 'viewer' };
 
-    const linkField = card.getByRole('textbox', { name: inviteLinkFieldLabel('viewer') });
+    const linkField = card.getByRole('textbox', { name: inviteLinkFieldLabel('viewer', created.id) });
     await expect(linkField).toHaveAttribute('id', `invite-link-${created.id}`);
     await expect(linkField).toHaveAttribute('readonly', '');
     await expect(linkField).toHaveAttribute('aria-readonly', 'true');
 
-    const copyButton = card.getByRole('button', { name: `Copy ${inviteLinkFieldLabel('viewer')}` });
+    const copyButton = card.getByRole('button', {
+      name: `Copy ${inviteLinkFieldLabel('viewer', created.id)}`,
+    });
     await copyButton.click();
     await expect(copyButton).toBeFocused();
     await expect(politeAnnouncement(page, INVITE_COPY_SUCCESS)).toBeAttached();
