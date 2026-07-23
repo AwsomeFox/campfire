@@ -280,6 +280,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'reveal_map_region',
   'check_objective',
   'set_npc_disposition',
+  'set_location_discovery', // scene transitions: mark locations discovered/current (#1067)
   // table notes the DM jots during play
   'add_note',
 ]);
