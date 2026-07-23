@@ -18,6 +18,7 @@ function notification(title: string, id: number): Notification {
     entityType: 'quest',
     entityId: navigation.questId,
     commentId: null,
+    data: null,
     actorName: 'Dungeon Master',
     readAt: null,
     createdAt: new Date().toISOString(),

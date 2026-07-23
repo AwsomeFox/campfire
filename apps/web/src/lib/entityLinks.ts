@@ -1,5 +1,7 @@
 import type { EntityType, MentionTarget, Notification, Proposal, SearchResult } from '@campfire/schema';
+import { parseScheduleNotificationData } from '@campfire/schema';
 import { normalizeMentionName } from './mentionMatching';
+import { cancelledScheduleDetailHref } from './scheduleNotificationCopy';
 
 /** Every campaign record that can be the destination of a cross-entity link. */
 export type NavigableEntityType = EntityType | MentionTarget['type'] | SearchResult['type'];
@@ -240,6 +242,17 @@ export function notificationHref(notification: Notification): string {
       return `/c/${campaignId}/table`;
     case 'session_scheduled':
     case 'session_rsvp': {
+      // Issue #820: cancelled nights are deleted — route to a stable cancelled
+      // detail fed by the notification's structured snapshot (not a live card).
+      // The bell stashes the snapshot before navigate (see NotificationsBell).
+      const scheduleData = parseScheduleNotificationData(notification.data);
+      if (
+        notification.type === 'session_scheduled'
+        && scheduleData?.changeType === 'cancelled'
+        && validId(scheduleData.scheduleId)
+      ) {
+        return cancelledScheduleDetailHref(campaignId, scheduleData.scheduleId);
+      }
       // Log-session "upcoming playedAt" pings set entityType=session; those still
       // land on the Schedule tab (not the session log) without a bogus schedule id.
       if (validId(notification.entityId) && notification.entityType !== 'session') {

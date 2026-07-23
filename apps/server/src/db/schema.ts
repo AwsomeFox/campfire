@@ -883,6 +883,8 @@ export const notifications = sqliteTable('notifications', {
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
   commentId: integer('comment_id'), // optional comment focus inside the entity thread (#446)
+  // Issue #820: optional JSON blob (ScheduleNotificationData for session_scheduled).
+  data: text('data'),
   actorName: text('actor_name').notNull().default(''),
   readAt: text('read_at'),
   createdAt: text('created_at').notNull(),

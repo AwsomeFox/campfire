@@ -1860,6 +1860,25 @@ function migrateNotificationsTableForCommentId(sqlite: Database.Database): void 
 }
 
 /**
+ * Migration for issue #820: schedule lifecycle notifications store structured
+ * metadata (schedule id, UTC instant, duration, change type) in
+ * `notifications.data` so clients can localize the start time. Plain nullable
+ * ADD COLUMN — existing rows stay null. Fresh DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateNotificationsTableForData(sqlite: Database.Database): void {
+  const hasNotificationsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'")
+    .get();
+  if (!hasNotificationsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'data')) return;
+
+  sqlite.exec('ALTER TABLE notifications ADD COLUMN data TEXT');
+}
+
+/**
  * Migration for issue #819: character assignment is an exclusive seat — at most
  * one campaign_members row may reference a given character_id. Pre-fix DBs could
  * accumulate duplicate links (the service overwrote ownerUserId without clearing
@@ -1999,6 +2018,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
   { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
   { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
+  { name: '0068_notifications_data', run: migrateNotificationsTableForData },
 ];
 
 /**

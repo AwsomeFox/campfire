@@ -878,6 +878,9 @@ export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps
 // Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
 export * from './scheduleWindow';
 
+// Schedule notification metadata + locale-aware copy (issue #820).
+export * from './scheduleNotifications';
+
 // Per-campaign ICS calendar feed. `token` is an unguessable capability secret
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
 // may read it (the feed only exposes schedule data members already see);
@@ -1280,6 +1283,12 @@ export const Notification = z.object({
    * inside the parent entity's discussion thread (`entityType`/`entityId`).
    */
   commentId: Id.nullable().default(null),
+  /**
+   * Issue #820: optional structured event payload (JSON object). Schedule
+   * lifecycle pings store {@link ScheduleNotificationData} here so clients can
+   * localize the start instant instead of trusting a UTC date baked into title.
+   */
+  data: z.record(z.string(), z.unknown()).nullable().default(null),
   actorName: z.string().max(120).default(''), // display name of who triggered it
   readAt: IsoDate.nullable().default(null), // null = unread
   createdAt: IsoDate,

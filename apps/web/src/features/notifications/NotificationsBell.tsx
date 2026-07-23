@@ -18,12 +18,19 @@ import {
 } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { Notification } from '@campfire/schema';
+import { parseScheduleNotificationData } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
 import { Btn, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
+import { useFormattingLocale } from '../../lib/format';
+import {
+  rememberCancelledScheduleDetail,
+  scheduleNotificationDisplayBody,
+  scheduleNotificationDisplayTitle,
+} from '../../lib/scheduleNotificationCopy';
 
 /**
  * Reports whether the viewport is below the desktop breakpoint (768px), so the
@@ -491,6 +498,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const markRead = useCallback(async (notification: Notification) => {
     closePanel();
+    // Issue #820: stash cancelled-night snapshot before navigate so the Schedule
+    // tab can render a stable cancelled-event detail after the row is deleted.
+    const scheduleData = parseScheduleNotificationData(notification.data);
+    if (scheduleData?.changeType === 'cancelled') {
+      rememberCancelledScheduleDetail(scheduleData);
+    }
     // Issue #446: navigate first so mark-read only follows a successful route
     // change. Deleted/hidden targets still get a URL; EntityDeepLinkFocus times
     // out gracefully when the DOM node never appears.
@@ -600,8 +613,21 @@ function CloseButton({ onClose, label }: { onClose: () => void; label: string })
   );
 }
 
+function notificationCopy(notification: Notification, locale: string | undefined): { title: string; body: string } {
+  // Issue #820: prefer viewer-local schedule copy when structured data is present.
+  const scheduleData = parseScheduleNotificationData(notification.data);
+  if (scheduleData) {
+    return {
+      title: scheduleNotificationDisplayTitle(scheduleData, locale),
+      body: scheduleNotificationDisplayBody(scheduleData, locale) || notification.body,
+    };
+  }
+  return { title: notification.title, body: notification.body };
+}
+
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
   const { count, items, loadError, closePanel, markRead, markAllRead } = notifications;
+  const formattingLocale = useFormattingLocale();
   const narrow = useIsNarrowViewport();
   // useDialog already wires Escape-to-close, focus trap, focus restore to the
   // trigger, and an inert background (issue #650/#92). It runs once per mount,
@@ -710,7 +736,9 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
               </p>
             </div>
           )}
-          {items?.map((notification) => (
+          {items?.map((notification) => {
+            const copy = notificationCopy(notification, formattingLocale);
+            return (
             <button
               key={notification.id}
               type="button"
@@ -739,12 +767,12 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
                       fontWeight: notification.readAt ? 400 : 600,
                     }}
                   >
-                    {notification.title}
+                    {copy.title}
                   </span>
                 </span>
-                {notification.body && (
+                {copy.body && (
                   <span className="block text-xs truncate" style={{ color: 'var(--color-neutral-400)' }}>
-                    {notification.body}
+                    {copy.body}
                   </span>
                 )}
                 <span className="block text-[10.5px] mt-0.5" style={{ color: 'var(--color-neutral-400)' }}>
@@ -758,7 +786,8 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
                 />
               )}
             </button>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
