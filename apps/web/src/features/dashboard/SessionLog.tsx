@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Role, ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
 import { isScheduleInProgress, scheduleEndsAtMs } from '@campfire/schema';
