@@ -23,6 +23,8 @@ export function useClearAnnouncementsOnScope(
   campaignId?: number,
 ): void {
   const clear = useClearAnnouncements();
+  const clearRef = useRef(clear);
+  clearRef.current = clear;
   const prevRef = useRef<AnnounceScope | null>(null);
 
   // Clear on first mount and whenever identity / campaign scope changes.
@@ -30,17 +32,17 @@ export function useClearAnnouncementsOnScope(
     const next: AnnounceScope = { userId, campaignId };
     const prev = prevRef.current;
     if (prev == null || announceScopeChanged(prev, next)) {
-      clear();
+      clearRef.current();
     }
     prevRef.current = next;
-  }, [userId, campaignId, clear]);
+  }, [userId, campaignId]);
 
   // Clear only when the calling tree unmounts (sign-out → /login, cast-to-TV
-  // routes outside Layout, leaving campaign chrome). Independent of the
-  // scope-change effect so dep updates do not double-clear.
+  // routes outside Layout, leaving campaign chrome). Empty deps + ref so a
+  // `clear` identity change never runs cleanup mid-lifetime.
   useLayoutEffect(() => {
     return () => {
-      clear();
+      clearRef.current();
     };
-  }, [clear]);
+  }, []);
 }

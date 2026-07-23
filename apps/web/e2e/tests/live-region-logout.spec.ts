@@ -49,7 +49,9 @@ function politeRegion(page: Page) {
 }
 
 function assertiveRegion(page: Page) {
-  return page.getByRole('alert');
+  // Target the Announcer assertive live region specifically (role=alert is also
+  // used by unrelated toasts/errors elsewhere in the app).
+  return page.locator('[aria-live="assertive"]');
 }
 
 async function seedEncounterAnnouncement(page: Page) {

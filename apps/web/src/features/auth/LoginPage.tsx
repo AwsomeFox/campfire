@@ -281,11 +281,14 @@ export function LoginPage() {
   // Leaving /login (sign-in success, SSO bounce, etc.) must wipe the assertive
   // "Signed out" confirmation. AuthedLayout's scope hook also clears on first
   // mount; this covers the LoginPage-owned announcement path directly (#434).
+  // Ref + empty deps: clear identity changes must not wipe mid-page.
+  const clearAnnouncementsRef = useRef(clearAnnouncements);
+  clearAnnouncementsRef.current = clearAnnouncements;
   useLayoutEffect(() => {
     return () => {
-      clearAnnouncements();
+      clearAnnouncementsRef.current();
     };
-  }, [clearAnnouncements]);
+  }, []);
 
   // Issue #449: after a failed submit, move focus to the first invalid field
   // (credentials) or the form summary (rate-limit / server / disabled).

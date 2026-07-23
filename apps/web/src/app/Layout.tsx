@@ -12,6 +12,8 @@ import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
+import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
+
 import { useFormattingLocale } from '../lib/format';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
@@ -313,12 +315,7 @@ function LayoutContent() {
   // Non-numeric `:campaignId` must not become NaN — that would trip scope clears
   // and confuse campaign lookups. Treat invalid params as "outside campaign".
   // Base-10 positive integers only — reject "1.5", "0x10", whitespace, etc.
-  const campaignId = (() => {
-    const raw = params.campaignId;
-    if (!raw || !/^\d+$/.test(raw)) return undefined;
-    const n = Number(raw);
-    return Number.isSafeInteger(n) && n > 0 ? n : undefined;
-  })();
+  const campaignId = parseCampaignIdParam(params.campaignId);
   const campaign = useCampaign(campaignId);
   const { campaigns, loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const navigate = useNavigate();

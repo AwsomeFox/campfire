@@ -9,6 +9,7 @@ import { CampaignProvider } from './CampaignContext';
 import { useAuthStatus } from './AuthStatusGate';
 import { GameIcon } from '../components/GameIcon';
 import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncementsOnScope';
+import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
 
 function Splash() {
   return (
@@ -31,14 +32,6 @@ function ConnectionErrorScreen({ onRetry }: { onRetry: () => void }) {
       </div>
     </div>
   );
-}
-
-function parseCampaignIdParam(raw: string | undefined): number | undefined {
-  if (!raw) return undefined;
-  // Base-10 positive integers only — reject "1.5", "0x10", whitespace, etc.
-  if (!/^\d+$/.test(raw)) return undefined;
-  const n = Number(raw);
-  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
 }
 
 export function AuthedLayout() {
