@@ -137,6 +137,8 @@ export function offlinePackIndicator(inspection: OfflineManifestInspection): Off
     return 'ready';
   }
   if (inspection.entries.every((e) => e.status === 'missing')) return 'missing';
+  // Missing required (or any) entries outrank staleness — incomplete is more actionable.
+  if (inspection.missingCount > 0 || !inspection.complete) return 'incomplete';
   if (inspection.staleCount > 0) return 'stale';
   return 'incomplete';
 }
@@ -264,12 +266,12 @@ function cacheEntryPath(url: string): string {
 
 function dropMetaEntry(metaEntries: Record<string, StoredEntryMeta> | undefined, path: string): void {
   if (!metaEntries) return;
+  const normalized = cacheEntryPath(path);
+  // Exact key match only (path-only or absolute URL forms), never suffix collisions.
   if (path in metaEntries) delete metaEntries[path];
-  // Absolute request URLs may have been stored under path-only keys too.
+  if (normalized in metaEntries) delete metaEntries[normalized];
   for (const key of Object.keys(metaEntries)) {
-    if (key === path || key.endsWith(path) || path.endsWith(key)) {
-      delete metaEntries[key];
-    }
+    if (cacheEntryPath(key) === normalized) delete metaEntries[key];
   }
 }
 
