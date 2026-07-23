@@ -211,13 +211,17 @@ function findPrimaryAttachmentFilesOnDisk(
   root: string,
   attachmentId: number,
 ): Array<{ relPath: string; campaignDir: string }> {
+  // Missing root is an empty-storage case (callers report success:false), not 503.
   if (!fs.existsSync(root)) return [];
 
   let campaignDirs: fs.Dirent[];
   try {
     campaignDirs = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    throw new ServiceUnavailableException(
+      `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); cannot locate attachment files.`,
+    );
   }
 
   const idPattern = new RegExp(`^${attachmentId}\\.([a-z0-9]+)$`);
@@ -228,8 +232,13 @@ function findPrimaryAttachmentFilesOnDisk(
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    } catch {
-      continue;
+    } catch (err) {
+      // Fail closed like runDiagnostics: skipping an unreadable campaign dir can
+      // produce a false "file not found" for relink/quarantine-by-attachmentId.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      throw new ServiceUnavailableException(
+        `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} at ${dirPath}); cannot locate attachment files.`,
+      );
     }
     for (const entry of entries) {
       if (!entry.isFile()) continue;
