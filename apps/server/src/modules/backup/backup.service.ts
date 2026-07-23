@@ -22,16 +22,26 @@ import {
   parseBackupIntervalHours,
   type BackupCadenceState,
 } from './backup-cadence';
+import {
+  BACKUP_APP,
+  BACKUP_FORMAT_VERSION,
+  BACKUP_KIND,
+  BACKUP_VERSION,
+  CURRENT_SCHEMA_REVISION,
+  manifestToInspectView,
+  parseBackupManifest,
+  serverAppVersion,
+  type BackupInspectResult,
+  type BackupManifest,
+} from './backup-manifest';
+
+export { BACKUP_APP, BACKUP_KIND, BACKUP_VERSION, BACKUP_FORMAT_VERSION };
+export type { BackupManifest, BackupInspectResult };
 
 /** Zip entry names inside a backup archive. */
 export const MANIFEST_ENTRY = 'manifest.json';
 export const DB_ENTRY = 'db/campfire.db';
 const UPLOADS_PREFIX = 'uploads/';
-
-/** Marks an archive as a Campfire whole-server backup; bumped if the layout changes. */
-export const BACKUP_APP = 'campfire';
-export const BACKUP_KIND = 'server-backup';
-export const BACKUP_VERSION = 1;
 
 /**
  * Restore is destructive (it overwrites the entire database + uploads). The
@@ -49,16 +59,6 @@ export const RESTORE_CONFIRM_TOKEN = 'RESTORE';
  * file as binary).
  */
 const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
-
-export interface BackupManifest {
-  app: string;
-  kind: string;
-  version: number;
-  createdAt: string;
-  db: string;
-  dbBytes: number;
-  uploadCount: number;
-}
 
 export interface RestoreResult {
   ok: true;
@@ -291,7 +291,9 @@ export class BackupService implements OnApplicationBootstrap {
       const manifest: BackupManifest = {
         app: BACKUP_APP,
         kind: BACKUP_KIND,
-        version: BACKUP_VERSION,
+        version: BACKUP_FORMAT_VERSION,
+        appVersion: serverAppVersion(),
+        schemaVersion: CURRENT_SCHEMA_REVISION,
         createdAt: nowIso(),
         db: DB_ENTRY,
         dbBytes: dbBytes.length,
@@ -312,6 +314,25 @@ export class BackupService implements OnApplicationBootstrap {
    * BEFORE the live DB is touched, so a malformed upload leaves the server
    * untouched (it 400s and the running DB is never closed).
    */
+  /**
+   * Read manifest metadata and upload entry names from an archive without
+   * restoring or touching the live server (issue #514).
+   */
+  async inspect(buffer: Buffer): Promise<BackupInspectResult> {
+    const zip = await this.loadBackupZip(buffer);
+    const manifest = await this.readManifestFromZip(zip);
+    const uploads: string[] = [];
+    for (const name of Object.keys(zip.files)) {
+      const entry = zip.files[name];
+      if (entry.dir || !name.startsWith(UPLOADS_PREFIX)) continue;
+      const rel = name.slice(UPLOADS_PREFIX.length);
+      if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) continue;
+      uploads.push(rel);
+    }
+    uploads.sort();
+    return manifestToInspectView(manifest, uploads);
+  }
+
   async restore(buffer: Buffer, confirm: string | undefined, user: RequestUser): Promise<RestoreResult> {
     if (confirm !== RESTORE_CONFIRM_TOKEN) {
       throw new BadRequestException(
@@ -319,28 +340,11 @@ export class BackupService implements OnApplicationBootstrap {
       );
     }
 
-    let zip: JSZip;
-    try {
-      zip = await JSZip.loadAsync(buffer);
-    } catch {
-      throw new BadRequestException('Invalid backup archive — not a readable zip file');
-    }
-
-    // --- Validate manifest ---
-    const manifestFile = zip.file(MANIFEST_ENTRY);
-    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
-    let manifest: Partial<BackupManifest>;
-    try {
-      manifest = JSON.parse(await manifestFile.async('string')) as Partial<BackupManifest>;
-    } catch {
-      throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON');
-    }
-    if (manifest.app !== BACKUP_APP || manifest.kind !== BACKUP_KIND) {
-      throw new BadRequestException('Invalid backup archive — not a Campfire server backup');
-    }
+    const zip = await this.loadBackupZip(buffer);
+    const manifest = await this.readManifestFromZip(zip);
 
     // --- Validate DB payload ---
-    const dbFile = zip.file(DB_ENTRY);
+    const dbFile = zip.file(manifest.db);
     if (!dbFile) throw new BadRequestException('Invalid backup archive — database is missing');
     const dbBytes = await dbFile.async('nodebuffer');
     if (!looksLikeSqlite(dbBytes)) {
@@ -423,5 +427,25 @@ export class BackupService implements OnApplicationBootstrap {
     } finally {
       fs.rmSync(stageDir, { recursive: true, force: true });
     }
+  }
+
+  private async loadBackupZip(buffer: Buffer): Promise<JSZip> {
+    try {
+      return await JSZip.loadAsync(buffer);
+    } catch {
+      throw new BadRequestException('Invalid backup archive — not a readable zip file');
+    }
+  }
+
+  private async readManifestFromZip(zip: JSZip): Promise<BackupManifest> {
+    const manifestFile = zip.file(MANIFEST_ENTRY);
+    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await manifestFile.async('string'));
+    } catch {
+      throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON');
+    }
+    return parseBackupManifest(parsed);
   }
 }
