@@ -311,14 +311,21 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect((await dmAgent.post(`/api/v1/encounters/${runningId}/start`)).status).toBe(201);
     // Three combatants (party auto-adds) — six next-turn advances wrap to round 3.
     for (let i = 0; i < 6; i++) {
-      await dmAgent.post(`/api/v1/encounters/${runningId}/next-turn`);
+      const nextTurn = await dmAgent.post(`/api/v1/encounters/${runningId}/next-turn`);
+      expect(nextTurn.status).toBe(201);
     }
     const midFight = await dmAgent.get(`/api/v1/encounters/${runningId}`);
     expect(midFight.body.status).toBe('running');
     expect(midFight.body.round).toBe(3);
-    await dmAgent
+    const brawlerPatch = await dmAgent
       .patch(`/api/v1/encounters/${runningId}/combatants/${brawler.body.id}`)
-      .send({ hpSet: 4, conditions: ['prone'] });
+      .send({ hpSet: 4, addConditions: ['prone'] });
+    expect(brawlerPatch.status).toBe(200);
+    const afterPatch = await dmAgent.get(`/api/v1/encounters/${runningId}`);
+    const sourceBrawler = afterPatch.body.combatants.find((c: { name: string }) => c.name === 'Brawler');
+    expect(sourceBrawler).toBeDefined();
+    expect(sourceBrawler.hpCurrent).toBe(4);
+    expect(sourceBrawler.conditions).toEqual(['prone']);
 
     const cloneRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/clone`)
