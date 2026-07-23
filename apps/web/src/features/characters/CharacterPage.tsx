@@ -49,6 +49,7 @@ import {
   d20Expr,
   toHitExpr,
   damageExpr,
+  rollPreview,
 } from '../../lib/characterStats';
 import { RollModeChooser } from './RollModeChooser';
 import { resolveRollMode, rollModeSummary, type RollMode } from './rollMode';
@@ -1031,6 +1032,10 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
   // every action's attack roll in this card; a shift/alt-click still overrides
   // once (resolveRollMode) so the desktop shortcut keeps working.
   const [mode, setMode] = useState<RollMode>('flat');
+  // In-place edit (issue #718): editingIndex is the position in character.actions
+  // being edited, or null when not editing an existing row. The row collapses into
+  // the same form Add uses, so order is preserved by writing back to the same index.
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
   async function saveActions(next: CharacterAction[], failMsg: string) {
     if (busy) return;
@@ -1048,6 +1053,15 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
     }
   }
 
+  function resetForm() {
+    setName('');
+    setKind('');
+    setToHit('');
+    setDamage('');
+    setNotes('');
+    setEditingIndex(null);
+  }
+
   async function add() {
     if (!name.trim()) return;
     const action: CharacterAction = {
@@ -1059,13 +1073,35 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
     };
     const ok = await saveActions([...character.actions, action], "Couldn't add the action.");
     if (ok) {
-      setName('');
-      setKind('');
-      setToHit('');
-      setDamage('');
-      setNotes('');
+      resetForm();
       setAdding(false);
     }
+  }
+
+  async function saveEdit() {
+    if (editingIndex == null || !name.trim()) return;
+    const action: CharacterAction = {
+      name: name.trim(),
+      kind: kind.trim(),
+      toHit: toHit.trim(),
+      damage: damage.trim(),
+      notes: notes.trim(),
+    };
+    const next = character.actions.map((a, i) => (i === editingIndex ? action : a));
+    const ok = await saveActions(next, "Couldn't save the action.");
+    if (ok) resetForm();
+  }
+
+  function startEdit(index: number) {
+    const a = character.actions[index];
+    if (!a) return;
+    setName(a.name);
+    setKind(a.kind);
+    setToHit(a.toHit);
+    setDamage(a.damage);
+    setNotes(a.notes);
+    setEditingIndex(index);
+    setAdding(false);
   }
 
   function remove(index: number) {
@@ -1088,8 +1124,8 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
             {rollModeSummary(mode)}
           </span>
         )}
-        {canEdit && !adding && (
-          <Btn ghost className="!min-h-0 !py-1 text-xs ml-auto" onClick={() => setAdding(true)}>
+        {canEdit && !adding && editingIndex == null && (
+          <Btn ghost className="!min-h-0 !py-1 text-xs ml-auto" onClick={() => { resetForm(); setAdding(true); }}>
             + Add
           </Btn>
         )}
@@ -1108,6 +1144,29 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
         </p>
       )}
       {character.actions.map((action, i) => {
+        // Editing this row: render the inline form in place of the read view.
+        if (editingIndex === i) {
+          return (
+            <ActionForm
+              key={`edit-${i}`}
+              busy={busy}
+              name={name}
+              kind={kind}
+              toHit={toHit}
+              damage={damage}
+              notes={notes}
+              setName={setName}
+              setKind={setKind}
+              setToHit={setToHit}
+              setDamage={setDamage}
+              setNotes={setNotes}
+              onCancel={resetForm}
+              onSave={saveEdit}
+              saveLabel="Save"
+              autoFocusName
+            />
+          );
+        }
         const attackExpr = action.toHit ? toHitExpr(action.toHit, 'flat') : null;
         const dmgExpr = action.damage ? damageExpr(action.damage) : null;
         return (
@@ -1127,12 +1186,14 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                     (attackExpr ? (
                       <RollChip
                         label={`to hit ${action.toHit}`}
-                        title={`Roll ${action.name} attack (d20 ${action.toHit}) · ${rollModeSummary(mode)}`}
+                        title={`Roll ${action.name} attack (${attackExpr}) · ${rollModeSummary(mode)}`}
                         disabled={roller.rolling}
                         onClick={(e) => void roller.roll(toHitExpr(action.toHit, resolveRollMode(mode, e))!, `${character.name} · ${action.name} to hit`)}
                       />
                     ) : (
-                      <span className="text-xs text-slate-400">to hit {action.toHit}</span>
+                      <span className="text-xs text-slate-400" title="Not a rollable to-hit value — edit the action and use +5, -1, or 1d20+5">
+                        to hit {action.toHit} (not rollable)
+                      </span>
                     ))}
                   {action.damage &&
                     (dmgExpr ? (
@@ -1143,56 +1204,160 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                         onClick={() => void roller.roll(dmgExpr, `${character.name} · ${action.name} damage`)}
                       />
                     ) : (
-                      <span className="text-xs text-slate-400">{action.damage}</span>
+                      <span className="text-xs text-slate-400" title="Flat or unparseable damage — no dice to roll">
+                        {action.damage} (flat)
+                      </span>
                     ))}
                 </div>
               )}
               {action.notes && <p className="text-[11px] text-slate-500 mt-0.5">{action.notes}</p>}
             </div>
             {canEdit && (
-              <button
-                type="button"
-                aria-label={`Remove ${action.name}`}
-                onClick={() => remove(i)}
-                disabled={busy}
-                style={{
-                  cursor: busy ? 'default' : 'pointer',
-                  opacity: 0.7,
-                  background: 'transparent',
-                  border: 0,
-                  padding: 0,
-                  font: 'inherit',
-                  color: 'inherit',
-                }}
-              >
-                ✕
-              </button>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  aria-label={`Edit ${action.name}`}
+                  onClick={() => startEdit(i)}
+                  disabled={busy}
+                  style={{
+                    cursor: busy ? 'default' : 'pointer',
+                    opacity: 0.7,
+                    background: 'transparent',
+                    border: 0,
+                    padding: 0,
+                    font: 'inherit',
+                    color: 'inherit',
+                  }}
+                >
+                  ✎
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Remove ${action.name}`}
+                  onClick={() => remove(i)}
+                  disabled={busy}
+                  style={{
+                    cursor: busy ? 'default' : 'pointer',
+                    opacity: 0.7,
+                    background: 'transparent',
+                    border: 0,
+                    padding: 0,
+                    font: 'inherit',
+                    color: 'inherit',
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
             )}
           </div>
         );
       })}
       {adding && (
-        <div className="space-y-2">
-          <div className="grid grid-cols-2 gap-2.5">
-            <TextInput autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (Longsword, Fire Bolt…)" />
-            <TextInput value={kind} onChange={(e) => setKind(e.target.value)} placeholder="Kind (melee, ranged, spell…)" />
-          </div>
-          <div className="grid grid-cols-2 gap-2.5">
-            <TextInput value={toHit} onChange={(e) => setToHit(e.target.value)} placeholder="To hit (+5)" />
-            <TextInput value={damage} onChange={(e) => setDamage(e.target.value)} placeholder="Damage (1d8+3 slashing)" />
-          </div>
-          <TextInput value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (versatile, 60 ft range…)" />
-          <div className="flex gap-2 justify-end">
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setAdding(false)} disabled={busy}>
-              Cancel
-            </Btn>
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={add} disabled={busy || !name.trim()}>
-              {busy ? 'Saving…' : 'Add action'}
-            </Btn>
-          </div>
-        </div>
+        <ActionForm
+          busy={busy}
+          name={name}
+          kind={kind}
+          toHit={toHit}
+          damage={damage}
+          notes={notes}
+          setName={setName}
+          setKind={setKind}
+          setToHit={setToHit}
+          setDamage={setDamage}
+          setNotes={setNotes}
+          onCancel={() => { resetForm(); setAdding(false); }}
+          onSave={add}
+          saveLabel="Add action"
+          autoFocusName
+        />
       )}
     </Card>
+  );
+}
+
+/**
+ * Shared add/edit form for a character action (issue #718). Renders a live
+ * "Campfire will roll …" preview from the to-hit/damage fields so the author can
+ * see — before saving — exactly how the sheet will interpret them. Empty fields
+ * are explained rather than silently dropped.
+ */
+function ActionForm({
+  busy,
+  name,
+  kind,
+  toHit,
+  damage,
+  notes,
+  setName,
+  setKind,
+  setToHit,
+  setDamage,
+  setNotes,
+  onCancel,
+  onSave,
+  saveLabel,
+  autoFocusName,
+}: {
+  busy: boolean;
+  name: string;
+  kind: string;
+  toHit: string;
+  damage: string;
+  notes: string;
+  setName: (v: string) => void;
+  setKind: (v: string) => void;
+  setToHit: (v: string) => void;
+  setDamage: (v: string) => void;
+  setNotes: (v: string) => void;
+  onCancel: () => void;
+  onSave: () => void;
+  saveLabel: string;
+  autoFocusName?: boolean;
+}) {
+  const preview = rollPreview(toHit, damage);
+  return (
+    <div className="cf-inset px-3 py-2.5 space-y-2">
+      <div className="grid grid-cols-2 gap-2.5">
+        <TextInput autoFocus={autoFocusName} value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (Longsword, Fire Bolt…)" />
+        <TextInput value={kind} onChange={(e) => setKind(e.target.value)} placeholder="Kind (melee, ranged, spell…)" />
+      </div>
+      <div className="grid grid-cols-2 gap-2.5">
+        <TextInput
+          value={toHit}
+          onChange={(e) => setToHit(e.target.value)}
+          placeholder="To hit (+5 or 1d20+5)"
+          aria-invalid={toHit.trim() !== '' && preview.hit == null}
+        />
+        <TextInput
+          value={damage}
+          onChange={(e) => setDamage(e.target.value)}
+          placeholder="Damage (1d8+3 slashing, 5 fire)"
+          aria-invalid={false}
+        />
+      </div>
+      <TextInput value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (versatile, 60 ft range…)" />
+      {(toHit.trim() || damage.trim()) && (
+        <p className="text-[11px] text-slate-400">
+          {preview.hit == null && preview.dmg == null ? (
+            <>No rollable dice recognized — this action will display as text only.</>
+          ) : (
+            <>
+              Campfire will roll{' '}
+              {[preview.hit, preview.dmg].filter(Boolean).join(', ') || 'nothing'}.
+            </>
+          )}
+        </p>
+      )}
+      <div className="flex gap-2 justify-end">
+        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Btn>
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onSave} disabled={busy || !name.trim()}>
+          {busy ? 'Saving…' : saveLabel}
+        </Btn>
+      </div>
+    </div>
   );
 }
 
