@@ -85,4 +85,11 @@ test.describe('map ping tap completion (issue #809)', () => {
     expect(isMapPingKeyboardActivation({ key: 'Enter', ctrlKey: true })).toBe(false);
     expect(isMapPingKeyboardActivation({ key: 'a' })).toBe(false);
   });
+
+  test('held-key auto-repeat never counts as a keyboard ping activation', () => {
+    expect(isMapPingKeyboardActivation({ key: 'Enter', repeat: true })).toBe(false);
+    expect(isMapPingKeyboardActivation({ key: ' ', repeat: true })).toBe(false);
+    expect(isMapPingKeyboardActivation({ key: 'Spacebar', repeat: true })).toBe(false);
+    expect(isMapPingKeyboardActivation({ key: 'Enter', repeat: false })).toBe(true);
+  });
 });

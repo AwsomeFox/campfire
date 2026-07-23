@@ -1970,11 +1970,8 @@ function BattleMap({
 
   // Only the owning primary pointer's normal release may commit. Ownership is cleared before the
   // mutation callback, making duplicate pointerup/lostcapture delivery exactly-once by design.
-  function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
-    const gesture = activeGestureRef.current;
-    if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
-    const finalPoint = pointerToPercent(e, true);
-    successfulPointerUpRef.current = e.pointerId;
+  function releasePointerOwnership(gesture: ActiveMapGesture) {
+    successfulPointerUpRef.current = gesture.pointerId;
     activeGestureRef.current = null;
     // Pointer capture is normally released implicitly after pointerup, but doing it explicitly
     // makes the lifecycle deterministic across mouse, pen, and touch implementations. Ownership
@@ -1986,10 +1983,14 @@ function BattleMap({
     } catch {
       // The browser may already have released capture as part of pointerup dispatch.
     }
-    // Completed measurements intentionally remain visible for reading. The three persistent
-    // gesture classes clear their transient overrides before invoking their mutation callbacks.
-    if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
+  }
 
+  function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = activeGestureRef.current;
+    if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+
+    // Ping: decide publish/cancel first, then always clear ownership + release capture so a
+    // completed (or cancelled) tap never leaves `kind: 'ping'` armed for a later pointerup.
     if (gesture.kind === 'ping') {
       const decision = decideMapPingTapRelease(gesture.arm, {
         pointerId: e.pointerId,
@@ -1997,9 +1998,18 @@ function BattleMap({
         clientY: e.clientY,
         nowMs: performance.now(),
       });
+      releasePointerOwnership(gesture);
       if (decision.action === 'publish') onPing(decision.x, decision.y);
       return;
     }
+
+    // Clamp so a release that ends in the letterbox still commits at the map edge (#464).
+    const finalPoint = pointerToPercent(e, true);
+    releasePointerOwnership(gesture);
+    // Completed measurements intentionally remain visible for reading. The three persistent
+    // gesture classes clear their transient overrides before invoking their mutation callbacks.
+    if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
+
     if (gesture.kind === 'token') {
       const raw = finalPoint ?? gesture.point;
       if (raw) {

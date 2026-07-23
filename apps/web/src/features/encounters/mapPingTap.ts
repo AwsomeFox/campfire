@@ -102,13 +102,16 @@ export function decideMapPingTapRelease(
   return { action: 'publish', x: arm.x, y: arm.y };
 }
 
-/** True for a bare Enter / Space activation (no modifier chord). */
+/** True for a bare Enter / Space activation (no modifier chord, no key-repeat). */
 export function isMapPingKeyboardActivation(event: {
   key: string;
   altKey?: boolean;
   ctrlKey?: boolean;
   metaKey?: boolean;
+  /** Browser auto-repeat while a key is held — must not spam pings. */
+  repeat?: boolean;
 }): boolean {
+  if (event.repeat) return false;
   if (event.altKey || event.ctrlKey || event.metaKey) return false;
   return event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar';
 }

@@ -29,7 +29,7 @@ function encounterUrl(): string {
 async function dispatchPointer(
   target: Locator,
   type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel' | 'lostpointercapture',
-  point: { xPct: number; yPct: number },
+  point: { xRatio: number; yRatio: number },
   options: PointerOptions,
   clientOffsetPx = { x: 0, y: 0 },
 ) {
@@ -42,13 +42,18 @@ async function dispatchPointer(
         new PointerEvent(event.type, {
           bubbles: true,
           cancelable: true,
-          clientX: rect.left + rect.width * event.xPct + event.offsetX,
-          clientY: rect.top + rect.height * event.yPct + event.offsetY,
+          clientX: rect.left + rect.width * event.xRatio + event.offsetX,
+          clientY: rect.top + rect.height * event.yRatio + event.offsetY,
           pointerId: event.pointerId,
           pointerType: event.pointerType,
           isPrimary: event.isPrimary,
           button: 0,
-          buttons: event.type === 'pointerup' || event.type === 'pointercancel' ? 0 : 1,
+          buttons:
+            event.type === 'pointerup' ||
+            event.type === 'pointercancel' ||
+            event.type === 'lostpointercapture'
+              ? 0
+              : 1,
         }),
       );
     },
@@ -136,7 +141,7 @@ test.describe('battle-map ping tap completion', () => {
   test('ordinary mouse and touch taps publish exactly one ping at the press coordinates', async ({ page }) => {
     const { surface, pings } = await openPingFixture(page);
 
-    const mouseSpot = { xPct: 0.3, yPct: 0.4 };
+    const mouseSpot = { xRatio: 0.3, yRatio: 0.4 };
     const mouse = { pointerId: 1, pointerType: 'mouse', isPrimary: true } as const;
     await dispatchPointer(surface, 'pointerdown', mouseSpot, mouse);
     await settleNoPing(page, pings, 0);
@@ -147,7 +152,7 @@ test.describe('battle-map ping tap completion', () => {
     expect(pings[0].x).toBeCloseTo(30);
     expect(pings[0].y).toBeCloseTo(40);
 
-    const touchSpot = { xPct: 0.7, yPct: 0.55 };
+    const touchSpot = { xRatio: 0.7, yRatio: 0.55 };
     const touch = { pointerId: 12, pointerType: 'touch', isPrimary: true } as const;
     await dispatchPointer(surface, 'pointerdown', touchSpot, touch);
     await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX, y: 0 });
@@ -158,7 +163,7 @@ test.describe('battle-map ping tap completion', () => {
 
   test('pointerdown alone never publishes; cancel and capture-loss drop the armed tap', async ({ page }) => {
     const { surface, pings } = await openPingFixture(page);
-    const spot = { xPct: 0.45, yPct: 0.5 };
+    const spot = { xRatio: 0.45, yRatio: 0.5 };
     const touch = { pointerId: 21, pointerType: 'touch', isPrimary: true } as const;
 
     await dispatchPointer(surface, 'pointerdown', spot, touch);
@@ -177,7 +182,7 @@ test.describe('battle-map ping tap completion', () => {
 
   test('drag-away past tap slop cancels without publishing', async ({ page }) => {
     const { surface, pings } = await openPingFixture(page);
-    const start = { xPct: 0.4, yPct: 0.4 };
+    const start = { xRatio: 0.4, yRatio: 0.4 };
     const touch = { pointerId: 31, pointerType: 'touch', isPrimary: true } as const;
 
     await dispatchPointer(surface, 'pointerdown', start, touch);
@@ -190,8 +195,8 @@ test.describe('battle-map ping tap completion', () => {
     const { surface, pings } = await openPingFixture(page);
     const owner = { pointerId: 41, pointerType: 'touch', isPrimary: true } as const;
     const palm = { pointerId: 42, pointerType: 'touch', isPrimary: false } as const;
-    const start = { xPct: 0.35, yPct: 0.35 };
-    const palmSpot = { xPct: 0.8, yPct: 0.8 };
+    const start = { xRatio: 0.35, yRatio: 0.35 };
+    const palmSpot = { xRatio: 0.8, yRatio: 0.8 };
 
     await dispatchPointer(surface, 'pointerdown', start, owner);
     await dispatchPointer(surface, 'pointerdown', palmSpot, palm);
@@ -220,5 +225,29 @@ test.describe('battle-map ping tap completion', () => {
     await expect.poll(() => pings.length).toBe(2);
     expect(pings[1].x).toBe(50);
     expect(pings[1].y).toBe(50);
+  });
+
+  test('held Enter/Space key-repeat does not spam additional center pings', async ({ page }) => {
+    const { surface, pings } = await openPingFixture(page);
+
+    await surface.focus();
+    await surface.evaluate((element) => {
+      for (const key of ['Enter', ' '] as const) {
+        element.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, repeat: false }),
+        );
+        element.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, repeat: true }),
+        );
+        element.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, repeat: true }),
+        );
+      }
+    });
+
+    await expect.poll(() => pings.length).toBe(2);
+    expect(pings.every((ping) => ping.x === 50 && ping.y === 50)).toBe(true);
+    await page.waitForTimeout(100);
+    expect(pings).toHaveLength(2);
   });
 });
