@@ -88,16 +88,21 @@ function pf1eNum(v: unknown): number | null {
   return null;
 }
 
+/** First numeric value among `keys` on `source`, skipping invalid-but-present entries. */
+function pf1eFirstNum(source: Record<string, unknown>, keys: readonly string[]): number | null {
+  for (const key of keys) {
+    const n = pf1eNum(source[key]);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
 /** Read the governing (DEX) score from either a canonical (`{ DEX }`) or raw monster
  *  (`{ dexterity }`) ability map, if numeric — mirrors the 5e adapter's DEX lookup.
  *  Uses pf1eNum so SRD numeric strings are accepted the same way as native Init. */
 function pf1eDexScore(abilities: Record<string, unknown> | null | undefined): number | null {
   if (!abilities) return null;
-  for (const key of ['DEX', 'dexterity', 'dex'] as const) {
-    const n = pf1eNum(abilities[key]);
-    if (n !== null) return n;
-  }
-  return null;
+  return pf1eFirstNum(abilities, ['DEX', 'dexterity', 'dex']);
 }
 
 /**
