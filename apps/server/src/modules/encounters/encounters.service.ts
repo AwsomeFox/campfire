@@ -1122,6 +1122,10 @@ export class EncountersService {
    * AI recap to see combat happened, where/why/when it was pinned, and a down tally,
    * without loading full combatant rows. One encounters query plus one grouped-count
    * query over combatants, both scoped to the campaign.
+   *
+   * Issue #625: the tally is split by kind — `downCount` counts only PCs/NPCs who fell
+   * (0 HP / dead) and `monstersDefeated` counts dead monsters, so a glance at the summary
+   * reflects fallen party members rather than every corpse on the field.
    */
   async digestForCampaign(campaignId: number, viewerRole?: Role): Promise<EncounterDigest[]> {
     const allRows = await this.db.select().from(encounters).where(eq(encounters.campaignId, campaignId));
@@ -1131,19 +1135,25 @@ export class EncountersService {
     if (rows.length === 0) return [];
 
     const encounterIds = rows.map((r) => r.id);
+    // Issue #625: split the down tally by kind. `downCount` reports only PCs/NPCs who
+    // fell (the meaningful "who's down" glance); `monstersDefeated` reports dead monsters
+    // separately so a pile of goblin corpses no longer inflates the party's casualties.
     const tally = await this.db
       .select({
         encounterId: combatants.encounterId,
         total: sql<number>`COUNT(*)`,
-        down: sql<number>`SUM(CASE WHEN ${combatants.hpCurrent} <= 0 OR ${combatants.deathState} = 'dead' THEN 1 ELSE 0 END)`,
+        down: sql<number>`SUM(CASE WHEN ${combatants.kind} != 'monster' AND (${combatants.hpCurrent} <= 0 OR ${combatants.deathState} = 'dead') THEN 1 ELSE 0 END)`,
+        monstersDefeated: sql<number>`SUM(CASE WHEN ${combatants.kind} = 'monster' AND (${combatants.hpCurrent} <= 0 OR ${combatants.deathState} = 'dead') THEN 1 ELSE 0 END)`,
       })
       .from(combatants)
       .where(inArray(combatants.encounterId, encounterIds))
       .groupBy(combatants.encounterId);
-    const tallyById = new Map(tally.map((t) => [t.encounterId, { total: Number(t.total), down: Number(t.down) }]));
+    const tallyById = new Map(
+      tally.map((t) => [t.encounterId, { total: Number(t.total), down: Number(t.down), monstersDefeated: Number(t.monstersDefeated) }]),
+    );
 
     const digests: EncounterDigest[] = rows.map((r) => {
-      const t = tallyById.get(r.id) ?? { total: 0, down: 0 };
+      const t = tallyById.get(r.id) ?? { total: 0, down: 0, monstersDefeated: 0 };
       return {
         id: r.id,
         name: r.name,
@@ -1155,6 +1165,7 @@ export class EncountersService {
         sessionId: r.sessionId,
         combatantCount: t.total,
         downCount: t.down,
+        monstersDefeated: t.monstersDefeated,
       };
     });
     return this.redactHiddenLinkedEntities(digests, campaignId, viewerRole);
