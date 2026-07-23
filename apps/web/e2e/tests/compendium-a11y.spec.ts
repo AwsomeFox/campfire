@@ -299,7 +299,7 @@ test.describe('Compendium accessibility (issue #647)', () => {
     });
 
     await page.goto(`/c/${campaignId}/compendium`);
-    await expect(page.getByText(/Showing 50 of 51/i)).toBeVisible();
+    await expect(page.getByText('Showing 50 of 51', { exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: /Entry 00/ })).toBeVisible();
     await expect(page.getByRole('link', { name: /Entry 50/ })).toHaveCount(0);
 
