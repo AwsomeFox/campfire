@@ -28,6 +28,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { entityDomId, entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { Markdown } from '../../components/Markdown';
+import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
@@ -230,6 +231,13 @@ export default function StorylinesPage() {
           DM only
         </span>
         <div style={{ flex: 1 }} />
+        {/*
+          Issue #639: beats are a Storylines entity, so "Draft a beat with AI" lives
+          here — on the surface that owns the content type — not on Quests. The button
+          self-gates (DM + AI-DM seat enabled, co_dm/driver mode), so it renders for the
+          only audience that can ever use it on this DM-only page.
+        */}
+        <DraftWithAiButton campaignId={cid} target="beat" label="Draft a beat with AI" />
       </div>
 
       <p className="text-muted" style={{ margin: '-6px 0 0', fontSize: 12 }}>
