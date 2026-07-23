@@ -30,6 +30,13 @@ export interface AuthState {
    * this is the time the snapshot was persisted, NOT the current render time.
    */
   lastSyncedAt: number | null;
+  /**
+   * True when a mid-session provenance-safe 401 cleared identity (issue #885).
+   * Distinct from a cold signed-out visit and from offline snapshot restore.
+   * AuthedLayout forwards this on the login Navigate so LoginPage can show the
+   * session-expired flow while preserving the same-origin deep link.
+   */
+  sessionExpired: boolean;
   isAdmin: boolean;
   /** Effective role in a campaign: admin → dm; else membership role; null = no access. */
   roleIn(campaignId: number): Role | null;
@@ -43,6 +50,7 @@ export const AuthContext = createContext<AuthState>({
   connectionError: false,
   staleIdentity: false,
   lastSyncedAt: null,
+  sessionExpired: false,
   isAdmin: false,
   roleIn: () => null,
   refresh: async () => {},

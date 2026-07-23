@@ -4,7 +4,11 @@
  * - dev-role override: localStorage 'cf.devRole' / 'cf.devUser' adds x-dev-* headers
  *   (only honored by the server when DEV_AUTH=1; harmless otherwise)
  * - throws ApiError with status + server message
+ * - provenance-safe 401 → {@link noteUnauthorizedResponse} (issue #885); network
+ *   failures never look like session expiry
  */
+
+import { noteUnauthorizedResponse } from './sessionExpiry';
 
 /** A single field-level validation failure parsed from the server's `errors[]`. */
 export interface FieldError {
@@ -107,6 +111,9 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     body: init?.json !== undefined ? JSON.stringify(init.json) : init?.body,
   });
   if (!res.ok) {
+    // Proven HTTP 401 (not a network throw): fan out before shaping the error so
+    // AuthProvider can transition a sleeping tab even when the caller swallows ApiError.
+    noteUnauthorizedResponse(path, res.status);
     let message = res.statusText;
     let fieldErrors: FieldError[] = [];
     let code: string | undefined;
@@ -152,6 +159,7 @@ export async function getWithHeaders<T>(path: string, init?: RequestInit): Promi
   if (devUser) headers.set('x-dev-user', devUser);
   const res = await fetch(path, { ...init, credentials: 'include', headers });
   if (!res.ok) {
+    noteUnauthorizedResponse(path, res.status);
     // Reuse the same error shaping as `request` so callers' catch blocks are identical.
     let message = res.statusText;
     try {
