@@ -11,12 +11,14 @@
  * `GOOGLE_API_KEY` environment variable (resolved by AiProviderConfigService).
  */
 import {
+  type AiFinishReason,
   type AiGenerateOptions,
   type AiGenerateRequest,
   type AiGenerateResult,
   type AiMessage,
   type AiProvider,
   type AiStreamEvent,
+  type AiToolCall,
   type AiToolSchema,
   type AiUsage,
 } from './ai-provider';
@@ -46,8 +48,20 @@ export interface GeminiProviderOptions {
 
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
+/** A Gemini `functionCall` part — the model asking to invoke a declared tool. */
+interface GeminiFunctionCall {
+  name?: string;
+  args?: Record<string, unknown>;
+}
+/** A Gemini `functionResponse` part — a tool result fed back to the model (matched BY NAME). */
+interface GeminiFunctionResponse {
+  name: string;
+  response: Record<string, unknown>;
+}
 interface GeminiPart {
   text?: string;
+  functionCall?: GeminiFunctionCall;
+  functionResponse?: GeminiFunctionResponse;
 }
 interface GeminiContent {
   role?: string;
@@ -110,10 +124,11 @@ export class GeminiProvider implements AiProvider {
       body.systemInstruction = { parts: [{ text: req.system }] };
     }
 
+    // Map the neutral history onto Gemini `contents`, preserving the tool loop:
+    // assistant tool calls become `functionCall` parts and tool results become
+    // `functionResponse` parts (#1062) — not text — so the model can actually act.
     for (const msg of req.messages) {
-      const role = msg.role === 'assistant' ? 'model' : 'user';
-      const text = typeof msg.content === 'string' ? msg.content : '';
-      contents.push({ role, parts: [{ text }] });
+      contents.push(toGeminiContent(msg));
     }
     body.contents = contents;
 
@@ -158,8 +173,9 @@ export class GeminiProvider implements AiProvider {
     if (!res.body) throw new AiProviderError('transport', `${this.name}: streaming response has no body`, { provider: this.name });
 
     let totalText = '';
+    const toolCalls: AiToolCall[] = [];
     let usage: AiUsage | undefined;
-    let finishReason = 'unknown';
+    let finishReason: AiFinishReason = 'unknown';
 
     // Idle/read timeout stays armed until the body completes or aborts (#1063).
     for await (const event of parseSse(res.body, {
@@ -180,6 +196,17 @@ export class GeminiProvider implements AiProvider {
           if (part.text) {
             totalText += part.text;
             yield { type: 'text', delta: part.text };
+          } else if (part.functionCall) {
+            // Gemini streams each functionCall as a whole part (not JSON deltas), so
+            // emit the complete call in one tool_call event and record it for `done`.
+            const index = toolCalls.length;
+            const call: AiToolCall = {
+              id: `call_${index}`,
+              name: part.functionCall.name ?? '',
+              arguments: part.functionCall.args ?? {},
+            };
+            toolCalls.push(call);
+            yield { type: 'tool_call', index, id: call.id, name: call.name, argumentsDelta: JSON.stringify(call.arguments) };
           }
         }
       }
@@ -195,9 +222,9 @@ export class GeminiProvider implements AiProvider {
       type: 'done',
       result: {
         text: totalText,
-        toolCalls: [],
+        toolCalls,
         usage: usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-        finishReason: finishReason as AiGenerateResult['finishReason'],
+        finishReason: resolveStreamFinishReason(finishReason, toolCalls.length),
         model: req.model || this.opts.model,
       },
     };
@@ -213,13 +240,15 @@ export class GeminiProvider implements AiProvider {
         { provider: this.name },
       );
     }
-    const text = candidate.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
+    const parts = candidate.content?.parts ?? [];
+    const text = parts.map((p) => p.text ?? '').join('');
+    const toolCalls = extractToolCalls(parts);
     const usage = data.usageMetadata ? mapUsage(data.usageMetadata) : { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     return {
       text,
-      toolCalls: [],
+      toolCalls,
       usage,
-      finishReason: candidate.finishReason ? mapFinishReason(candidate.finishReason) : 'stop',
+      finishReason: resolveFinishReason(candidate.finishReason, toolCalls.length),
       model: model || this.opts.model,
     };
   }
@@ -266,5 +295,79 @@ function toGeminiTool(tool: AiToolSchema): Record<string, unknown> {
   };
 }
 
-// Suppress unused-import warning for AiMessage (referenced in type annotations)
-export type { AiMessage };
+/**
+ * Map one neutral message onto a Gemini `content` entry, preserving the tool loop (#1062):
+ *   - `assistant` → role `model`, with a `functionCall` part per tool call (plus any text);
+ *   - `tool`      → role `user`, with a `functionResponse` part matched to the call BY NAME
+ *                   (Gemini has no call ids), using the driver-populated `toolName`;
+ *   - everything else → role `user` text.
+ */
+function toGeminiContent(msg: AiMessage): GeminiContent {
+  if (msg.role === 'tool') {
+    return {
+      role: 'user',
+      parts: [{ functionResponse: { name: msg.toolName ?? '', response: toResponseStruct(msg.content) } }],
+    };
+  }
+  if (msg.role === 'assistant') {
+    const parts: GeminiPart[] = [];
+    if (msg.content) parts.push({ text: msg.content });
+    for (const tc of msg.toolCalls ?? []) parts.push({ functionCall: { name: tc.name, args: tc.arguments ?? {} } });
+    // A `model` turn must carry at least one part even when it is a bare tool call.
+    if (parts.length === 0) parts.push({ text: '' });
+    return { role: 'model', parts };
+  }
+  return { role: 'user', parts: [{ text: typeof msg.content === 'string' ? msg.content : '' }] };
+}
+
+/**
+ * Gemini's `functionResponse.response` must be a JSON object (struct). MCP tool results
+ * arrive as strings — often JSON — so parse a JSON object through unchanged and wrap any
+ * scalar/array/plain-text result under a `result` key.
+ */
+function toResponseStruct(content: string | undefined): Record<string, unknown> {
+  if (!content) return {};
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    return { result: parsed };
+  } catch {
+    return { result: content };
+  }
+}
+
+/** Pull every `functionCall` part out of a candidate's parts as neutral tool calls. */
+function extractToolCalls(parts: GeminiPart[]): AiToolCall[] {
+  const calls: AiToolCall[] = [];
+  for (const part of parts) {
+    if (part.functionCall) {
+      calls.push({
+        // Gemini assigns no call id; synthesize a stable one for the neutral tool loop.
+        id: `call_${calls.length}`,
+        name: part.functionCall.name ?? '',
+        arguments: part.functionCall.args ?? {},
+      });
+    }
+  }
+  return calls;
+}
+
+/** Map a RAW Gemini finishReason, then normalize for the presence of tool calls. */
+function resolveFinishReason(raw: string | undefined, toolCallCount: number): AiFinishReason {
+  return normalizeToolFinish(raw ? mapFinishReason(raw) : 'stop', toolCallCount);
+}
+
+/** Normalize an already-mapped finishReason for the presence of tool calls. */
+function resolveStreamFinishReason(mapped: AiFinishReason, toolCallCount: number): AiFinishReason {
+  return normalizeToolFinish(mapped, toolCallCount);
+}
+
+/**
+ * Gemini reports `STOP` even when the turn is purely function calls. Normalize that to
+ * `tool_calls` so the driver runs the tools instead of treating it as a narration stop
+ * (a bare tool-call turn would otherwise look like empty narration and park the seat).
+ */
+function normalizeToolFinish(mapped: AiFinishReason, toolCallCount: number): AiFinishReason {
+  if (toolCallCount > 0 && (mapped === 'stop' || mapped === 'unknown')) return 'tool_calls';
+  return mapped;
+}
