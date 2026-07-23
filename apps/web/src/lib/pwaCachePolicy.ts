@@ -75,7 +75,8 @@ export function matchNetworkOnlyApi({ url, request }: WorkboxMatchOptions): bool
 
   // Whole-server backup + campaign/member exports (issues #730 / #879).
   if (path === '/api/v1/backup' || path.startsWith('/api/v1/backup/')) return true;
-  if (path.includes('/export')) return true;
+  // Path-segment match so `/exporter` does not catch `/exporterer`.
+  if (/\/export(\/|$)/.test(path)) return true;
 
   // Admin / credential surfaces — never retain in Cache Storage.
   if (path.startsWith('/api/v1/admin/')) return true;
@@ -120,7 +121,7 @@ export function matchApiJsonCache({ url, request }: WorkboxMatchOptions): boolea
   if (accept.includes('text/event-stream')) return false;
   if (/\/campaigns\/[^/]+\/events$/.test(path) || path.endsWith('/ai-dm/stream')) return false;
   if (path === '/api/v1/backup' || path.startsWith('/api/v1/backup/')) return false;
-  if (path.includes('/export')) return false;
+  if (/\/export(\/|$)/.test(path)) return false;
   if (path.startsWith('/api/v1/admin/')) return false;
   if (path.startsWith('/api/v1/tokens')) return false;
   if (path.startsWith('/api/v1/attachments/')) return false;
@@ -171,11 +172,27 @@ export async function cacheWillUpdateJson({
     const n = Number(rawLen);
     if (Number.isFinite(n) && n > 512 * 1024) return null;
   } else {
-    // No Content-Length (chunked / some proxies): measure a clone so we never
-    // pin an unbounded body into Cache Storage.
+    // No Content-Length: stream a clone and stop once over the cap so we never
+    // fully buffer a huge/chunked body just to reject it.
     try {
-      const buf = await response.clone().arrayBuffer();
-      if (buf.byteLength > 512 * 1024) return null;
+      const body = response.clone().body;
+      if (!body) return null;
+      const reader = body.getReader();
+      let total = 0;
+      const limit = 512 * 1024;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value?.byteLength ?? 0;
+        if (total > limit) {
+          try {
+            await reader.cancel();
+          } catch {
+            /* ignore */
+          }
+          return null;
+        }
+      }
     } catch {
       return null;
     }
@@ -210,8 +227,24 @@ export async function cacheWillUpdateImage({
     if (Number.isFinite(n) && n > 256 * 1024) return null;
   } else {
     try {
-      const buf = await response.clone().arrayBuffer();
-      if (buf.byteLength > 256 * 1024) return null;
+      const body = response.clone().body;
+      if (!body) return null;
+      const reader = body.getReader();
+      let total = 0;
+      const limit = 256 * 1024;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value?.byteLength ?? 0;
+        if (total > limit) {
+          try {
+            await reader.cancel();
+          } catch {
+            /* ignore */
+          }
+          return null;
+        }
+      }
     } catch {
       return null;
     }

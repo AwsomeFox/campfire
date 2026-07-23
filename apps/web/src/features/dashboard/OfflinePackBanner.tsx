@@ -13,6 +13,7 @@ import {
   type OfflineManifestInspection,
   type OfflinePackIndicator,
 } from '../../lib/offlineCampaignManifest';
+import { subscribeToCachePurges } from '../../lib/swCache';
 
 const LABEL: Record<OfflinePackIndicator, string> = {
   ready: 'Offline pack ready',
@@ -37,9 +38,16 @@ export function OfflinePackBanner({ campaignId }: { campaignId: number }) {
 
   useEffect(() => {
     void refresh();
+    return subscribeToCachePurges(() => {
+      setError(null);
+      void refresh();
+    });
   }, [refresh]);
 
-  const indicator = inspection ? offlinePackIndicator(inspection) : 'missing';
+  const rawIndicator = inspection ? offlinePackIndicator(inspection) : 'missing';
+  // A failed refresh must not keep advertising "ready" from leftover cache/meta.
+  const indicator: OfflinePackIndicator =
+    error && rawIndicator === 'ready' ? 'incomplete' : rawIndicator;
 
   async function download() {
     setBusy(true);

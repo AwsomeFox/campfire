@@ -87,13 +87,15 @@ if (existsSync(join(dist, "sw.js"))) {
     sw.includes("text/event-stream"),
     "sw.js should exclude text/event-stream from runtime caching",
   );
+  // Prefer path-aware markers over bare "export"/"backup" substrings (bundlers
+  // often emit `exports` / unrelated backup text that would false-positive).
   check(
-    sw.includes("/export") || sw.includes("export"),
-    "sw.js should exclude export downloads from runtime caching",
+    sw.includes("/export"),
+    "sw.js should exclude /export path downloads from runtime caching",
   );
   check(
-    sw.includes("/backup") || sw.includes("backup"),
-    "sw.js should exclude backup downloads from runtime caching",
+    sw.includes("/api/v1/backup"),
+    "sw.js should exclude /api/v1/backup from runtime caching",
   );
 }
 

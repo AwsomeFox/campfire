@@ -69,6 +69,7 @@ test.describe('pwaCachePolicy matchers (#879)', () => {
     expect(matchNetworkOnlyApi(req('/api/v1/backup'))).toBe(true);
     expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/export'))).toBe(true);
     expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/export/me'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/foo/exporter'))).toBe(false);
     expect(matchNetworkOnlyApi(req('/api/v1/admin/metrics'))).toBe(true);
     expect(matchNetworkOnlyApi(req('/api/v1/me'))).toBe(true);
     expect(matchNetworkOnlyApi(req('/api/v1/auth/logout'))).toBe(true);

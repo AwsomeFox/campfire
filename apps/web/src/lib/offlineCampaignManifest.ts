@@ -164,14 +164,28 @@ export async function inspectCampaignOfflineManifest(
   const manifest = campaignOfflineManifest(campaignId);
   const meta = readOfflineManifestMeta(campaignId);
 
+  let jsonCache: Cache | null = null;
+  let imageCache: Cache | null = null;
+  if (cacheStorage) {
+    try {
+      jsonCache = await cacheStorage.open(API_JSON_CACHE_NAME);
+    } catch {
+      jsonCache = null;
+    }
+    try {
+      imageCache = await cacheStorage.open(API_IMAGE_CACHE_NAME);
+    } catch {
+      imageCache = null;
+    }
+  }
+
   const entries: OfflineEntryInspection[] = [];
   for (const entry of manifest) {
     const stored = meta?.entries[entry.url] ?? null;
     let inCache = false;
-    if (cacheStorage) {
-      const cacheName = entry.kind === 'image' ? API_IMAGE_CACHE_NAME : API_JSON_CACHE_NAME;
+    const cache = entry.kind === 'image' ? imageCache : jsonCache;
+    if (cache) {
       try {
-        const cache = await cacheStorage.open(cacheName);
         const hit = await cache.match(entry.url);
         inCache = !!hit;
       } catch {
@@ -239,42 +253,59 @@ async function measureBytes(response: Response): Promise<number> {
   return buf.byteLength;
 }
 
+function cacheEntryPath(url: string): string {
+  try {
+    const u = new URL(url, 'http://local');
+    return u.pathname + u.search;
+  } catch {
+    return url;
+  }
+}
+
+function dropMetaEntry(metaEntries: Record<string, StoredEntryMeta> | undefined, path: string): void {
+  if (!metaEntries) return;
+  if (path in metaEntries) delete metaEntries[path];
+  // Absolute request URLs may have been stored under path-only keys too.
+  for (const key of Object.keys(metaEntries)) {
+    if (key === path || key.endsWith(path) || path.endsWith(key)) {
+      delete metaEntries[key];
+    }
+  }
+}
+
 /**
- * Evict oldest entries from a cache until under maxEntries, or until
- * `needBytes` might fit. Returns the number of deleted entries.
+ * Evict oldest entries from a cache until under maxEntries.
+ * Optionally deletes `evictFirstUrls` before applying the overflow trim.
+ * When `metaEntries` is provided, matching bookkeeping records are pruned too.
  */
 export async function evictCacheEntries(
   cache: Cache,
   opts: {
     maxEntries: number;
     metaEntries?: Record<string, StoredEntryMeta>;
-    preferUrls?: string[];
+    /** URLs to delete first when making room for a new write (not "prefer to keep"). */
+    evictFirstUrls?: string[];
   },
 ): Promise<number> {
   const keys = await cache.keys();
-  if (keys.length <= opts.maxEntries && !opts.preferUrls?.length) return 0;
+  if (keys.length <= opts.maxEntries && !opts.evictFirstUrls?.length) return 0;
 
   // Oldest cachedAt first; unknown meta sorts as oldest.
   const ranked = keys.map((req) => {
     const url = typeof req === 'string' ? req : req.url;
-    const path = (() => {
-      try {
-        return new URL(url, 'http://local').pathname + new URL(url, 'http://local').search;
-      } catch {
-        return url;
-      }
-    })();
+    const path = cacheEntryPath(url);
     const cachedAt = opts.metaEntries?.[path]?.cachedAt ?? 0;
     return { req, path, cachedAt };
   });
   ranked.sort((a, b) => a.cachedAt - b.cachedAt);
 
   let deleted = 0;
-  // Always drop preferUrls first (caller asked to make room for a new write).
-  for (const prefer of opts.preferUrls ?? []) {
-    const hit = ranked.find((r) => r.path === prefer || r.req.url.endsWith(prefer));
+  // Drop caller-requested URLs first (make room for a new write).
+  for (const target of opts.evictFirstUrls ?? []) {
+    const hit = ranked.find((r) => r.path === target || r.req.url.endsWith(target));
     if (!hit) continue;
     await cache.delete(hit.req);
+    dropMetaEntry(opts.metaEntries, hit.path);
     deleted += 1;
   }
 
@@ -284,19 +315,14 @@ export async function evictCacheEntries(
   const overflow = remaining.length - opts.maxEntries;
   const freshKeys = await cache.keys();
   const reRanked = freshKeys.map((req) => {
-    const url = req.url;
-    let path = url;
-    try {
-      const u = new URL(url);
-      path = u.pathname + u.search;
-    } catch {
-      /* keep */
-    }
-    return { req, cachedAt: opts.metaEntries?.[path]?.cachedAt ?? 0 };
+    const path = cacheEntryPath(req.url);
+    return { req, path, cachedAt: opts.metaEntries?.[path]?.cachedAt ?? 0 };
   });
   reRanked.sort((a, b) => a.cachedAt - b.cachedAt);
   for (let i = 0; i < overflow && i < reRanked.length; i += 1) {
-    await cache.delete(reRanked[i]!.req);
+    const hit = reRanked[i]!;
+    await cache.delete(hit.req);
+    dropMetaEntry(opts.metaEntries, hit.path);
     deleted += 1;
   }
   return deleted;
@@ -337,18 +363,22 @@ async function putWithQuotaRetry(
         reason: err instanceof Error ? err.message : 'cache-put-failed',
       };
     }
-    // Make room: evict half the bucket, then retry once.
+    // Make room via the same LRU/meta-aware path, then retry once.
     const keys = await cache.keys();
-    const toDrop = Math.max(1, Math.floor(keys.length / 2));
-    for (let i = 0; i < toDrop; i += 1) {
-      const k = keys[i];
-      if (k) {
-        await cache.delete(k);
-        evicted += 1;
-      }
-    }
+    const half = Math.max(0, Math.floor(keys.length / 2));
+    evicted += await evictCacheEntries(cache, {
+      maxEntries: half,
+      metaEntries,
+      evictFirstUrls: [requestUrl],
+    });
     try {
       await cache.put(requestUrl, response.clone());
+      metaEntries[requestUrl] = {
+        cachedAt: Date.now(),
+        bytes: metaEntries[requestUrl]?.bytes ?? 0,
+        cacheName,
+      };
+      evicted += await evictCacheEntries(cache, { maxEntries, metaEntries });
       return { ok: true, quotaExceeded: true, evicted };
     } catch {
       return {
@@ -396,9 +426,21 @@ export async function downloadCampaignOfflinePack(
   let completed = 0;
   for (const entry of all) {
     try {
+      const headers: Record<string, string> = {
+        accept: entry.kind === 'image' ? 'image/*' : 'application/json',
+      };
+      // Mirror api.ts so DEV_AUTH tables can download packs without 401/403.
+      try {
+        const devRole = typeof localStorage !== 'undefined' ? localStorage.getItem('cf.devRole') : null;
+        const devUser = typeof localStorage !== 'undefined' ? localStorage.getItem('cf.devUser') : null;
+        if (devRole) headers['x-dev-role'] = devRole;
+        if (devUser) headers['x-dev-user'] = devUser;
+      } catch {
+        /* private mode / unavailable storage */
+      }
       const res = await fetchImpl(entry.url, {
         credentials: 'include',
-        headers: { accept: entry.kind === 'image' ? 'image/*' : 'application/json' },
+        headers,
       });
       if (!res.ok) {
         failed.push({ url: entry.url, reason: `http-${res.status}` });
