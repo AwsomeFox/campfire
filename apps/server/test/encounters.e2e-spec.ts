@@ -335,6 +335,53 @@ describe('encounters (e2e)', () => {
       expect(res.body.hpCurrent).toBe(15);
     });
 
+    // Issue #495: players may only add conditions from the active rule vocabulary;
+    // arbitrary free-text ("god_mode") must 400. MCP update_combatant shares this path.
+    it('owning player cannot inject an arbitrary free-text condition (issue #495)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ addConditions: ['god_mode'] });
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toMatch(/god_mode|vocabulary|Unknown condition/i);
+
+      const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const aria = (after.body.combatants as Array<{ id: number; conditions: string[] }>).find(
+        (c) => c.id === ariaCombatantId,
+      )!;
+      expect(aria.conditions).not.toContain('god_mode');
+    });
+
+    it('owning player may add an adapter vocabulary condition (case-insensitive, issue #495)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ addConditions: ['prone'] });
+      expect(res.status).toBe(200);
+      expect(res.body.conditions).toContain('prone');
+      // Clean up so later assertions in this suite are not surprised by leftover conditions.
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ removeConditions: ['prone'] });
+    });
+
+    it('DM may mint a custom condition label outside the vocabulary (issue #495)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ addConditions: ['hexed_by_patron'] });
+      expect(res.status).toBe(200);
+      expect(res.body.conditions).toContain('hexed_by_patron');
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ removeConditions: ['hexed_by_patron'] });
+    });
+
     // Strict-validation (task P1 item 3): CombatantUpdateDto is now .strict() at
     // the DTO layer — an unknown/misnamed key like `hpCurrent` (the real column
     // name; CombatantUpdate's actual field is `hpDelta`/`hpSet`) previously
