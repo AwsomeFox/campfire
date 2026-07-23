@@ -38,8 +38,11 @@ test.describe('RegionMap keyboard pin source guards (#807)', () => {
   });
 
   test('pointer drag is gated while kbMovingId is set', () => {
-    expect(src).toMatch(/kbMovingId != null\) return/);
-    expect(src).toContain('if (!isDm || !mapImageUrl || kbMovingId != null) return;');
+    // Whitespace-tolerant: gate must refuse drag when kbMovingId is set.
+    expect(src).toMatch(/kbMovingId\s*!=\s*null/);
+    expect(src).toMatch(
+      /if\s*\(\s*!isDm\s*\|\|\s*!mapImageUrl\s*\|\|\s*kbMovingId\s*!=\s*null\s*\)\s*return\s*;/,
+    );
   });
 
   test('Move focuses the horizontal input so arrows work immediately', () => {
@@ -48,9 +51,11 @@ test.describe('RegionMap keyboard pin source guards (#807)', () => {
     expect(src).toMatch(/ref=\{kbXInputRef\}/);
   });
 
-  test('announceKb RAF is canceled on unmount', () => {
-    expect(src).toMatch(/cancelAnimationFrame\(kbAnnounceRaf\.current\)/);
-    // Unmount cleanup effect clears the pending frame.
-    expect(src).toMatch(/return \(\) => \{\s*if \(kbAnnounceRaf\.current != null\)/);
+  test('announceKb RAF and in-flight kb save are canceled on unmount', () => {
+    expect(src).toMatch(/cancelAnimationFrame\(\s*kbAnnounceRaf\.current\s*\)/);
+    // Unmount cleanup clears the pending frame and aborts any keyboard save.
+    expect(src).toMatch(
+      /return\s*\(\s*\)\s*=>\s*\{[\s\S]*?kbAnnounceRaf\.current[\s\S]*?kbSaveAbort\.current\?\.abort\(\)/,
+    );
   });
 });

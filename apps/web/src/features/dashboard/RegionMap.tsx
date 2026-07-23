@@ -93,13 +93,17 @@ export function RegionMap({
     });
   }, []);
 
-  // Cancel pending live-region RAF on unmount so we never setState after teardown.
+  // Cancel pending live-region RAF and abort any in-flight keyboard save on unmount
+  // so late network activity cannot setState / announce after teardown.
   useEffect(() => {
     return () => {
       if (kbAnnounceRaf.current != null) {
         cancelAnimationFrame(kbAnnounceRaf.current);
         kbAnnounceRaf.current = null;
       }
+      kbSaveGen.current += 1;
+      kbSaveAbort.current?.abort();
+      kbSaveAbort.current = null;
     };
   }, []);
 
