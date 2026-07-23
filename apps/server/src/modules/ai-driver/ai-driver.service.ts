@@ -768,7 +768,7 @@ export class AiDriverService {
         // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
         // omit streaming usage. When that happens usage is 0 despite real content. Estimate
         // rather than silently fail-open on budget enforcement.
-        if (usage === 0 && (text.length > 0 || (result?.toolCalls.length ?? 0) > 0)) {
+        if (usage === 0 && (text.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
           const outputChars = text.length + JSON.stringify(result?.toolCalls ?? []).length;
           // ~4 chars per token is a conservative English-language estimate.
           usage = Math.max(1, Math.ceil(outputChars / 4));
