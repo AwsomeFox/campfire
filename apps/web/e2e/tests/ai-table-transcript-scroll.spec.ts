@@ -90,13 +90,16 @@ test.describe('AI table transcript scroll (#590)', () => {
     const transcript = page.getByRole('log', { name: 'Table transcript' });
     await expect(transcript).toBeVisible();
     await expect(page.getByTestId('transcript-jump-latest')).toHaveCount(0);
-    await expect.poll(async () =>
-      transcript.getByText('Earlier table line 80').evaluate((el) => {
-        const row = el.getBoundingClientRect();
-        const pane = el.closest('[role="log"]')!.getBoundingClientRect();
-        return row.top >= pane.top - 4 && row.bottom <= pane.bottom + 4;
-      }),
-    ).toBe(true);
+    // Pin assertion: near the scroll max (more stable than bounding-box overlap
+    // while fonts/layout settle on CI).
+    await expect.poll(async () => {
+      const { top, max } = await transcript.evaluate((node) => ({
+        top: node.scrollTop,
+        max: node.scrollHeight - node.clientHeight,
+      }));
+      return max > 0 && max - top <= 48;
+    }).toBe(true);
+    await expect(transcript.getByText('Earlier table line 80')).toBeVisible();
   });
 
   test('stops tail follow when reading history and offers jump-to-latest with unread count', async ({ page }) => {

@@ -338,11 +338,22 @@ export default function AiTablePage() {
     if (pin) setUnreadBelow(0);
   }, []);
 
+  const pinTranscriptToTail = useCallback((el: HTMLDivElement) => {
+    // Prefer scrollTop over scrollIntoView — the latter can move the window when
+    // nested flex overflow is still settling (issue #590 mount flake).
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  }, []);
+
   const syncTranscriptTailScroll = useCallback(() => {
     const el = transcriptRef.current;
     if (!el || transcript.entries.length === 0) return;
 
-    if (!transcriptMountScrollDoneRef.current && el.scrollHeight > el.clientHeight) {
+    const canScroll = el.scrollHeight > el.clientHeight + 1;
+
+    if (!transcriptMountScrollDoneRef.current) {
+      // Wait for a real overflow box; early layouts with equal scroll/client height
+      // would otherwise mark the mount done and leave the reader at the top.
+      if (!canScroll) return;
       transcriptMountScrollDoneRef.current = true;
       if (
         shouldScrollTranscriptToTailOnMount(
@@ -352,20 +363,21 @@ export default function AiTablePage() {
           el.clientHeight,
         )
       ) {
-        el.scrollTop = el.scrollHeight - el.clientHeight;
+        pinTranscriptToTail(el);
         followLatestRef.current = true;
         setFollowLatest(true);
+        setUnreadBelow(0);
         return;
       }
     }
 
-    if (el.scrollHeight <= el.clientHeight && transcript.entries.length > 1) return;
+    if (!canScroll) return;
 
     // Prefer previous follow intent over post-growth distance: a tall append can
     // push "near bottom" false even when the reader was pinned (orchestrator / #590).
     if (followLatestRef.current) {
       setUnreadBelow(0);
-      bottomRef.current?.scrollIntoView({ block: 'end' });
+      pinTranscriptToTail(el);
       return;
     }
     const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
@@ -373,16 +385,18 @@ export default function AiTablePage() {
       followLatestRef.current = true;
       setFollowLatest(true);
       setUnreadBelow(0);
-      bottomRef.current?.scrollIntoView({ block: 'end' });
+      pinTranscriptToTail(el);
     }
-  }, [transcript.entries.length]);
+  }, [pinTranscriptToTail, transcript.entries.length]);
 
   const jumpToLatest = useCallback(() => {
     followLatestRef.current = true;
     setFollowLatest(true);
     setUnreadBelow(0);
-    bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, []);
+    const el = transcriptRef.current;
+    if (el) pinTranscriptToTail(el);
+    else bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [pinTranscriptToTail]);
 
   useLayoutEffect(() => {
     if (!isDriver) return;
@@ -638,12 +652,12 @@ export default function AiTablePage() {
 
       {/* Transcript — named log landmark with aria-live=off so token deltas
           never spam SRs. The sr-only mirror below owns polite additions. */}
-      <Card className="!p-0 flex-1 flex flex-col overflow-hidden relative">
+      <Card className="!p-0 flex-1 min-h-0 flex flex-col overflow-hidden relative">
         <div
           ref={transcriptRef}
           {...NARRATION_VISUAL_TRANSCRIPT}
           onScroll={handleTranscriptScroll}
-          className="flex-1 overflow-y-auto p-4 space-y-3"
+          className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3"
           aria-label={t('table.transcriptLabel')}
           aria-busy={streaming || undefined}
           tabIndex={0}
