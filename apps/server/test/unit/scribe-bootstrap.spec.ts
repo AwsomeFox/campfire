@@ -30,6 +30,9 @@ describe('ScribeService — onApplicationBootstrap (#316)', () => {
 
     await jest.advanceTimersByTimeAsync(60_000);
     expect(sweep).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(sweep).toHaveBeenCalledTimes(2);
   });
 
   it('does not start a timer when SCRIBE_SWEEP_INTERVAL_MS is unset', () => {

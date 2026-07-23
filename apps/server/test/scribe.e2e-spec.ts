@@ -50,11 +50,20 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     harness.script({ text: 'A quiet night at the inn.' });
     const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
     expect(run.status).toBe(201);
+    const proposalId = run.body.proposalIds[0] as number;
+    expect((await request(harness.server).post(`${API}/proposals/${proposalId}/approve`).set(dm).send({})).status).toBe(201);
+
+    await seedResolvedInbox(harness, campaignId, 'The party broke camp at dawn.');
+    harness.script({ text: 'Dawn march toward the pass.' });
+    const secondRun = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(secondRun.status).toBe(201);
+    expect(secondRun.body.job.status).toBe('succeeded');
 
     const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs?limit=1`).set(dm);
     expect(jobs.status).toBe(200);
     expect(jobs.body).toHaveLength(1);
     expect(jobs.body[0].trigger).toBe('on_demand');
+    expect(jobs.body[0].id).toBe(secondRun.body.job.id);
 
     const created = await request(harness.server)
       .put(`${API}/campaigns/${campaignId}/scribe`)

@@ -46,10 +46,16 @@ describe('AI Driver mid-turn freeze check (#1057)', () => {
     expect(isMidTurnFrozenState('awaiting_players')).toBe(false);
   });
 
-  it('a session with state paused should be detected as frozen by the loop guard', () => {
+  it('loop guard detects human_control mid-turn via session.state mutation', () => {
     const session = { state: 'running' as string };
     expect(isMidTurnFrozenState(session.state)).toBe(false);
     session.state = 'human_control';
+    expect(isMidTurnFrozenState(session.state)).toBe(true);
+  });
+
+  it('loop guard detects paused mid-turn via session.state mutation', () => {
+    const session = { state: 'running' as string };
+    session.state = 'paused';
     expect(isMidTurnFrozenState(session.state)).toBe(true);
   });
 });
