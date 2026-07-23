@@ -19,6 +19,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { API } from './api';
+import { SseParser, type SseParseSignal } from './sseParse';
 
 /**
  * One AI-DM stream event, mirroring the server union in
@@ -170,15 +171,6 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
   }
 }
 
-/** Extracts the concatenated `data:` payload of one SSE event block. */
-export function sseBlockData(block: string): string {
-  return block
-    .split('\n')
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice('data:'.length).trimStart())
-    .join('\n');
-}
-
 /**
  * Subscribe to a campaign's AI-DM narration stream for the lifetime of the mount (or until
  * `campaignId`/`enabled` changes). Handlers are read from a ref so a re-render never tears
@@ -232,24 +224,28 @@ export function useAiDmStream(
           attempt = 0;
 
           const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let sep: number;
-            while ((sep = buffer.indexOf('\n\n')) !== -1) {
-              const data = sseBlockData(buffer.slice(0, sep));
-              buffer = buffer.slice(sep + 2);
+          // Shared incremental SSE parser (#748) — same framing rules as campaign events.
+          const parser = new SseParser();
+          const consume = (signals: SseParseSignal[]) => {
+            for (const signal of signals) {
+              if (signal.kind !== 'message') continue;
+              const data = signal.message.data;
               if (!data) continue;
               try {
                 const parsed = parseAiDmStreamEvent(JSON.parse(data));
                 if (parsed && !disposed) handlersRef.current.onEvent(parsed);
               } catch {
-                /* malformed frame — skip */
+                /* malformed JSON payload — skip */
               }
             }
+          };
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) {
+              consume(parser.flush());
+              break;
+            }
+            consume(parser.push(value));
           }
           // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
           throw new Error('AI-DM SSE stream ended');
