@@ -231,7 +231,7 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(page.getByText('Quest description differs from current content').first()).toBeVisible();
     expect(historyAttempts()).toBe(2);
 
-    await page.getByRole('button', { name: /Preview version .* by Morgan Vale/ }).first().click();
+    await page.getByRole('button', { name: /Preview version by Morgan Vale/ }).first().click();
     await page.getByRole('button', { name: 'Restore this version' }).click();
     await page.getByRole('button', { name: 'Restore version' }).click();
 

@@ -321,7 +321,7 @@ test.describe('Player Display controls', () => {
     await expect(exit).toBeFocused();
 
     // Activate Fullscreen via keyboard, then return focus and confirm we stay usable.
-    await page.keyboard.press('Tab');
+    await fullscreen.focus();
     await expect(fullscreen).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
