@@ -427,6 +427,7 @@ export function classifyDriverRead(toolName: string): DriverReadDisposition {
 export function wrapUntrustedPlayerInput(input: string): string {
   const neutralized = (input ?? '')
     // Drop control chars (keep normal whitespace) that could scramble the framing.
+    // eslint-disable-next-line no-control-regex -- deliberate control-char strip, not a typo
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ')
     .replace(/\[\s*player_message_(start|end)\s*\]/gi, (_m, g: string) => `(player_message_${g.toLowerCase()})`);
   return `${PLAYER_INPUT_START}\n${neutralized}\n${PLAYER_INPUT_END}`;

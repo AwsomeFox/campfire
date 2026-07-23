@@ -5,8 +5,10 @@
  * clients survive CRLF framing, proxy comment heartbeats, multiline `data:`
  * fields, and TCP/HTTP chunk boundaries (including mid-delimiter and mid-UTF-8
  * splits). Malformed streams that never emit a blank line are bounded; recovery
- * resets internal buffers and surfaces a `recovered` signal to the caller.
+ * resets in-progress buffers (preserving stream-level `id`/`retry`) and surfaces
+ * a `recovered` signal to the caller.
  */
+import { utf8ByteLength } from './sseUtf8';
 
 export interface SseMessage {
   /** Event type field; empty string means the default "message" type. */
@@ -22,17 +24,29 @@ export type SseParseSignal =
 
 export interface SseParserOptions {
   /**
-   * Max unfinished decoded text (incomplete line / frame overhead) before
-   * recovery. Does **not** include an in-progress message's assembled `data`
-   * fields — those use {@link maxMessageBytes}. Default 256 KiB.
+   * Max unfinished decoded text (incomplete line / frame overhead) in **UTF-8
+   * bytes** before recovery. Does **not** include an in-progress message's
+   * assembled `data` fields — those use {@link maxMessageBytes}. Default 256 KiB.
    */
   maxBufferedBytes?: number;
   /**
-   * Max bytes for in-progress message field buffers (`data` + `event` + `id`)
+   * Max **UTF-8 bytes** for in-progress message field buffers (`data` + `event`)
    * before recovery. Allows a single legitimate large SSE payload while still
    * bounding runaway streams that never send a blank-line delimiter. Default 1 MiB.
+   *
+   * Stream-level `id` / `retry` are not counted here — they persist across events
+   * and across parser recovery.
    */
   maxMessageBytes?: number;
+}
+
+export interface SseResetOptions {
+  /**
+   * When true, keep stream-level `lastEventId` / `retry` (WHATWG reconnect state).
+   * Used by buffer-overrun recovery so subsequent messages keep Last-Event-ID
+   * continuity. Full connection teardown should call {@link reset} without this.
+   */
+  preserveStreamState?: boolean;
 }
 
 const DEFAULT_MAX_BUFFERED_BYTES = 256 * 1024;
@@ -53,18 +67,18 @@ export class SseParser {
     this.maxMessageBytes = options?.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
   }
 
-  /** Unfinished frame text waiting for a line terminator (recovery overhead). */
+  /** Unfinished frame text waiting for a line terminator (UTF-8 byte length). */
   get unfinishedBytes(): number {
-    return this.text.length;
+    return utf8ByteLength(this.text);
   }
 
-  /** Assembled field buffers for the in-progress (not yet dispatched) message. */
+  /**
+   * Assembled field buffers for the in-progress (not yet dispatched) message,
+   * measured in UTF-8 bytes. Excludes stream-level `lastEventId` (persists across
+   * dispatch / recovery).
+   */
   get messageBytes(): number {
-    return (
-      this.dataBuffer.length +
-      this.eventTypeBuffer.length +
-      (this.lastEventId?.length ?? 0)
-    );
+    return utf8ByteLength(this.dataBuffer) + utf8ByteLength(this.eventTypeBuffer);
   }
 
   /** Total pending buffered size (unfinished text + in-progress message fields). */
@@ -99,13 +113,18 @@ export class SseParser {
     return this.drain(true);
   }
 
-  /** Reset all buffers after recovery or when abandoning a connection. */
-  reset(): void {
+  /**
+   * Reset buffers. By default clears stream-level `id`/`retry` as well (full
+   * teardown). Pass `{ preserveStreamState: true }` for mid-stream recovery.
+   */
+  reset(options?: SseResetOptions): void {
     this.text = '';
     this.dataBuffer = '';
     this.eventTypeBuffer = '';
-    this.lastEventId = null;
-    this.retry = null;
+    if (!options?.preserveStreamState) {
+      this.lastEventId = null;
+      this.retry = null;
+    }
   }
 
   private drain(flushing: boolean): SseParseSignal[] {
@@ -115,7 +134,8 @@ export class SseParser {
     // in-progress message fields (legitimate large payloads use the higher cap).
     if (this.unfinishedBytes > this.maxBufferedBytes || this.messageBytes > this.maxMessageBytes) {
       const discardedBytes = this.bufferedBytes;
-      this.reset();
+      // Keep Last-Event-ID / retry — recovery stays on the same connection.
+      this.reset({ preserveStreamState: true });
       // Fresh decoder so a partial UTF-8 sequence can't leak into the next frame.
       this.decoder = new TextDecoder('utf-8');
       out.push({ kind: 'recovered', discardedBytes });

@@ -194,7 +194,7 @@ test.describe('Character Move to Trash — encounter link preserved (issue #716)
     if (characterId) await restore(baseURL!, characterId);
   });
 
-  test('trashing a character keeps its combatant record on the encounter', async ({ page, baseURL }) => {
+  test('trashing a character keeps its combatant record on the encounter', async ({ page }) => {
     const { campaignId, encounterId } = seed();
 
     // Trash the character from the roster via the kebab menu.
