@@ -171,7 +171,7 @@ export class ExportService {
       this.comments.listForCampaign(campaignId, role),
       this.members.listForCampaign(campaignId),
       this.audit.listForCampaign(campaignId, 500),
-      this.proposals.listForCampaign(campaignId, undefined),
+      this.proposals.listForCampaign(campaignId, undefined, role),
       this.encounters.listForCampaign(campaignId),
       this.attachments.listRowsForCampaign(campaignId),
       this.factions.listForCampaign(campaignId, role),
@@ -287,12 +287,13 @@ export class ExportService {
       this.characters.listForCampaign(campaignId, role),
       this.notes.listForCampaign(campaignId, user, role, { mine: true }),
       this.comments.listForCampaign(campaignId, role, { authorUserId: user.id }),
-      this.proposals.listForCampaign(campaignId, undefined),
+      this.proposals.listForCampaign(campaignId, undefined, role, { proposerUserId: user.id }),
       this.supportPreferences.getOwn(campaignId, user.id),
     ]);
 
     const ownCharacters = characterList.filter((c) => c.ownerUserId === user.id);
-    const ownProposals = proposalList.filter((p) => p.proposer === user.id);
+    // Already scoped + projected for the caller's role (#817); keep the list as-is.
+    const ownProposals = proposalList;
     const ownComments = commentList;
 
     return {

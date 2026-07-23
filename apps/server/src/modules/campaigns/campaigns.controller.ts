@@ -8,6 +8,7 @@ import {
   ParseIntPipe,
   Patch,
   Post,
+  Query,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
@@ -23,6 +24,13 @@ import { CampaignCloneDto, CampaignCreateDto, CampaignImportDto, CampaignUpdateD
 type MulterFile = Express.Multer.File;
 /** Generous cap on the uploaded archive (mirrors MAX_IMPORT_ARCHIVE_BYTES in the service). */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
+
+/** Query flag for atomic invite revoke alongside archive/trash (#857). */
+function truthyQuery(value: string | undefined): boolean {
+  if (value == null) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
 
 @ApiTags('campaigns')
 @Controller('campaigns')
@@ -103,27 +111,42 @@ export class CampaignsController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a campaign', description: 'dm role required. On a paused/completed (archived, read-only) campaign only `status` may be changed — everything else requires un-archiving first.' })
+  @ApiOperation({
+    summary: 'Update a campaign',
+    description:
+      'dm role required. On a paused/completed (archived, read-only) campaign only `status` may be changed — everything else requires un-archiving first. ' +
+      'Pass `revokeInvites=true` when archiving (active → paused/completed) to permanently delete every invite row in the same transaction as the status change (#857) — avoids client-side revoke-before-archive data loss if the status update fails.',
+  })
   @ApiResponse({ status: 200, description: 'Updated campaign.' })
   @ApiResponse({ status: 403, description: 'Campaign is archived and the patch touches more than `status`.' })
-  async update(@Param('id', ParseIntPipe) id: number, @Body() body: CampaignUpdateDto, @CurrentUser() user: RequestUser) {
+  async update(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: CampaignUpdateDto,
+    @CurrentUser() user: RequestUser,
+    @Query('revokeInvites') revokeInvites?: string,
+  ) {
     // allowArchived: this is the un-archive path (PATCH {status:'active'}) —
     // CampaignsService.update() restricts an archived campaign to status-only patches.
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
-    return this.campaigns.update(id, body, user);
+    return this.campaigns.update(id, body, user, { revokeInvites: truthyQuery(revokeInvites) });
   }
 
   @Delete(':id')
   @ApiOperation({
     summary: 'Delete (trash) a campaign',
     description:
-      'dm role required. Allowed even when the campaign is archived (paused/completed). SOFT-delete (issue #116): the campaign moves to the trash — every row and its on-disk uploads survive and it is restorable via POST /campaigns/:id/restore. The old irreversible hard-cascade + disk wipe is now the deliberate second step DELETE /campaigns/:id/purge.',
+      'dm role required. Allowed even when the campaign is archived (paused/completed). SOFT-delete (issue #116): the campaign moves to the trash — every row and its on-disk uploads survive and it is restorable via POST /campaigns/:id/restore. The old irreversible hard-cascade + disk wipe is now the deliberate second step DELETE /campaigns/:id/purge. ' +
+      'Pass `revokeInvites=true` to permanently delete every invite row in the same transaction as the trash stamp (#857).',
   })
   @ApiResponse({ status: 200, description: 'Trashed (soft-deleted).' })
-  async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  async remove(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: RequestUser,
+    @Query('revokeInvites') revokeInvites?: string,
+  ) {
     // allowArchived: trashing an archived campaign must not require un-archiving it first.
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
-    return this.campaigns.remove(id, user);
+    return this.campaigns.remove(id, user, { revokeInvites: truthyQuery(revokeInvites) });
   }
 
   @Post(':id/restore')

@@ -2292,4 +2292,72 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(res.isError).toBeFalsy();
     });
   });
+
+  // Issue #817 — MCP propose path must not disclose hidden targets / dmSecret via
+  // create responses or list_proposals self-view.
+  describe('issue #817 — MCP proposal snapshot secrecy', () => {
+    let playerProposeToken: string;
+
+    beforeAll(async () => {
+      const createPlayer = await dmAgent
+        .post('/api/v1/users')
+        .send({ username: 'mcp-817-player', password: 'player-password-1', serverRole: 'user' });
+      const playerId = createPlayer.body.id as number;
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+
+      const playerAgent = request.agent(ctx.app.getHttpServer());
+      await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-817-player', password: 'player-password-1' });
+      const mint = await playerAgent
+        .post('/api/v1/tokens')
+        .send({ name: 'mcp-817-propose', scope: 'player', writeScope: 'propose', campaignId });
+      expect(mint.status).toBe(201);
+      playerProposeToken = mint.body.token;
+    });
+
+    it('update_quest on a hidden quest fails (no proposal / no secret leak)', async () => {
+      const hidden = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({
+        title: 'MCP Hidden Quest 817',
+        dmSecret: 'MCP_HIDDEN_QUEST_817',
+        hidden: true,
+      });
+      const client = await mcpClient(playerProposeToken);
+      const res = await client.callTool({
+        name: 'update_quest',
+        arguments: { questId: hidden.body.id, title: 'leak?', propose: true },
+      });
+      expect(res.isError).toBeTruthy();
+      expect(JSON.stringify(res)).not.toContain('MCP_HIDDEN_QUEST_817');
+    });
+
+    it('update_quest on a visible secret-bearing quest returns a redacted snapshot; list_proposals stays redacted', async () => {
+      const visible = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({
+        title: 'MCP Visible Quest 817',
+        dmSecret: 'MCP_VISIBLE_QUEST_817',
+        hidden: false,
+      });
+      const client = await mcpClient(playerProposeToken);
+      const res = await client.callTool({
+        name: 'update_quest',
+        arguments: { questId: visible.body.id, title: 'mcp tweak', propose: true },
+      });
+      expect(res.isError).toBeFalsy();
+      const { proposal } = parseResult(res) as {
+        proposal: { id: number; snapshot: { title: string; dmSecret?: string } };
+      };
+      expect(proposal.snapshot.title).toBe('MCP Visible Quest 817');
+      expect(proposal.snapshot.dmSecret ?? '').toBe('');
+      expect(JSON.stringify(proposal)).not.toContain('MCP_VISIBLE_QUEST_817');
+
+      const listRes = await client.callTool({
+        name: 'list_proposals',
+        arguments: { campaignId, status: 'pending' },
+      });
+      expect(listRes.isError).toBeFalsy();
+      const list = parseResult(listRes) as Array<{ id: number; snapshot: { dmSecret?: string } }>;
+      const row = list.find((p) => p.id === proposal.id);
+      expect(row).toBeDefined();
+      expect(row!.snapshot.dmSecret ?? '').toBe('');
+      expect(JSON.stringify(list)).not.toContain('MCP_VISIBLE_QUEST_817');
+    });
+  });
 });

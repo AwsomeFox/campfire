@@ -789,7 +789,8 @@ CREATE TABLE IF NOT EXISTS combatants (
 -- Persistent per-encounter combat log (issue #61). New table, so a plain
 -- CREATE TABLE IF NOT EXISTS in bootstrap (no migrate fn needed). See db/schema.ts
 -- for column docs; detail deliberately omits monster exact-HP totals (only deltas)
--- so listing it to a non-DM can't leak issue #43's redaction.
+-- so listing it to a non-DM can't leak issue #43's redaction. actor_id/target_id
+-- (issue #869) let listing re-project names from current hidden-NPC visibility.
 CREATE TABLE IF NOT EXISTS encounter_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
@@ -797,6 +798,8 @@ CREATE TABLE IF NOT EXISTS encounter_events (
   type TEXT NOT NULL,
   actor TEXT,
   target TEXT,
+  actor_id INTEGER,
+  target_id INTEGER,
   detail TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );

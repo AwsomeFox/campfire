@@ -1484,10 +1484,11 @@ function migratePublicRecapSharePolicy(sqlite: Database.Database): void {
 }
 
 /**
- * Issue #857: campaign-level public-invite kill switch. Existing campaigns keep
- * invites enabled (DEFAULT 1) so live tables are uninterrupted; archive/trash
- * paths clear the flag going forward so restore cannot accidentally revive
- * bearer join links.
+ * Issue #857: campaign-level public-invite kill switch. Existing *active* campaigns
+ * keep invites enabled (DEFAULT 1) so live tables are uninterrupted; paused/
+ * completed/trashed rows are cleared immediately so restore after upgrade cannot
+ * accidentally revive bearer join links (see also 0059 for DBs that already ran
+ * an earlier 0058 that only ADDed the column).
  */
 function migrateCampaignsTableForPublicInvitesEnabled(sqlite: Database.Database): void {
   const hasCampaigns = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'").get();
@@ -1495,6 +1496,36 @@ function migrateCampaignsTableForPublicInvitesEnabled(sqlite: Database.Database)
   const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
   if (columns.some((column) => column.name === 'public_invites_enabled')) return;
   sqlite.exec('ALTER TABLE campaigns ADD COLUMN public_invites_enabled INTEGER NOT NULL DEFAULT 1');
+  // Soft-delete (0031) runs before this migration, so deleted_at is present.
+  sqlite.exec(`
+    UPDATE campaigns
+    SET public_invites_enabled = 0
+    WHERE status IN ('paused', 'completed')
+       OR deleted_at IS NOT NULL
+  `);
+}
+
+/**
+ * Issue #857 follow-up: 0058 originally ADDed `public_invites_enabled` DEFAULT 1
+ * without clearing paused/completed/trashed rows. DBs that already applied that
+ * shape would restore those campaigns with invites still enabled. Clear the flag
+ * for any non-live campaign so restore matches the suspend-on-archive contract.
+ * Idempotent: re-running on an already-cleared DB is a no-op UPDATE.
+ */
+function migratePublicInvitesDisabledForInactiveCampaigns(sqlite: Database.Database): void {
+  const hasCampaigns = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'").get();
+  if (!hasCampaigns) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'public_invites_enabled')) return;
+  sqlite.exec(`
+    UPDATE campaigns
+    SET public_invites_enabled = 0
+    WHERE public_invites_enabled != 0
+      AND (
+        status IN ('paused', 'completed')
+        OR deleted_at IS NOT NULL
+      )
+  `);
 }
 
 /**
@@ -1542,6 +1573,26 @@ function migrateOAuthAccessTokensForAtomicRotation(sqlite: Database.Database): v
     sqlite.exec('CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id)');
   });
   migrate();
+}
+
+/**
+ * Migration for DBs created before combat-log combatant ids (issue #869):
+ * `encounter_events.actor_id` / `target_id` didn't exist. Plain nullable ADD
+ * COLUMNs — no table rebuild needed. Existing rows keep denormalized name strings
+ * and get NULL ids; listing still best-effort redacts by matching those names to
+ * currently-hidden NPC combatants. Fresh DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the columns.
+ */
+function migrateEncounterEventsTableForCombatantIds(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounter_events'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounter_events)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('actor_id')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN actor_id INTEGER');
+  if (!has('target_id')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN target_id INTEGER');
 }
 
 /**
@@ -1673,7 +1724,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0056_characters_death_temp_hp', run: migrateCharactersTableForDeathTempHp },
   { name: '0057_campaigns_active_encounter', run: migrateCampaignsTableForActiveEncounter },
   { name: '0058_campaigns_public_invites_enabled', run: migrateCampaignsTableForPublicInvitesEnabled },
-  { name: '0059_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
+  { name: '0059_public_invites_disabled_inactive', run: migratePublicInvitesDisabledForInactiveCampaigns },
+  { name: '0060_encounter_events_combatant_ids', run: migrateEncounterEventsTableForCombatantIds },
+  { name: '0062_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
 ];
 
 /**
