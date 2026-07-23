@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { MONSTERS } from '../global-setup';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 /**
  * Combat tracker cross-role checks (issue #81):
@@ -24,6 +24,7 @@ function endedEncounterUrl(): string {
 }
 
 async function openEncounter(page: Page) {
+  await restoreSeedEncounter(page);
   await page.goto(encounterUrl());
   await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
 }

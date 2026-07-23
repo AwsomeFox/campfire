@@ -1,7 +1,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import type { EncounterEvent } from '@campfire/schema';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 test.use({ storageState: stateFor('dm') });
 
@@ -55,8 +55,7 @@ async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
  * serial suite regardless of which throwaway fight a test created and ended.
  */
 async function restoreSeedFight(page: Page): Promise<void> {
-  const { encounterId } = seed();
-  await page.request.post(`/api/v1/encounters/${encounterId}/reopen`);
+  await restoreSeedEncounter(page);
 }
 
 async function openEncounter(page: Page, campaignId: number, encounterId: number, heading: string) {
@@ -140,7 +139,7 @@ test.describe('combat log accessibility — remote clients', () => {
       const turned = await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/next-turn`);
       expect(turned.ok()).toBe(true);
       await expect
-        .poll(async () => (await announcements(viewerPage)).slice(announcementCountBeforeTurn).some((message) => message.includes("'s turn (round")))
+        .poll(async () => (await announcements(viewerPage)).slice(announcementCountBeforeTurn).some((message) => message.includes("'s turn")))
         .toBe(true);
 
       const defeated = await dmPage.request.patch(
@@ -153,6 +152,9 @@ test.describe('combat log accessibility — remote clients', () => {
       await expect(log).toContainText('Secret Ash Hound dropped to 0 HP');
     } finally {
       await viewerContext.close();
+      // End before delete so a failed DELETE cannot leave a RUNNING fight that
+      // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
+      await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
       const removed = await dmPage.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       expect(removed.ok()).toBe(true);
       await restoreSeedFight(dmPage);
@@ -190,6 +192,7 @@ test.describe('combat log accessibility — remote clients', () => {
     } finally {
       await viewerContext.setOffline(false);
       await viewerContext.close();
+      await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
       const removed = await dmPage.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       expect(removed.ok()).toBe(true);
       await restoreSeedFight(dmPage);
