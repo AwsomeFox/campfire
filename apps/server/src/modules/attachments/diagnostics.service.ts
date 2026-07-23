@@ -207,6 +207,26 @@ function canonicalRelPath(row: { campaignId: number; id: number; mime: string })
  * multiple campaign directories (a realistic misplacement/duplicate failure
  * mode) and refuse to act nondeterministically on a possibly-wrong file.
  */
+/**
+ * Read a campaign directory's entries for the on-disk scan/lookup paths below.
+ * `ENOENT` (directory vanished between the parent listing and this read) is
+ * treated as "skip" (returns `null`); any other error — e.g. EACCES/EPERM,
+ * or a non-directory entry like ENOTDIR — is fail-closed: skipping it could
+ * produce a false "not found" for callers, so it's surfaced as a 503 that
+ * names the relative campaign directory rather than its absolute path.
+ */
+function readCampaignDirOrThrow(dirPath: string, dirName: string, contextSuffix: string): fs.Dirent[] | null {
+  try {
+    return fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return null;
+    throw new ServiceUnavailableException(
+      `Attachment storage subdirectory is unreadable or inaccessible (${code ?? 'unknown error'} in campaign directory ${dirName}); ${contextSuffix}`,
+    );
+  }
+}
+
 function findPrimaryAttachmentFilesOnDisk(
   root: string,
   attachmentId: number,
@@ -222,7 +242,7 @@ function findPrimaryAttachmentFilesOnDisk(
     if (code === 'ENOENT') return [];
     // Avoid leaking absolute host paths in admin API error responses.
     throw new ServiceUnavailableException(
-      `Attachment storage root is unreadable (${code ?? 'unknown error'}); cannot locate attachment files.`,
+      `Attachment storage root is unreadable or inaccessible (${code ?? 'unknown error'}); cannot locate attachment files.`,
     );
   }
 
@@ -231,20 +251,10 @@ function findPrimaryAttachmentFilesOnDisk(
   for (const dir of campaignDirs) {
     if (!dir.isDirectory()) continue;
     const dirPath = path.join(root, dir.name);
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code;
-      // Directory removed between root listing and this read — skip and continue.
-      if (code === 'ENOENT') continue;
-      // Fail closed like runDiagnostics: skipping an unreadable campaign dir can
-      // produce a false "file not found" for relink/quarantine-by-attachmentId.
-      // Use the campaign directory name (relative), not the absolute path.
-      throw new ServiceUnavailableException(
-        `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} in campaign directory ${dir.name}); cannot locate attachment files.`,
-      );
-    }
+    // Fail closed like runDiagnostics: skipping an unreadable campaign dir can
+    // produce a false "file not found" for relink/quarantine-by-attachmentId.
+    const entries = readCampaignDirOrThrow(dirPath, dir.name, 'cannot locate attachment files.');
+    if (entries === null) continue;
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (idPattern.test(entry.name)) {
@@ -289,25 +299,15 @@ export class DiagnosticsService {
       } catch (err) {
         const code = (err as NodeJS.ErrnoException)?.code;
         throw new ServiceUnavailableException(
-          `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); cannot run diagnostics.`,
+          `Attachment storage root is unreadable or inaccessible (${code ?? 'unknown error'}); cannot run diagnostics.`,
         );
       }
       for (const dir of campaignDirs) {
         if (!dir.isDirectory()) continue;
         const dirCampaignId = parseCampaignDirId(dir.name);
         const dirPath = path.join(root, dir.name);
-        let entries: fs.Dirent[];
-        try {
-          entries = fs.readdirSync(dirPath, { withFileTypes: true });
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException)?.code;
-          // Directory removed between root listing and this read — skip and continue.
-          if (code === 'ENOENT') continue;
-          // Use the campaign directory name (relative), not the absolute path.
-          throw new ServiceUnavailableException(
-            `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} in campaign directory ${dir.name}); cannot run diagnostics.`,
-          );
-        }
+        const entries = readCampaignDirOrThrow(dirPath, dir.name, 'cannot run diagnostics.');
+        if (entries === null) continue;
         for (const entry of entries) {
           if (!entry.isFile()) continue;
           totalDiskFiles++;

@@ -669,8 +669,14 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       // chmod-based permission revocation is unreliable on Windows.
       if (process.platform === 'win32') return;
 
+      // Use a dedicated campaign (not the shared fixtures) so that a chmod
+      // left in a bad state can't leak into unrelated tests.
+      const camp = await adminAgent.post('/api/v1/campaigns').send({ name: 'Diagnostics Unreadable Subdir' });
+      expect(camp.status).toBe(201);
+      const isolatedCampaignId = camp.body.id;
+
       const up = await adminAgent
-        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .post(`/api/v1/campaigns/${isolatedCampaignId}/attachments`)
         .field('kind', 'map')
         .attach('file', TINY_PNG, { filename: 'unreadable-subdir-relink.png', contentType: 'image/png' });
       expect(up.status).toBe(201);
@@ -679,7 +685,7 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       // Make the attachment's own campaign directory unreadable. Without
       // fail-closed lookup, readdir would skip it and report a false not-found;
       // with the fix it must map to 503 when EACCES is observable.
-      const campaignDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
+      const campaignDir = path.join(ctx.dataDir, 'uploads', String(isolatedCampaignId));
       const previousMode = fs.statSync(campaignDir).mode & 0o7777;
       try {
         fs.chmodSync(campaignDir, 0);
@@ -702,11 +708,14 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
           expect(fixRes.body.success).toBe(true);
         }
       } finally {
-        // Best-effort restore: a failure here shouldn't cascade into other tests.
         try {
           fs.chmodSync(campaignDir, previousMode);
-        } catch {
-          // Ignore — restricted filesystems may also refuse the restore.
+        } catch (restoreErr) {
+          // Isolated to `isolatedCampaignId` above, so a failed restore here
+          // can't leave shared fixtures unreadable for other tests — but log
+          // it with a clear cause instead of swallowing it silently.
+          // eslint-disable-next-line no-console
+          console.error(`Failed to restore mode on ${campaignDir} after test:`, restoreErr);
         }
       }
     });
