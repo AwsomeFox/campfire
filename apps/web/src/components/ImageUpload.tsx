@@ -221,6 +221,9 @@ export function ImageUpload({
   // The staged object URL we are responsible for revoking. Tracked alongside the
   // reducer state so we never lose the handle to revoke (issue #583 leak fix).
   const stagedUrlRef = useRef<string | null>(null);
+  // Drag-depth counter: incremented on dragenter, decremented on dragleave.
+  // Prevents flicker when the pointer crosses child element boundaries (#845).
+  const dragDepthRef = useRef(0);
   const [dragOver, setDragOver] = useState(false);
   const [state, dispatch] = useReducer(reduceUpload, initialUploadState);
 
@@ -246,6 +249,17 @@ export function ImageUpload({
         handle.current = null;
       }
     };
+  }, []);
+
+  // Reset drag state on window blur (e.g. user alt-tabs mid-drag). Without this
+  // the highlight stays stuck because the browser never fires dragleave (#845).
+  useEffect(() => {
+    function resetDrag() {
+      dragDepthRef.current = 0;
+      setDragOver(false);
+    }
+    window.addEventListener('blur', resetDrag);
+    return () => window.removeEventListener('blur', resetDrag);
   }, []);
 
   const shown = visiblePreview(state, previewUrl);
@@ -304,6 +318,7 @@ export function ImageUpload({
 
   function onDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
+    dragDepthRef.current = 0;
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (file) void doUpload(file);
@@ -357,9 +372,19 @@ export function ImageUpload({
         }}
         onDragOver={(e) => {
           e.preventDefault();
+        }}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          dragDepthRef.current++;
           setDragOver(true);
         }}
-        onDragLeave={() => setDragOver(false)}
+        onDragLeave={() => {
+          dragDepthRef.current--;
+          if (dragDepthRef.current <= 0) {
+            dragDepthRef.current = 0;
+            setDragOver(false);
+          }
+        }}
         onDrop={onDrop}
         role="button"
         tabIndex={isFailed ? -1 : 0}
