@@ -39,6 +39,7 @@ import {
   SESSION_ZERO_VEILS_LABEL,
 } from '../../components/formFieldLabels';
 import { Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
+import { PageTitle } from '../../components/PageTitle';
 
 interface Draft {
   lines: string[];
@@ -227,7 +228,7 @@ export default function SessionZeroPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h3 style={{ margin: '4px 0 0' }}>Session Zero</h3>
+        <PageTitle>Session Zero</PageTitle>
         <div style={{ flex: 1 }} />
         {isDm && !editing && !loading && (
           <Btn onClick={startEdit} style={{ fontSize: 13 }}>
@@ -273,7 +274,7 @@ export default function SessionZeroPage() {
           style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
         >
           <div style={{ marginTop: 10 }}>
-            <h3 id="access-support-heading" style={{ margin: 0 }}>Access support</h3>
+            <h2 id="access-support-heading" style={{ margin: 0, fontSize: '1.12rem' }}>Access support</h2>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13, lineHeight: 1.5 }}>
               Optional practical preferences that help participation. No diagnosis or explanation is needed, and sharing
               is never required. You own your submission and can change or delete it at any time.

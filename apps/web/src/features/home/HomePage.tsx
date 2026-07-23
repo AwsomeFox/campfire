@@ -25,6 +25,7 @@ import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../.
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
 import type { Campaign, PermanentDeletionResult, Role } from '@campfire/schema';
+import { PageTitle } from '../../components/PageTitle';
 
 /** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
 const COVERS = [
@@ -507,7 +508,7 @@ export function HomePage() {
   return (
     <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5">
       <div>
-        <h3 style={{ margin: 0 }}>Your campaigns</h3>
+        <PageTitle style={{ margin: 0 }}>Your campaigns</PageTitle>
         <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
           Everything on this server, one sign-in. Roles are per campaign. Opening a
           campaign resumes the matching module or your last place there.

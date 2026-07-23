@@ -58,7 +58,8 @@ test.describe('Layout skip link and route focus (#591)', () => {
 
     await page.locator('.cf-tabbar').getByRole('link', { name: 'Quests', exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/quests`));
-    await expect(page.locator(`#${MAIN_CONTENT_ID}`)).toBeFocused();
+    // Issue #649: Quests exposes a route-level h1, so route-change focus lands there.
+    await expect(page.getByRole('heading', { level: 1 })).toBeFocused();
   });
 
   test('in-page session tab changes keep focus on the activated tab', async ({ page }) => {

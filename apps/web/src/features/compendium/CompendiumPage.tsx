@@ -13,6 +13,7 @@ import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
+import { PageTitle } from '../../components/PageTitle';
 import {
   COMPENDIUM_CLEAR_FILTERS_LABEL,
   COMPENDIUM_SEARCH_ID,
@@ -249,7 +250,7 @@ export default function CompendiumPage() {
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 760 }}>
       <div className="flex items-start gap-2.5 flex-wrap">
         <div style={{ flex: 1, minWidth: 200 }}>
-          <h3 style={{ margin: '4px 0 0' }}>Compendium</h3>
+          <PageTitle>Compendium</PageTitle>
           <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12.5 }}>
             Everything from your installed rule systems — searchable, and one tap from play.
           </p>
