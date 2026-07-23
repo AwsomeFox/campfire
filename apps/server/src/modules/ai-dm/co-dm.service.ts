@@ -25,6 +25,8 @@ import { SettingsService } from '../settings/settings.service';
 import { ProposalRecordsService, type ProposableEntityType } from '../proposals/proposal-records.service';
 import { AiDmService } from './ai-dm.service';
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
+import { createAiProvider, type AiProvider } from './providers';
+import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 
 type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
 
@@ -69,6 +71,7 @@ export class CoDmService {
     private readonly records: ProposalRecordsService,
     private readonly audit: AuditService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
+    private readonly providerConfig: AiProviderConfigService,
   ) {}
 
   /** 403 unless the server-wide experimental flag is on — the same choke point as the AI DM seat. */
@@ -116,18 +119,47 @@ export class CoDmService {
 
     // Ask the provider for structured content. The persona (seat.instructions) is combined
     // with a target-specific "reply as JSON" directive; the DM's brief is the user turn.
-    const result = await this.provider.generate({
-      campaignId,
-      kind: input.target === 'recap' ? 'recap' : 'narrate',
-      prompt: input.prompt,
-      instructions: this.buildInstructions(seat.instructions, input.target, count),
-      model: execModel,
-      maxTokens,
-    });
+    //
+    // Issue #987: resolve the dynamically-configured provider (AiProviderConfigService →
+    // createAiProvider) when one exists, mirroring ScribeService's pattern. Without this,
+    // CoDmService always used the injected AI_DM_PROVIDER (NoopAiDmProvider by default),
+    // so a configured provider's drafts were served by the no-op scaffold — which fails
+    // JSON parsing (422). When no provider is configured, fall back to the legacy seam.
+    const instructions = this.buildInstructions(seat.instructions, input.target, count);
+    const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
+
+    let narration: string;
+    let tokensUsed: number;
+    let resolvedModel: string;
+
+    if (config) {
+      const aiProvider: AiProvider = createAiProvider(config);
+      const result = await aiProvider.generate({
+        system: instructions,
+        messages: [{ role: 'user', content: input.prompt }],
+        model: config.model,
+        maxTokens,
+      });
+      narration = result.text;
+      tokensUsed = result.usage.totalTokens;
+      resolvedModel = config.model;
+    } else {
+      const result = await this.provider.generate({
+        campaignId,
+        kind: input.target === 'recap' ? 'recap' : 'narrate',
+        prompt: input.prompt,
+        instructions,
+        model: execModel,
+        maxTokens,
+      });
+      narration = result.narration;
+      tokensUsed = result.tokensUsed;
+      resolvedModel = execModel;
+    }
 
     // Turn the provider text into validated proposal payloads for the target's entity type.
     const entityType = TARGET_ENTITY_TYPE[input.target];
-    const payloads = this.toPayloads(input.target, result.narration, count);
+    const payloads = this.toPayloads(input.target, narration, count);
 
     // Attribute the proposal to the AI seat + model, not the triggering DM (issue #313).
     // The label reflects the model that actually served the draft when a provider is
@@ -136,7 +168,7 @@ export class CoDmService {
     // informational label falls back to the legacy `seat.model` text the DM set. That label
     // is DISPLAY-ONLY: it never drives execution (execModel above is '' in this branch, and
     // the no-op provider ignores it).
-    const modelLabel = execModel || seat.model || 'unconfigured';
+    const modelLabel = resolvedModel || seat.model || 'unconfigured';
     const attribution = {
       proposer: `AI DM (${modelLabel})`,
       proposerUserId: `ai-dm:${campaignId}`,
@@ -148,8 +180,8 @@ export class CoDmService {
       proposals.push(await this.records.create(campaignId, entityType, null, 'create', payload, user, role, attribution));
     }
 
-    const tokensUsed = Math.max(0, Math.floor(result.tokensUsed));
-    const newTokensUsed = this.meterUsage(campaignId, seat.tokenBudget, tokensUsed);
+    const clampedTokens = Math.max(0, Math.floor(tokensUsed));
+    const newTokensUsed = this.meterUsage(campaignId, seat.tokenBudget, clampedTokens);
 
     await this.audit.log({
       actor: auditActor(user),

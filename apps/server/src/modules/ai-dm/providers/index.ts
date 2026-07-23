@@ -32,6 +32,9 @@ export type { OpenAiProviderOptions } from './openai-provider';
 export { AnthropicProvider } from './anthropic-provider';
 export type { AnthropicProviderOptions } from './anthropic-provider';
 
+export { GeminiProvider } from './gemini-provider';
+export type { GeminiProviderOptions } from './gemini-provider';
+
 export { MockAiProvider, mockTokenCount } from './mock-provider';
 export type { MockProviderOptions, MockResponse } from './mock-provider';
 
