@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionCreate, SessionUpdate, RECAP_TEMPLATE } from '@campfire/schema';
-import type { Session, SessionListItem, SessionAttendee, Role, Note, EncounterWithCombatants, PageParams } from '@campfire/schema';
+import type { Session, SessionListItem, SessionAttendee, Role, Note, EncounterWithCombatants, EncounterEvent, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, sessionAttendees, characters, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -51,7 +51,11 @@ function attendeeToDomain(row: typeof sessionAttendees.$inferSelect): SessionAtt
  */
 export interface RecapDraftSource {
   resolvedInbox: Pick<Note, 'body' | 'resolvedNote' | 'entityName'>[];
-  encounters: Pick<EncounterWithCombatants, 'name' | 'status' | 'combatants'>[];
+  // `events` (issue #1068) is the persisted per-encounter combat log — the round-by-round
+  // damage/heal/condition/death/turn trail — so a recap can narrate WHAT HAPPENED in the
+  // fight, not just who was in it. Optional so pure buildRecapDraft callers/tests that only
+  // seed the roster line stay valid; assembled sources (scribe + draft_session_recap) carry it.
+  encounters: (Pick<EncounterWithCombatants, 'name' | 'status' | 'combatants'> & { events?: EncounterEvent[] })[];
 }
 
 /** One line summarising an encounter for the Recap section seed. */
