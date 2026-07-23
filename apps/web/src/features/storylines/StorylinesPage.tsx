@@ -692,7 +692,7 @@ function BeatRow({
 
   return (
     <section
-      style={{ borderLeft: '2px solid var(--color-border)', paddingLeft: 10, display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}
+      style={{ borderLeft: '2px solid var(--color-divider, rgba(255,255,255,0.08))', paddingLeft: 10, display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}
       aria-labelledby={beatTitleId}
       {...entityTargetProps('beat', beat.id)}
     >
