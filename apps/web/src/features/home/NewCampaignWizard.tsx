@@ -67,18 +67,22 @@ export function NewCampaignWizard({
   }, []);
 
   useEffect(() => {
+    const previousTitle = document.title;
+    return () => {
+      document.title = previousTitle;
+    };
+  }, []);
+
+  useEffect(() => {
     const stepTitle = STEP_TITLES[step];
     document.title = `New campaign — ${stepTitle} · ${DEFAULT_DOCUMENT_TITLE}`;
-    return () => {
-      document.title = DEFAULT_DOCUMENT_TITLE;
-    };
   }, [step]);
 
   useEffect(() => {
     const prev = prevStepRef.current;
     prevStepRef.current = step;
     const id = window.requestAnimationFrame(() => {
-      stepHeadingRef.current?.focus();
+      stepHeadingRef.current?.focus({ preventScroll: true });
     });
     if (prev !== null && prev !== step) {
       announce(`${STEP_TITLES[step]}.`);
