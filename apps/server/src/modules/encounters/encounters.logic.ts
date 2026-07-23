@@ -300,22 +300,44 @@ export function generateEncounterGroup(opts: GenerateGroupOptions): GenerateGrou
 }
 
 /**
+ * Optional ruleset tiebreak for equal *non-null* initiative totals (issue #611).
+ * Adapters supply `RuleSystemAdapter.initiativeTiebreak`; when omitted, falls back to
+ * `sortOrder` ascending (legacy insertion-order behavior).
+ *
+ * Unrolled combatants (`initiative === null`) always keep `sortOrder` order — adapter
+ * DEX tiebreak must not reshuffle combatants that have not rolled yet.
+ */
+export type InitiativeTiebreak = (
+  a: Pick<Combatant, 'initMod' | 'sortOrder' | 'id'>,
+  b: Pick<Combatant, 'initMod' | 'sortOrder' | 'id'>,
+) => number;
+
+/**
  * Order combatants for display.
  * - `running`: initiative desc, nulls last (a just-added combatant with no
- *   initiative sinks to the bottom), tie-broken by sortOrder asc.
+ *   initiative sinks to the bottom); equal *non-null* totals use `tiebreak` when
+ *   provided (per-adapter DEX-desc / preserved-roll-order — issue #611), else
+ *   sortOrder asc. Null/null pairs always use sortOrder (never adapter DEX).
  * - otherwise (preparing/ended): plain sortOrder asc.
  * Returns a new array; the input is never mutated.
  */
-export function sortCombatants(rows: Combatant[], status: EncounterStatus): Combatant[] {
+export function sortCombatants(
+  rows: Combatant[],
+  status: EncounterStatus,
+  tiebreak?: InitiativeTiebreak,
+): Combatant[] {
   if (status !== 'running') {
     return [...rows].sort((a, b) => a.sortOrder - b.sortOrder);
   }
+  const breakTie: InitiativeTiebreak = tiebreak ?? ((a, b) => a.sortOrder - b.sortOrder);
   return [...rows].sort((a, b) => {
+    // Unrolled combatants: preserve insertion order even when an adapter tiebreak
+    // is supplied (do not sort by initMod/DEX before initiative is rolled).
     if (a.initiative === null && b.initiative === null) return a.sortOrder - b.sortOrder;
     if (a.initiative === null) return 1;
     if (b.initiative === null) return -1;
     if (a.initiative !== b.initiative) return b.initiative - a.initiative;
-    return a.sortOrder - b.sortOrder;
+    return breakTie(a, b);
   });
 }
 

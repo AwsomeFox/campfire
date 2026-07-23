@@ -25,6 +25,11 @@ import {
   unsupportedEncounterDifficulty,
   type EncounterDifficultyInput,
 } from './encounter-difficulty';
+import {
+  initModDescThenSortOrderAsc,
+  sortOrderAscTiebreak,
+  type InitiativeTiebreakCombatant,
+} from './initiative-tiebreak';
 
 export {
   DifficultyBand,
@@ -38,8 +43,11 @@ export {
   encounterMultiplier,
   computeDnd5eEncounterDifficulty,
   unsupportedEncounterDifficulty,
+  initModDescThenSortOrderAsc,
+  sortOrderAscTiebreak,
 };
 export type { EncounterDifficultyInput };
+export type { InitiativeTiebreakCombatant };
 
 // ---------- shared ----------
 export const Role = z.enum(['dm', 'player', 'viewer']);
@@ -1671,6 +1679,14 @@ export interface RuleSystemAdapter {
     representation?: AbilityRepresentation,
     level?: number,
   ): number;
+  /**
+   * Compare two combatants with equal initiative totals for running-order sort (issue #611).
+   * Return negative if `a` should act before `b`. Called only after initiative totals match
+   * (or both are null). 5e: higher DEX/`initMod` first, then `sortOrder` ascending as a
+   * stable fallback (no roll-off prompt — DM may manually reorder). PF2e: preserve
+   * roll/add order via `sortOrder` only (do not re-sort by DEX).
+   */
+  initiativeTiebreak(a: InitiativeTiebreakCombatant, b: InitiativeTiebreakCombatant): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
@@ -1774,6 +1790,10 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     const dex = dnd5eDexScore(abilities);
     return dex === null ? 0 : resolveAbilityModifier(this, dex, representation);
   },
+  // Issue #611: on equal initiative totals, higher DEX (stored as initMod) goes first.
+  // Equal DEX falls back to sortOrder (stable insertion order). A DM roll-off / reorder
+  // UI is out of scope for this PR — the DM can manually set initiative or reorder.
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   // The combat-UI condition vocabulary is the canonical 5e list (issue #111's single
   // source of truth), not a separate hand-maintained subset. This is what every 5e
   // surface — character sheet, encounter tracker, compendium — offers as suggestions.
@@ -1968,6 +1988,9 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
     // Agility is already the native attribute value (no score→mod conversion).
     return openLegendAgility(abilities);
   },
+  // Open Legend initiative is Agility-monotonic; on a tied total, higher Agility (initMod)
+  // goes first, then sortOrder — same shape as the 5e DEX-desc default (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: OPEN_LEGEND_BANES_BOONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const attributes = (d.attributes ?? d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
@@ -2253,6 +2276,9 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     }
     return wisMod;
   },
+  // Issue #611: PF2e keeps tied combatants in preserved roll/add order (sortOrder).
+  // Do NOT re-sort by DEX/initMod after equal initiative totals.
+  initiativeTiebreak: sortOrderAscTiebreak,
   conditions: PF2E_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     // PF2e statblocks list ability MODIFIERS (Str +4), not scores; the importer stores them

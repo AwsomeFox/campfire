@@ -1,4 +1,5 @@
 import type { Combatant, EncounterEvent, EncounterStatus } from '@campfire/schema';
+import { Dnd5eAdapter, Pf2eAdapter } from '@campfire/schema';
 import {
   abilityMod,
   sortCombatants,
@@ -83,7 +84,7 @@ describe('encounters — sortCombatants', () => {
     expect(sortCombatants(rows, 'running').map((c) => c.id)).toEqual([2, 1]);
   });
 
-  it('running: ties break by sortOrder ascending', () => {
+  it('running: ties break by sortOrder ascending when no adapter tiebreak is supplied', () => {
     const rows = [
       combatant({ id: 1, initiative: 15, sortOrder: 2 }),
       combatant({ id: 2, initiative: 15, sortOrder: 1 }),
@@ -104,6 +105,65 @@ describe('encounters — sortCombatants', () => {
     const before = rows.map((c) => c.id);
     sortCombatants(rows, 'preparing');
     expect(rows.map((c) => c.id)).toEqual(before);
+  });
+
+  // Issue #611 — per-adapter initiative tiebreak on equal totals.
+  describe('adapter tiebreak (issue #611)', () => {
+    it('5e: higher initMod (DEX) wins a tied initiative, ignoring later sortOrder', () => {
+      // Same total 14; id 1 was added first (sortOrder 0) but has lower DEX.
+      // Without DEX tiebreak, sortOrder would put id 1 first — wrong for 5e.
+      const rows = [
+        combatant({ id: 1, initiative: 14, initMod: 1, sortOrder: 0 }),
+        combatant({ id: 2, initiative: 14, initMod: 3, sortOrder: 1 }),
+      ];
+      expect(
+        sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id),
+      ).toEqual([2, 1]);
+    });
+
+    it('5e: equal initMod falls back to sortOrder ascending (stable / DM-reorder fallback)', () => {
+      const rows = [
+        combatant({ id: 1, initiative: 14, initMod: 2, sortOrder: 2 }),
+        combatant({ id: 2, initiative: 14, initMod: 2, sortOrder: 0 }),
+        combatant({ id: 3, initiative: 14, initMod: 2, sortOrder: 1 }),
+      ];
+      expect(
+        sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id),
+      ).toEqual([2, 3, 1]);
+    });
+
+    it('PF2e: preserves sortOrder on a tie — does NOT re-sort by initMod/DEX', () => {
+      // Higher initMod on the later-added combatant must NOT jump ahead in PF2e.
+      const rows = [
+        combatant({ id: 1, initiative: 18, initMod: 1, sortOrder: 0 }),
+        combatant({ id: 2, initiative: 18, initMod: 5, sortOrder: 1 }),
+      ];
+      expect(
+        sortCombatants(rows, 'running', (a, b) => Pf2eAdapter.initiativeTiebreak(a, b)).map((c) => c.id),
+      ).toEqual([1, 2]);
+    });
+
+    it('PF2e: equal initiative keeps insertion/roll order even when initMods differ wildly', () => {
+      const rows = [
+        combatant({ id: 3, initiative: 10, initMod: 9, sortOrder: 2 }),
+        combatant({ id: 1, initiative: 10, initMod: -1, sortOrder: 0 }),
+        combatant({ id: 2, initiative: 10, initMod: 4, sortOrder: 1 }),
+      ];
+      expect(
+        sortCombatants(rows, 'running', (a, b) => Pf2eAdapter.initiativeTiebreak(a, b)).map((c) => c.id),
+      ).toEqual([1, 2, 3]);
+    });
+
+    it('5e: unrolled (null/null) combatants keep sortOrder — adapter DEX must not reshuffle', () => {
+      // Higher DEX on the later-added unrolled combatant must NOT jump ahead before roll.
+      const rows = [
+        combatant({ id: 1, initiative: null, initMod: 1, sortOrder: 0 }),
+        combatant({ id: 2, initiative: null, initMod: 5, sortOrder: 1 }),
+      ];
+      expect(
+        sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id),
+      ).toEqual([1, 2]);
+    });
   });
 });
 

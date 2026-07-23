@@ -35,6 +35,36 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     await harness.close();
   });
 
+  it('returns default config, lists jobs, and updates an existing config', async () => {
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Config And Jobs');
+
+    const defaults = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe`).set(dm);
+    expect(defaults.status).toBe(200);
+    expect(defaults.body.postSession).toBe(false);
+    expect(defaults.body.cron).toBe(false);
+    expect(defaults.body.budgetPerRun).toBe(2000);
+
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await seedResolvedInbox(harness, campaignId, 'The party rested at the inn.');
+    harness.script({ text: 'A quiet night at the inn.' });
+    const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(run.status).toBe(201);
+
+    const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs?limit=3`).set(dm);
+    expect(jobs.status).toBe(200);
+    expect(jobs.body.length).toBeGreaterThan(0);
+    expect(jobs.body[0].trigger).toBe('on_demand');
+
+    const updated = await request(harness.server)
+      .put(`${API}/campaigns/${campaignId}/scribe`)
+      .set(dm)
+      .send({ cron: true, budgetPerRun: 1500 });
+    expect(updated.status).toBe(200);
+    expect(updated.body.cron).toBe(true);
+    expect(updated.body.budgetPerRun).toBe(1500);
+  });
+
   it('#877 sends only AI-consented support to the provider and drops it after revocation', async () => {
     await harness.enableExperimental();
     const campaignId = await harness.createCampaign('Scribe Support Consent');
