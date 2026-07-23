@@ -60,6 +60,11 @@ import {
   type CombatLogAnnouncementCursor,
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
+import {
+  deleteConfirmCopy,
+  dmLifecycleActions,
+  isLifecycleConfirmValid,
+} from './encounterLifecycleActions';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -825,8 +830,18 @@ export default function RunSessionPage() {
   const rollInitiative = () => runControl.mutate('roll-initiative');
   const startEncounter = () => runControl.mutate('start');
   const nextTurn = () => runControl.mutate('next-turn');
-  const endEncounter = () => runControl.mutate('end', { onSuccess: () => setConfirmEnd(false) });
-  const reopenEncounter = () => runControl.mutate('reopen', { onSuccess: () => setConfirmReopen(false) });
+  // Close the confirm on success *or* failure so a rejected End (e.g. stale
+  // preparing status) does not leave the modal parked over the error banner (#420).
+  const endEncounter = () =>
+    runControl.mutate('end', {
+      onSuccess: () => setConfirmEnd(false),
+      onError: () => setConfirmEnd(false),
+    });
+  const reopenEncounter = () =>
+    runControl.mutate('reopen', {
+      onSuccess: () => setConfirmReopen(false),
+      onError: () => setConfirmReopen(false),
+    });
   const deleteEncounter = () => deleteEncounterMut.mutate();
 
   // Issue #702: how many combatants still need an initiative roll. Used to keep the
@@ -841,6 +856,16 @@ export default function RunSessionPage() {
   // to 'running' with nobody in the turn order). Mirror that here so the DM sees a
   // disabled control with an explanation instead of a round-trip 400.
   const hasNoCombatants = encounter ? encounter.combatants.length === 0 : true;
+
+  // Issue #420: drop confirm dialogs that the current status no longer allows
+  // (e.g. End left open after a peer/SSE transition out of running).
+  const encounterStatus = encounter?.status;
+  useEffect(() => {
+    if (!encounterStatus) return;
+    if (!isLifecycleConfirmValid('end', encounterStatus)) setConfirmEnd(false);
+    if (!isLifecycleConfirmValid('reopen', encounterStatus)) setConfirmReopen(false);
+    if (!isLifecycleConfirmValid('delete', encounterStatus)) setConfirmDelete(false);
+  }, [encounterStatus]);
 
   const removeCombatant = (combatantId: number) => {
     setActionError(null);
@@ -994,6 +1019,10 @@ export default function RunSessionPage() {
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
   const currentCombatantId = encounter.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
+  // Issue #420: DM header actions come from an explicit lifecycle matrix (not
+  // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
+  const lifecycle = dmLifecycleActions(encounter.status);
+  const deleteCopy = deleteConfirmCopy(encounter.status);
 
   return (
     <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
@@ -1061,7 +1090,7 @@ export default function RunSessionPage() {
             >
               <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
             </Btn>
-            {encounter.status === 'preparing' && (
+            {lifecycle.rollInitiative && lifecycle.start && (
               <>
                 {/* Issue #702: the server treats a fully-rolled roster as a no-op (no
                     write, no audit), so the button must reflect that — disabled when
@@ -1092,7 +1121,7 @@ export default function RunSessionPage() {
                 </div>
               </>
             )}
-            {encounter.status === 'running' && (
+            {lifecycle.rollInitiative && lifecycle.nextTurn && (
               <>
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
                     keep Roll initiative reachable so the DM can fill them (issue #54).
@@ -1112,19 +1141,19 @@ export default function RunSessionPage() {
                 </Btn>
               </>
             )}
-            {encounter.status !== 'ended' && (
+            {lifecycle.end && (
               <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
-            {encounter.status === 'ended' && (
+            {lifecycle.reopen && (
               <Btn ghost disabled={headerBusy} onClick={() => setConfirmReopen(true)}>
                 Reopen
               </Btn>
             )}
-            {(encounter.status === 'ended' || encounter.status === 'preparing') && (
+            {lifecycle.delete && (
               <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmDelete(true)}>
-                Delete
+                {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
               </Btn>
             )}
           </div>
@@ -1278,9 +1307,17 @@ export default function RunSessionPage() {
       )}
       {confirmDelete && (
         <ConfirmDialog
-          title="Delete this encounter?"
-          body="This cannot be undone."
-          confirmLabel={deleteEncounterMut.isPending ? 'Deleting…' : 'Delete encounter'}
+          title={deleteCopy.title}
+          body={deleteCopy.body}
+          confirmLabel={
+            deleteEncounterMut.isPending
+              ? encounter.status === 'preparing'
+                ? 'Canceling…'
+                : 'Deleting…'
+              : encounter.status === 'preparing'
+                ? 'Cancel preparation'
+                : 'Delete encounter'
+          }
           busy={deleteEncounterMut.isPending}
           onConfirm={deleteEncounter}
           onCancel={() => setConfirmDelete(false)}
