@@ -14,7 +14,7 @@ import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
-import { useAnnounce } from '../../components/Announcer';
+import { useAnnounce, useClearAnnouncements } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 
 function FlameMark({ size = 44 }: { size?: number }) {
@@ -205,6 +205,7 @@ export function LoginPage() {
   const { status, loading } = useAuthStatus();
   const { me, ready, refresh } = useAuth();
   const announce = useAnnounce();
+  const clearAnnouncements = useClearAnnouncements();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -252,6 +253,15 @@ export function LoginPage() {
     announcedSignOut.current = true;
     announce(t('nav.signedOutAnnouncement'), { assertive: true });
   }, [cameFromSignOut, announce, t]);
+
+  // Leaving /login (sign-in success, SSO bounce, etc.) must wipe the assertive
+  // "Signed out" confirmation. AuthedLayout's scope hook also clears on first
+  // mount; this covers the LoginPage-owned announcement path directly (#434).
+  useLayoutEffect(() => {
+    return () => {
+      clearAnnouncements();
+    };
+  }, [clearAnnouncements]);
 
   // React Router keeps this page mounted for query-only navigation. Mirror the
   // URL on back/forward and recovery-page navigation instead of treating the

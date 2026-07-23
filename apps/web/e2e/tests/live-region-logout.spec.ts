@@ -97,8 +97,12 @@ test.describe('live-region clear on logout / identity change (issue #434)', () =
 
     await signIn(page, 'player');
     // Player lands authed — prior DM encounter text must not reappear in the
-    // app-root live regions (AnnounceProvider outlives the router).
+    // app-root live regions (AnnounceProvider outlives the router). The #506
+    // "Signed out" assertive confirmation must also be gone once /login unmounts
+    // / AuthedLayout mounts (first-mount scope clear).
     await expect(politeRegion(page)).toHaveText('');
+    await expect(assertiveRegion(page)).toHaveText('');
+    await expect(assertiveRegion(page)).not.toContainText('Signed out');
     await expect(assertiveRegion(page)).not.toContainText('Encounter secret leak');
     await expect(assertiveRegion(page)).not.toContainText(/Round 1/);
     await expect(page.locator('body')).not.toContainText("Goblin Boss's turn");

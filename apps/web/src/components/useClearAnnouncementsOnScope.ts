@@ -6,6 +6,11 @@
  * turn") otherwise survives into /login and the next user's session. useLayoutEffect
  * runs before paint so public layouts never briefly contain the prior message.
  *
+ * First mount also clears: LoginPage may leave an assertive "Signed out"
+ * confirmation in the app-root announcer, and a freshly mounted AuthedLayout
+ * would otherwise skip the scope-change path (prev is null) and keep that alert
+ * into the next authenticated session.
+ *
  * Scope-change and unmount clears are split into separate effects so a dependency
  * change does not clear twice (cleanup-before-rerun + body clear).
  */
@@ -20,11 +25,11 @@ export function useClearAnnouncementsOnScope(
   const clear = useClearAnnouncements();
   const prevRef = useRef<AnnounceScope | null>(null);
 
-  // Clear when identity / campaign scope changes (not on first mount).
+  // Clear on first mount and whenever identity / campaign scope changes.
   useLayoutEffect(() => {
     const next: AnnounceScope = { userId, campaignId };
     const prev = prevRef.current;
-    if (prev && announceScopeChanged(prev, next)) {
+    if (prev == null || announceScopeChanged(prev, next)) {
       clear();
     }
     prevRef.current = next;
