@@ -218,6 +218,7 @@ export default function PlayerDisplayPage() {
     setEventStatus('connecting');
     setDisplayStale(false);
     setLoading(true);
+    setIncludeAlumni(false);
     void load();
     return () => {
       sequencer.invalidate();

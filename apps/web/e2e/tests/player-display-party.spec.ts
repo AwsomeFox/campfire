@@ -21,31 +21,40 @@ async function login(ctx: APIRequestContext) {
 
 async function createCharacter(baseURL: string, campaignId: number, name: string): Promise<number> {
   const ctx = await request.newContext({ baseURL });
-  await login(ctx);
-  const res = await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
-    data: { name, className: 'Rogue', level: 2, status: 'active' },
-  });
-  if (!res.ok()) throw new Error(`create character -> ${res.status()}: ${await res.text()}`);
-  const body = await res.json();
-  await ctx.dispose();
-  return body.id as number;
+  try {
+    await login(ctx);
+    const res = await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name, className: 'Rogue', level: 2, status: 'active' },
+    });
+    if (!res.ok()) throw new Error(`create character -> ${res.status()}: ${await res.text()}`);
+    const body = await res.json();
+    return body.id as number;
+  } finally {
+    await ctx.dispose();
+  }
 }
 
 async function patchStatus(baseURL: string, id: number, status: 'active' | 'retired' | 'dead' | 'inactive') {
   const ctx = await request.newContext({ baseURL });
-  await login(ctx);
-  const res = await ctx.patch(`/api/v1/characters/${id}`, { data: { status } });
-  if (!res.ok()) throw new Error(`patch status -> ${res.status()}: ${await res.text()}`);
-  await ctx.dispose();
+  try {
+    await login(ctx);
+    const res = await ctx.patch(`/api/v1/characters/${id}`, { data: { status } });
+    if (!res.ok()) throw new Error(`patch status -> ${res.status()}: ${await res.text()}`);
+  } finally {
+    await ctx.dispose();
+  }
 }
 
 async function trashCharacter(baseURL: string, id: number) {
   const ctx = await request.newContext({ baseURL });
-  await login(ctx);
-  const res = await ctx.delete(`/api/v1/characters/${id}`);
-  await ctx.dispose();
-  if (!res.ok() && res.status() !== 404) {
-    throw new Error(`trash ${id} -> ${res.status()}`);
+  try {
+    await login(ctx);
+    const res = await ctx.delete(`/api/v1/characters/${id}`);
+    if (!res.ok() && res.status() !== 404) {
+      throw new Error(`trash ${id} -> ${res.status()}`);
+    }
+  } finally {
+    await ctx.dispose();
   }
 }
 
