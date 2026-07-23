@@ -91,7 +91,9 @@ describe('mcp oauth authorization flow (e2e)', () => {
   }
 
   /** Walk the authorize (consent) + token exchange, returning the token response. */
-  async function runFlow(opts: { clientId: string; role?: string; campaignId?: string } = { clientId: '' }): Promise<{
+  async function runFlow(
+    opts: { clientId: string; role?: string; campaignId?: string; scope?: string } = { clientId: '' },
+  ): Promise<{
     access_token: string;
     refresh_token: string;
     verifier: string;
@@ -110,6 +112,7 @@ describe('mcp oauth authorization flow (e2e)', () => {
       code_challenge_method: 'S256',
       state,
       resource: `${baseUrl}/mcp`,
+      ...(opts.scope ? { scope: opts.scope } : {}),
     });
     expect(getRes.status).toBe(200);
     expect(getRes.text).toContain('Connect to Campfire');
@@ -126,6 +129,7 @@ describe('mcp oauth authorization flow (e2e)', () => {
       role: opts.role ?? 'dm',
       campaign_id: opts.campaignId ?? '',
       decision: 'approve',
+      ...(opts.scope ? { scope: opts.scope } : {}),
     });
     expect(postRes.status).toBe(302);
     const redirect = new URL(postRes.headers.location);
@@ -389,6 +393,138 @@ describe('mcp oauth authorization flow (e2e)', () => {
     expect(write.isError).toBe(true);
     const err = parseResult(write) as { error: { status: number } };
     expect(err.error.status).toBe(403);
+  });
+
+  // ---------- OAuth scope enforces authority (#680) ----------
+  //
+  // The advertised scope (what the user consents to) must be the single source
+  // of truth for the token's authority. The consent form's role selector may
+  // only NARROW the requested scope further — never widen past it. Before #680
+  // a request for scope=viewer with role=dm (the form default) yielded a token
+  // that REPORTED viewer while carrying DM authority.
+
+  it('the consent form role selector is capped by the requested scope (#680)', async () => {
+    const clientId = await registerClient();
+    const viewerPkce = pkce();
+    const dmPkce = pkce();
+
+    // Request viewer scope; the consent page must NOT offer dm/player.
+    const page = await agent.get('/oauth/authorize').query({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      code_challenge: viewerPkce.challenge,
+      code_challenge_method: 'S256',
+      scope: 'viewer',
+    });
+    expect(page.status).toBe(200);
+    expect(page.text).toContain('Role cap fixed at');
+    expect(page.text).toContain('viewer');
+    expect(page.text).not.toContain('value="dm"');
+    expect(page.text).not.toContain('value="player"');
+
+    // Request dm scope; the consent page must offer all three with dm selected.
+    const dmPage = await agent.get('/oauth/authorize').query({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      code_challenge: dmPkce.challenge,
+      code_challenge_method: 'S256',
+      scope: 'dm',
+    });
+    expect(dmPage.status).toBe(200);
+    expect(dmPage.text).toContain('<option value="dm" selected>');
+    expect(dmPage.text).toContain('<option value="player">');
+    expect(dmPage.text).toContain('<option value="viewer">');
+  });
+
+  it('scope=viewer caps authority even when the consent form posts role=dm (#680 regression)', async () => {
+    const clientId = await registerClient();
+    // The classic privilege mismatch: request viewer scope, post role=dm.
+    // The resulting token MUST be viewer-capped, not DM-capped.
+    const tokens = await runFlow({ clientId, scope: 'viewer', role: 'dm' });
+    const client = await mcpClient(tokens.access_token);
+
+    const read = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
+    expect(read.isError).toBeFalsy();
+
+    const write = await client.callTool({ name: 'create_quest', arguments: { campaignId, title: 'nope', body: 'nope' } });
+    expect(write.isError).toBe(true);
+    const err = parseResult(write) as { error: { status: number } };
+    expect(err.error.status).toBe(403);
+  });
+
+  it('scope=player caps authority even when the consent form posts role=dm (#680)', async () => {
+    const clientId = await registerClient();
+    const tokens = await runFlow({ clientId, scope: 'player', role: 'dm' });
+    const client = await mcpClient(tokens.access_token);
+
+    // Player can read.
+    const read = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
+    expect(read.isError).toBeFalsy();
+
+    // Player cannot do DM-only writes (create_quest is DM-only).
+    const write = await client.callTool({ name: 'create_quest', arguments: { campaignId, title: 'nope', body: 'nope' } });
+    expect(write.isError).toBe(true);
+    const err = parseResult(write) as { error: { status: number } };
+    expect(err.error.status).toBe(403);
+  });
+
+  it('scope=dm grants DM authority (the role selector and scope agree)', async () => {
+    const clientId = await registerClient();
+    const tokens = await runFlow({ clientId, scope: 'dm', role: 'dm' });
+    const client = await mcpClient(tokens.access_token);
+
+    // DM can write canon directly.
+    const write = await client.callTool({ name: 'create_quest', arguments: { campaignId, title: '#680 dm quest', body: 'body' } });
+    expect(write.isError).toBeFalsy();
+  });
+
+  it('mcp-only scope (no role scope) defaults to viewer authority, not DM (#680)', async () => {
+    const clientId = await registerClient();
+    // 'mcp' alone grants MCP access, not campaign authority — the token must
+    // land at viewer, the least-privilege default. Previously the role-less
+    // path fell through to the 'dm' form default and produced a DM token.
+    const tokens = await runFlow({ clientId, scope: 'mcp' });
+    const client = await mcpClient(tokens.access_token);
+
+    const read = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
+    expect(read.isError).toBeFalsy();
+
+    const write = await client.callTool({ name: 'create_quest', arguments: { campaignId, title: 'nope', body: 'nope' } });
+    expect(write.isError).toBe(true);
+    const err = parseResult(write) as { error: { status: number } };
+    expect(err.error.status).toBe(403);
+  });
+
+  it('the granted scope is echoed in the token response', async () => {
+    const clientId = await registerClient();
+    const { verifier, challenge } = pkce();
+    const state = randomBytes(8).toString('hex');
+    const scope = 'mcp viewer';
+
+    const postRes = await agent.post('/oauth/authorize').type('form').send({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      state,
+      scope,
+      decision: 'approve',
+    });
+    expect(postRes.status).toBe(302);
+    const code = new URL(postRes.headers.location).searchParams.get('code');
+
+    const tokenRes = await request(server).post('/oauth/token').type('form').send({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: REDIRECT_URI,
+      client_id: clientId,
+      code_verifier: verifier,
+    });
+    expect(tokenRes.status).toBe(200);
+    expect(tokenRes.body.scope).toBe(scope);
   });
 
   it('binding a token to a campaign the user cannot access is rejected on the consent form', async () => {
