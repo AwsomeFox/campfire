@@ -667,8 +667,10 @@ export class DiagnosticsService {
       fs.accessSync(root, fs.constants.R_OK | fs.constants.X_OK);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
+      // Avoid leaking the absolute host path in admin API error responses,
+      // matching the other unreadable-storage error messages in this file.
       throw new ServiceUnavailableException(
-        `Attachment storage is unavailable (${code ?? 'unknown error'} at ${root}); cannot run diagnostics.`,
+        `Attachment storage is unavailable or inaccessible (${code ?? 'unknown error'}); cannot run diagnostics.`,
       );
     }
   }
