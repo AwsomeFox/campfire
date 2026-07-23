@@ -689,6 +689,65 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     for (const m of matches) expect(m.type).toBe('monster');
   });
 
+  it('lookup_rule scopes to a single pack via the pack filter (issue #717)', async () => {
+    // Two uploaded packs whose entries share the search token "IsoGrapple" but live in
+    // different systems. Without a pack filter the search sees both; with `pack` set it
+    // sees only the named system — the multi-pack isolation property campaign lookups
+    // rely on. (Distinct names let us tell them apart since lookup_rule only retains the
+    // body of the top match.)
+    const packA = {
+      source: 'upload' as const,
+      pack: { slug: 'iso-a-srd', name: 'Iso A SRD', version: '1.0', license: 'OGL 1.0a', sourceUrl: 'https://example.com/a' },
+      entries: [{ slug: 'iso-a-grapple', name: 'IsoGrapple Alpha', type: 'condition', body: 'Iso A grapple body.' }],
+    };
+    const packB = {
+      source: 'upload' as const,
+      pack: { slug: 'iso-b-srd', name: 'Iso B SRD', version: '1.0', license: 'OGL 1.0a', sourceUrl: 'https://example.com/b' },
+      entries: [{ slug: 'iso-b-grapple', name: 'IsoGrapple Beta', type: 'condition', body: 'Iso B grapple body.' }],
+    };
+    const aRes = await dmAgent.post('/api/v1/rules/packs/upload').send(packA);
+    const bRes = await dmAgent.post('/api/v1/rules/packs/upload').send(packB);
+    expect(aRes.status).toBe(202);
+    expect(bRes.status).toBe(202);
+    const poll = async (id: string) => {
+      const start = Date.now();
+      for (;;) {
+        const job = await dmAgent.get(`/api/v1/rules/packs/install-jobs/${id}`);
+        if (job.body.status === 'completed' || job.body.status === 'failed') return job.body;
+        if (Date.now() - start > 10_000) throw new Error(`job ${id} did not finish`);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+    const aJob = await poll(aRes.body.id);
+    const bJob = await poll(bRes.body.id);
+    expect(aJob.status).toBe('completed');
+    expect(bJob.status).toBe('completed');
+
+    try {
+      const client = await mcpClient(viewerToken);
+
+      // No pack filter → entries from BOTH systems appear.
+      const both = await client.callTool({ name: 'lookup_rule', arguments: { query: 'IsoGrapple' } });
+      expect(both.isError).toBeFalsy();
+      const bothNames = (parseResult(both) as Array<{ name: string }>).map((m) => m.name);
+      expect(bothNames).toContain('IsoGrapple Alpha');
+      expect(bothNames).toContain('IsoGrapple Beta');
+
+      // Pack filter → only the named system's entry appears.
+      const scoped = await client.callTool({ name: 'lookup_rule', arguments: { query: 'IsoGrapple', pack: 'iso-a-srd' } });
+      expect(scoped.isError).toBeFalsy();
+      const scopedMatches = parseResult(scoped) as Array<{ name: string; body?: string }>;
+      expect(scopedMatches.some((m) => m.name === 'IsoGrapple Alpha')).toBe(true);
+      expect(scopedMatches.some((m) => m.name === 'IsoGrapple Beta')).toBe(false);
+      // Top match retains its body — and it is pack A's body, never pack B's.
+      expect(scopedMatches[0].body ?? '').toContain('Iso A grapple body');
+      expect((scopedMatches[0].body ?? '')).not.toContain('Iso B grapple body');
+    } finally {
+      await dmAgent.delete(`/api/v1/rules/packs/${aJob.pack.id}`);
+      await dmAgent.delete(`/api/v1/rules/packs/${bJob.pack.id}`);
+    }
+  });
+
   it('get_ai_dm_seat redacts DM instructions (plot secrets) for a non-DM caller (issue #261)', async () => {
     // Enable the experimental feature (admin) and configure the seat with a private
     // steering prompt via REST — this is where plot secrets live.

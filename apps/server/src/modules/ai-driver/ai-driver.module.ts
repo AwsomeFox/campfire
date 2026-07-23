@@ -7,6 +7,8 @@ import { McpModule } from '../mcp/mcp.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config.module';
 import { SessionZeroModule } from '../session-zero/session-zero.module';
+import { CampaignsModule } from '../campaigns/campaigns.module';
+import { RulesModule } from '../rules/rules.module';
 import { AiDriverService } from './ai-driver.service';
 import { AiDriverController } from './ai-driver.controller';
 import { AiDmStreamService } from './ai-driver-stream.service';
@@ -28,6 +30,10 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
  *
  * AI_PROVIDER_RESOLVER is a DI token so tests (#318 harness) can swap in a resolver
  * that returns the deterministic mock provider — the whole loop then runs offline.
+ *
+ * CampaignsModule + RulesModule feed the #717 campaign-scoped rules-lookup lever: the
+ * driver resolves the campaign's active rule system (ruleSystem slug → RulePack) and
+ * scopes compendium search to that single pack.
  */
 @Module({
   imports: [
@@ -39,6 +45,8 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
     NotificationsModule,
     AiProviderConfigModule,
     SessionZeroModule,
+    CampaignsModule,
+    RulesModule,
   ],
   controllers: [AiDriverController],
   providers: [

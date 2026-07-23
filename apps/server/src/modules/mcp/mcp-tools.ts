@@ -904,10 +904,27 @@ export class McpToolsService {
       server,
       'lookup_rule',
       'Search installed rule packs (spells, monsters, items, conditions, etc.) for a rules question. Returns up to 5 ' +
-        'matches; the top match includes its full body text so the caller can quote/cite it directly.',
-      { query: z.string().min(1).max(200).describe('Free-text search query'), type: RuleEntryType.optional().describe('Filter by entry type') },
-      async ({ query, type }) => {
-        const results = await this.rules.search({ q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined }, 5);
+        'matches; the top match includes its full body text so the caller can quote/cite it directly. Pass `pack` ' +
+        '(a rule pack slug from list_rule_packs) to scope the search to a single rule system — the campaign-scoped ' +
+        'path the AI table uses for its rules help (issue #717), so a multi-pack server answers a 5e question from ' +
+        'the 5e pack, not whichever pack happens to match first.',
+      {
+        query: z.string().min(1).max(200).describe('Free-text search query'),
+        type: RuleEntryType.optional().describe('Filter by entry type'),
+        pack: z
+          .string()
+          .min(1)
+          .max(160)
+          .optional()
+          .describe(
+            'Filter to a single installed rule pack by slug (e.g. "open5e-srd", "pf2e-srd") — the campaign-scoped path (issue #717).',
+          ),
+      },
+      async ({ query, type, pack }) => {
+        const results = await this.rules.search(
+          { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined },
+          5,
+        );
         return results.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
       },
     );
