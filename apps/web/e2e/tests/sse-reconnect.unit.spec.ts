@@ -158,6 +158,11 @@ test.describe('sseReconnect helpers (#800)', () => {
     expect(sseBlockData(': keepalive\n')).toBe('');
   });
 
+  test('sseBlockData strips CRLF line endings', () => {
+    expect(sseBlockData('data: {"a":1}\r\ndata: {"b":2}\r\n')).toBe('{"a":1}\n{"b":2}');
+    expect(sseBlockData('data: {"x":true}\r\n')).toBe('{"x":true}');
+  });
+
   test('sseAuthHeaders includes accept + optional dev overrides', () => {
     const storage = {
       getItem(key: string) {
@@ -276,24 +281,63 @@ test.describe('startSseReconnectLoop — reconnect / abort / unmount (#800)', ()
   test('401 stops the loop without scheduling further retries', async () => {
     const fake = createFakeClock();
     let connects = 0;
+    let bodyCancelled = false;
     const statuses: SseStreamStatus[] = [];
     const loop = startSseReconnectLoop({
       url: 'http://example.test/events',
       clock: fake.clock,
       fetchFn: async () => {
         connects += 1;
-        return new Response(null, { status: 401 });
+        const body = new ReadableStream({
+          start() {
+            /* unconsumed body — must be cancelled on 401 */
+          },
+          cancel() {
+            bodyCancelled = true;
+          },
+        });
+        return new Response(body, { status: 401 });
       },
       onData: () => undefined,
       onStatusChange: (s) => statuses.push(s),
     });
     await waitFor(() => statuses.includes('stopped'), fake);
     expect(connects).toBe(1);
+    expect(bodyCancelled).toBe(true);
     expect(fake.pendingCount).toBe(0);
     fake.flush();
     await Promise.resolve();
     expect(connects).toBe(1);
     loop.dispose();
+  });
+
+  test('failed connect cancels an unconsumed response body', async () => {
+    const fake = createFakeClock();
+    let bodyCancelled = false;
+    let connects = 0;
+
+    const loop = startSseReconnectLoop({
+      url: 'http://example.test/events',
+      clock: fake.clock,
+      fetchFn: async () => {
+        connects += 1;
+        const body = new ReadableStream({
+          start() {
+            /* hang — dispose before read */
+          },
+          cancel() {
+            bodyCancelled = true;
+          },
+        });
+        return new Response(body, { status: 200 });
+      },
+      onData: () => undefined,
+    });
+
+    await waitFor(() => connects === 1, fake);
+    loop.dispose();
+    await waitFor(() => bodyCancelled, fake);
+    expect(bodyCancelled).toBe(true);
   });
 
   test('campaign-change dispose mid-retry does not leak timers or listeners', async () => {

@@ -28,9 +28,17 @@ export function reconnectBackoffMs(attempt: number): number {
 export function sseBlockData(block: string): string {
   return block
     .split('\n')
+    .map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line))
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.slice('data:'.length).trimStart())
     .join('\n');
+}
+
+/** Release an SSE fetch body so aborted / early-exit responses don't pin connections. */
+function cancelResponseBody(res: Response | null | undefined): void {
+  void res?.body?.cancel().catch(() => {
+    /* already closed / aborted */
+  });
 }
 
 /** Auth surface shared with lib/api.ts — cookie + optional dev-role overrides. */
@@ -104,6 +112,7 @@ export function startSseReconnectLoop(options: SseReconnectOptions): SseReconnec
   const session = new AbortController();
   let disposed = false;
   let activeRequest: AbortController | null = null;
+  let activeResponse: Response | null = null;
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let status: SseStreamStatus | null = null;
   let needsCatchUp = trackBrowserOnline ? !isOnline() : false;
@@ -129,6 +138,8 @@ export function startSseReconnectLoop(options: SseReconnectOptions): SseReconnec
         /* already closed / aborted */
       });
       activeReader = null;
+      cancelResponseBody(activeResponse);
+      activeResponse = null;
       activeRequest?.abort();
       activeRequest = null;
       session.abort();
@@ -167,6 +178,8 @@ export function startSseReconnectLoop(options: SseReconnectOptions): SseReconnec
     needsCatchUp = true;
     setStatus('offline');
     activeRequest?.abort();
+    cancelResponseBody(activeResponse);
+    activeResponse = null;
   }
 
   if (trackBrowserOnline) {
@@ -202,21 +215,30 @@ export function startSseReconnectLoop(options: SseReconnectOptions): SseReconnec
             session.signal.removeEventListener('abort', onSessionAbortRequest);
           }
 
+          activeResponse = res;
           const auth = classifyStreamConnectStatus(res.status);
           if (auth === 'session-expired') {
             // Proven 401 — fan out so AuthProvider can show reauth; stop until
             // resumeEpoch advances after login (issue #885).
+            cancelResponseBody(res);
+            activeResponse = null;
             signalSessionExpired();
             setStatus('stopped');
             disposed = true;
             return;
           }
           if (auth === 'forbidden') {
+            cancelResponseBody(res);
+            activeResponse = null;
             setStatus('stopped');
             disposed = true;
             return;
           }
-          if (!res.ok || !res.body) throw new Error(`SSE connect failed (${res.status})`);
+          if (!res.ok || !res.body) {
+            cancelResponseBody(res);
+            activeResponse = null;
+            throw new Error(`SSE connect failed (${res.status})`);
+          }
 
           const reconnected = needsCatchUp;
           attempt = 0;
@@ -253,6 +275,8 @@ export function startSseReconnectLoop(options: SseReconnectOptions): SseReconnec
             }
           } finally {
             if (activeReader === reader) activeReader = null;
+            cancelResponseBody(res);
+            if (activeResponse === res) activeResponse = null;
           }
 
           throw new Error('SSE stream ended');
@@ -264,6 +288,10 @@ export function startSseReconnectLoop(options: SseReconnectOptions): SseReconnec
           attempt += 1;
         } finally {
           activeRequest = null;
+          if (activeResponse) {
+            cancelResponseBody(activeResponse);
+            activeResponse = null;
+          }
         }
       }
     } finally {
