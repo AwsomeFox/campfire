@@ -173,6 +173,15 @@ function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
   return { ...c, tokenX: null, tokenY: null };
 }
 
+export type EncounterSearchEntry = {
+  id: number;
+  campaignId: number;
+  name: string;
+  locationLabel: string;
+  questLabel: string;
+  sessionLabel: string;
+};
+
 @Injectable()
 export class EncountersService {
   constructor(
@@ -513,6 +522,64 @@ export class EncountersService {
     }
     return this.redactHiddenLinkedEntities(list, campaignId, viewerRole);
   }
+async searchForCampaign(campaignId: number, role: Role, needle: string, limit: number): Promise<EncounterSearchEntry[]> {
+    const boundedLimit = Math.max(1, Math.min(limit, 50));
+    needle = needle.trim().toLowerCase();
+    if (!needle) return [];
+    const questLabel = role === 'dm'
+      ? sql<string>`coalesce(${quests.title}, '')`
+      : sql<string>`case when ${quests.hidden} = 0 then coalesce(${quests.title}, '') else '' end`;
+    const locationLabel = role === 'dm'
+      ? sql<string>`coalesce(${locations.name}, '')`
+      : sql<string>`case when ${locations.status} <> 'unexplored' then coalesce(${locations.name}, '') else '' end`;
+    const sessionLabel = sql<string>`case
+      when ${sessions.id} is null then ''
+      when length(trim(coalesce(${sessions.title}, ''))) > 0 then ${sessions.title}
+      else 'Session ' || ${sessions.number}
+    end`;
+
+    const rows = await this.db
+      .select({
+        id: encounters.id,
+        campaignId: encounters.campaignId,
+        name: encounters.name,
+        locationLabel,
+        questLabel,
+        sessionLabel,
+      })
+      .from(encounters)
+      .leftJoin(
+        locations,
+        and(
+          eq(locations.id, encounters.locationId),
+          eq(locations.campaignId, campaignId),
+          notDeleted(locations.deletedAt),
+        ),
+      )
+      .leftJoin(
+        quests,
+        and(eq(quests.id, encounters.questId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)),
+      )
+      .leftJoin(
+        sessions,
+        and(eq(sessions.id, encounters.sessionId), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)),
+      )
+      .where(and(
+        eq(encounters.campaignId, campaignId),
+        role === 'dm' ? undefined : eq(encounters.hidden, false),
+        or(
+          sql`instr(lower(${encounters.name}), ${needle}) > 0`,
+          sql`instr(lower(${locationLabel}), ${needle}) > 0`,
+          sql`instr(lower(${questLabel}), ${needle}) > 0`,
+          sql`instr(lower(${sessionLabel}), ${needle}) > 0`,
+        ),
+      ))
+      .orderBy(encounters.id)
+      .limit(boundedLimit);
+
+    return rows;
+  }
+
 
   /**
    * `viewerRole` drives issue #43 redaction: anyone below `dm` (player/viewer)
