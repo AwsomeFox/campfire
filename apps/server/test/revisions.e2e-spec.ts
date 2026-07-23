@@ -314,3 +314,239 @@ describe('revisions + optimistic concurrency (e2e) — #157', () => {
     });
   });
 });
+
+/**
+ * Issue #813 — revision history must attribute versions to their real author, not the
+ * replacing editor. Covers human→human, AI→human, human→AI, restore linkage, and
+ * legacy-row honesty ("Replaced by …" when authorship is unknowable).
+ */
+describe('revision version authorship (e2e) — #813', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  const alice = { 'x-dev-role': 'dm', 'x-dev-user': 'alice' };
+  const bob = { 'x-dev-role': 'dm', 'x-dev-user': 'bob' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const res = await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(alice).send({ name: 'Authorship Campaign' });
+    campaignId = res.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('human→human: Alice\'s version stays attributed to Alice when Bob overwrites it', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(alice)
+      .send({ title: 'The Crossing', body: 'Alice wrote this' });
+    expect(created.status).toBe(201);
+    const questId = created.body.id;
+
+    const ok = await request(server)
+      .patch(`/api/v1/quests/${questId}`)
+      .set(bob)
+      .send({ body: 'Bob replaced it' });
+    expect(ok.status).toBe(200);
+
+    const revs = await request(server).get(`/api/v1/revisions/quest/${questId}`).set(alice);
+    expect(revs.status).toBe(200);
+    expect(revs.body).toHaveLength(1);
+    const version = revs.body[0];
+    expect(version.snapshot.body).toBe('Alice wrote this');
+    expect(version.authorUserId).toBe('dev:alice');
+    expect(version.authorName).toBe('alice');
+    expect(version.authorSource).toBe('human');
+    expect(version.authorshipKnown).toBe(true);
+    expect(version.replacedByUserId).toBe('dev:bob');
+    expect(version.replacedByName).toBe('bob');
+    expect(version.replacedAt).toBeTruthy();
+    // Replacer must not be presented as the version author.
+    expect(version.authorUserId).not.toBe('dev:bob');
+  });
+
+  it('AI→human and human→AI preserve authorSource provenance on each version', async () => {
+    const server = ctx.app.getHttpServer();
+    // Drive RevisionsService directly with an AI seat principal — HTTP headers cannot
+    // synthesize proposalAttribution, and a second HTTP patch would double-commit tips.
+    const { RevisionsService } = await import('../src/modules/revisions/revisions.service');
+    const revisions = ctx.app.get(RevisionsService);
+
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(alice)
+      .send({ name: 'Oracle', body: 'human draft' });
+    const npcId = created.body.id;
+
+    const aiUser = {
+      id: `ai-dm-seat:${campaignId}`,
+      name: 'AI Dungeon Master',
+      serverRole: 'user' as const,
+      devRole: 'dm' as const,
+      tokenContext: {
+        tokenId: 0,
+        name: `ai-dm-seat:${campaignId}`,
+        scope: 'dm' as const,
+        writeScope: 'direct' as const,
+        campaignId,
+        adminEnabled: false,
+      },
+      proposalAttribution: {
+        proposer: 'AI Dungeon Master (driver)',
+        proposerUserId: `ai-dm:${campaignId}`,
+        proposerToken: null,
+      },
+    };
+
+    // human→AI: Alice's tip closed by AI, AI tip opened.
+    await revisions.commitProseVersion({
+      entityType: 'npc',
+      entityId: npcId,
+      campaignId,
+      priorProse: 'human draft',
+      nextProse: 'ai rewrite',
+      user: aiUser,
+    });
+
+    // AI→human: AI tip closed by Bob.
+    await revisions.commitProseVersion({
+      entityType: 'npc',
+      entityId: npcId,
+      campaignId,
+      priorProse: 'ai rewrite',
+      nextProse: 'human polish',
+      user: { id: 'dev:bob', name: 'bob', serverRole: 'user', devRole: 'dm' },
+    });
+
+    const listed = await revisions.listForEntity('npc', npcId);
+    const aiVersion = listed.find((r) => r.snapshot.body === 'ai rewrite');
+    const humanVersion = listed.find((r) => r.snapshot.body === 'human draft');
+    expect(aiVersion).toBeDefined();
+    expect(aiVersion!.authorSource).toBe('ai');
+    expect(aiVersion!.authorUserId).toBe(`ai-dm:${campaignId}`);
+    expect(aiVersion!.replacedBySource).toBe('human');
+    expect(aiVersion!.replacedByUserId).toBe('dev:bob');
+
+    expect(humanVersion).toBeDefined();
+    expect(humanVersion!.authorSource).toBe('human');
+    expect(humanVersion!.authorUserId).toBe('dev:alice');
+    expect(humanVersion!.replacedBySource).toBe('ai');
+  });
+
+  it('restore creates a new tip linked to the source revision and attributes it to the restorer', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/locations`)
+      .set(alice)
+      .send({ name: 'Lantern Road', body: 'original' });
+    const locationId = created.body.id;
+
+    await request(server).patch(`/api/v1/locations/${locationId}`).set(bob).send({ body: 'edited' });
+    const before = await request(server).get(`/api/v1/revisions/location/${locationId}`).set(alice);
+    const sourceId = before.body[0].id;
+
+    const restored = await request(server)
+      .post(`/api/v1/revisions/location/${locationId}/${sourceId}/restore`)
+      .set(bob);
+    expect(restored.status).toBe(201);
+
+    // Live tip is omitted from list; the closed pre-restore content should link when we
+    // inspect via listForCampaign / DB. The restore itself closed Bob's "edited" tip —
+    // and the NEW tip (restored prose) is live. After another edit we can see the restored tip.
+    await request(server).patch(`/api/v1/locations/${locationId}`).set(alice).send({ body: 'after-restore' });
+    const after = await request(server).get(`/api/v1/revisions/location/${locationId}`).set(alice);
+    const restoredVersion = after.body.find((r: { snapshot: { body?: string } }) => r.snapshot.body === 'original');
+    expect(restoredVersion).toBeDefined();
+    // The restored tip was authored by Bob (the restorer), linked to the source.
+    expect(restoredVersion.authorUserId).toBe('dev:bob');
+    expect(restoredVersion.restoredFromRevisionId).toBe(sourceId);
+    expect(restoredVersion.authorshipKnown).toBe(true);
+  });
+
+  it('legacy rows with unknown authorship expose authorshipKnown=false (honest "Replaced by" shape)', async () => {
+    const server = ctx.app.getHttpServer();
+    const { DB } = await import('../src/db/db.module');
+    const db = ctx.app.get(DB);
+    const { entityRevisions } = await import('../src/db/schema');
+
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/factions`)
+      .set(alice)
+      .send({ name: 'Legacy Guild', body: 'current' });
+    const factionId = created.body.id;
+
+    // Insert a pre-#813-shaped legacy closed version directly.
+    await db.insert(entityRevisions).values({
+      campaignId,
+      entityType: 'faction',
+      entityId: factionId,
+      snapshot: JSON.stringify({ body: 'ancient prose' }),
+      authorUserId: '',
+      authorName: '',
+      authorSource: 'human',
+      authorSourceDetail: '',
+      createdAt: '',
+      replacedByUserId: 'dev:bob',
+      replacedByName: 'bob',
+      replacedBySource: 'human',
+      replacedBySourceDetail: '',
+      replacedAt: '2024-01-01T00:00:00.000Z',
+      restoredFromRevisionId: null,
+      authorshipKnown: false,
+    });
+
+    const revs = await request(server).get(`/api/v1/revisions/faction/${factionId}`).set(alice);
+    expect(revs.status).toBe(200);
+    const legacy = revs.body.find((r: { snapshot: { body?: string } }) => r.snapshot.body === 'ancient prose');
+    expect(legacy).toBeDefined();
+    expect(legacy.authorshipKnown).toBe(false);
+    expect(legacy.authorUserId).toBe('');
+    expect(legacy.authorName).toBe('');
+    expect(legacy.replacedByName).toBe('bob');
+    expect(legacy.replacedAt).toBe('2024-01-01T00:00:00.000Z');
+  });
+
+  it('export/import preserves version authorship metadata with remapped ids', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .set(alice)
+      .send({ title: 'Export Quest', body: 'v-export-a' });
+    const questId = created.body.id;
+    await request(server).patch(`/api/v1/quests/${questId}`).set(bob).send({ body: 'v-export-b' });
+
+    const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json`).set(alice);
+    expect(exported.status).toBe(200);
+    expect(Array.isArray(exported.body.revisions)).toBe(true);
+    const exportedRev = exported.body.revisions.find(
+      (r: { entityType: string; snapshot: { body?: string } }) =>
+        r.entityType === 'quest' && r.snapshot?.body === 'v-export-a',
+    );
+    expect(exportedRev).toBeDefined();
+    expect(exportedRev.authorUserId).toBe('dev:alice');
+    expect(exportedRev.replacedByUserId).toBe('dev:bob');
+    expect(exportedRev.authorshipKnown).toBe(true);
+
+    const imported = await request(server).post('/api/v1/campaigns/import').set(alice).send(exported.body);
+    expect(imported.status).toBe(201);
+    const newCampaignId = imported.body.id;
+    expect(newCampaignId).toBeTruthy();
+    expect(newCampaignId).not.toBe(campaignId);
+
+    const quests = await request(server).get(`/api/v1/campaigns/${newCampaignId}/quests`).set(alice);
+    const importedQuest = quests.body.find((q: { title: string }) => q.title === 'Export Quest');
+    expect(importedQuest).toBeDefined();
+
+    const revs = await request(server).get(`/api/v1/revisions/quest/${importedQuest.id}`).set(alice);
+    expect(revs.status).toBe(200);
+    const roundTripped = revs.body.find((r: { snapshot: { body?: string } }) => r.snapshot.body === 'v-export-a');
+    expect(roundTripped).toBeDefined();
+    expect(roundTripped.authorUserId).toBe('dev:alice');
+    expect(roundTripped.replacedByUserId).toBe('dev:bob');
+    expect(roundTripped.authorshipKnown).toBe(true);
+    expect(roundTripped.entityId).toBe(importedQuest.id);
+    expect(roundTripped.entityId).not.toBe(questId);
+  });
+});

@@ -170,6 +170,9 @@ export const CampaignImport = z
     sessionZero: ImportedEntity.optional(),
     inventory: z.array(ImportedEntity).optional(),
     treasury: ImportedEntity.optional(),
+    // Issue #813: immutable prose versions (author + replacer provenance) round-trip
+    // with remapped entity / restoredFrom ids. Loose objects — the importer is defensive.
+    revisions: z.array(ImportedEntity).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
@@ -1094,32 +1097,56 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
-// ---------- entity revisions (issue #157) ----------
-// A revision-history layer for the prose entities most at risk of a blind
-// last-write-wins clobber (a co-DM polishing a recap while a connected AI saves its
-// own edit). On every committed prose update the server snapshots the PRIOR content
-// here; the history can then be listed and any prior snapshot RESTORED (re-applied as
-// a new update, itself recorded). Covers the DM-authored world-building prose whose
-// edit path is uniformly dm-gated — sessions (recap), quests/npcs/locations/factions
-// (body) — AND notes (body), which #157 cited by line as the destroyed prose. Notes
-// carry their own per-note visibility/author-only-edit model, so their revision reads
-// are gated on the note's OWN visibility (not a blanket dm-gate) and restore is
-// author-only — see RevisionsController — so history is never a redaction back-door.
+// ---------- entity revisions (issue #157 / #813) ----------
+// Immutable prose versions for the entities most at risk of a blind last-write-wins
+// clobber (a co-DM polishing a recap while a connected AI saves its own edit). Each
+// row is a version of the prose itself (not merely "content being overwritten"):
+// `author*` + `createdAt` are who/when that version became authoritative, while
+// `replacedBy*` + `replacedAt` record who later superseded it. A null `replacedAt`
+// marks the current tip (live content); history listings omit tips. Restoring a
+// prior version opens a NEW tip attributed to the restorer and linked via
+// `restoredFromRevisionId`. Legacy rows migrated from the pre-#813 shape (where
+// author/time were the replacing editor) set `authorshipKnown=false` so the UI can
+// label them honestly as "Replaced by …" instead of inventing an author.
+// Covers DM-authored world-building prose — sessions (recap), quests/npcs/locations/
+// factions (body) — AND notes (body). Notes carry their own per-note visibility/
+// author-only-edit model, so revision reads are gated on the note's OWN visibility
+// and restore is author-only — see RevisionsController.
 export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location', 'faction', 'note']);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
+
+/** How the version's prose was produced — human editor, AI seat, or tool/PAT. */
+export const RevisionAuthorSource = z.enum(['human', 'ai', 'tool']);
+export type RevisionAuthorSource = z.infer<typeof RevisionAuthorSource>;
 
 export const EntityRevision = z.object({
   id: Id,
   campaignId: Id,
   entityType: RevisionEntityType,
   entityId: Id,
-  // The snapshotted PRIOR prose, keyed by the entity's prose field ('recap' for a
+  // The prose OF THIS VERSION, keyed by the entity's prose field ('recap' for a
   // session, 'body' for quest/npc/location/faction/note). A plain string map so the
   // shape is uniform across entity types and the web can render whichever key is present.
   snapshot: z.record(z.string(), z.string()).default({}),
+  // Version author (who wrote this snapshot). Empty when authorshipKnown is false.
   authorUserId: z.string().max(120).default(''),
   authorName: z.string().max(120).default(''),
+  authorSource: RevisionAuthorSource.default('human'),
+  // Token name / AI seat id / provider hint — empty for ordinary human cookie sessions.
+  authorSourceDetail: z.string().max(200).default(''),
+  // When this version became authoritative. Empty string for legacy rows whose
+  // original authored-at is unknowable (authorshipKnown=false).
   createdAt: IsoDate,
+  // Who/when superseded this version. Null replacedAt = current tip (still live).
+  replacedByUserId: z.string().max(120).default(''),
+  replacedByName: z.string().max(120).default(''),
+  replacedBySource: RevisionAuthorSource.default('human'),
+  replacedBySourceDetail: z.string().max(200).default(''),
+  replacedAt: z.string().nullable().default(null),
+  // Set when this version was created by restoring another revision.
+  restoredFromRevisionId: Id.nullable().default(null),
+  // false for pre-#813 rows: author fields must not be presented as provenance.
+  authorshipKnown: z.boolean().default(true),
 });
 export type EntityRevision = z.infer<typeof EntityRevision>;
 
@@ -1248,6 +1275,11 @@ export const Notification = z.object({
   body: z.string().max(1000).default(''), // short excerpt/context, plain text
   entityType: EntityType.nullable().default(null), // deep-link target (e.g. session), if any
   entityId: Id.nullable().default(null),
+  /**
+   * Issue #446: when set (typically `comment_reply`), the UI focuses this comment
+   * inside the parent entity's discussion thread (`entityType`/`entityId`).
+   */
+  commentId: Id.nullable().default(null),
   actorName: z.string().max(120).default(''), // display name of who triggered it
   readAt: IsoDate.nullable().default(null), // null = unread
   createdAt: IsoDate,
@@ -2648,6 +2680,8 @@ export const AuthStatus = z.object({
   // the UI must use neutral "SSO" copy; no issuer/client/group details belong here.
   oidcProviderName: z.string().max(80).nullable(),
   version: z.string(),
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
 
@@ -4417,6 +4451,10 @@ export const CampaignEventType = z.enum([
   'encounter.ping',
   'schedule.updated',
   'membership.revoked',
+  // Issue #437: a member's role changed (promote/demote). Thin invalidation so the
+  // affected client's open UI can refetch /me and drop or reveal role-gated chrome
+  // without a full reload. Forwarded on the data path (unlike membership.revoked).
+  'membership.updated',
   'treasury.updated',
   // Issue #421: character sheet / member-resource writes (stats, actions, slots, …).
   'character.updated',
@@ -4465,6 +4503,18 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     userId: z.string().max(120),
     memberId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #437: a member's campaign role changed. `role` is the NEW effective role so
+    // the affected client can refresh /me (and other tabs via BroadcastChannel) and
+    // immediately show or hide DM chrome without waiting for a reload. `userId` matches
+    // RequestUser.id / String(campaignMembers.userId).
+    type: z.literal('membership.updated'),
+    campaignId: Id,
+    userId: z.string().max(120),
+    memberId: Id,
+    role: Role,
     at: IsoDate,
   }),
   z.object({
@@ -4605,6 +4655,8 @@ export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
 
 export const AdminMetrics = z.object({
   version: z.string(), // server package.json version (same source as /healthz)
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
   now: IsoDate, // server clock when this snapshot was taken
   startedAt: IsoDate, // process start (now - uptime)
   uptimeSeconds: z.number().nonnegative(),

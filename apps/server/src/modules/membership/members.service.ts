@@ -443,6 +443,7 @@ export class MembersService {
     let seatResolution: CharacterSeatResolution | null = null;
     let assigneeUserId: number | null = null;
     let previousCharacterId: number | null = null;
+    let priorRole: CampaignMember['role'] | null = null;
     try {
       this.db.transaction((tx) => {
         const row = tx
@@ -456,6 +457,7 @@ export class MembersService {
 
         assigneeUserId = row.member.userId;
         previousCharacterId = row.member.characterId;
+        priorRole = row.member.role as CampaignMember['role'];
 
         const promotingDisabledDm = input.role === 'dm' && row.member.role !== 'dm' && row.disabled;
         if (promotingDisabledDm) {
@@ -559,6 +561,20 @@ export class MembersService {
     const all = await this.listForCampaign(campaignId);
     const updated = all.find((m) => m.id === memberId);
     if (!updated) throw new NotFoundException(`Member ${memberId} not found`);
+
+    // Issue #437: publish role changes so the affected member's open browsers can
+    // invalidate cached /me memberships immediately (promote → DM nav; demote →
+    // drop forbidden controls) without a reload. Character-link-only patches stay quiet.
+    if (input.role !== undefined && priorRole != null && updated.role !== priorRole) {
+      this.events.emit({
+        type: 'membership.updated',
+        campaignId,
+        userId: String(updated.userId),
+        memberId: updated.id,
+        role: updated.role,
+      });
+    }
+
     return updated;
   }
 

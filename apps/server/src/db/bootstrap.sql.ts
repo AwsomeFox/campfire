@@ -374,7 +374,16 @@ CREATE TABLE IF NOT EXISTS entity_revisions (
   snapshot TEXT NOT NULL DEFAULT '{}',
   author_user_id TEXT NOT NULL DEFAULT '',
   author_name TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  author_source TEXT NOT NULL DEFAULT 'human',
+  author_source_detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT '',
+  replaced_by_user_id TEXT NOT NULL DEFAULT '',
+  replaced_by_name TEXT NOT NULL DEFAULT '',
+  replaced_by_source TEXT NOT NULL DEFAULT 'human',
+  replaced_by_source_detail TEXT NOT NULL DEFAULT '',
+  replaced_at TEXT,
+  restored_from_revision_id INTEGER,
+  authorship_known INTEGER NOT NULL DEFAULT 1
 );
 
 -- audit_log deliberately carries NO foreign key on campaign_id (issue #69). Audit
@@ -669,6 +678,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   body TEXT NOT NULL DEFAULT '',
   entity_type TEXT,
   entity_id INTEGER,
+  comment_id INTEGER,
   actor_name TEXT NOT NULL DEFAULT '',
   read_at TEXT,
   created_at TEXT NOT NULL
@@ -852,7 +862,7 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_re
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
 -- Issue #819: exclusive character seat — at most one membership may link a given
--- character. Partial so unlinked (NULL) seats do not collide. Matches migration 0065.
+-- character. Partial so unlinked (NULL) seats do not collide. Matches migration 0067.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
   ON campaign_members(character_id) WHERE character_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_participant_support_campaign ON participant_support_preferences(campaign_id);
