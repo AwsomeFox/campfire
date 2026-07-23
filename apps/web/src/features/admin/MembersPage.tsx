@@ -20,6 +20,7 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
+import { InviteQrCard } from './InviteQrCard';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -246,25 +247,28 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       {error && <p className="text-xs text-rose-400 m-0">{error}</p>}
 
       {invites.map((invite) => (
-        <div key={invite.id} className="flex gap-2 flex-wrap items-center">
-          <input
-            className="input"
-            style={{ flex: 1, minWidth: 190 }}
-            readOnly
-            value={inviteLinkFor(invite.code)}
-            onFocus={(e) => e.currentTarget.select()}
-          />
-          <span className={`cf-chip ${ROLE_CHIP[invite.role]}`}>{ROLE_LABEL[invite.role]}</span>
-          <span className="text-muted text-[11px] whitespace-nowrap">
-            {expiresIn(invite.expiresAt)} · used {invite.useCount}
-            {invite.maxUses != null ? `/${invite.maxUses}` : '×'}
-          </span>
-          <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={() => copy(invite)}>
-            {copiedId === invite.id ? 'Copied!' : 'Copy link'}
-          </button>
-          <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
-            Revoke
-          </button>
+        <div key={invite.id} className="space-y-2">
+          <div className="flex gap-2 flex-wrap items-center">
+            <input
+              className="input"
+              style={{ flex: 1, minWidth: 190 }}
+              readOnly
+              value={inviteLinkFor(invite.code)}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+            <span className={`cf-chip ${ROLE_CHIP[invite.role]}`}>{ROLE_LABEL[invite.role]}</span>
+            <span className="text-muted text-[11px] whitespace-nowrap">
+              {expiresIn(invite.expiresAt)} · used {invite.useCount}
+              {invite.maxUses != null ? `/${invite.maxUses}` : '×'}
+            </span>
+            <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={() => copy(invite)}>
+              {copiedId === invite.id ? 'Copied!' : 'Copy link'}
+            </button>
+            <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
+              Revoke
+            </button>
+          </div>
+          <InviteQrCard invite={invite} />
         </div>
       ))}
 
