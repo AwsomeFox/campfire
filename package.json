@@ -19,7 +19,7 @@
     "test:e2e": "npm run build && npm run test:e2e -w apps/web",
     "test:e2e:nobuild": "npm run test:e2e -w apps/web",
     "test:all": "npm run lint && npm run typecheck && npm run test && npm run build && npm run test:pwa:dist -w apps/web && npm run test:e2e:typecheck -w apps/web && npm run test:e2e:nobuild",
-    "lint": "npm run lint --workspaces --if-present",
+    "lint": "npm run lint --workspaces",
     "typecheck": "npm run build -w packages/schema && npm run typecheck --workspaces"
   },
   "devDependencies": {

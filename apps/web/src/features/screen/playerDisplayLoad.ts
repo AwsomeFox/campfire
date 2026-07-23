@@ -11,7 +11,9 @@
  *   - fetch summary + running list + detail, then commit one consistent
  *     projection;
  *   - re-verify the encounter is still running before painting it live;
- *   - on transient failure, keep last-known state and flag stale.
+ *   - on transient failure, keep last-known state and flag stale;
+ *   - on persistent failure after summary succeeded, keep the cast and drop
+ *     only the initiative rail (rail-scoped error — not a full-screen wipe).
  *
  * Extracted so the e2e unit suite can drive every reorder / End-during-load /
  * campaign-change scenario without mounting React.
@@ -51,6 +53,11 @@ export type PlayerDisplayLoadFailed = {
   /** True when the caller should keep last-known projection and show stale UI. */
   keepLastKnown: boolean;
   transient: boolean;
+  /**
+   * Summary fetched before a later step failed. When present, the caller should
+   * keep the cast summary and drop only the initiative rail (not full-screen wipe).
+   */
+  summary: CampaignSummary | null;
 };
 
 export type PlayerDisplayLoadResult =
@@ -206,16 +213,22 @@ function failureMessage(error: unknown): string {
 }
 
 /**
- * After a sequenced refresh fails: keep the prior paint on transient blips, but
- * drop this campaign's projection on persistent errors (404/403/…) so the
- * initiative rail cannot keep showing a fight the server no longer treats as live.
+ * After a sequenced refresh fails:
+ *   - transient (`keepLastKnown`): leave the prior paint alone;
+ *   - persistent with a summary from this load: keep the cast, drop only the
+ *     initiative rail (matches pre-#743 nested try/catch behavior);
+ *   - persistent with no summary: clear this campaign's projection so the
+ *     page can show the full-screen error.
  */
 export function projectionAfterLoadFailure(
   current: PlayerDisplayProjection | null,
   campaignId: number,
-  keepLastKnown: boolean,
+  options: { keepLastKnown: boolean; summary?: CampaignSummary | null },
 ): PlayerDisplayProjection | null {
-  if (keepLastKnown) return current;
+  if (options.keepLastKnown) return current;
+  if (options.summary) {
+    return { campaignId, summary: options.summary, encounter: null };
+  }
   if (current?.campaignId === campaignId) return null;
   return current;
 }
@@ -239,8 +252,20 @@ export async function runPlayerDisplayLoad(
   }
 
   const { generation, signal } = sequencer.begin(campaignId);
+  // Capture summary as soon as it resolves so a later rail failure can still
+  // keep the cast painted (drop encounter only) instead of wiping the page.
+  let fetchedSummary: CampaignSummary | null = null;
+  const capturingFetchers: PlayerDisplayFetchers = {
+    getSummary: async (id, sig) => {
+      const summary = await fetchers.getSummary(id, sig);
+      fetchedSummary = summary;
+      return summary;
+    },
+    getRunningEncounters: fetchers.getRunningEncounters,
+    getEncounter: fetchers.getEncounter,
+  };
   try {
-    const projection = await fetchPlayerDisplayProjection(campaignId, fetchers, signal);
+    const projection = await fetchPlayerDisplayProjection(campaignId, capturingFetchers, signal);
     if (!sequencer.isCurrent(generation, campaignId)) {
       return {
         kind: 'ignored',
@@ -269,6 +294,7 @@ export async function runPlayerDisplayLoad(
       // A first-load failure still surfaces the error screen (nothing to keep).
       keepLastKnown: transient && options.hadProjection,
       transient,
+      summary: fetchedSummary,
     };
   }
 }
