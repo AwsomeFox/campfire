@@ -1,4 +1,12 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { and, asc, desc, eq, inArray, or, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
@@ -93,6 +101,8 @@ export function canSee(
 
 @Injectable()
 export class NotesService {
+  private readonly logger = new Logger(NotesService.name);
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -218,17 +228,23 @@ export class NotesService {
    */
   private async notifyDmsOfInboxSubmission(row: typeof notes.$inferSelect, user: RequestUser): Promise<void> {
     if (row.kind !== 'inbox') return;
-    const roles = await this.notifications.memberRoles(row.campaignId);
-    for (const [memberId, memberRole] of roles) {
-      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
-      await this.notifications.notifyUser(memberId, row.campaignId, user, {
-        type: 'inbox_submitted',
-        title: `${user.name || 'A member'} sent a note to your inbox`,
-        body: excerpt(row.body),
-        entityType: null,
-        entityId: row.id,
-        actorName: user.name,
-      });
+    try {
+      const roles = await this.notifications.memberRoles(row.campaignId);
+      for (const [memberId, memberRole] of roles) {
+        if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+        await this.notifications.notifyUser(memberId, row.campaignId, user, {
+          type: 'inbox_submitted',
+          title: `${user.name || 'A member'} sent a note to your inbox`,
+          body: excerpt(row.body),
+          entityType: null,
+          entityId: row.id,
+          actorName: user.name,
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `inbox_submitted notification fan-out failed for note ${row.id}: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 

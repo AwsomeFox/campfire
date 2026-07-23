@@ -1,4 +1,6 @@
 import request from 'supertest';
+import { sql } from 'drizzle-orm';
+import { DB, type DrizzleDb } from '../src/db/db.module';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 /**
@@ -756,5 +758,28 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
     const post = await creatorDm.post(`/api/v1/campaigns/${loneId}/inbox`).send({ body: 'Solo note' });
     expect(post.status).toBe(201);
     expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(before);
+  });
+
+  it('keeps inbox create durable when inbox_submitted notification delivery fails', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.run(sql`
+      CREATE TRIGGER fail_inbox_submitted_notification
+      BEFORE INSERT ON notifications
+      WHEN NEW.type = 'inbox_submitted'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated notification failure');
+      END
+    `);
+    try {
+      const beforeCo = ofType(await listFor(coDm), 'inbox_submitted').length;
+      const inbox = await player
+        .post(`/api/v1/campaigns/${campaignId}/inbox`)
+        .send({ body: 'Notify failure must not block inbox create' });
+      expect(inbox.status).toBe(201);
+      expect(inbox.body.body).toContain('Notify failure');
+      expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo);
+    } finally {
+      db.run(sql`DROP TRIGGER IF EXISTS fail_inbox_submitted_notification`);
+    }
   });
 });
