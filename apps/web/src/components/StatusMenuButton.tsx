@@ -127,6 +127,12 @@ export function StatusMenuButton<V extends string>({
     }
     if (suppressFocusRestore.current) return;
     buttonRef.current?.focus();
+    // Escape / trigger-click dismiss restores focus now, but if a save is still
+    // pending the later finish() must not restore again — the user may have
+    // already tabbed or clicked elsewhere after this dismiss.
+    if (commitInFlight.current) {
+      suppressFocusRestore.current = true;
+    }
   }, []);
 
   // Move the DOM focus to the active option whenever it changes while open.

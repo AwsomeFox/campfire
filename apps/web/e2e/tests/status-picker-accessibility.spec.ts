@@ -221,6 +221,47 @@ test.describe('quest status picker accessibility', () => {
 
     await page.unroute(`**/api/v1/quests/${fixture.quests.active.id}/status`);
   });
+
+  test('Escape during a pending save does not re-refocus the trigger after settle', async ({ page }) => {
+    const { semantic: fixture } = seed();
+    await page.goto(`/c/${fixture.campaignId}/quests/${fixture.quests.active.id}`);
+
+    let releaseSave!: () => void;
+    const saveHeld = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    await page.route(`**/api/v1/quests/${fixture.quests.active.id}/status`, async (route) => {
+      await saveHeld;
+      await route.continue();
+    });
+
+    const trigger = page.getByRole('button', { name: /^Quest status:/ });
+    const heading = page.getByRole('heading', { name: fixture.quests.active.title });
+    await trigger.click();
+    const listbox = page.getByRole('listbox');
+    await expect(listbox).toBeVisible();
+
+    // Enter starts an async commit (menu stays open until settle). The page also
+    // disables the trigger while saving, so Escape cannot land focus on it —
+    // but after the user moves elsewhere, finish() must still not yank focus
+    // back once the save completes and the trigger re-enables.
+    await listbox.getByRole('option', { name: 'Failed' }).focus();
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Escape');
+    await expect(listbox).toHaveCount(0);
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+
+    await heading.click();
+    await expect(trigger).not.toBeFocused();
+
+    releaseSave();
+    await expect(
+      page.locator('[data-semantic="quest-status"][data-semantic-value="failed"]'),
+    ).toHaveCount(2);
+    await expect(trigger).not.toBeFocused();
+
+    await page.unroute(`**/api/v1/quests/${fixture.quests.active.id}/status`);
+  });
 });
 
 // ---------------------------------------------------------------------------
