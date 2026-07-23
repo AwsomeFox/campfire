@@ -52,6 +52,17 @@ import {
   type ToolEntry,
 } from './transcript';
 import { invalidateForToolEvent, resolveToolActivity, type ToolResource } from './toolActivity';
+import {
+  advanceNarrationLog,
+  formatNarrationLogAddition,
+  nextComposerStatusAnnouncement,
+  NARRATION_LOG_LIVE_REGION,
+  NARRATION_STATUS_LIVE_REGION,
+  resolveComposerA11ySnapshot,
+  type ComposerA11ySnapshot,
+  type NarrationLogAddition,
+  type NarrationLogCursor,
+} from './narrationAccessibility';
 import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
 import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
@@ -233,6 +244,33 @@ export default function AiTablePage() {
           ? t('table.composerLockedAwaiting')
           : null;
 
+  // #1077: SR live regions. The visible transcript mutates token-by-token, so a
+  // mirror only gains finished additions (turn.end / player / system). Status
+  // covers turn.start/end + composer lock/unlock without flooding SRs.
+  const [narrationLogMirror, setNarrationLogMirror] = useState<NarrationLogAddition[]>([]);
+  const [a11yStatus, setA11yStatus] = useState('');
+  const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
+  const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
+
+  useEffect(() => {
+    const advanced = advanceNarrationLog(transcript.entries, narrationLogCursorRef.current);
+    narrationLogCursorRef.current = advanced.cursor;
+    if (advanced.additions.length === 0) return;
+    setNarrationLogMirror((prev) => [...prev, ...advanced.additions]);
+  }, [transcript.entries]);
+
+  useEffect(() => {
+    // Non-streaming lock reasons already carry the localized copy; streaming uses
+    // the same "DM is narrating…" string as the composer placeholder.
+    const next = resolveComposerA11ySnapshot(streaming, streaming ? null : lockReason);
+    const message = nextComposerStatusAnnouncement(composerA11yRef.current, next, {
+      streaming: t('table.composerLockedStreaming'),
+      ready: t('table.composerUnlocked'),
+    });
+    composerA11yRef.current = next;
+    if (message) setA11yStatus(message);
+  }, [streaming, lockReason, t]);
+
   const placeholder = activeEncounter
     ? currentCombatantName
       ? t('table.composerPlaceholderTurn', { name: currentCombatantName })
@@ -400,9 +438,14 @@ export default function AiTablePage() {
         />
       )}
 
-      {/* Transcript */}
+      {/* Transcript — visual scroll surface stays free of aria-live so token
+          deltas never spam SRs. A mirror below owns the live log. */}
       <Card className="!p-0 flex-1 flex flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        <div
+          className="flex-1 overflow-y-auto p-4 space-y-3"
+          aria-label={t('table.transcriptLabel')}
+          aria-busy={streaming || undefined}
+        >
           {transcript.entries.length === 0 ? (
             <EmptyState icon="campfire" title={t('table.emptyTitle')} hint={t('table.emptyHint')} />
           ) : (
@@ -418,6 +461,28 @@ export default function AiTablePage() {
           <div ref={bottomRef} />
         </div>
       </Card>
+
+      {/* #1077: polite log mirror — appends only finished entries (turn.end). */}
+      <div
+        {...NARRATION_LOG_LIVE_REGION}
+        aria-label={t('table.narrationLogLabel')}
+        className="sr-only"
+        data-testid="ai-narration-log"
+      >
+        {narrationLogMirror.map((addition) => (
+          <p key={addition.id}>{formatNarrationLogAddition(addition)}</p>
+        ))}
+      </div>
+
+      {/* #1077: turn.start/end + composer lock/unlock — same status pattern as
+          DraftWithAiButton / StuckLadder. */}
+      <div
+        {...NARRATION_STATUS_LIVE_REGION}
+        className="sr-only"
+        data-testid="ai-narration-status"
+      >
+        {a11yStatus}
+      </div>
 
       {/* Composer */}
       {canCompose ? (
