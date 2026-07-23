@@ -97,7 +97,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
         // Fail closed: never delete metadata if a path cannot be queued for durable cleanup.
         const message = err instanceof Error ? err.message : String(err);
         this.logger.error(`Refusing to reserve invalid upload path ${abs}: ${message}`);
-        throw new Error(`Cannot reserve upload path for verified erasure: ${message}`);
+        throw new Error(`Cannot reserve upload path for verified erasure: ${message}`, { cause: err });
       }
       let kind: 'file' | 'directory' = 'file';
       try {

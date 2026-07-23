@@ -6,6 +6,7 @@ import { SettingsService } from '../../src/modules/settings/settings.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { BackupService } from '../../src/modules/backup/backup.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
+import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { BACKUP_CADENCE_KEY, type BackupCadenceState } from '../../src/modules/backup/backup-cadence';
 import { settings } from '../../src/db/schema';
 import { eq } from 'drizzle-orm';
@@ -92,7 +93,7 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     // it for inserts/reads, so handing them the proxy directly mirrors runtime.
     const db = holder.proxy as DrizzleDb;
     const audit = new AuditService(db);
-    return new BackupService(holder, audit, new SettingsService(db), new AttachmentsService(db, audit));
+    return new BackupService(holder, audit, new SettingsService(db), new AttachmentsService(db, audit, new FsDeletionService(db, audit)));
   }
 
   it('runs an initial catch-up backup on the first boot after enabling (no prior cadence row)', async () => {
