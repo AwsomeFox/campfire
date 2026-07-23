@@ -1423,7 +1423,8 @@ export default function RunSessionPage() {
         <ConfirmDialog
           title="End this encounter?"
           body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets heal or rest after this End, Reopen will show the conflict and ask which HP to keep — it will not silently overwrite."
-          confirmLabel={runControl.isPending ? 'Ending…' : 'End encounter'}
+          confirmLabel="End encounter"
+          pendingLabel="Ending encounter…"
           busy={runControl.isPending}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
@@ -1492,7 +1493,9 @@ export default function RunSessionPage() {
               )}
             </div>
           }
-          confirmLabel={runControl.isPending ? 'Reopening…' : 'Reopen encounter'}
+          confirmLabel="Reopen encounter"
+          pendingLabel="Reopening encounter…"
+
           busy={runControl.isPending}
           confirmDisabled={!reopenChoicesComplete}
           onConfirm={reopenEncounter}
@@ -1507,13 +1510,10 @@ export default function RunSessionPage() {
           title={deleteCopy.title}
           body={deleteCopy.body}
           confirmLabel={
-            deleteEncounterMut.isPending
-              ? encounter.status === 'preparing'
-                ? 'Canceling…'
-                : 'Deleting…'
-              : encounter.status === 'preparing'
-                ? 'Cancel preparation'
-                : 'Delete encounter'
+            encounter.status === 'preparing' ? 'Cancel preparation' : 'Delete encounter'
+          }
+          pendingLabel={
+            encounter.status === 'preparing' ? 'Cancelling preparation…' : 'Deleting encounter…'
           }
           busy={deleteEncounterMut.isPending}
           onConfirm={deleteEncounter}
@@ -1523,7 +1523,8 @@ export default function RunSessionPage() {
       {confirmRemoveCombatantId != null && (
         <ConfirmDialog
           title="Remove this combatant from the encounter?"
-          confirmLabel={pendingCombatantIds.has(confirmRemoveCombatantId) ? 'Removing…' : 'Remove'}
+          confirmLabel="Remove"
+          pendingLabel="Removing…"
           busy={pendingCombatantIds.has(confirmRemoveCombatantId)}
           onConfirm={() => removeCombatant(confirmRemoveCombatantId)}
           onCancel={() => setConfirmRemoveCombatantId(null)}

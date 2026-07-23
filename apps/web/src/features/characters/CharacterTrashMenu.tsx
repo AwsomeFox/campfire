@@ -113,7 +113,7 @@ export function CharacterTrashMenu({
               campaign Trash.
             </p>
           }
-          confirmLabel={busy ? 'Moving…' : 'Move to Trash'}
+          confirmLabel="Move to Trash"
           busy={busy}
           onConfirm={confirmTrash}
           onCancel={() => setConfirming(false)}

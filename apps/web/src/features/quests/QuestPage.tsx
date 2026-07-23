@@ -802,7 +802,8 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               {t('quests.deleteBodyUndone')}
             </>
           }
-          confirmLabel={deleting ? t('quests.deleting') : t('quests.deleteQuest')}
+          confirmLabel={t('quests.deleteQuest')}
+          pendingLabel={t('quests.deleting')}
           busy={deleting}
           onConfirm={deleteQuest}
           onCancel={() => setConfirmingDelete(false)}
