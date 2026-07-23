@@ -7,7 +7,7 @@
  * never mistaken for "configured, show Sign in" — Retry re-runs this alongside
  * /me through the shared bootstrap recovery surface.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AuthStatus } from '@campfire/schema';
 import { api, API } from '../lib/api';
 import { authStatusPhase, type AuthStatusPhase } from './authBootstrapState';
@@ -35,24 +35,39 @@ export function AuthStatusProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  // Monotonic id so overlapping refresh() calls cannot apply out-of-order results.
+  const refreshSeq = useRef(0);
+  // After the first settle, Retry must not flip phase back to `loading` (that
+  // would replace BootstrapRecoveryScreen with splash / the Sign-in shell).
+  const hasSettledRef = useRef(false);
 
   const refresh = useCallback(async (): Promise<boolean> => {
-    setLoading(true);
-    setError(false);
+    const requestId = ++refreshSeq.current;
+    const isInitial = !hasSettledRef.current;
+    if (isInitial) {
+      setLoading(true);
+      setError(false);
+    }
     try {
       const next = await api.get<AuthStatus>(`${API}/auth/status`);
+      if (requestId !== refreshSeq.current) return false;
       setStatus(next);
       setError(false);
+      hasSettledRef.current = true;
       return true;
     } catch {
       // Leave any prior status in place so a transient blip during an already
       // configured session does not erase setupRequired; phase still reports
       // error so unsigned bootstrap can recover (#801). Callers that must not
       // keep a stale answer (post-setup exit) check the boolean return.
+      if (requestId !== refreshSeq.current) return false;
       setError(true);
+      hasSettledRef.current = true;
       return false;
     } finally {
-      setLoading(false);
+      if (requestId === refreshSeq.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
