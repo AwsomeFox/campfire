@@ -98,6 +98,15 @@ function parseCampaignDirId(name: string): number {
   return Number.parseInt(name, 10);
 }
 
+/**
+ * True when a `path.relative()` result escapes its root via parent traversal.
+ * A bare `startsWith('..')` would also reject legitimate names that merely begin
+ * with two dots (e.g. `..foo`), so match only an exact `..` or a `..<sep>` prefix.
+ */
+function escapesRoot(relative: string): boolean {
+  return relative === '..' || relative.startsWith(`..${path.sep}`);
+}
+
 /** Compute sha256 hex of a file, or empty string if unreadable. */
 function checksumFile(filePath: string): string {
   const hash = crypto.createHash('sha256');
@@ -136,21 +145,30 @@ function canonicalRelPath(row: { campaignId: number; id: number; mime: string })
   return `${row.campaignId}/${row.id}.${ext}`;
 }
 
-/** Primary (non-thumbnail) attachment file for an id, anywhere under uploads. */
-function findPrimaryAttachmentFileOnDisk(
+/**
+ * All primary (non-thumbnail) attachment files for an id, anywhere under uploads,
+ * returned in a stable (relPath-sorted) order.
+ *
+ * Returning every match — rather than the first one `readdirSync` happens to
+ * yield — lets callers detect the ambiguous case where the same id exists in
+ * multiple campaign directories (a realistic misplacement/duplicate failure
+ * mode) and refuse to act nondeterministically on a possibly-wrong file.
+ */
+function findPrimaryAttachmentFilesOnDisk(
   root: string,
   attachmentId: number,
-): { relPath: string; campaignDir: string } | null {
-  if (!fs.existsSync(root)) return null;
+): Array<{ relPath: string; campaignDir: string }> {
+  if (!fs.existsSync(root)) return [];
 
   let campaignDirs: fs.Dirent[];
   try {
     campaignDirs = fs.readdirSync(root, { withFileTypes: true });
   } catch {
-    return null;
+    return [];
   }
 
   const idPattern = new RegExp(`^${attachmentId}\\.([a-z0-9]+)$`);
+  const matches: Array<{ relPath: string; campaignDir: string }> = [];
   for (const dir of campaignDirs) {
     if (!dir.isDirectory()) continue;
     const dirPath = path.join(root, dir.name);
@@ -163,11 +181,12 @@ function findPrimaryAttachmentFileOnDisk(
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (idPattern.test(entry.name)) {
-        return { relPath: `${dir.name}/${entry.name}`, campaignDir: dir.name };
+        matches.push({ relPath: `${dir.name}/${entry.name}`, campaignDir: dir.name });
       }
     }
   }
-  return null;
+  matches.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  return matches;
 }
 
 @Injectable()
@@ -303,8 +322,16 @@ export class DiagnosticsService {
             seenOnDisk.add(fileId);
           }
 
-          // Check: wrong campaign directory (misplaced)
-          if (!Number.isNaN(dirCampaignId) && dirCampaignId !== expectedCampaignId) {
+          // Check: wrong campaign directory (misplaced). A file that is not under
+          // its canonical numeric campaign directory — whether it's a *different*
+          // campaign id or a non-canonical directory name like `1extra`
+          // (dirCampaignId === NaN) — is not where AttachmentsService looks for
+          // it. Surface it (with its real on-disk path) so the row isn't reported
+          // as only `missing` with no pointer to where the bytes actually live.
+          if (Number.isNaN(dirCampaignId) || dirCampaignId !== expectedCampaignId) {
+            const actualDirDesc = Number.isNaN(dirCampaignId)
+              ? `non-canonical dir "${dir.name}"`
+              : `campaign dir ${dirCampaignId}`;
             issues.push({
               type: 'misplaced',
               attachmentId: row.id,
@@ -314,7 +341,7 @@ export class DiagnosticsService {
               canonicalPath: expectedRelPath,
               size,
               checksum,
-              detail: `File is in campaign dir ${dirCampaignId} but DB row says campaign ${expectedCampaignId}`,
+              detail: `File is in ${actualDirDesc} but DB row says campaign ${expectedCampaignId}`,
             });
           }
 
@@ -421,12 +448,22 @@ export class DiagnosticsService {
     }
 
     this.assertAccessible(root);
-    const located = findPrimaryAttachmentFileOnDisk(root, req.attachmentId);
-    if (!located) {
+    const located = findPrimaryAttachmentFilesOnDisk(root, req.attachmentId);
+    if (located.length === 0) {
       return { success: false, action: 'relink', attachmentId: req.attachmentId, detail: 'File not found on disk in any campaign directory' };
     }
+    if (located.length > 1) {
+      return {
+        success: false,
+        action: 'relink',
+        attachmentId: req.attachmentId,
+        detail: `Multiple on-disk files match attachment ${req.attachmentId} (${located
+          .map((l) => l.relPath)
+          .join(', ')}); resolve the duplicates before relinking`,
+      };
+    }
 
-    const actualDir = located.campaignDir;
+    const actualDir = located[0].campaignDir;
     const actualCampaignId = parseCampaignDirId(actualDir);
     if (Number.isNaN(actualCampaignId)) {
       return { success: false, action: 'relink', attachmentId: req.attachmentId, detail: `Non-numeric campaign directory: ${actualDir}` };
@@ -475,9 +512,19 @@ export class DiagnosticsService {
     let relPath: string | undefined = req.diskPath;
 
     if (!relPath && req.attachmentId !== undefined) {
-      const located = findPrimaryAttachmentFileOnDisk(root, req.attachmentId);
-      if (located) {
-        relPath = located.relPath;
+      const located = findPrimaryAttachmentFilesOnDisk(root, req.attachmentId);
+      if (located.length > 1) {
+        return {
+          success: false,
+          action: 'quarantine',
+          attachmentId: req.attachmentId,
+          detail: `Multiple on-disk files match attachment ${req.attachmentId} (${located
+            .map((l) => l.relPath)
+            .join(', ')}); pass an explicit diskPath to disambiguate`,
+        };
+      }
+      if (located.length === 1) {
+        relPath = located[0].relPath;
       } else {
         const [row] = await this.db.select().from(attachments).where(eq(attachments.id, req.attachmentId)).limit(1);
         if (row) {
@@ -497,7 +544,7 @@ export class DiagnosticsService {
 
     const srcPath = path.resolve(root, safeRelPath);
     const srcRelative = path.relative(root, srcPath);
-    if (srcRelative.startsWith('..')) {
+    if (escapesRoot(srcRelative)) {
       throw new BadRequestException('diskPath must stay within uploads root');
     }
 
@@ -512,7 +559,7 @@ export class DiagnosticsService {
 
     const destPath = path.resolve(qRoot, srcRelative);
     const destRelative = path.relative(qRoot, destPath);
-    if (destRelative.startsWith('..')) {
+    if (escapesRoot(destRelative)) {
       throw new BadRequestException('diskPath must stay within quarantine root');
     }
 

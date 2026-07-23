@@ -512,6 +512,16 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       );
       expect(missing).toBeDefined();
 
+      // …and the file that actually exists under the non-canonical directory must
+      // still be surfaced as "misplaced" (pointing at its real location) so the
+      // operator can find the bytes, not just learn the row is missing.
+      const misplaced = res.body.issues.find(
+        (i: { type: string; attachmentId: number }) => i.type === 'misplaced' && i.attachmentId === attachId,
+      );
+      expect(misplaced).toBeDefined();
+      expect(misplaced.path).toContain(`${campaignId}extra`);
+      expect(misplaced.detail).toContain('non-canonical dir');
+
       // Clean up.
       fs.renameSync(bogusFile, srcFile);
       fs.rmSync(bogusDir, { recursive: true, force: true });
@@ -541,6 +551,92 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       // Clean up.
       fs.renameSync(bogusFile, srcFile);
       fs.rmSync(bogusDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('ambiguous attachmentId (multiple on-disk files)', () => {
+    it('relink refuses to act when the same id exists in multiple campaign dirs', async () => {
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'ambiguous-relink.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      // Duplicate the same-id file into campaign2's directory so two primaries exist.
+      const srcFile = path.join(ctx.dataDir, 'uploads', String(campaignId), `${attachId}.png`);
+      const destDir = path.join(ctx.dataDir, 'uploads', String(campaign2Id));
+      fs.mkdirSync(destDir, { recursive: true });
+      const destFile = path.join(destDir, `${attachId}.png`);
+      fs.copyFileSync(srcFile, destFile);
+
+      const fixRes = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ attachmentId: attachId, action: 'relink' });
+      expect(fixRes.status).toBe(201);
+      expect(fixRes.body.success).toBe(false);
+      expect(fixRes.body.detail).toContain('Multiple on-disk files');
+
+      // Clean up the duplicate.
+      fs.rmSync(destFile, { force: true });
+    });
+
+    it('quarantine by attachmentId refuses to act when multiple files share the id', async () => {
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'ambiguous-quarantine.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      const srcFile = path.join(ctx.dataDir, 'uploads', String(campaignId), `${attachId}.png`);
+      const destDir = path.join(ctx.dataDir, 'uploads', String(campaign2Id));
+      fs.mkdirSync(destDir, { recursive: true });
+      const destFile = path.join(destDir, `${attachId}.png`);
+      fs.copyFileSync(srcFile, destFile);
+
+      const fixRes = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ attachmentId: attachId, action: 'quarantine' });
+      expect(fixRes.status).toBe(201);
+      expect(fixRes.body.success).toBe(false);
+      expect(fixRes.body.detail).toContain('Multiple on-disk files');
+      // Neither copy should have been moved.
+      expect(fs.existsSync(srcFile)).toBe(true);
+      expect(fs.existsSync(destFile)).toBe(true);
+
+      // Clean up the duplicate.
+      fs.rmSync(destFile, { force: true });
+    });
+  });
+
+  describe('path containment (leading-dot names)', () => {
+    it('accepts a legitimate relative diskPath whose first segment merely starts with dots', async () => {
+      // Regression: `startsWith('..')` used to reject valid names like `..foo`.
+      const bogusDir = path.join(ctx.dataDir, 'uploads', '..foo');
+      fs.mkdirSync(bogusDir, { recursive: true });
+      const filePath = path.join(bogusDir, 'bar.png');
+      fs.writeFileSync(filePath, TINY_PNG);
+
+      const res = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ diskPath: '..foo/bar.png', action: 'quarantine' });
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(fs.existsSync(filePath)).toBe(false);
+      expect(fs.existsSync(path.join(ctx.dataDir, 'quarantine', '..foo', 'bar.png'))).toBe(true);
+
+      // Clean up.
+      fs.rmSync(bogusDir, { recursive: true, force: true });
+      fs.rmSync(path.join(ctx.dataDir, 'quarantine', '..foo'), { recursive: true, force: true });
+    });
+
+    it('still rejects real parent traversal', async () => {
+      const res = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ action: 'quarantine', diskPath: '../outside.txt' });
+      expect(res.status).toBe(400);
+      expect(String(res.body.message)).toContain('uploads root');
     });
   });
 
