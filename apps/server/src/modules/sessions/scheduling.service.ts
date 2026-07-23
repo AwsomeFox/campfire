@@ -212,11 +212,13 @@ export class SchedulingService {
     });
     this.emitScheduleUpdated(campaignId, row.id);
     // Tell the party a game night was put on the calendar (issue #263). Best-effort;
-    // no entity deep-link (scheduled sessions aren't an EntityType — the bell routes
-    // session_scheduled to the sessions page, which hosts the schedule panel).
+    // stamp entityId so the bell opens the Schedule tab on this exact card (#446).
     await this.notifications.notifyCampaign(campaignId, user, {
       type: 'session_scheduled',
       title: `${this.scheduleLabel(row)} scheduled for ${row.scheduledAt.slice(0, 10)}`,
+      // entityId alone (no EntityType for scheduled_session) — the bell routes
+      // session_scheduled to the Schedule tab and focuses this card (#446).
+      entityId: row.id,
       actorName: user.name,
     });
     return { ...toDomain(row), rsvps: [] };
@@ -247,6 +249,7 @@ export class SchedulingService {
       await this.notifications.notifyCampaign(existing.campaignId, user, {
         type: 'session_scheduled',
         title: `${this.scheduleLabel(existing)} rescheduled for ${patch.scheduledAt.slice(0, 10)}`,
+        entityId: id,
         actorName: user.name,
       });
     }
@@ -316,6 +319,7 @@ export class SchedulingService {
       await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
         type: 'session_rsvp',
         title: `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`,
+        entityId: scheduleId,
         actorName: user.name,
       });
     }

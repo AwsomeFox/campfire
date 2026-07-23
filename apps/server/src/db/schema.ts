@@ -870,6 +870,7 @@ export const notifications = sqliteTable('notifications', {
   body: text('body').notNull().default(''),
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
+  commentId: integer('comment_id'), // optional comment focus inside the entity thread (#446)
   actorName: text('actor_name').notNull().default(''),
   readAt: text('read_at'),
   createdAt: text('created_at').notNull(),
