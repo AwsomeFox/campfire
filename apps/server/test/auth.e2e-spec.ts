@@ -988,7 +988,10 @@ describe('sliding session expiry (#661)', () => {
       })
       .where(eq(userSessions.id, sessionId));
 
-    expect((await request(ctx.app.getHttpServer()).get('/api/v1/me').set('Cookie', cookie)).status).toBe(200);
+    const before = Date.now();
+    const meRes = await request(ctx.app.getHttpServer()).get('/api/v1/me').set('Cookie', cookie);
+    const after = Date.now();
+    expect(meRes.status).toBe(200);
 
     const [updated] = await db.select().from(userSessions).where(eq(userSessions.id, sessionId));
     const expiresMs = new Date(updated.expiresAt).getTime();
@@ -996,5 +999,19 @@ describe('sliding session expiry (#661)', () => {
     // Must be clamped well below a full idle extension from now.
     expect(expiresMs).toBeLessThan(Date.now() + SESSION_MAX_AGE_MS - 24 * 60 * 60 * 1000);
     expect(expiresMs).toBeGreaterThan(Date.now() + 4 * 24 * 60 * 60 * 1000);
+
+    // Cookie Max-Age must track remaining absolute lifetime, not a fresh 30d idle window.
+    const setCookie = meRes.headers['set-cookie'];
+    expect(setCookie).toBeDefined();
+    const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : String(setCookie);
+    const maxAgeMatch = cookieHeader.match(/max-age=(\d+)/i);
+    expect(maxAgeMatch).toBeTruthy();
+    const maxAgeSec = Number(maxAgeMatch![1]);
+    const remainingSecLow = Math.floor((expiresMs - after) / 1000);
+    const remainingSecHigh = Math.ceil((expiresMs - before) / 1000);
+    expect(maxAgeSec).toBeGreaterThanOrEqual(remainingSecLow - 2);
+    expect(maxAgeSec).toBeLessThanOrEqual(remainingSecHigh + 2);
+    // Far below a naive 30-day re-issue (~2_592_000s).
+    expect(maxAgeSec).toBeLessThan(6 * 24 * 60 * 60);
   });
 });
