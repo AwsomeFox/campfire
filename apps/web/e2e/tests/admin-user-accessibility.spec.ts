@@ -100,8 +100,8 @@ test.describe('admin user creation accessibility', () => {
     await expect(dialog).toBeHidden();
     expect(uniqueCreateRequests).toBe(1);
     await expect(trigger).toBeFocused();
-    await expect(page.getByRole('cell', { name: uniqueUsername })).toBeVisible();
-    await expect(page.getByRole('cell', { name: 'Keyboard User' })).toBeVisible();
+    await expect(page.getByRole('cell', { name: uniqueUsername, exact: true })).toBeVisible();
+    await expect(page.getByRole('cell', { name: 'Keyboard User', exact: true })).toBeVisible();
   });
 
   test('repairs an orphaned campaign without exposing campaign content', async ({ page }) => {
