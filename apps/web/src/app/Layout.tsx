@@ -306,7 +306,11 @@ function LayoutContent() {
   const formattingLocale = useFormattingLocale();
   const clearAnnouncements = useClearAnnouncements();
   const params = useParams<{ campaignId: string }>();
-  const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
+  // Non-numeric `:campaignId` must not become NaN — that would trip scope clears
+  // and confuse campaign lookups. Treat invalid params as "outside campaign".
+  const parsedCampaignId = params.campaignId ? Number(params.campaignId) : undefined;
+  const campaignId =
+    parsedCampaignId != null && Number.isFinite(parsedCampaignId) ? parsedCampaignId : undefined;
   const campaign = useCampaign(campaignId);
   const { campaigns, loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const navigate = useNavigate();

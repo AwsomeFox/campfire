@@ -47,4 +47,10 @@ test.describe('announce scope changes (issue #434)', () => {
   test('sign-in from logged-out clears (public → authed)', () => {
     expect(announceScopeChanged(scope({ userId: null }), scope({ userId: 1, campaignId: 2 }))).toBe(true);
   });
+
+  test('stable NaN campaignId does not clear (Object.is)', () => {
+    expect(
+      announceScopeChanged(scope({ userId: 1, campaignId: Number.NaN }), scope({ userId: 1, campaignId: Number.NaN })),
+    ).toBe(false);
+  });
 });

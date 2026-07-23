@@ -68,9 +68,9 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
   const assertiveRafRef = useRef<number | null>(null);
 
   const announce = useCallback<AnnounceFn>((message, options) => {
-    const assertive = Boolean(options?.assertive);
-    const setter = assertive ? setAssertive : setPolite;
-    const rafRef = assertive ? assertiveRafRef : politeRafRef;
+    const isAssertive = Boolean(options?.assertive);
+    const setter = isAssertive ? setAssertive : setPolite;
+    const rafRef = isAssertive ? assertiveRafRef : politeRafRef;
     // Clear first so an identical consecutive message still triggers the SR.
     setter('');
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
@@ -106,8 +106,9 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
     const w = window as CampfireE2EWindow;
     if (!shouldAttachE2EBridge(w)) return;
 
-    const hooks: CampfireE2EHooks =
-      typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null ? w.__CAMPFIRE_E2E__ : {};
+    const reusedExisting =
+      typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null;
+    const hooks: CampfireE2EHooks = reusedExisting ? w.__CAMPFIRE_E2E__ : {};
     hooks.announce = announce;
     hooks.clearAnnouncements = clear;
     w.__CAMPFIRE_E2E__ = hooks;
@@ -121,13 +122,16 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
         cancelAnimationFrame(assertiveRafRef.current);
         assertiveRafRef.current = null;
       }
-      if (w.__CAMPFIRE_E2E__ === hooks) {
-        delete hooks.announce;
-        delete hooks.clearAnnouncements;
-        delete w.__CAMPFIRE_E2E__;
-      } else if (typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null) {
+      // Always strip only the properties we added. Delete the whole bridge object
+      // only when this effect created it — otherwise preserve unrelated e2e fields.
+      if (typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null) {
         if (w.__CAMPFIRE_E2E__.announce === announce) delete w.__CAMPFIRE_E2E__.announce;
-        if (w.__CAMPFIRE_E2E__.clearAnnouncements === clear) delete w.__CAMPFIRE_E2E__.clearAnnouncements;
+        if (w.__CAMPFIRE_E2E__.clearAnnouncements === clear) {
+          delete w.__CAMPFIRE_E2E__.clearAnnouncements;
+        }
+      }
+      if (!reusedExisting && w.__CAMPFIRE_E2E__ === hooks) {
+        delete w.__CAMPFIRE_E2E__;
       }
     };
   }, [announce, clear]);

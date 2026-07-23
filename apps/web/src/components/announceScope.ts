@@ -13,5 +13,7 @@ export type AnnounceScope = {
 
 /** True when the announcer's identity or campaign scope has changed. */
 export function announceScopeChanged(prev: AnnounceScope, next: AnnounceScope): boolean {
-  return prev.userId !== next.userId || prev.campaignId !== next.campaignId;
+  // Object.is so a stable NaN campaignId (bad route param) does not look like a
+  // change on every render — `NaN !== NaN` would otherwise clear forever.
+  return !Object.is(prev.userId, next.userId) || !Object.is(prev.campaignId, next.campaignId);
 }
