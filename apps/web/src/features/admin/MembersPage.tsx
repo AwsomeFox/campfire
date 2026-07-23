@@ -704,7 +704,7 @@ function YourMembershipCard({
         <ConfirmDialog
           title="Leave this campaign?"
           body="You'll lose access to it. Export your data first if you want a copy."
-          confirmLabel={leaving ? 'Leaving…' : 'Leave'}
+          confirmLabel="Leave"
           busy={leaving}
           onConfirm={leave}
           onCancel={() => setConfirming(false)}
@@ -958,7 +958,7 @@ function MemberRow({
       {confirmingRemove && (
         <ConfirmDialog
           title={`Remove ${member.displayName || member.username} from this campaign?`}
-          confirmLabel={removing ? 'Removing…' : 'Remove'}
+          confirmLabel="Remove"
           busy={removing}
           onConfirm={remove}
           onCancel={() => setConfirmingRemove(false)}

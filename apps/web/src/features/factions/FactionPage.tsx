@@ -389,7 +389,7 @@ export default function FactionPage() {
         <ConfirmDialog
           title={`Delete ${faction.name}?`}
           body="This cannot be undone. Member NPCs are unlinked, not deleted."
-          confirmLabel={deleting ? 'Deleting…' : 'Delete faction'}
+          confirmLabel="Delete faction"
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}

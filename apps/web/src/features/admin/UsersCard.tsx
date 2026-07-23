@@ -404,7 +404,7 @@ function UserRow({
             <ConfirmDialog
               title={`Delete user "${user.username}"?`}
               body="This cannot be undone."
-              confirmLabel={removing ? 'Deleting…' : 'Delete user'}
+              confirmLabel="Delete user"
               busy={removing}
               onConfirm={remove}
               onCancel={() => setConfirmingDelete(false)}

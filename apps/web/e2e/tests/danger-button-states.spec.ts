@@ -163,7 +163,9 @@ for (const viewport of [
       });
 
       await confirm.click();
-      const busyConfirm = dialog.getByRole('button', { name: 'Working…' });
+      // Issue #793: busy copy keeps the action + object (not generic "Working…").
+      const busyConfirm = dialog.getByRole('button', { name: 'Deleting NPC…' });
+      await expect(dialog).toHaveAttribute('aria-busy', 'true');
       await expect(busyConfirm).toBeDisabled();
       await expect(busyConfirm).toHaveAttribute('aria-busy', 'true');
       const busy = await buttonStyle(busyConfirm);

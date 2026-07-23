@@ -398,7 +398,7 @@ export default function MyNotesPage() {
         <ConfirmDialog
           title="Delete this note?"
           body="This moves the note to the Trash — you can undo it right after."
-          confirmLabel={deleting ? 'Deleting…' : 'Delete note'}
+          confirmLabel="Delete note"
           busy={deleting}
           onConfirm={() => deleteNote(pendingDelete)}
           onCancel={() => setPendingDelete(null)}
