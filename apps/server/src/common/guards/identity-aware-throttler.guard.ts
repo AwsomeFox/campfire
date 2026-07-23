@@ -38,20 +38,30 @@ export class IdentityAwareThrottlerGuard extends ThrottlerGuard {
   }
 
   protected async handleRequest(requestProps: ThrottlerRequest): Promise<boolean> {
+    // Only the strict per-route AI ceiling (limit=AI_THROTTLE_LIMIT) resolves
+    // identity — the loose module-level AI named throttler must not pay for
+    // session/PAT lookups on every request (#1054).
     if (requestProps.throttler.name === THROTTLE_AI && requestProps.limit === AI_THROTTLE_LIMIT) {
       const { req, res } = this.getRequestResponse(requestProps.context) as {
         req: AuthenticatedRequest;
         res: Response;
       };
       await this.resolveUserForAiThrottle(req, res);
+      // Prefer user buckets for this AI check only; other named throttlers on
+      // the same request keep IP tracking unless they also resolve a user.
+      if (req.user) {
+        (req as AuthenticatedRequest & { aiThrottleTracker?: string }).aiThrottleTracker =
+          `user:${req.user.id}`;
+      }
     }
 
     return super.handleRequest(requestProps);
   }
 
   protected async getTracker(req: Record<string, unknown>): Promise<string> {
-    const request = req as unknown as AuthenticatedRequest;
-    return request.user ? `user:${request.user.id}` : (request.ip ?? request.socket.remoteAddress ?? 'unknown');
+    const request = req as unknown as AuthenticatedRequest & { aiThrottleTracker?: string };
+    if (request.aiThrottleTracker) return request.aiThrottleTracker;
+    return request.ip ?? request.socket.remoteAddress ?? 'unknown';
   }
 
   private async resolveUserForAiThrottle(req: AuthenticatedRequest, res: Response): Promise<void> {
