@@ -148,12 +148,21 @@ export class AnthropicProvider implements AiProvider {
 
 function toAnthropicMessages(messages: AiMessage[]): AnthropicWireMessage[] {
   const out: AnthropicWireMessage[] = [];
+  let pendingToolResults: AnthropicContentBlock[] = [];
+
   for (const m of messages) {
     if (m.role === 'tool') {
-      // A tool result is delivered as a user-role message carrying a tool_result block.
-      out.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: m.toolCallId ?? '', content: m.content ?? '' }] });
+      // Accumulate tool results — they'll be flushed as one user message
+      pendingToolResults.push({ type: 'tool_result', tool_use_id: m.toolCallId ?? '', content: m.content ?? '' });
       continue;
     }
+
+    // Flush any pending tool results before processing a non-tool message
+    if (pendingToolResults.length > 0) {
+      out.push({ role: 'user', content: pendingToolResults });
+      pendingToolResults = [];
+    }
+
     if (m.role === 'assistant') {
       const blocks: AnthropicContentBlock[] = [];
       if (m.content) blocks.push({ type: 'text', text: m.content });
@@ -164,6 +173,12 @@ function toAnthropicMessages(messages: AiMessage[]): AnthropicWireMessage[] {
     // user (and any stray system slipped into history) → user text block
     out.push({ role: 'user', content: [{ type: 'text', text: m.content ?? '' }] });
   }
+
+  // Flush any trailing tool results
+  if (pendingToolResults.length > 0) {
+    out.push({ role: 'user', content: pendingToolResults });
+  }
+
   return out;
 }
 

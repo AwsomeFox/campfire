@@ -126,6 +126,141 @@ describe('AnthropicProvider — streaming', () => {
   });
 });
 
+describe('AnthropicProvider — parallel tool call coalescing (#1074)', () => {
+  it('coalesces consecutive tool results into a single user message', async () => {
+    const { fetchImpl, calls } = fakeFetch(jsonResponse(message('done')));
+    const p = new AnthropicProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    await p.generate({
+      model: 'm',
+      messages: [
+        { role: 'user', content: 'attack' },
+        {
+          role: 'assistant',
+          content: 'rolling attacks',
+          toolCalls: [
+            { id: 'tu_1', name: 'roll_dice', arguments: { sides: 20 } },
+            { id: 'tu_2', name: 'roll_dice', arguments: { sides: 8 } },
+          ],
+        },
+        { role: 'tool', toolCallId: 'tu_1', content: '17' },
+        { role: 'tool', toolCallId: 'tu_2', content: '5' },
+      ],
+    });
+    const body = sentBody(calls[0].init) as { messages: unknown[] };
+    // assistant message with both tool_use blocks
+    expect(body.messages[1]).toEqual({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'rolling attacks' },
+        { type: 'tool_use', id: 'tu_1', name: 'roll_dice', input: { sides: 20 } },
+        { type: 'tool_use', id: 'tu_2', name: 'roll_dice', input: { sides: 8 } },
+      ],
+    });
+    // Both tool results in ONE user message
+    expect(body.messages[2]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'tu_1', content: '17' },
+        { type: 'tool_result', tool_use_id: 'tu_2', content: '5' },
+      ],
+    });
+    // No additional messages beyond these three
+    expect(body.messages).toHaveLength(3);
+  });
+
+  it('single tool result still works (single user message with one tool_result block)', async () => {
+    const { fetchImpl, calls } = fakeFetch(jsonResponse(message('done')));
+    const p = new AnthropicProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    await p.generate({
+      model: 'm',
+      messages: [
+        { role: 'user', content: 'roll' },
+        { role: 'assistant', toolCalls: [{ id: 'tu_1', name: 'roll_dice', arguments: { sides: 20 } }] },
+        { role: 'tool', toolCallId: 'tu_1', content: '14' },
+      ],
+    });
+    const body = sentBody(calls[0].init) as { messages: unknown[] };
+    expect(body.messages[2]).toEqual({
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: '14' }],
+    });
+    expect(body.messages).toHaveLength(3);
+  });
+
+  it('handles mixed sequence: user → assistant(2 tool_use) → tool → tool → assistant(text)', async () => {
+    const { fetchImpl, calls } = fakeFetch(jsonResponse(message('final')));
+    const p = new AnthropicProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    await p.generate({
+      model: 'm',
+      messages: [
+        { role: 'user', content: 'do things' },
+        {
+          role: 'assistant',
+          toolCalls: [
+            { id: 'tu_a', name: 'tool_a', arguments: {} },
+            { id: 'tu_b', name: 'tool_b', arguments: {} },
+          ],
+        },
+        { role: 'tool', toolCallId: 'tu_a', content: 'result_a' },
+        { role: 'tool', toolCallId: 'tu_b', content: 'result_b' },
+        { role: 'assistant', content: 'All done' },
+      ],
+    });
+    const body = sentBody(calls[0].init) as { messages: unknown[] };
+    expect(body.messages).toHaveLength(4);
+    // user
+    expect(body.messages[0]).toEqual({ role: 'user', content: [{ type: 'text', text: 'do things' }] });
+    // assistant with tool calls
+    expect(body.messages[1]).toEqual({
+      role: 'assistant',
+      content: [
+        { type: 'tool_use', id: 'tu_a', name: 'tool_a', input: {} },
+        { type: 'tool_use', id: 'tu_b', name: 'tool_b', input: {} },
+      ],
+    });
+    // coalesced tool results
+    expect(body.messages[2]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'tu_a', content: 'result_a' },
+        { type: 'tool_result', tool_use_id: 'tu_b', content: 'result_b' },
+      ],
+    });
+    // final assistant text
+    expect(body.messages[3]).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'All done' }] });
+  });
+
+  it('non-consecutive tool results (separated by user messages) stay in separate user messages', async () => {
+    const { fetchImpl, calls } = fakeFetch(jsonResponse(message('ok')));
+    const p = new AnthropicProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    await p.generate({
+      model: 'm',
+      messages: [
+        { role: 'user', content: 'first' },
+        { role: 'assistant', toolCalls: [{ id: 'tu_1', name: 'tool_a', arguments: {} }] },
+        { role: 'tool', toolCallId: 'tu_1', content: 'res_1' },
+        { role: 'user', content: 'second' },
+        { role: 'assistant', toolCalls: [{ id: 'tu_2', name: 'tool_b', arguments: {} }] },
+        { role: 'tool', toolCallId: 'tu_2', content: 'res_2' },
+      ],
+    });
+    const body = sentBody(calls[0].init) as { messages: unknown[] };
+    expect(body.messages).toHaveLength(6);
+    // First tool result as its own user message
+    expect(body.messages[2]).toEqual({
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'res_1' }],
+    });
+    // Intervening user message
+    expect(body.messages[3]).toEqual({ role: 'user', content: [{ type: 'text', text: 'second' }] });
+    // Second tool result as its own user message
+    expect(body.messages[5]).toEqual({
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'tu_2', content: 'res_2' }],
+    });
+  });
+});
+
 describe('AnthropicProvider — error handling', () => {
   it('maps 429 to a retryable rate_limit error', async () => {
     const { fetchImpl } = fakeFetch(errorResponse(429, 'overloaded'));
