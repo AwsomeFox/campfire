@@ -231,7 +231,11 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     try {
       await navigator.clipboard.writeText(inviteLinkFor(invite.code));
       setCopiedId(invite.id);
-      setError(null);
+      // `error` is shared across create/revoke/copy for this card, so only
+      // clear it here if it's the copy-failure message we set below —
+      // otherwise a successful copy could silently dismiss an unrelated
+      // create/revoke failure that's still unresolved.
+      setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
       announce(INVITE_COPY_SUCCESS);
       setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
     } catch {
