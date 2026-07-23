@@ -245,9 +245,10 @@ jobs:
       # cache hit the Chromium binary download itself is skipped.
       - run: npx playwright install --with-deps chromium
       - name: Run Playwright tests (shard ${{ matrix.shard }}/4)
+        working-directory: apps/web
         run: |
-          if [ "${{ matrix.shard }}" = "1" ]; then npx playwright test --config playwright.first-run.config.ts -w apps/web; fi
-          npx playwright test --shard=${{ matrix.shard }}/4 -w apps/web
+          if [ "${{ matrix.shard }}" = "1" ]; then npx playwright test --config playwright.first-run.config.ts; fi
+          npx playwright test --shard=${{ matrix.shard }}/4
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
