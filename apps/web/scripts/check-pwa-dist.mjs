@@ -39,6 +39,15 @@ if (existsSync(join(dist, "manifest.webmanifest"))) {
   check(m.name === "Campfire", "manifest.name should be Campfire");
   check(!!m.short_name, "manifest.short_name missing");
   check(m.display === "standalone", "manifest.display should be standalone");
+  // Issue #797: portrait lock blocked landscape for maps / AI table / player display.
+  // Allow omitting orientation or setting it to "any"; reject any portrait* lock.
+  const orientation = m.orientation;
+  check(
+    orientation == null
+      || orientation === "any"
+      || (typeof orientation === "string" && !orientation.includes("portrait")),
+    `manifest.orientation must not lock portrait (got ${JSON.stringify(orientation)})`,
+  );
   check(/^#/.test(m.theme_color || ""), "manifest.theme_color missing");
   check(/^#/.test(m.background_color || ""), "manifest.background_color missing");
   check(Array.isArray(m.icons) && m.icons.length >= 2, "manifest needs >=2 icons");
