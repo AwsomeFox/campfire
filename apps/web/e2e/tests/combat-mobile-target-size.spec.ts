@@ -1,5 +1,5 @@
 import { test, expect, request, type Locator, type Page } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
