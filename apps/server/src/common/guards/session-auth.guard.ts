@@ -77,9 +77,20 @@ export class SessionAuthGuard implements CanActivate {
         req.user = resolved.user;
         // Re-issue the cookie when the DB session slides so browser maxAge tracks
         // idle extension (otherwise the cookie dies at login+30d while expiresAt moved).
+        // Use remaining time until the (possibly absolute-capped) server expiresAt —
+        // a fixed 30d Max-Age can outlive absoluteDeadline and leave the browser
+        // sending a cookie the server already rejects.
         if (resolved.slid) {
           const res = context.switchToHttp().getResponse<Response>();
-          res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
+          const remainingMs =
+            resolved.expiresAtMs !== undefined
+              ? Math.max(0, resolved.expiresAtMs - Date.now())
+              : undefined;
+          res.cookie(
+            SESSION_COOKIE_NAME,
+            token,
+            remainingMs !== undefined ? sessionCookieOptions(remainingMs) : sessionCookieOptions(),
+          );
         }
         return true;
       }
