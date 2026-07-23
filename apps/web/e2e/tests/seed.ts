@@ -105,20 +105,21 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
       status = 'running';
     }
 
-    // Reset HP / initiative / round to the seeded fixture. Valid for preparing and
-    // running (assertMutable rejects only ended).
-    const patchRes = await dm.patch(`/api/v1/encounters/${encounterId}`, {
-      data: {
-        round: 1,
-        turnIndex: 0,
-        combatants: [
-          { id: bossId, currentHp: 30, initiative: 18 },
-          { id: skirmisherId, currentHp: 12, initiative: 7 },
-        ],
-      },
-    });
-    if (!patchRes.ok()) {
-      throw new Error(`patch seed encounter -> ${patchRes.status()}: ${await readError(patchRes)}`);
+    // Reset each seed combatant's HP / initiative. EncounterUpdate does not accept
+    // round/turnIndex/combatants (lifecycle endpoints own those); prior restore helpers
+    // patched unrecognized keys and silently no-op'd under .catch().
+    for (const c of [
+      { id: bossId, hpSet: 30, initiative: 18 },
+      { id: skirmisherId, hpSet: 12, initiative: 7 },
+    ]) {
+      const patchRes = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
+        data: { hpSet: c.hpSet, initiative: c.initiative },
+      });
+      if (!patchRes.ok()) {
+        throw new Error(
+          `patch seed combatant ${c.id} -> ${patchRes.status()}: ${await readError(patchRes)}`,
+        );
+      }
     }
 
     if (status === 'preparing') {
