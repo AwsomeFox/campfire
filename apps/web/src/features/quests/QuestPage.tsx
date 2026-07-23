@@ -228,8 +228,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     setSavingStatus(true);
     try {
       const updated = await api.post<Quest>(`${API}/quests/${quest.id}/status`, { status });
-      setQuest({ ...quest, ...updated });
-      announce(t('quests.statusChanged', { status: questStatusWord(t, status) }));
+      setQuest((q) => (q ? { ...q, ...updated } : q));
+      // Announce the server-acknowledged status, not the requested one — if the
+      // backend normalizes/overrides the value, the spoken message must match
+      // what was actually persisted.
+      announce(t('quests.statusChanged', { status: questStatusWord(t, updated.status) }));
     } catch {
       // Selection is preserved (quest.status is unchanged). Surface the failure
       // both visually (page-level ErrorNote) and to the screen reader so the
