@@ -53,11 +53,6 @@ function meFor(id: number, instance: ServerInstance = INSTANCE_GEN0): Me {
 /** A stable install identity for the "no change" cases. */
 const INSTANCE_ID = '11111111-1111-1111-1111-111111111111';
 const INSTANCE_GEN0: ServerInstance = { instanceId: INSTANCE_ID, dataGeneration: 0 };
-/** A post-restore identity: same install (UUID travels inside the restored DB),
- * generation bumped — this is the #723 wipe signal. */
-const INSTANCE_GEN1: ServerInstance = { instanceId: INSTANCE_ID, dataGeneration: 1 };
-/** A different physical install entirely (e.g. pointed the SW at another box). */
-const INSTANCE_OTHER: ServerInstance = { instanceId: '22222222-2222-2222-2222-222222222222', dataGeneration: 0 };
 
 const NOW = 1_700_000_000_000;
 

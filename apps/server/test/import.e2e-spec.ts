@@ -643,9 +643,9 @@ describe('campaign import — atomic staged commit (issue #725)', () => {
       expect(idsAfter.sort()).toEqual(idsBefore.sort());
 
       // No audit row for a rolled-back import (the audit insert shared the tx).
-      const audit = await dmAgent.get('/api/v1/campaigns/999999/audit');
-      // 404 is fine — we only care that no 'campaign.import' row leaked; check by
-      // confirming the campaigns table itself gained no row named "Should Roll Back".
+      // There's no campaign to fetch /audit for (the row never committed), so we
+      // check indirectly: confirm the campaigns table itself gained no row named
+      // "Should Roll Back" — a leaked audit row would imply a leaked campaign too.
       const all = await dmAgent.get('/api/v1/campaigns');
       const leaked = (all.body as { name: string }[]).find((c) => c.name === 'Should Roll Back');
       expect(leaked).toBeUndefined();

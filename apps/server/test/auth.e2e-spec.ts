@@ -788,7 +788,7 @@ describe('self-delete account (e2e, issue #128)', () => {
     const server = ctx.app.getHttpServer();
 
     // A DM with a campaign, and a player who owns a linked character.
-    const createDm = await adminAgent.post('/api/v1/users').send({ username: 'sd-dm', password: 'dm-password-1', serverRole: 'user' });
+    await adminAgent.post('/api/v1/users').send({ username: 'sd-dm', password: 'dm-password-1', serverRole: 'user' });
     const dmAgent = request.agent(server);
     await dmAgent.post('/api/v1/auth/login').send({ username: 'sd-dm', password: 'dm-password-1' });
     const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Self Delete Campaign' });
