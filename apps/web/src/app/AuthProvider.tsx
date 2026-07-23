@@ -38,6 +38,7 @@ import {
   useAuthStorageListener,
 } from '../features/auth/useAuthStorageListener';
 import { applyReadingPreference } from './readingPreferences';
+import { clearLiveAnnouncements } from '../components/Announcer';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
 // e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
 // can be unit-tested without JSX and without React.
@@ -104,8 +105,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // though the user id is unchanged. Only a PROVEN-LIVE /me updates this (never a
   // stale/restored identity), so it can't itself be poisoned by offline artifacts.
   const lastInstanceRef = useRef<ServerInstance | null>(null);
+  // Issue #506 / Bugbot: bumped synchronously at the start of logout() so any
+  // in-flight refresh() that resolves after sign-out discards its result instead
+  // of resurrecting `me` from a cookie that hasn't been revoked yet.
+  const logoutEpochRef = useRef(0);
 
   const handleMultiTabSignOut = useCallback(() => {
+    logoutEpochRef.current += 1;
     setMe(null);
     lastUserIdRef.current = null;
     lastInstanceRef.current = null;
@@ -116,18 +122,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
-    void clearApiCache().finally(() => queryClient.clear());
+    // Issue #506: peer tabs must not keep assertive/polite combat/HP text after
+    // another tab signs out (AnnounceProvider sits below us, so use the module
+    // entrypoint rather than the React hook).
+    clearLiveAnnouncements();
+    // Drop in-memory campaign data immediately; SW cache purge stays best-effort.
+    queryClient.clear();
+    // If the first /me was still in flight, refresh() will early-return — mark
+    // ready so AuthedLayout can leave the splash and show the logged-out UI.
+    setReady(true);
+    void clearApiCache();
   }, []);
 
   useAuthStorageListener(handleMultiTabSignOut);
 
   const refresh = useCallback(async () => {
+    const epoch = logoutEpochRef.current;
     let outcome: MeFetchOutcome;
     try {
       const nextMe = await api.get<Me>(`${API}/me`);
       outcome = { kind: 'live', me: nextMe };
     } catch (err) {
       outcome = outcomeFromError(err);
+    }
+
+    // Sign-out won the race: do not apply a late /me (live or snapshot restore).
+    // Still mark ready — otherwise a first-load /me cancelled by multi-tab
+    // sign-out leaves AuthedLayout stuck on Splash forever.
+    if (epoch !== logoutEpochRef.current) {
+      setReady(true);
+      return;
     }
 
     const snapshot = readMeSnapshot<Me>();
@@ -141,6 +165,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await clearApiCache();
       queryClient.clear();
     }
+    // Re-check after the cache await — logout may have started meanwhile.
+    if (epoch !== logoutEpochRef.current) {
+      setReady(true);
+      return;
+    }
+
     if (decision.shouldClearSnapshot) {
       clearMeSnapshot();
     }
@@ -205,25 +235,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    try {
-      await api.post(`${API}/auth/logout`);
-    } finally {
-      clearAuthStorage();
-      setMe(null);
-      // Drop this account's cached campaign data so the next person to sign in on
-      // this device never inherits it (issue #268), and clear the persisted
-      // offline identity so an offline reload no longer restores this account.
-      lastUserIdRef.current = null;
-      lastInstanceRef.current = null;
-      await clearApiCache();
-      queryClient.clear();
-      clearMeSnapshot();
-      setStaleIdentity(false);
-      setLastSyncedAt(null);
-      setConnectionError(false);
-      applyAccentColor(null);
-      applyReadingPreference(document.documentElement, 'default');
-    }
+    // Issue #506: invalidate the server session and clear local state without
+    // awaiting either network/cache work. Callers (Layout) must be able to
+    // announce + navigate synchronously; `clearApiCache` is documented as
+    // never blocking logout; a stalled /auth/logout must not hold the UI.
+    // Bump the epoch FIRST so any in-flight refresh() cannot re-apply `me`
+    // from a cookie that still looks valid until the POST lands.
+    logoutEpochRef.current += 1;
+
+    // Fire server invalidation immediately (before/alongside the local clear)
+    // so the session-survival window on reload is as short as possible. Errors
+    // are swallowed — the local session is over regardless.
+    void api.post(`${API}/auth/logout`).catch(() => {
+      /* Swallowed intentionally — see comment above. */
+    });
+
+    // `clearAuthStorage()` also fires the storage event that drives multi-tab
+    // sign-out (issue #666), so other tabs clear immediately too.
+    clearAuthStorage();
+    setMe(null);
+    // Drop this account's cached campaign data so the next person to sign in on
+    // this device never inherits it (issue #268), and clear the persisted
+    // offline identity so an offline reload no longer restores this account.
+    lastUserIdRef.current = null;
+    lastInstanceRef.current = null;
+    clearMeSnapshot();
+    setStaleIdentity(false);
+    setLastSyncedAt(null);
+    setConnectionError(false);
+    applyAccentColor(null);
+    applyReadingPreference(document.documentElement, 'default');
+    // Clear React Query synchronously so a fast shared-device re-login cannot
+    // read the prior account's in-memory campaign cache. SW Cache Storage purge
+    // stays fire-and-forget (must never block sign-out).
+    queryClient.clear();
+    setReady(true);
+    void clearApiCache();
   }, []);
 
   const isAdmin = me?.user.serverRole === 'admin';

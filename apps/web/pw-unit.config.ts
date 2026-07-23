@@ -4,7 +4,8 @@ import { defineConfig } from '@playwright/test';
 // (savedRollsState, undoSnackbarState, imageUploadState, …) in isolation.
 export default defineConfig({
   testDir: './e2e/tests',
-  testMatch: /.*\.unit\.spec\.ts/,
+  // `.mts` allows native `import.meta.url` (Playwright's CJS transform does not).
+  testMatch: /.*\.unit\.spec\.m?ts/,
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,

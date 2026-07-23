@@ -1103,7 +1103,15 @@ describe('rules / rule packs — Pathfinder 2e install (e2e, fake AoN server)', 
     const data = JSON.parse(goblin.dataJson);
     expect(data.level).toBe(-1);
     expect(data.perception).toBe(2);
-    expect(data.abilityMods.dexterity).toBe(3);
+    // REST surface: ability MODS round-trip with zero / positive / negative values (issue #767).
+    expect(data.abilityMods).toEqual({
+      strength: 0,
+      dexterity: 3,
+      constitution: 1,
+      intelligence: 0,
+      wisdom: -1,
+      charisma: 1,
+    });
 
     // Spell -> spell, equipment -> item, ancestry -> race, class -> class, condition -> condition.
     const typesToProbe: Array<[string, string]> = [
