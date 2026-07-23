@@ -72,10 +72,9 @@ jobs:
   # Browser E2E (Playwright). The root `test:e2e` script builds schema + server +
   # web and runs the Playwright suite (apps/web/e2e) against the real server
   # serving the built SPA on one origin, with a seeded per-role backend.
-  # E2E typecheck is a required gate (#574) and needs packages/schema built first
-  # (@campfire/schema types live in gitignored dist/). The Playwright run keeps
-  # `--if-present` so that step can no-op if the script is ever removed. The
-  # browser is installed explicitly (npm ci does not fetch it).
+  # E2E typecheck and the Playwright run are both required gates (#574). Typecheck
+  # needs packages/schema built first (@campfire/schema types live in gitignored
+  # dist/). The browser is installed explicitly (npm ci does not fetch it).
   e2e-web:
     runs-on: ubuntu-latest
     steps:
@@ -90,7 +89,7 @@ jobs:
       - run: npm run test:e2e:typecheck -w apps/web
       # Chromium only — the suite runs a single headless project (see playwright.config.ts).
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e --if-present
+      - run: npm run test:e2e
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
