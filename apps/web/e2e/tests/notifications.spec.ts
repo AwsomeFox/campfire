@@ -152,9 +152,109 @@ test.describe('shared notification controller', () => {
     await page.getByRole('button', { name: 'Notifications', exact: true }).click();
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
-    await expect(dialog.locator('p').filter({ hasText: "Couldn't load notifications." })).toHaveText("Couldn't load notifications.");
+    await expect(dialog.getByRole('alert')).toHaveText(/Couldn't load notifications\./);
     await expect(dialog.getByRole('status')).toHaveText("Couldn't load notifications.");
     await expect(dialog).toHaveAccessibleDescription("Couldn't load notifications.");
+    await expect(dialog.getByRole('button', { name: 'Retry' })).toBeVisible();
+  });
+
+  test('retries a failed notification list load from the dialog', async ({ page }) => {
+    const { campaignId } = seed();
+    let listRequests = 0;
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 1 } }));
+    await page.route(LIST_URL, async (route) => {
+      listRequests += 1;
+      if (listRequests === 1) {
+        await route.fulfill({ status: 503, json: { message: 'Unavailable' } });
+        return;
+      }
+      await route.fulfill({ json: [notification('Recovered notification', 9920)] });
+    });
+
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: 'Notifications (1 unread)' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog.getByRole('alert')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Retry' }).click();
+    await expect(dialog.getByRole('button', { name: 'Recovered notification' })).toBeVisible();
+    await expect(dialog.getByRole('status')).toHaveText('1 item.');
+    expect(listRequests).toBe(2);
+  });
+
+  test('announces mark all read in the dialog status region', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 2 } }));
+    await page.route(LIST_URL, (route) => route.fulfill({
+      json: [
+        notification('First unread', 9921),
+        notification('Second unread', 9922),
+      ],
+    }));
+    await page.route('**/api/v1/notifications/read-all', async (route) => {
+      await route.fulfill({ json: { ok: true } });
+    });
+
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: 'Notifications (2 unread)' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog.getByRole('status')).toHaveText('2 items.');
+    await dialog.getByRole('button', { name: 'Mark all read' }).click();
+    await expect(dialog.getByRole('status')).toHaveText('All notifications marked as read.');
+    await expect(page.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+  });
+
+  test('announces loading before items arrive', async ({ page }) => {
+    const { campaignId } = seed();
+    let releaseList: () => void = () => {};
+    const listGate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 0 } }));
+    await page.route(LIST_URL, async (route) => {
+      await listGate;
+      await route.fulfill({ json: [] });
+    });
+
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: 'Notifications', exact: true }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog.getByRole('status')).toHaveText('Loading items.');
+    releaseList();
+    await expect(dialog.getByRole('status')).toHaveText('0 items.');
+  });
+
+  test('reflows and scrolls at the 200% zoom equivalent on desktop', async ({ page }) => {
+    const { campaignId } = seed();
+    // 640 CSS pixels is the reflow width for a 1280px layout at 200% browser zoom.
+    await page.setViewportSize({ width: 640, height: 480 });
+    const many = Array.from({ length: 24 }, (_, index) => notification(`Notice ${index + 1}`, 9930 + index));
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: many.length } }));
+    await page.route(LIST_URL, (route) => route.fulfill({ json: many }));
+
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: new RegExp(`Notifications \\(${many.length} unread\\)`) }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog).toBeVisible();
+    const box = await dialog.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x + box!.width).toBeLessThanOrEqual(640 + 1);
+    expect(box!.y).toBeGreaterThanOrEqual(0);
+
+    const scrollRegion = dialog.locator('.overflow-y-auto');
+    await expect(scrollRegion).toBeVisible();
+    const beforeScroll = await scrollRegion.evaluate((element) => element.scrollTop);
+    await scrollRegion.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    expect(await scrollRegion.evaluate((element) => element.scrollTop)).toBeGreaterThan(beforeScroll);
+    await expect(dialog.getByRole('button', { name: 'Notice 24' })).toBeVisible();
+
+    const accessibilityScan = await new AxeBuilder({ page }).include('[role="dialog"]').analyze();
+    expect(accessibilityScan.violations).toEqual([]);
   });
 
   test('renders one responsive bell and does not overlap route refreshes', async ({ page }) => {

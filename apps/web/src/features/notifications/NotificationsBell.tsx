@@ -20,7 +20,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import type { Notification } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
-import { Btn, Skeleton } from '../../components/ui';
+import { Btn, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
@@ -67,6 +67,7 @@ type NotificationContextValue = {
   loadError: boolean;
   togglePanel(): void;
   closePanel(): void;
+  retryLoadItems(): void;
   markRead(notification: Notification): Promise<void>;
   markAllRead(): Promise<void>;
 };
@@ -531,6 +532,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     loadError,
     togglePanel,
     closePanel,
+    retryLoadItems: loadItems,
     markRead,
     markAllRead,
   };
@@ -601,15 +603,21 @@ function CloseButton({ onClose, label }: { onClose: () => void; label: string })
 }
 
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
-  const { count, items, loadError, closePanel, markRead, markAllRead } = notifications;
+  const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead } = notifications;
   const narrow = useIsNarrowViewport();
+  const [markAllAnnouncement, setMarkAllAnnouncement] = useState<string | null>(null);
   // useDialog already wires Escape-to-close, focus trap, focus restore to the
   // trigger, and an inert background (issue #650/#92). It runs once per mount,
   // so it stays put when the panel re-renders across the breakpoint.
   const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
-  const itemCountAnnouncement = items === null
+  const itemCountAnnouncement = markAllAnnouncement ?? (items === null
     ? (loadError ? "Couldn't load notifications." : 'Loading items.')
-    : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`;
+    : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`);
+
+  const handleMarkAllRead = useCallback(async () => {
+    await markAllRead();
+    setMarkAllAnnouncement('All notifications marked as read.');
+  }, [markAllRead]);
 
   // Bottom sheet on phones (issue #664), top-right flyout everywhere else —
   // matches the MoreSheet pattern in Layout.tsx so a thumb reaches the close
@@ -685,7 +693,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
           </span>
           <div className="flex-1" />
           {count > 0 && (
-            <Btn ghost style={{ fontSize: 11, minHeight: 32 }} onClick={() => void markAllRead()}>
+            <Btn ghost style={{ fontSize: 11, minHeight: 32 }} onClick={() => void handleMarkAllRead()}>
               Mark all read
             </Btn>
           )}
@@ -698,9 +706,9 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
             </div>
           )}
           {loadError && (
-            <p className="text-sm p-3" style={{ color: 'var(--color-neutral-400)' }}>
-              Couldn't load notifications.
-            </p>
+            <div className="p-3">
+              <ErrorNote message="Couldn't load notifications." onRetry={retryLoadItems} />
+            </div>
           )}
           {items !== null && items.length === 0 && (
             <div className="cf-inset border-dashed p-6 text-center space-y-1">
