@@ -9,11 +9,13 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { safeInternalPath } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+import { useAnnounce, useClearAnnouncements } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { PasswordInput } from '../../components/PasswordInput';
 import {
@@ -223,8 +225,11 @@ function LocalLoginForm({
 }
 
 export function LoginPage() {
+  const { t } = useTranslation();
   const { status, loading } = useAuthStatus();
   const { me, ready, refresh } = useAuth();
+  const announce = useAnnounce();
+  const clearAnnouncements = useClearAnnouncements();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -255,13 +260,35 @@ export function LoginPage() {
   // Router just removed (often nowhere, per WCAG 2.4.3). A normal cold visit or
   // a session-expiry bounce doesn't carry this flag, so the local form's own
   // autoFocus (aimed at the username field) is left alone for those.
+  //
+  // Assertive "Signed out" is announced here (not in Layout.onLogout) so it
+  // survives AuthedLayout/Layout unmount clears from issue #434.
   const cameFromSignOut = Boolean((location.state as { signedOut?: boolean } | null)?.signedOut);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const announcedSignOut = useRef(false);
   // useLayoutEffect so heading focus wins over a later paint; skip username
   // autoFocus when cameFromSignOut (see LocalLoginForm below).
   useLayoutEffect(() => {
     if (cameFromSignOut) headingRef.current?.focus();
   }, [cameFromSignOut]);
+
+  useEffect(() => {
+    if (!cameFromSignOut || announcedSignOut.current) return;
+    announcedSignOut.current = true;
+    announce(t('nav.signedOutAnnouncement'), { assertive: true });
+  }, [cameFromSignOut, announce, t]);
+
+  // Leaving /login (sign-in success, SSO bounce, etc.) must wipe the assertive
+  // "Signed out" confirmation. AuthedLayout's scope hook also clears on first
+  // mount; this covers the LoginPage-owned announcement path directly (#434).
+  // Ref + empty deps: clear identity changes must not wipe mid-page.
+  const clearAnnouncementsRef = useRef(clearAnnouncements);
+  clearAnnouncementsRef.current = clearAnnouncements;
+  useLayoutEffect(() => {
+    return () => {
+      clearAnnouncementsRef.current();
+    };
+  }, []);
 
   // Issue #449: after a failed submit, move focus to the first invalid field
   // (credentials) or the form summary (rate-limit / server / disabled).

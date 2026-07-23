@@ -13,6 +13,10 @@
  * identical messages without a `dedupeKey` are still re-announced (we blank
  * the node for a frame first), so e.g. two "1d20: 15" rolls in a row are both
  * spoken. Pass `dedupeKey` to suppress reconnect/refetch chatter.
+ *
+ * Because the provider outlives the router, announcement text can otherwise
+ * linger into /login and the next account's session (issue #434). Callers that
+ * tear down an identity or campaign scope use `useClearAnnouncements()`.
  */
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
@@ -52,6 +56,28 @@ let clearLiveRegionImpl: ClearFn = () => {};
 /** Wipe polite/assertive live-region text. Safe no-op before provider mount. */
 export function clearLiveAnnouncements(): void {
   clearLiveRegionImpl();
+}
+
+/**
+ * Playwright / automation bridge (issue #434). Namespaced under one symbol and
+ * attached only when the same window reports `navigator.webdriver` — never in
+ * normal production browsing (a bare `__CAMPFIRE_E2E__` object is not enough).
+ * Specs seed React announcer state via `window.__CAMPFIRE_E2E__.announce`.
+ */
+type CampfireE2EHooks = {
+  announce?: AnnounceFn;
+  clearAnnouncements?: ClearFn;
+};
+
+type CampfireE2EWindow = Window & {
+  __CAMPFIRE_E2E__?: CampfireE2EHooks | true;
+};
+
+function shouldAttachE2EBridge(w: CampfireE2EWindow): boolean {
+  // Require BOTH webdriver AND an explicit opt-in sentinel. A bare webdriver
+  // session (or a bare `__CAMPFIRE_E2E__` object) must not expose announcer hooks.
+  const nav = (w as Window & { navigator?: Navigator }).navigator;
+  return Boolean(nav?.webdriver && w.__CAMPFIRE_E2E__);
 }
 
 function createProviderQueue(
@@ -105,6 +131,32 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
   // Keep the module-level entrypoint pointed at the mounted provider's clear
   // (same render-time publish as #506 — multi-tab sign-out can race effects).
   clearLiveRegionImpl = clear;
+
+  // Attach the e2e bridge only under automation. Drop only the properties we
+  // added on cleanup; delete the whole bridge object only when we created it.
+  useEffect(() => {
+    const w = window as CampfireE2EWindow;
+    if (!shouldAttachE2EBridge(w)) return;
+
+    const reusedExisting =
+      typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null;
+    const hooks: CampfireE2EHooks = reusedExisting ? w.__CAMPFIRE_E2E__ : {};
+    hooks.announce = announce;
+    hooks.clearAnnouncements = clear;
+    w.__CAMPFIRE_E2E__ = hooks;
+
+    return () => {
+      if (typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null) {
+        if (w.__CAMPFIRE_E2E__.announce === announce) delete w.__CAMPFIRE_E2E__.announce;
+        if (w.__CAMPFIRE_E2E__.clearAnnouncements === clear) {
+          delete w.__CAMPFIRE_E2E__.clearAnnouncements;
+        }
+      }
+      if (!reusedExisting && w.__CAMPFIRE_E2E__ === hooks) {
+        delete w.__CAMPFIRE_E2E__;
+      }
+    };
+  }, [announce, clear]);
 
   return (
     <AnnounceContext.Provider value={announce}>
