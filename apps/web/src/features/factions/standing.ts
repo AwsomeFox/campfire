@@ -14,7 +14,7 @@ export { FACTION_STANDINGS };
 export type { FactionStanding };
 
 /** Localization-ready English display labels for every standing enum. */
-export const FACTION_STANDING_LABEL: Record<FactionStanding, string> = {
+export const FACTION_STANDING_LABELS: Record<FactionStanding, string> = {
   hostile: 'Hostile',
   unfriendly: 'Unfriendly',
   neutral: 'Neutral',
@@ -35,7 +35,7 @@ type Translate = (key: string, options?: { defaultValue?: string }) => string | 
 
 /** Humanized standing label. Pass `t` to resolve through the i18n catalog. */
 export function factionStandingLabel(standing: FactionStanding, t?: Translate): string {
-  const fallback = FACTION_STANDING_LABEL[standing] ?? standing;
+  const fallback = FACTION_STANDING_LABELS[standing] ?? standing;
   if (!t) return fallback;
   // Nullish-aware: an intentional empty translation (`""`) must not be replaced.
   return t(factionStandingLabelKey(standing), { defaultValue: fallback }) ?? fallback;

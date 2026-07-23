@@ -595,7 +595,7 @@ export const NpcUpdate = NpcCreate.partial();
 // wholesale `hidden` gating) and adds a party-reputation model: a numeric
 // `reputation` score the DM (or the AI scribe) can bump, plus a human `standing`
 // label on the hostile→allied scale. NPCs link to a faction via npcs.factionId.
-export const FACTION_STANDINGS = ['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'] as const;
+export const FACTION_STANDINGS = Object.freeze(['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'] as const);
 export const FactionStanding = z.enum(FACTION_STANDINGS);
 export type FactionStanding = z.infer<typeof FactionStanding>;
 

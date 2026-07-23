@@ -290,19 +290,22 @@ export default function FactionPage() {
                         +10
                       </Btn>
                     </div>
-                    <select
-                      className="cf-select"
-                      value={faction.standing}
-                      disabled={bumping}
-                      onChange={(e) => adjustReputation({ standing: e.target.value as FactionStanding })}
-                      aria-label="Party standing"
-                    >
-                      {standingOptions.map(({ value, label }) => (
-                        <option key={value} value={value}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
+                    <label className="block space-y-1">
+                      <span className="text-muted">Party standing</span>
+                      <select
+                        id="faction-party-standing"
+                        className="cf-select"
+                        value={faction.standing}
+                        disabled={bumping}
+                        onChange={(e) => adjustReputation({ standing: e.target.value as FactionStanding })}
+                      >
+                        {standingOptions.map(({ value, label }) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
                 )}
               </Card>
