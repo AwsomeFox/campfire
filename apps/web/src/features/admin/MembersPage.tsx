@@ -177,7 +177,7 @@ type ExpiryPreset = 'end-of-today' | '24h' | '7d' | '30d' | 'custom';
 type MaxUsesPreset = 'unlimited' | '1' | '5' | '10' | 'custom';
 
 /** Compute expiresInDays from the selected preset or custom date. */
-function computeExpiryDays(preset: ExpiryPreset, customDate: string): number {
+function computeExpiryDays(preset: ExpiryPreset, customDate: string): number | null {
   switch (preset) {
     case 'end-of-today':
       return 1;
@@ -188,8 +188,8 @@ function computeExpiryDays(preset: ExpiryPreset, customDate: string): number {
     case '30d':
       return 30;
     case 'custom': {
-      if (!customDate) return 7;
-      const diff = Math.ceil((new Date(customDate).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+      if (!customDate) return null; // block creation until date is picked
+      const diff = Math.ceil((new Date(customDate + 'T23:59:59').getTime() - Date.now()) / (24 * 60 * 60 * 1000));
       return Math.max(1, Math.min(365, diff));
     }
   }
@@ -200,9 +200,8 @@ function describeExpiry(preset: ExpiryPreset, customDate: string): string {
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   switch (preset) {
     case 'end-of-today': {
-      const eod = new Date();
-      eod.setHours(23, 59, 59, 999);
-      return `End of today (${eod.toLocaleString()} ${tz})`;
+      const d = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      return `~24 hours from creation (${d.toLocaleString()} ${tz})`;
     }
     case '24h': {
       const d = new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -304,6 +303,10 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     setError(null);
     try {
       const expiresInDays = computeExpiryDays(expiryPreset, customDate);
+      if (expiresInDays === null) {
+        setError('Please select an expiry date before generating.');
+        return;
+      }
       const maxUses = computeMaxUses(maxUsesPreset, customMaxUses);
       await api.post<CampaignInvite>(`${API}/campaigns/${campaignId}/invites`, {
         role,
@@ -338,10 +341,12 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     }
   }
 
-  // Minimum date for custom picker: tomorrow
-  const minDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  // Maximum date: 365 days from now
-  const maxDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  // Minimum date for custom picker: tomorrow (local timezone)
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const minDate = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+  // Maximum date: 365 days from now (local timezone)
+  const maxDay = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  const maxDate = `${maxDay.getFullYear()}-${String(maxDay.getMonth() + 1).padStart(2, '0')}-${String(maxDay.getDate()).padStart(2, '0')}`;
 
   return (
     <Card className="space-y-2.5">
