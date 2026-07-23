@@ -47,6 +47,7 @@ const ALL_TOOLS = [
   'get_rule_entry',
   'get_encounter',
   'get_encounter_difficulty',
+  'list_encounter_events',
   'generate_encounter',
   'list_encounters',
   'list_members',
@@ -247,7 +248,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(146);
+    expect(tools).toHaveLength(147);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -1073,6 +1074,62 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const viewerOgre = viewerView.combatants.find((c) => c.name === 'Hidden Ogre')!;
     expect(viewerOgre.hpCurrent).toBeNull();
     expect(viewerOgre.hpBand).toBeTruthy();
+  });
+
+  it('list_encounter_events returns the persisted combat log with stable ids (issue #1068)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const enc = parseResult(
+      await dmC.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'Log Test Fight' } }),
+    ) as { id: number };
+    const goblin = parseResult(
+      await dmC.callTool({
+        name: 'add_combatant',
+        arguments: { encounterId: enc.id, kind: 'monster', name: 'Goblin Scout', hpMax: 20 },
+      }),
+    ) as { id: number };
+    await dmC.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    await dmC.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
+    // Deal damage — this appends a 'damage' event to the persistent combat log.
+    await dmC.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: enc.id, combatantId: goblin.id, hpDelta: -8 },
+    });
+
+    const res = await dmC.callTool({ name: 'list_encounter_events', arguments: { encounterId: enc.id } });
+    expect(res.isError).toBeFalsy();
+    const events = parseResult(res) as Array<{
+      id: number;
+      encounterId: number;
+      type: string;
+      round: number;
+    }>;
+    // At least the begin/turn + damage events are present, in insertion order.
+    expect(Array.isArray(events)).toBe(true);
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.every((e) => e.encounterId === enc.id)).toBe(true);
+    expect(events.some((e) => e.type === 'damage')).toBe(true);
+    // Ids are stable and ascending (chronological insertion order).
+    const ids = events.map((e) => e.id);
+    expect([...ids].sort((a, b) => a - b)).toEqual(ids);
+  });
+
+  it('list_encounter_events 404s a hidden encounter for a non-DM viewer PAT (issue #869 parity)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const hidden = parseResult(
+      await dmC.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId, name: 'Hidden Prep Fight', hidden: true },
+      }),
+    ) as { id: number };
+
+    // DM can read the hidden encounter's (possibly empty) log.
+    const dmRes = await dmC.callTool({ name: 'list_encounter_events', arguments: { encounterId: hidden.id } });
+    expect(dmRes.isError).toBeFalsy();
+
+    // A viewer-scoped PAT must not even learn the hidden encounter exists.
+    const viewerC = await mcpClient(viewerToken);
+    const viewerRes = await viewerC.callTool({ name: 'list_encounter_events', arguments: { encounterId: hidden.id } });
+    expect(viewerRes.isError).toBe(true);
   });
 
   it('draft_session_recap assembles the template scaffold + seeds encounters and resolved inbox threads (issue #62)', async () => {
