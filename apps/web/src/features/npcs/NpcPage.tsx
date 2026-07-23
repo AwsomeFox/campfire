@@ -410,7 +410,7 @@ export default function NpcPage() {
                           e.preventDefault();
                           navigate(`/c/${cid}/quests/${q.id}`);
                         }}
-                        className="cf-inset p-3 hover:border-amber-500/50"
+                        className="cf-inset cf-card-hover p-3"
                       >
                         <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={13} /> {q.title}</p>
                         <QuestStatusBadge status={q.status} className="mt-1" />

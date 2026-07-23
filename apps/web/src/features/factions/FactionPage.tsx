@@ -258,7 +258,7 @@ export default function FactionPage() {
                           e.preventDefault();
                           navigate(`/c/${cid}/npcs/${npc.id}`);
                         }}
-                        className="cf-inset p-3 hover:border-amber-500/50"
+                        className="cf-inset cf-card-hover p-3"
                       >
                         <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="hooded-figure" size={13} /> {npc.name}</p>
                         {npc.role && <p className="text-[11.5px] text-slate-500 truncate">{npc.role}</p>}

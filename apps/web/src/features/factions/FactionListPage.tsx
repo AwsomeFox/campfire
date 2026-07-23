@@ -156,7 +156,7 @@ export default function FactionListPage() {
               <Link
                 key={faction.id}
                 to={`/c/${id}/factions/${faction.id}`}
-                className="cf-card p-3.5 space-y-2 hover:border-amber-500/50"
+                className="cf-card cf-card-hover p-3.5 space-y-2"
               >
                 <div className="flex items-center gap-2.5">
                   <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)]">

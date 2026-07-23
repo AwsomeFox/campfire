@@ -198,7 +198,7 @@ export default function LocationListPage() {
               <Link
                 key={loc.id}
                 to={`/c/${id}/locations/${loc.id}`}
-                className="cf-card flex items-center gap-3 p-3.5 hover:border-amber-500/50"
+                className="cf-card cf-card-hover flex items-center gap-3 p-3.5"
                 style={depth > 0 ? { marginLeft: depth * 20 } : undefined}
               >
                 {depth > 0 && <span className="text-slate-600 shrink-0" aria-hidden>↳</span>}

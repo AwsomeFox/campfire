@@ -155,7 +155,7 @@ function QuickLinksCard() {
           <Link
             key={l.to}
             to={l.to}
-            className="cf-inset p-3 flex items-start gap-2.5 hover:border-amber-500/40"
+            className="cf-inset cf-card-hover p-3 flex items-start gap-2.5"
           >
             <span className="leading-none text-[var(--color-accent)]"><GameIcon slug={l.icon} size={20} /></span>
             <span>
