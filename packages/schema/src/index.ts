@@ -1575,10 +1575,14 @@ export interface RuleSystemAdapter {
    * object (`{ dexterity: 14 }`); returns 0 when the governing value is absent or non-numeric.
    * Pass `representation` from `mapStatblock().abilityRepresentation` for monsters so
    * already-modifier / native values are not converted a second time (issue #767).
+   * Optional `level` is for systems whose initiative check includes a level/proficiency
+   * term (PF2e Perception = WIS mod + proficiency; issue #491). Callers pass the
+   * character's level on the character-sheet path; monster/statblock paths omit it.
    */
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation?: AbilityRepresentation,
+    level?: number,
   ): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
@@ -2131,21 +2135,36 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
-  // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
-  // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
-  // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
-  // back to the WIS modifier. When `representation` is `modifier` (mapped creatures), WIS
-  // is already a modifier and must not be converted again (issue #767).
+  // DEX modifier (the 5e assumption). A numeric `perception` is already the full
+  // Perception modifier and is LEVEL-INCLUSIVE (monster statblocks publish Perception
+  // with level baked in; a character sheet that stores a computed Perception number is
+  // the same). Otherwise (a character sheet of ability SCORES) Perception is
+  // Wisdom-based and at least trained for every PC (Player Core), so the fallback is
+  // `WIS mod + pf2eProficiencyBonus(level, 'trained')` — never the bare 5e-style WIS
+  // mod alone (issue #491). When `representation` is `modifier` (mapped creatures),
+  // WIS is already a modifier and must not be converted again (issue #767); that path
+  // does not add proficiency (creatures expose Perception instead).
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',
+    level?: number,
   ): number {
     if (!abilities) return 0;
     const perception = abilities.perception ?? abilities.Perception;
+    // Level-inclusive: return as-is (do not add proficiency a second time).
     if (typeof perception === 'number') return perception;
     const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
-    if (typeof wisScore === 'number') return resolveAbilityModifier(this, wisScore, representation);
-    return 0;
+    if (typeof wisScore !== 'number') return 0;
+    const wisMod = resolveAbilityModifier(this, wisScore, representation);
+    // Character-sheet fallback only: ability scores + known level → trained Perception.
+    if (
+      representation === 'score' &&
+      typeof level === 'number' &&
+      Number.isFinite(level)
+    ) {
+      return wisMod + pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+    }
+    return wisMod;
   },
   conditions: PF2E_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
