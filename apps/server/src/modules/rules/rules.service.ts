@@ -679,6 +679,21 @@ export class RulesService {
   }
 
   /**
+   * Look up an installed rule pack by its slug (issue #717). The AI table's rules help
+   * binds lookups to the campaign's active rule system — its `ruleSystem` field is the
+   * slug of the installed pack the table is playing under (or '' for homebrew). This
+   * resolves that slug to a `RulePack` (with name/license/sourceUrl for the human-
+   * readable answer) so the driver can scope `search` to a single pack and render the
+   * pack's attribution. Returns undefined for a missing/empty slug rather than throwing,
+   * so the caller can render a "no rule system configured" note for homebrew tables.
+   */
+  async getPackBySlug(slug: string): Promise<RulePack | undefined> {
+    if (!slug) return undefined;
+    const [row] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).limit(1);
+    return row ? packToDomain(row) : undefined;
+  }
+
+  /**
    * DM/admin-set edits to an imported entry (issue #305). Today only the manual icon
    * override is editable — a DM picks a bundled game-icons.net slug to show in the
    * compendium list + reader, or clears it ('') to fall back to the type-derived
