@@ -696,6 +696,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   entity_type TEXT,
   entity_id INTEGER,
   comment_id INTEGER,
+  data TEXT,
   actor_name TEXT NOT NULL DEFAULT '',
   read_at TEXT,
   created_at TEXT NOT NULL

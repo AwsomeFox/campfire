@@ -118,7 +118,7 @@ test.describe('source adapters', () => {
   test('notifications route every type to its exact destination (issue #446)', () => {
     const base = {
       id: 1, userId: 2, campaignId, title: 'Notice', body: '', actorName: '', readAt: null,
-      createdAt: '2026-07-22T00:00:00.000Z', entityType: null, entityId: null, commentId: null,
+      createdAt: '2026-07-22T00:00:00.000Z', entityType: null, entityId: null, commentId: null, data: null,
     } satisfies Omit<Notification, 'type'>;
     const href = (type: Notification['type'], patch: Partial<Notification> = {}) =>
       notificationHref({ ...base, type, ...patch } as Notification);
@@ -132,6 +132,19 @@ test.describe('source adapters', () => {
     expect(href('session_scheduled', { entityType: 'session', entityId: 11 })).toBe(
       '/c/7/sessions?tab=schedule',
     );
+    // Issue #820: cancelled nights route to a stable cancelled-event detail.
+    expect(href('session_scheduled', {
+      entityId: 11,
+      data: {
+        kind: 'schedule',
+        scheduleId: 11,
+        scheduledAt: '2026-07-22T00:00:00.000Z',
+        durationMinutes: 240,
+        changeType: 'cancelled',
+        changedFields: [],
+        label: 'Game night',
+      },
+    })).toBe('/c/7/sessions?tab=schedule&cancelled=11#cancelled-schedule-11');
 
     // Quest detail route (not an ignored ?quest= query).
     expect(href('quest_updated', { entityType: 'quest', entityId: 11 })).toBe(expected.quest);
