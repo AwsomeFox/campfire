@@ -18,6 +18,7 @@
 // RuleSystemAdapter seam), #295-300 (sibling rulesets following the same pattern).
 
 import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from './index';
+import { initModDescThenSortOrderAsc } from './initiative-tiebreak';
 
 /** Family id of the Starfinder 1e adapter. Matches the rule-pack slug the importer stamps, so a
  *  campaign whose `ruleSystem` is set to the installed Starfinder pack resolves to this adapter. */
@@ -170,6 +171,9 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
     // Inline of resolveAbilityModifier — no runtime import from ./index (cycle).
     return representation === 'score' ? this.abilityModifier(dex) : Math.trunc(dex);
   },
+  // Starfinder initiative is DEX-derived like 5e/PF1e; on a tied total, higher DEX
+  // (initMod) first, then sortOrder (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: STARFINDER_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): StarfinderStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
