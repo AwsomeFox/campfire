@@ -47,7 +47,6 @@ test.describe('formatCampaignSessionPosition (issue #841)', () => {
     );
     expect(formatCampaignSessionPosition({ sessionCount: 3, latestSessionNumber: undefined })).toBe('3 recaps');
   });
-});
 
   test('defensive: non-finite numbers never produce Session NaN', () => {
     expect(formatCampaignSessionPosition({ sessionCount: Number.NaN, latestSessionNumber: Number.NaN })).toBe(
@@ -57,4 +56,4 @@ test.describe('formatCampaignSessionPosition (issue #841)', () => {
       formatCampaignSessionPosition({ sessionCount: Number.POSITIVE_INFINITY, latestSessionNumber: 4 }),
     ).toBe('Session 4');
   });
-
+});
