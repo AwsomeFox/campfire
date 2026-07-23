@@ -82,7 +82,17 @@ export class FsDeletionService implements OnApplicationBootstrap {
   ): Promise<FsDeletionOutcome> {
     const pendingPaths: string[] = [];
     for (const abs of absolutePaths) {
-      const rel = uploadsRelativePath(abs);
+      let rel: string;
+      try {
+        rel = uploadsRelativePath(abs);
+      } catch (err) {
+        this.logger.error(
+          `Refusing to enqueue invalid upload path ${abs}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        continue;
+      }
       const result = removePathVerified(abs, {
         recursive: true,
         rmSync: fs.rmSync.bind(fs),
@@ -180,7 +190,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
         cleared += 1;
         await this.audit.log({
           actor: 'system',
-          actorRole: 'dm',
+          actorRole: 'admin',
           action: 'storage.fs_cleanup.complete',
           entityType: 'storage',
           entityId: row.id,
@@ -221,6 +231,10 @@ export class FsDeletionService implements OnApplicationBootstrap {
       error: string;
     },
   ): Promise<void> {
+    if (relPath === '' || relPath.trim() === '') {
+      this.logger.error('Refusing to enqueue empty relPath (would target uploads root)');
+      return;
+    }
     const now = nowIso();
     await this.db
       .insert(fsDeletionQueue)

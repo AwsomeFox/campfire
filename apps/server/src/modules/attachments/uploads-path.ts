@@ -11,13 +11,16 @@ export function uploadsRelativePath(absolutePath: string): string {
   const root = path.resolve(uploadsRoot());
   const resolved = path.resolve(absolutePath);
   const rel = path.relative(root, resolved);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new Error(`Path ${absolutePath} is outside uploads root`);
   }
   return rel.split(path.sep).join('/');
 }
 
 export function uploadsAbsolutePath(relativePath: string): string {
+  if (relativePath === '' || relativePath.trim() === '') {
+    throw new Error('Relative path must not be empty (would target uploads root)');
+  }
   const normalized = relativePath.replace(/\//g, path.sep);
   const abs = path.resolve(uploadsRoot(), normalized);
   const root = path.resolve(uploadsRoot());
