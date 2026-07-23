@@ -120,14 +120,18 @@ test.describe('Compendium accessibility (issue #647)', () => {
     await expect(filters.getByRole('radio', { name: 'All' })).toHaveAttribute('aria-checked', 'false');
     await expect(page.getByRole('link', { name: /Fire Bolt/ })).toBeVisible();
     await expect(page.getByRole('link', { name: /Goblin/ })).toHaveCount(0);
+    await expect.poll(() => new URL(page.url()).searchParams.get('type')).toBe('spell');
 
-    // Clear filters resets both type selection and any typed query.
+    // Clear filters resets both type selection and any typed query — including URL params.
     await search.fill('fire');
+    await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe('fire');
     await expect(page.getByRole('button', { name: COMPENDIUM_CLEAR_FILTERS_LABEL })).toBeVisible();
     await page.getByRole('button', { name: COMPENDIUM_CLEAR_FILTERS_LABEL }).click();
     await expect(search).toHaveValue('');
     await expect(filters.getByRole('radio', { name: 'All' })).toHaveAttribute('aria-checked', 'true');
     await expect(page.getByRole('button', { name: COMPENDIUM_CLEAR_FILTERS_LABEL })).toHaveCount(0);
+    await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBeNull();
+    await expect.poll(() => new URL(page.url()).searchParams.get('type')).toBeNull();
 
     const polite = page.locator('.sr-only[aria-live="polite"][role="status"]');
     await expect(polite).toContainText(/\d+ results?/i);
@@ -149,6 +153,7 @@ test.describe('Compendium accessibility (issue #647)', () => {
       'true',
     );
     await expect(filters.getByRole('radio', { name: 'Spells' })).toBeFocused();
+    await expect.poll(() => new URL(page.url()).searchParams.get('type')).toBe('spell');
 
     await expect
       .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1))
@@ -158,5 +163,22 @@ test.describe('Compendium accessibility (issue #647)', () => {
       .include('main')
       .analyze();
     expect(accessibilityScan.violations).toEqual([]);
+  });
+
+  test('loads q/type from the URL and rehydrates search + type chips', async ({ page }) => {
+    const { campaignId } = seed();
+    await stubCompendiumBrowse(page, FIXTURE_ENTRIES);
+    await page.goto(`/c/${campaignId}/compendium?q=fire&type=spell`);
+
+    const search = page.getByRole('searchbox', { name: COMPENDIUM_SEARCH_LABEL });
+    const filters = page.getByRole('radiogroup', { name: COMPENDIUM_TYPE_FILTER_LABEL });
+    await expect(search).toHaveValue('fire');
+    await expect(filters.getByRole('radio', { name: 'Spells' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await expect(page.getByRole('link', { name: /Fire Bolt/ })).toBeVisible();
+    await expect(page.getByRole('link', { name: /Goblin/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: COMPENDIUM_CLEAR_FILTERS_LABEL })).toBeVisible();
   });
 });

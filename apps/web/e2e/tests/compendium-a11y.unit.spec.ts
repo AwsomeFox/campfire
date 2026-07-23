@@ -4,7 +4,11 @@ import {
   COMPENDIUM_SEARCH_ID,
   COMPENDIUM_SEARCH_LABEL,
   COMPENDIUM_TYPE_FILTER_LABEL,
+  COMPENDIUM_URL_Q,
+  COMPENDIUM_URL_TYPE,
+  applyCompendiumSearchParams,
   compendiumResultsStatus,
+  parseCompendiumTypeParam,
 } from '../../src/features/compendium/compendiumA11y';
 
 /**
@@ -24,6 +28,32 @@ test.describe('compendium a11y vocabulary (issue #647)', () => {
   test('names the type-filter group and clear-filters control', () => {
     expect(COMPENDIUM_TYPE_FILTER_LABEL.length).toBeGreaterThan(0);
     expect(COMPENDIUM_CLEAR_FILTERS_LABEL.toLowerCase()).toContain('clear');
+  });
+});
+
+test.describe('compendium URL filter params (issue #647)', () => {
+  test('parses type from the URL and rejects unknown values', () => {
+    expect(parseCompendiumTypeParam(null)).toBe('all');
+    expect(parseCompendiumTypeParam('all')).toBe('all');
+    expect(parseCompendiumTypeParam('spell')).toBe('spell');
+    expect(parseCompendiumTypeParam('monster')).toBe('monster');
+    expect(parseCompendiumTypeParam('section')).toBe('all');
+    expect(parseCompendiumTypeParam('nope')).toBe('all');
+  });
+
+  test('applies q/type to search params and omits defaults', () => {
+    const withFilters = applyCompendiumSearchParams(new URLSearchParams('tab=keep'), {
+      q: '  fire  ',
+      type: 'spell',
+    });
+    expect(withFilters.get(COMPENDIUM_URL_Q)).toBe('fire');
+    expect(withFilters.get(COMPENDIUM_URL_TYPE)).toBe('spell');
+    expect(withFilters.get('tab')).toBe('keep');
+
+    const cleared = applyCompendiumSearchParams(withFilters, { q: '', type: 'all' });
+    expect(cleared.get(COMPENDIUM_URL_Q)).toBeNull();
+    expect(cleared.get(COMPENDIUM_URL_TYPE)).toBeNull();
+    expect(cleared.get('tab')).toBe('keep');
   });
 });
 

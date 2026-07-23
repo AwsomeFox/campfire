@@ -6,9 +6,9 @@
  * this pass (no backing endpoint per the BUILD spec) — search + browse only.
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
-import type { RuleEntry, RuleEntryType, RulePack } from '@campfire/schema';
+import type { RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
@@ -18,10 +18,15 @@ import {
   COMPENDIUM_SEARCH_ID,
   COMPENDIUM_SEARCH_LABEL,
   COMPENDIUM_TYPE_FILTER_LABEL,
+  COMPENDIUM_URL_Q,
+  COMPENDIUM_URL_TYPE,
+  applyCompendiumSearchParams,
   compendiumResultsStatus,
+  parseCompendiumTypeParam,
+  type CompendiumUrlType,
 } from './compendiumA11y';
 
-const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
+const TYPE_CHIPS: { key: CompendiumUrlType; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'spell', label: 'Spells' },
   { key: 'monster', label: 'Monsters' },
@@ -46,6 +51,7 @@ function useDebounced<T>(value: T, delayMs: number): T {
 export default function CompendiumPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
+  const [searchParams, setSearchParams] = useSearchParams();
   const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
   const { loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const campaignPack = campaign?.ruleSystem || '';
@@ -54,9 +60,40 @@ export default function CompendiumPage() {
   // campaign to resolve). Distinguish "still loading" from "couldn't load".
   const campaignUnresolved = campaign === undefined && (campaignsLoading || campaignsError);
 
-  const [query, setQuery] = useState('');
+  // URL is authoritative for filters (issue #647): `type` is read directly;
+  // `q` is mirrored into local state so keystrokes stay responsive while we
+  // debounce writes back with replace (no history spam).
+  const type = parseCompendiumTypeParam(searchParams.get(COMPENDIUM_URL_TYPE));
+  const committedQuery = searchParams.get(COMPENDIUM_URL_Q) ?? '';
+  const [query, setQuery] = useState(committedQuery);
   const debouncedQuery = useDebounced(query, 300);
-  const [type, setType] = useState<RuleEntryType | 'all'>('all');
+
+  useEffect(() => {
+    setQuery(committedQuery);
+  }, [committedQuery]);
+
+  useEffect(() => {
+    const trimmed = debouncedQuery.trim();
+    if (trimmed === committedQuery) return;
+    // Skip stale debounce ticks (e.g. Clear filters) so we don't rewrite `q`.
+    if (trimmed !== query.trim()) return;
+    setSearchParams(
+      (prev) => applyCompendiumSearchParams(prev, { q: trimmed, type }),
+      { replace: true },
+    );
+  }, [debouncedQuery, committedQuery, query, type, setSearchParams]);
+
+  function setType(next: CompendiumUrlType) {
+    setSearchParams(
+      (prev) => {
+        const params = new URLSearchParams(prev);
+        if (next === 'all') params.delete(COMPENDIUM_URL_TYPE);
+        else params.set(COMPENDIUM_URL_TYPE, next);
+        return params;
+      },
+      { replace: true },
+    );
+  }
 
   const [packs, setPacks] = useState<RulePack[] | null>(null);
   const [results, setResults] = useState<RuleEntry[] | null>(null);
@@ -127,7 +164,7 @@ export default function CompendiumPage() {
   // copy should say which (issue #242).
   const activeTypeLabel = TYPE_CHIPS.find((c) => c.key === type)?.label ?? '';
   const filtersActive = type !== 'all' || query.trim().length > 0;
-  const chipRefs = useRef<Partial<Record<RuleEntryType | 'all', HTMLButtonElement | null>>>({});
+  const chipRefs = useRef<Partial<Record<CompendiumUrlType, HTMLButtonElement | null>>>({});
 
   const canAnnounceResults =
     campaign !== undefined &&
@@ -147,15 +184,19 @@ export default function CompendiumPage() {
     : '';
 
   function clearFilters() {
+    // Clear local input immediately; URL params drop both filters (replace).
     setQuery('');
-    setType('all');
+    setSearchParams(
+      (prev) => applyCompendiumSearchParams(prev, { q: '', type: 'all' }),
+      { replace: true },
+    );
   }
 
-  function focusChip(key: RuleEntryType | 'all') {
+  function focusChip(key: CompendiumUrlType) {
     chipRefs.current[key]?.focus();
   }
 
-  function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, key: RuleEntryType | 'all') {
+  function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, key: CompendiumUrlType) {
     // Roving tabindex for the type-filter radiogroup: arrows move AND select
     // (WAI-ARIA single-select pattern), wrapping at the ends.
     const idx = TYPE_CHIP_KEYS.indexOf(key);
