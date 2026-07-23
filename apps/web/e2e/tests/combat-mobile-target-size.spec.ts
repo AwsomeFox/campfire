@@ -128,8 +128,7 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
       } finally {
         if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
         if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
-        const seedEncounterId = seed().encounterId;
-        await dm.post(`/api/v1/encounters/${seedEncounterId}/reopen`).catch(() => undefined);
+        await restoreSeedEncounter(page);
         await dm.dispose();
       }
     });
