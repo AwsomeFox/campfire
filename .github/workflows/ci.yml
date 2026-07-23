@@ -42,6 +42,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      # PWA dist contract (manifest, service worker, icons) after the web build above.
+      - run: npm run test:pwa -w apps/web
 
   # Re-runs the server unit + e2e suites with coverage instrumentation and
   # publishes the report as a build artifact (lcov + HTML). Kept separate from
@@ -81,6 +83,8 @@ jobs:
           node-version: '24.x'
           cache: npm
       - run: npm ci
+      # Type-check Playwright sources before installing the browser / running the suite.
+      - run: npm run test:e2e:typecheck -w apps/web
       # Chromium only — the suite runs a single headless project (see playwright.config.ts).
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e --if-present
