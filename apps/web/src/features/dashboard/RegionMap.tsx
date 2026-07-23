@@ -11,15 +11,12 @@ import type { Attachment, Campaign, Location, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
+import { clampPercentInt } from './mapPercent';
+
+export { clampPercentInt };
 
 const VIEW_W = 500;
 const VIEW_H = 260;
-
-/** Clamp to 0–100 and round to an integer percent (matches 1%/5% keyboard steps). */
-export function clampPercentInt(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.round(Math.max(0, Math.min(100, value)));
-}
 
 // Status tones follow the app's existing chip convention (see cf-chip-* in index.css):
 // accent for "current" (matches the legend dot below), the emerald success family for

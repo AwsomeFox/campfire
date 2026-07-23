@@ -5,7 +5,7 @@
  * pins the pure percent clamp used by coordinate inputs and PATCH payloads.
  */
 import { expect, test } from '@playwright/test';
-import { clampPercentInt } from '../../src/features/dashboard/RegionMap';
+import { clampPercentInt } from '../../src/features/dashboard/mapPercent';
 
 test.describe('clampPercentInt (#807)', () => {
   test('rounds and clamps to the 0–100 integer range', () => {
