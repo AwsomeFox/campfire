@@ -219,8 +219,16 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(encDetail.body.questId).not.toBe(questId);
     expect(encDetail.body.sessionId).not.toBe(sessionId);
     expect(encDetail.body.combatants.length).toBe(3);
+    // Issue #548: cloned encounters are fresh prep, not a snapshot of live combat.
+    expect(encDetail.body.status).toBe('preparing');
+    expect(encDetail.body.round).toBe(0);
+    expect(encDetail.body.turnIndex).toBe(0);
+    expect(encDetail.body.currentCombatantId).toBeNull();
+    expect(encDetail.body.endedAt).toBeNull();
     const goblin = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Goblin');
     expect(goblin).toBeDefined();
+    expect(goblin.hpCurrent).toBe(goblin.hpMax);
+    expect(goblin.conditions).toEqual([]);
     const hero = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Hero');
     expect(hero.kind).toBe('character');
     expect(hero.characterId).toBe(clonedHero.id);
@@ -275,6 +283,72 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     // Members are NOT copied — the source player has no access to the clone.
     const playerView = await playerAgent.get(`/api/v1/campaigns/${clone.id}`);
     expect(playerView.status).toBe(403);
+  });
+
+  it('full clone resets running and ended encounter combat state (issue #548)', async () => {
+    const endedRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'Finished skirmish' });
+    expect(endedRes.status).toBe(201);
+    const endedId = endedRes.body.id;
+    expect((await dmAgent.post(`/api/v1/encounters/${endedId}/roll-initiative`)).status).toBe(201);
+    expect((await dmAgent.post(`/api/v1/encounters/${endedId}/start`)).status).toBe(201);
+    const endedFight = await dmAgent.post(`/api/v1/encounters/${endedId}/end`);
+    expect(endedFight.status).toBe(201);
+    expect(endedFight.body.status).toBe('ended');
+    expect(endedFight.body.endedAt).not.toBeNull();
+
+    const runningRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'Mid-fight brawl' });
+    expect(runningRes.status).toBe(201);
+    const runningId = runningRes.body.id;
+    const brawler = await dmAgent
+      .post(`/api/v1/encounters/${runningId}/combatants`)
+      .send({ kind: 'monster', name: 'Brawler', hpMax: 30 });
+    expect(brawler.status).toBe(201);
+    expect((await dmAgent.post(`/api/v1/encounters/${runningId}/roll-initiative`)).status).toBe(201);
+    expect((await dmAgent.post(`/api/v1/encounters/${runningId}/start`)).status).toBe(201);
+    // Three combatants (party auto-adds) — six next-turn advances wrap to round 3.
+    for (let i = 0; i < 6; i++) {
+      await dmAgent.post(`/api/v1/encounters/${runningId}/next-turn`);
+    }
+    const midFight = await dmAgent.get(`/api/v1/encounters/${runningId}`);
+    expect(midFight.body.status).toBe('running');
+    expect(midFight.body.round).toBe(3);
+    await dmAgent
+      .patch(`/api/v1/encounters/${runningId}/combatants/${brawler.body.id}`)
+      .send({ hpSet: 4, conditions: ['prone'] });
+
+    const cloneRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/clone`)
+      .send({ name: 'Sequel arc' });
+    expect(cloneRes.status).toBe(201);
+    const cloneId = cloneRes.body.id;
+
+    const encs = await dmAgent.get(`/api/v1/campaigns/${cloneId}/encounters`);
+    expect(encs.body.length).toBe(3);
+    const clonedRunning = encs.body.find((e: { name: string }) => e.name === 'Mid-fight brawl');
+    const clonedEnded = encs.body.find((e: { name: string }) => e.name === 'Finished skirmish');
+    expect(clonedRunning).toBeDefined();
+    expect(clonedEnded).toBeDefined();
+
+    const runningDetail = await dmAgent.get(`/api/v1/encounters/${clonedRunning.id}`);
+    expect(runningDetail.body.status).toBe('preparing');
+    expect(runningDetail.body.round).toBe(0);
+    expect(runningDetail.body.turnIndex).toBe(0);
+    expect(runningDetail.body.currentCombatantId).toBeNull();
+    expect(runningDetail.body.endedAt).toBeNull();
+    const clonedBrawler = runningDetail.body.combatants.find((c: { name: string }) => c.name === 'Brawler');
+    expect(clonedBrawler.hpCurrent).toBe(30);
+    expect(clonedBrawler.hpMax).toBe(30);
+    expect(clonedBrawler.conditions).toEqual([]);
+    expect(clonedBrawler.initiative).toBeNull();
+
+    const endedDetail = await dmAgent.get(`/api/v1/encounters/${clonedEnded.id}`);
+    expect(endedDetail.body.status).toBe('preparing');
+    expect(endedDetail.body.endedAt).toBeNull();
+    expect(endedDetail.body.round).toBe(0);
   });
 
   it('template clone copies prep only and resets play state', async () => {

@@ -174,7 +174,7 @@ export class CampaignsController {
   }
 
   @Post(':id/clone')
-  @ApiOperation({ summary: 'Clone a campaign (duplicate or start from template)', description: "dm role required on the source campaign; the caller becomes the clone's dm. mode='full' (default) duplicates quests, npcs, locations, characters, sessions, notes and encounters with all cross-references remapped; mode='template' copies prep only (quests reset to available, objectives unchecked, locations unexplored) and strips play state. Members, attachments, tokens, audit history and proposals are never copied." })
+  @ApiOperation({ summary: 'Clone a campaign (duplicate or start from template)', description: "dm role required on the source campaign; the caller becomes the clone's dm. mode='full' (default) duplicates quests, npcs, locations, characters, sessions, notes and encounters with all cross-references remapped; cloned encounters reset to 'preparing' with combatant HP/conditions cleared (issue #548). mode='template' copies prep only (quests reset to available, objectives unchecked, locations unexplored) and strips play state. Members, attachments, tokens, audit history and proposals are never copied." })
   @ApiResponse({ status: 201, description: 'The newly created campaign.' })
   @ApiResponse({ status: 403, description: 'Not a dm of the source campaign.' })
   async clone(@Param('id', ParseIntPipe) id: number, @Body() body: CampaignCloneDto, @CurrentUser() user: RequestUser) {
