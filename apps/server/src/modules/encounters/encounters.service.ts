@@ -693,9 +693,17 @@ export class EncountersService {
       // unrevealed region. Encounter JSON still degrades invalid fog to `null` for
       // the fog field itself, but token coordinates must fail closed the same way
       // the map-byte path does — otherwise a corrupt fog row would leak monster
-      // positions while the image stayed fully masked.
+      // positions while the image stayed fully masked. Sibling fog protection is
+      // mirrored here too: when another encounter still conceals the shared map,
+      // this fight's tokens must not float on a fully masked board.
       const fog = parseFog(row.fog);
-      if (row.fog !== null && fog === null) {
+      const invalidFog = row.fog !== null && fog === null;
+      const siblingProtects =
+        !invalidFog &&
+        !fog?.enabled &&
+        row.mapAttachmentId != null &&
+        (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
+      if (invalidFog || siblingProtects) {
         const concealAll: FogState = { enabled: true, revealed: [] };
         list = list.map((c) => redactTokenInFog(c, concealAll));
       } else if (fog?.enabled) {
