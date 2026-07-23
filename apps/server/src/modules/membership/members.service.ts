@@ -242,7 +242,7 @@ export class MembersService {
     // and sync character ownership inside one synchronous SQLite transaction.
     // Concurrent REST/MCP/account-lifecycle changes therefore serialize at the
     // same invariant (#654 + #849).
-    this.db.transaction((tx) => {
+    const priorRole = this.db.transaction((tx) => {
       const row = tx
         .select({ member: campaignMembers, disabled: users.disabled })
         .from(campaignMembers)
@@ -274,6 +274,7 @@ export class MembersService {
       if (input.characterId !== undefined && row.member.characterId !== input.characterId) {
         this.syncCharacterOwnershipTx(tx, row.member.userId, row.member.characterId, input.characterId, ts);
       }
+      return row.member.role as CampaignMember['role'];
     });
 
     await this.audit.log({
@@ -289,6 +290,20 @@ export class MembersService {
     const all = await this.listForCampaign(campaignId);
     const updated = all.find((m) => m.id === memberId);
     if (!updated) throw new NotFoundException(`Member ${memberId} not found`);
+
+    // Issue #437: publish role changes so the affected member's open browsers can
+    // invalidate cached /me memberships immediately (promote → DM nav; demote →
+    // drop forbidden controls) without a reload. Character-link-only patches stay quiet.
+    if (input.role !== undefined && updated.role !== priorRole) {
+      this.events.emit({
+        type: 'membership.updated',
+        campaignId,
+        userId: String(updated.userId),
+        memberId: updated.id,
+        role: updated.role,
+      });
+    }
+
     return updated;
   }
 

@@ -1273,6 +1273,11 @@ export const Notification = z.object({
   body: z.string().max(1000).default(''), // short excerpt/context, plain text
   entityType: EntityType.nullable().default(null), // deep-link target (e.g. session), if any
   entityId: Id.nullable().default(null),
+  /**
+   * Issue #446: when set (typically `comment_reply`), the UI focuses this comment
+   * inside the parent entity's discussion thread (`entityType`/`entityId`).
+   */
+  commentId: Id.nullable().default(null),
   actorName: z.string().max(120).default(''), // display name of who triggered it
   readAt: IsoDate.nullable().default(null), // null = unread
   createdAt: IsoDate,
@@ -2673,6 +2678,8 @@ export const AuthStatus = z.object({
   // the UI must use neutral "SSO" copy; no issuer/client/group details belong here.
   oidcProviderName: z.string().max(80).nullable(),
   version: z.string(),
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
 
@@ -4426,6 +4433,10 @@ export const CampaignEventType = z.enum([
   'encounter.ping',
   'schedule.updated',
   'membership.revoked',
+  // Issue #437: a member's role changed (promote/demote). Thin invalidation so the
+  // affected client's open UI can refetch /me and drop or reveal role-gated chrome
+  // without a full reload. Forwarded on the data path (unlike membership.revoked).
+  'membership.updated',
   'treasury.updated',
   // Issue #421: character sheet / member-resource writes (stats, actions, slots, …).
   'character.updated',
@@ -4474,6 +4485,18 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     campaignId: Id,
     userId: z.string().max(120),
     memberId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #437: a member's campaign role changed. `role` is the NEW effective role so
+    // the affected client can refresh /me (and other tabs via BroadcastChannel) and
+    // immediately show or hide DM chrome without waiting for a reload. `userId` matches
+    // RequestUser.id / String(campaignMembers.userId).
+    type: z.literal('membership.updated'),
+    campaignId: Id,
+    userId: z.string().max(120),
+    memberId: Id,
+    role: Role,
     at: IsoDate,
   }),
   z.object({
@@ -4614,6 +4637,8 @@ export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
 
 export const AdminMetrics = z.object({
   version: z.string(), // server package.json version (same source as /healthz)
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
   now: IsoDate, // server clock when this snapshot was taken
   startedAt: IsoDate, // process start (now - uptime)
   uptimeSeconds: z.number().nonnegative(),

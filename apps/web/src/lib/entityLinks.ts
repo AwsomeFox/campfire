@@ -221,7 +221,15 @@ export function proposalTargetHref(campaignId: number, proposal: Pick<Proposal, 
     : null;
 }
 
-/** Notification destinations use entity metadata when the event supplies it. */
+/**
+ * Notification destinations (issue #446).
+ *
+ * Schedule/RSVP always open the Schedule tab (never the session log). When the
+ * server stamped a schedule row id (and did NOT set entityType='session' — that
+ * legacy shape is a log-session playedAt ping), focus the exact game-night card.
+ * Quest updates use /quests/:id. Comment replies focus the comment inside its
+ * parent entity thread when commentId is present.
+ */
 export function notificationHref(notification: Notification): string {
   const campaignId = notification.campaignId;
   switch (notification.type) {
@@ -231,15 +239,32 @@ export function notificationHref(notification: Notification): string {
     case 'ai_dm_alert':
       return `/c/${campaignId}/table`;
     case 'session_scheduled':
-    case 'session_rsvp':
-      return notification.entityType === 'session' && validId(notification.entityId)
-        ? entityHref(campaignId, { type: 'session', id: notification.entityId })
-        : `/c/${campaignId}/sessions?tab=schedule`;
+    case 'session_rsvp': {
+      // Log-session "upcoming playedAt" pings set entityType=session; those still
+      // land on the Schedule tab (not the session log) without a bogus schedule id.
+      if (validId(notification.entityId) && notification.entityType !== 'session') {
+        return entityHref(campaignId, { type: 'scheduled_session', id: notification.entityId });
+      }
+      return `/c/${campaignId}/sessions?tab=schedule`;
+    }
+    case 'comment_reply': {
+      if (notification.entityType && validId(notification.entityId)) {
+        if (validId(notification.commentId)) {
+          return entityHref(campaignId, {
+            type: 'comment',
+            id: notification.commentId,
+            parentType: notification.entityType,
+            parentId: notification.entityId,
+          });
+        }
+        return entityHref(campaignId, { type: notification.entityType, id: notification.entityId });
+      }
+      return `/c/${campaignId}`;
+    }
     case 'recap_posted':
     case 'quest_updated':
     case 'note_reply':
     case 'note_shared':
-    case 'comment_reply':
       return notification.entityType && validId(notification.entityId)
         ? entityHref(campaignId, { type: notification.entityType, id: notification.entityId })
         : notification.type.startsWith('note_')

@@ -18,7 +18,8 @@
     "test:cov": "npm run test:cov -w apps/server",
     "test:e2e": "npm run build && npm run test:e2e -w apps/web",
     "test:e2e:nobuild": "npm run test:e2e -w apps/web",
-    "test:all": "npm run lint && npm run typecheck && npm run test && npm run build && npm run test:pwa:dist -w apps/web && npm run test:e2e:typecheck -w apps/web && npm run test:e2e:nobuild",
+    "test:all": "npm run check:version && npm run lint && npm run typecheck && npm run test && npm run build && npm run test:pwa:dist -w apps/web && npm run test:e2e:typecheck -w apps/web && npm run test:e2e:nobuild",
+    "check:version": "node scripts/check-version-sync.mjs",
     "lint": "npm run lint --workspaces",
     "typecheck": "npm run build -w packages/schema && npm run typecheck --workspaces"
   },

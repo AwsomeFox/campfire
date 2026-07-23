@@ -3,13 +3,18 @@
  * of the /admin/* page split (issue #350). Lives on /admin/users. Supports an
  * accessible new-user dialog, inline edit/disable/delete controls, and an
  * inline one-time password reset.
+ *
+ * Issue #770: create + repeated edit/reset rows expose durable associated labels,
+ * group each row under the username, keep password requirements/validation
+ * visible, preserve values/focus on failure, and announce success.
  */
-import { useId, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { ServerRole, User } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, Btn, TextInput, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useDialog } from '../../components/useDialog';
+import { useAnnounce } from '../../components/Announcer';
 
 export function UsersCard({ users, onChange }: { users: User[]; onChange: () => void }) {
   const [showNew, setShowNew] = useState(false);
@@ -53,12 +58,14 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-[10px] uppercase text-slate-500 text-left">
+              <tr className="text-[10px] uppercase text-slate-300 text-left">
                 <th className="py-2 pr-4 font-bold">Username</th>
                 <th className="pr-4 font-bold">Display name</th>
                 <th className="pr-4 font-bold">Role</th>
                 <th className="pr-4 font-bold">Status</th>
-                <th></th>
+                <th className="font-bold">
+                  <span className="sr-only">Actions</span>
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
@@ -111,6 +118,7 @@ function NewUserForm({
   const savingRef = useRef(false);
   const [fieldErrors, setFieldErrors] = useState<{ username?: string; password?: string }>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const announce = useAnnounce();
 
   const idPrefix = useId();
   const titleId = `${idPrefix}-title`;
@@ -175,8 +183,9 @@ function NewUserForm({
       return;
     }
 
-    // Success closes and unmounts the dialog. Do not schedule another local
-    // state update after handing lifecycle ownership back to the parent.
+    // Success closes and unmounts the dialog. Announce first, then hand
+    // lifecycle ownership back to the parent without further local updates.
+    announce(`Created user ${trimmedUsername}.`);
     onCreated();
   }
 
@@ -202,6 +211,7 @@ function NewUserForm({
             <label htmlFor={usernameId}>Username</label>
             <TextInput
               id={usernameId}
+              name="username"
               value={username}
               onChange={(e) => {
                 setUsername(e.target.value);
@@ -231,6 +241,7 @@ function NewUserForm({
             </label>
             <TextInput
               id={displayNameId}
+              name="displayName"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               autoComplete="name"
@@ -246,6 +257,7 @@ function NewUserForm({
             <label htmlFor={passwordId}>Temporary password</label>
             <TextInput
               id={passwordId}
+              name="password"
               type="password"
               value={password}
               onChange={(e) => {
@@ -273,6 +285,7 @@ function NewUserForm({
             <label htmlFor={roleId}>Server role</label>
             <select
               id={roleId}
+              name="serverRole"
               className="cf-select"
               value={serverRole}
               onChange={(e) => setServerRole(e.target.value as ServerRole)}
@@ -331,18 +344,40 @@ function UserRow({
   const [serverRole, setServerRole] = useState<ServerRole>(user.serverRole);
   const [disabled, setDisabled] = useState(user.disabled);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [removing, setRemoving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const announce = useAnnounce();
+  const idPrefix = useId();
+  const legendId = `${idPrefix}-legend`;
+  const displayNameId = `${idPrefix}-display-name`;
+  const roleId = `${idPrefix}-role`;
+  const disabledId = `${idPrefix}-disabled`;
+  const formErrorId = `${idPrefix}-error`;
+  const displayNameRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    setFormError(null);
+    const focusHandle = requestAnimationFrame(() => displayNameRef.current?.focus());
+    return () => cancelAnimationFrame(focusHandle);
+  }, [editing]);
 
   function startEdit() {
     setDisplayName(user.displayName);
     setServerRole(user.serverRole);
     setDisabled(user.disabled);
+    setFormError(null);
     onEdit();
   }
 
-  async function save() {
+  async function save(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
+    setFormError(null);
     onError(null);
     try {
       await api.patch(`${API}/users/${user.id}`, {
@@ -350,11 +385,16 @@ function UserRow({
         serverRole,
         disabled,
       });
+      announce(`Updated user ${user.username}.`);
       onClose();
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't update user.");
+      const message = err instanceof ApiError ? err.message : "Couldn't update user.";
+      setFormError(`${message} Your changes have been kept.`);
+      onError(message);
+      requestAnimationFrame(() => displayNameRef.current?.focus());
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -365,6 +405,7 @@ function UserRow({
     try {
       await api.delete(`${API}/users/${user.id}`);
       setConfirmingDelete(false);
+      announce(`Deleted user ${user.username}.`);
       onChange();
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't delete user.");
@@ -376,8 +417,12 @@ function UserRow({
   return (
     <>
       <tr>
-        <td className="py-2.5 pr-4 font-semibold text-white">{user.username}</td>
-        <td className="pr-4 text-slate-400">{user.displayName || <span className="text-slate-600">—</span>}</td>
+        <td className="py-2.5 pr-4 font-semibold text-white" style={{ overflowWrap: 'anywhere' }}>
+          {user.username}
+        </td>
+        <td className="pr-4 text-slate-400" style={{ overflowWrap: 'anywhere' }}>
+          {user.displayName || <span className="text-slate-600">—</span>}
+        </td>
         <td className="pr-4">
           <span className={`cf-chip ${user.serverRole === 'admin' ? 'cf-chip-dm' : 'cf-chip-private'}`}>
             {user.serverRole === 'admin' ? 'Admin' : 'User'}
@@ -391,13 +436,30 @@ function UserRow({
           )}
         </td>
         <td className="text-right whitespace-nowrap">
-          <button type="button" className="text-[11px] text-slate-500 hover:text-white mr-3" onClick={startEdit}>
+          <button
+            type="button"
+            className="text-[11px] text-slate-300 hover:text-white mr-3"
+            aria-expanded={editing}
+            aria-label={`Edit ${user.username}`}
+            onClick={startEdit}
+          >
             edit ▾
           </button>
-          <button type="button" className="text-[11px] text-slate-500 hover:text-white mr-3" onClick={onReset}>
+          <button
+            type="button"
+            className="text-[11px] text-slate-300 hover:text-white mr-3"
+            aria-expanded={resetting}
+            aria-label={`Reset password for ${user.username}`}
+            onClick={onReset}
+          >
             reset password
           </button>
-          <button type="button" className="text-[11px] text-rose-500/80 hover:text-rose-400" onClick={() => setConfirmingDelete(true)}>
+          <button
+            type="button"
+            className="text-[11px] text-rose-300 hover:text-rose-200"
+            aria-label={`Delete ${user.username}`}
+            onClick={() => setConfirmingDelete(true)}
+          >
             delete
           </button>
           {confirmingDelete && (
@@ -415,67 +477,166 @@ function UserRow({
       {editing && (
         <tr>
           <td colSpan={5} className="pb-3">
-            <div className="cf-inset p-3.5 space-y-2">
-              <div className="grid sm:grid-cols-3 gap-2">
-                <TextInput
-                  className="!min-h-0 !py-2 text-sm"
-                  placeholder="Display name"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                />
-                <select
-                  className="cf-select !min-h-0 !py-2 text-sm"
-                  value={serverRole}
-                  onChange={(e) => setServerRole(e.target.value as ServerRole)}
+            <form
+              className="cf-inset p-3.5 space-y-2 min-w-0"
+              data-testid={`user-edit-${user.id}`}
+              onSubmit={save}
+              noValidate
+            >
+              <fieldset className="min-w-0 border-0 p-0 m-0 space-y-2">
+                <legend
+                  id={legendId}
+                  className="text-[10px] font-bold text-slate-300 uppercase tracking-widest mb-1"
+                  style={{ overflowWrap: 'anywhere' }}
                 >
-                  <option value="user">Role: User</option>
-                  <option value="admin">Role: Admin</option>
-                </select>
-                <label className="flex items-center gap-2 text-sm text-slate-300">
-                  <input type="checkbox" checked={disabled} onChange={(e) => setDisabled(e.target.checked)} />
-                  Disabled
-                </label>
-              </div>
-              <div className="flex gap-2 justify-end">
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose} disabled={saving}>
-                  Cancel
-                </Btn>
-                <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
-                  Save
-                </Btn>
-              </div>
-            </div>
+                  Edit {user.username}
+                </legend>
+                <div className="grid sm:grid-cols-3 gap-3 min-w-0">
+                  <div className="field min-w-0">
+                    <label htmlFor={displayNameId} style={{ overflowWrap: 'anywhere' }}>
+                      Display name for {user.username}
+                    </label>
+                    <TextInput
+                      ref={displayNameRef}
+                      id={displayNameId}
+                      name={`displayName-${user.id}`}
+                      className="!min-h-0 !py-2 text-sm"
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      autoComplete="nickname"
+                      maxLength={120}
+                      aria-invalid={!!formError}
+                      aria-describedby={formError ? formErrorId : undefined}
+                    />
+                  </div>
+                  <div className="field min-w-0">
+                    <label htmlFor={roleId} style={{ overflowWrap: 'anywhere' }}>
+                      Server role for {user.username}
+                    </label>
+                    <select
+                      id={roleId}
+                      name={`serverRole-${user.id}`}
+                      className="cf-select !min-h-0 !py-2 text-sm"
+                      value={serverRole}
+                      onChange={(e) => setServerRole(e.target.value as ServerRole)}
+                      aria-invalid={!!formError}
+                      aria-describedby={formError ? formErrorId : undefined}
+                    >
+                      <option value="user">User</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                  <div className="field min-w-0 flex items-end">
+                    <label
+                      htmlFor={disabledId}
+                      className="flex items-center gap-2 text-sm text-slate-300"
+                      style={{ overflowWrap: 'anywhere' }}
+                    >
+                      <input
+                        id={disabledId}
+                        name={`disabled-${user.id}`}
+                        type="checkbox"
+                        checked={disabled}
+                        onChange={(e) => setDisabled(e.target.checked)}
+                      />
+                      Disabled for {user.username}
+                    </label>
+                  </div>
+                </div>
+                {formError && (
+                  <p id={formErrorId} role="alert" className="text-xs text-rose-400">
+                    {formError}
+                  </p>
+                )}
+                <div className="flex gap-2 justify-end">
+                  <Btn
+                    ghost
+                    type="button"
+                    className="!min-h-0 !py-1.5 text-xs"
+                    aria-label={`Cancel editing ${user.username}`}
+                    onClick={onClose}
+                    disabled={saving}
+                  >
+                    Cancel
+                  </Btn>
+                  <Btn
+                    type="submit"
+                    className="!min-h-0 !py-1.5 text-xs"
+                    aria-label={`Save ${user.username}`}
+                    disabled={saving}
+                  >
+                    {saving ? 'Saving…' : 'Save'}
+                  </Btn>
+                </div>
+              </fieldset>
+            </form>
           </td>
         </tr>
       )}
-      {resetting && <ResetPasswordRow userId={user.id} onClose={onClose} onError={onError} />}
+      {resetting && (
+        <ResetPasswordRow user={user} onClose={onClose} onError={onError} />
+      )}
     </>
   );
 }
 
 function ResetPasswordRow({
-  userId,
+  user,
   onClose,
   onError,
 }: {
-  userId: number;
+  user: User;
   onClose: () => void;
   onError: (msg: string | null) => void;
 }) {
   const [newPassword, setNewPassword] = useState('');
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [done, setDone] = useState(false);
+  const [fieldError, setFieldError] = useState<string | null>(null);
+  const announce = useAnnounce();
+  const idPrefix = useId();
+  const legendId = `${idPrefix}-legend`;
+  const passwordId = `${idPrefix}-password`;
+  const passwordHelpId = `${idPrefix}-password-help`;
+  const passwordErrorId = `${idPrefix}-password-error`;
+  const passwordRef = useRef<HTMLInputElement>(null);
 
-  async function submit() {
-    if (newPassword.length < 8) return;
+  useEffect(() => {
+    const focusHandle = requestAnimationFrame(() => passwordRef.current?.focus());
+    return () => cancelAnimationFrame(focusHandle);
+  }, []);
+
+  async function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (savingRef.current) return;
+
+    if (!newPassword) {
+      setFieldError('Enter a new password.');
+      requestAnimationFrame(() => passwordRef.current?.focus());
+      return;
+    }
+    if (newPassword.length < 8) {
+      setFieldError('Password must be at least 8 characters.');
+      requestAnimationFrame(() => passwordRef.current?.focus());
+      return;
+    }
+
+    savingRef.current = true;
     setSaving(true);
+    setFieldError(null);
     onError(null);
     try {
-      await api.post(`${API}/users/${userId}/password`, { newPassword });
+      await api.post(`${API}/users/${user.id}/password`, { newPassword });
       setDone(true);
+      announce(`Password reset for ${user.username}.`);
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't reset password.");
+      const message = err instanceof ApiError ? err.message : "Couldn't reset password.";
+      setFieldError(`${message} Your password entry has been kept.`);
+      onError(message);
+      requestAnimationFrame(() => passwordRef.current?.focus());
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -483,45 +644,95 @@ function ResetPasswordRow({
   return (
     <tr>
       <td colSpan={5} className="pb-3">
-        <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
-          <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Reset password</p>
-          {done ? (
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-emerald-400">Password updated. Signed out of all sessions and revoked all access tokens.</p>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose}>
-                Close
-              </Btn>
-            </div>
-          ) : (
-            <>
-              <p className="text-xs text-muted">
-                This is an incident-response reset: it signs the user out of every session and revokes all their access
-                tokens, so no pre-existing credential survives.
-              </p>
-              <div className="grid sm:grid-cols-3 gap-2">
-                <TextInput
-                  className="!min-h-0 !py-2 text-sm sm:col-span-2"
-                  placeholder="New password (min 8 chars)"
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                />
-              </div>
-              <div className="flex gap-2 justify-end">
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose} disabled={saving}>
-                  Cancel
-                </Btn>
+        <form
+          className="cf-inset border-amber-500/30 p-3.5 space-y-2 min-w-0"
+          onSubmit={submit}
+          noValidate
+        >
+          <fieldset className="min-w-0 border-0 p-0 m-0 space-y-2">
+            <legend
+              id={legendId}
+              className="text-[10px] font-bold text-amber-500 uppercase tracking-widest"
+              style={{ overflowWrap: 'anywhere' }}
+            >
+              Reset password for {user.username}
+            </legend>
+            {done ? (
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <p className="text-sm text-emerald-400" role="status">
+                  Password updated. Signed out of all sessions and revoked all access tokens.
+                </p>
                 <Btn
+                  ghost
+                  type="button"
                   className="!min-h-0 !py-1.5 text-xs"
-                  onClick={submit}
-                  disabled={saving || newPassword.length < 8}
+                  aria-label={`Close password reset for ${user.username}`}
+                  onClick={onClose}
                 >
-                  Set password
+                  Close
                 </Btn>
               </div>
-            </>
-          )}
-        </div>
+            ) : (
+              <>
+                <p className="text-xs text-muted">
+                  This is an incident-response reset: it signs the user out of every session and revokes all their
+                  access tokens, so no pre-existing credential survives.
+                </p>
+                <div className="field min-w-0 max-w-xl">
+                  <label htmlFor={passwordId} style={{ overflowWrap: 'anywhere' }}>
+                    New password for {user.username}
+                  </label>
+                  <TextInput
+                    ref={passwordRef}
+                    id={passwordId}
+                    name={`new-password-${user.id}`}
+                    className="!min-h-0 !py-2 text-sm"
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => {
+                      setNewPassword(e.target.value);
+                      setFieldError(null);
+                    }}
+                    autoComplete="new-password"
+                    minLength={8}
+                    maxLength={200}
+                    required
+                    aria-invalid={!!fieldError}
+                    aria-describedby={`${passwordHelpId}${fieldError ? ` ${passwordErrorId}` : ''}`}
+                  />
+                  <p id={passwordHelpId} className="mt-1 text-xs text-slate-400">
+                    At least 8 characters. Share it with the user through a secure channel.
+                  </p>
+                  {fieldError && (
+                    <p id={passwordErrorId} role="alert" className="mt-1 text-xs text-rose-400">
+                      {fieldError}
+                    </p>
+                  )}
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <Btn
+                    ghost
+                    type="button"
+                    className="!min-h-0 !py-1.5 text-xs"
+                    aria-label={`Cancel password reset for ${user.username}`}
+                    onClick={onClose}
+                    disabled={saving}
+                  >
+                    Cancel
+                  </Btn>
+                  <Btn
+                    type="submit"
+                    className="!min-h-0 !py-1.5 text-xs"
+                    aria-label={`Set password for ${user.username}`}
+                    disabled={saving}
+                  >
+                    {saving ? 'Setting…' : 'Set password'}
+                  </Btn>
+                </div>
+              </>
+            )}
+          </fieldset>
+        </form>
       </td>
     </tr>
   );
