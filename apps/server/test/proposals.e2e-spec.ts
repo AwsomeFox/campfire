@@ -597,4 +597,242 @@ describe('proposals (e2e, real cookie sessions)', () => {
     const quest = await dmAgent.get(`/api/v1/quests/${seqQuestId}`);
     expect(quest.body.title).toBe('Seq Approve Then Reject (applied)');
   });
+
+  // ---------- #817: proposal self-view must not disclose hidden entities / dmSecret ----------
+
+  describe('issue #817 — hidden target + dmSecret projection', () => {
+    type Snapshot = { title?: string; name?: string; dmSecret?: string; hidden?: boolean; status?: string } | null;
+
+    function expectNoDmSecret(snapshot: Snapshot) {
+      expect(snapshot).toBeTruthy();
+      expect(snapshot!.dmSecret ?? '').toBe('');
+    }
+
+    it.each(['player', 'viewer'] as const)(
+      '%s cannot propose update/delete on a hidden quest (indistinguishable 404)',
+      async (who) => {
+        const agent = who === 'player' ? playerAgent : viewerAgent;
+        const created = await dmAgent
+          .post(`/api/v1/campaigns/${campaignId}/quests`)
+          .send({ title: `Hidden Quest ${who}`, dmSecret: 'HIDDEN_QUEST_SECRET_817', hidden: true });
+        expect(created.status).toBe(201);
+        const id = created.body.id as number;
+
+        const patch = await agent.patch(`/api/v1/quests/${id}?proposed=true`).send({ title: 'leak?' });
+        expect(patch.status).toBe(404);
+        expect(JSON.stringify(patch.body)).not.toContain('HIDDEN_QUEST_SECRET_817');
+
+        const del = await agent.delete(`/api/v1/quests/${id}?proposed=true`);
+        expect(del.status).toBe(404);
+        expect(JSON.stringify(del.body)).not.toContain('HIDDEN_QUEST_SECRET_817');
+      },
+    );
+
+    it.each(['player', 'viewer'] as const)(
+      '%s cannot propose update/delete on a hidden NPC (404)',
+      async (who) => {
+        const agent = who === 'player' ? playerAgent : viewerAgent;
+        const created = await dmAgent
+          .post(`/api/v1/campaigns/${campaignId}/npcs`)
+          .send({ name: `Hidden NPC ${who}`, dmSecret: 'HIDDEN_NPC_SECRET_817', hidden: true });
+        const id = created.body.id as number;
+
+        expect((await agent.patch(`/api/v1/npcs/${id}?proposed=true`).send({ name: 'leak?' })).status).toBe(404);
+        expect((await agent.delete(`/api/v1/npcs/${id}?proposed=true`)).status).toBe(404);
+      },
+    );
+
+    it.each(['player', 'viewer'] as const)(
+      '%s cannot propose update/delete on an unexplored location (404)',
+      async (who) => {
+        const agent = who === 'player' ? playerAgent : viewerAgent;
+        const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/locations`).send({
+          name: `Unexplored Locus ${who}`,
+          status: 'unexplored',
+          dmSecret: 'HIDDEN_LOC_SECRET_817',
+        });
+        const id = created.body.id as number;
+
+        expect((await agent.patch(`/api/v1/locations/${id}?proposed=true`).send({ name: 'leak?' })).status).toBe(404);
+        expect((await agent.delete(`/api/v1/locations/${id}?proposed=true`)).status).toBe(404);
+      },
+    );
+
+    it('visible quest/npc/location/session/character: create response + self-view strip dmSecret; DM list keeps it', async () => {
+      const quest = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({
+        title: 'Visible Secret Quest',
+        dmSecret: 'QUEST_DM_SECRET_817',
+        hidden: false,
+      });
+      const npc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({
+        name: 'Visible Secret NPC',
+        dmSecret: 'NPC_DM_SECRET_817',
+        hidden: false,
+      });
+      const loc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/locations`).send({
+        name: 'Visible Secret Location',
+        status: 'explored',
+        dmSecret: 'LOC_DM_SECRET_817',
+      });
+      const session = await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({
+        title: 'Visible Secret Session',
+        dmSecret: 'SESSION_DM_SECRET_817',
+      });
+      const character = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+        name: 'Visible Secret Character',
+        dmSecret: 'CHAR_DM_SECRET_817',
+      });
+
+      const cases = [
+        {
+          label: 'quest',
+          entityType: 'quest',
+          entityId: quest.body.id as number,
+          secret: 'QUEST_DM_SECRET_817',
+          propose: () => playerAgent.patch(`/api/v1/quests/${quest.body.id}?proposed=true`).send({ title: 'Q tweak' }),
+        },
+        {
+          label: 'npc',
+          entityType: 'npc',
+          entityId: npc.body.id as number,
+          secret: 'NPC_DM_SECRET_817',
+          propose: () => playerAgent.patch(`/api/v1/npcs/${npc.body.id}?proposed=true`).send({ name: 'N tweak' }),
+        },
+        {
+          label: 'location',
+          entityType: 'location',
+          entityId: loc.body.id as number,
+          secret: 'LOC_DM_SECRET_817',
+          propose: () => playerAgent.patch(`/api/v1/locations/${loc.body.id}?proposed=true`).send({ name: 'L tweak' }),
+        },
+        {
+          label: 'session',
+          entityType: 'session',
+          entityId: session.body.id as number,
+          secret: 'SESSION_DM_SECRET_817',
+          propose: () =>
+            playerAgent.patch(`/api/v1/sessions/${session.body.id}?proposed=true`).send({ title: 'S tweak' }),
+        },
+        {
+          label: 'character',
+          entityType: 'character',
+          entityId: character.body.id as number,
+          secret: 'CHAR_DM_SECRET_817',
+          propose: () =>
+            playerAgent.patch(`/api/v1/characters/${character.body.id}?proposed=true`).send({ name: 'C tweak' }),
+        },
+      ];
+
+      const proposalIds: number[] = [];
+      for (const c of cases) {
+        const res = await c.propose();
+        expect(res.status).toBe(202);
+        expectNoDmSecret(res.body.proposal.snapshot);
+        expect(JSON.stringify(res.body)).not.toContain(c.secret);
+        proposalIds.push(res.body.proposal.id);
+      }
+
+      // Subsequent self-view list must also stay redacted.
+      const selfView = await playerAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+      expect(selfView.status).toBe(200);
+      for (const id of proposalIds) {
+        const row = selfView.body.find((p: { id: number }) => p.id === id);
+        expect(row).toBeDefined();
+        expectNoDmSecret(row.snapshot);
+      }
+      expect(JSON.stringify(selfView.body)).not.toMatch(/_DM_SECRET_817/);
+
+      // Viewer self-view never sees the player's proposals (and thus not their secrets).
+      const viewerView = await viewerAgent.get(`/api/v1/campaigns/${campaignId}/proposals`);
+      expect(viewerView.body.some((p: { id: number }) => proposalIds.includes(p.id))).toBe(false);
+
+      // DM review queue retains the full snapshot for diffs.
+      const dmView = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`);
+      for (const c of cases) {
+        const row = dmView.body.find(
+          (p: { id: number; entityId: number; entityType: string }) =>
+            proposalIds.includes(p.id) && p.entityId === c.entityId && p.entityType === c.entityType,
+        );
+        expect(row).toBeDefined();
+        expect(row.snapshot.dmSecret).toBe(c.secret);
+      }
+    });
+
+    it('propose-token PAT: hidden target 404s; visible target create+list strip dmSecret', async () => {
+      const tokenRes = await playerAgent
+        .post('/api/v1/tokens')
+        .send({ name: 'propose-817', scope: 'player', writeScope: 'propose', campaignId });
+      expect(tokenRes.status).toBe(201);
+      const token = tokenRes.body.token as string;
+      const server = ctx.app.getHttpServer();
+
+      const hidden = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .send({ title: 'Token Hidden Quest', dmSecret: 'TOKEN_HIDDEN_SECRET_817', hidden: true });
+      const hiddenId = hidden.body.id as number;
+
+      const hiddenPropose = await request(server)
+        .patch(`/api/v1/quests/${hiddenId}?proposed=true`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ title: 'nope' });
+      expect(hiddenPropose.status).toBe(404);
+      expect(JSON.stringify(hiddenPropose.body)).not.toContain('TOKEN_HIDDEN_SECRET_817');
+
+      const visible = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({
+        title: 'Token Visible Quest',
+        dmSecret: 'TOKEN_VISIBLE_SECRET_817',
+        hidden: false,
+      });
+      const visibleId = visible.body.id as number;
+
+      const propose = await request(server)
+        .patch(`/api/v1/quests/${visibleId}?proposed=true`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ title: 'token tweak' });
+      expect(propose.status).toBe(202);
+      expectNoDmSecret(propose.body.proposal.snapshot);
+      expect(JSON.stringify(propose.body)).not.toContain('TOKEN_VISIBLE_SECRET_817');
+
+      const list = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/proposals`)
+        .set('Authorization', `Bearer ${token}`);
+      expect(list.status).toBe(200);
+      const row = list.body.find((p: { id: number }) => p.id === propose.body.proposal.id);
+      expect(row).toBeDefined();
+      expectNoDmSecret(row.snapshot);
+      expect(JSON.stringify(list.body)).not.toContain('TOKEN_VISIBLE_SECRET_817');
+    });
+
+    it('member export (/export/me) redacts proposal snapshots', async () => {
+      const quest = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({
+        title: 'Export Secret Quest',
+        dmSecret: 'EXPORT_QUEST_SECRET_817',
+        hidden: false,
+      });
+      const propose = await playerAgent
+        .patch(`/api/v1/quests/${quest.body.id}?proposed=true`)
+        .send({ title: 'export tweak' });
+      expect(propose.status).toBe(202);
+
+      const exp = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
+      expect(exp.status).toBe(200);
+      const row = exp.body.proposals.find((p: { id: number }) => p.id === propose.body.proposal.id);
+      expect(row).toBeDefined();
+      expectNoDmSecret(row.snapshot);
+      expect(JSON.stringify(exp.body.proposals)).not.toContain('EXPORT_QUEST_SECRET_817');
+    });
+
+    it('viewer proposing a delete on a visible secret-bearing NPC gets a redacted snapshot', async () => {
+      const npc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({
+        name: 'Viewer Delete NPC',
+        dmSecret: 'VIEWER_DELETE_NPC_817',
+        hidden: false,
+      });
+      const res = await viewerAgent.delete(`/api/v1/npcs/${npc.body.id}?proposed=true`);
+      expect(res.status).toBe(202);
+      expectNoDmSecret(res.body.proposal.snapshot);
+      expect(res.body.proposal.snapshot.name).toBe('Viewer Delete NPC');
+      expect(JSON.stringify(res.body)).not.toContain('VIEWER_DELETE_NPC_817');
+    });
+  });
 });

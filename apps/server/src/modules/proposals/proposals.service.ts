@@ -89,9 +89,10 @@ export class ProposalsService {
   async listForCampaign(
     campaignId: number,
     status: string | undefined,
+    role: Role,
     opts?: { proposerUserId?: string },
   ): Promise<Proposal[]> {
-    return this.records.listForCampaign(campaignId, status, opts);
+    return this.records.listForCampaign(campaignId, status, role, opts);
   }
 
   /**
@@ -116,8 +117,8 @@ export class ProposalsService {
     });
   }
 
-  async latestForCampaign(campaignId: number, limit = 500): Promise<Proposal[]> {
-    return this.records.latestForCampaign(campaignId, limit);
+  async latestForCampaign(campaignId: number, limit = 500, role: Role = 'dm'): Promise<Proposal[]> {
+    return this.records.latestForCampaign(campaignId, limit, role);
   }
 
   async getRowOrThrow(id: number) {
@@ -321,7 +322,7 @@ export class ProposalsService {
     if (existing.status !== 'pending') {
       throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
     }
-    const withdrawn = await this.records.markWithdrawn(id, user.id);
+    const withdrawn = await this.records.markWithdrawn(id, user.id, role);
     if (!withdrawn) {
       const current = await this.records.getRowOrThrow(id);
       throw new ConflictException(`Proposal ${id} is already ${current.status}`);
@@ -345,7 +346,7 @@ export class ProposalsService {
    * edit-before-approve), so a bad revision 400s rather than being stored. Delete
    * proposals carry no payload and cannot be revised.
    */
-  async revise(id: number, input: { payload: Record<string, unknown> }, user: RequestUser): Promise<Proposal> {
+  async revise(id: number, input: { payload: Record<string, unknown> }, user: RequestUser, role: Role): Promise<Proposal> {
     const existing = await this.records.getRowOrThrow(id);
     if ((existing.proposerUserId ?? '') !== user.id) {
       throw new ForbiddenException('You can only revise your own proposals');
@@ -361,7 +362,7 @@ export class ProposalsService {
       throw new BadRequestException('Delete proposals have no payload to revise');
     }
     const validated = this.validatePayload(existing.entityType, action, input.payload);
-    const revised = await this.records.revisePayload(id, validated);
+    const revised = await this.records.revisePayload(id, validated, role);
     if (!revised) {
       const current = await this.records.getRowOrThrow(id);
       throw new ConflictException(`Proposal ${id} is already ${current.status}`);
