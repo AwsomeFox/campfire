@@ -901,11 +901,12 @@ export class CampaignsService {
           encounterMap.set(e.id, row.id);
           for (const c of combatantRows) {
             if (c.encounterId !== e.id) continue;
+            const mappedCharacterId = c.characterId != null ? (charMap.get(c.characterId) ?? null) : null;
             tx.insert(combatants)
               .values({
                 encounterId: row.id,
                 kind: c.kind,
-                characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
                 name: c.name,
                 initiative: null,
@@ -915,6 +916,8 @@ export class CampaignsService {
                 conditions: '[]',
                 ruleEntryId: c.ruleEntryId, // compendium entries are server-global — no remap needed
                 sortOrder: c.sortOrder,
+                // Match cloned character.updatedAt (= ts) so /end HP write-back CAS works (#466).
+                sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
               })
               .run();
           }
