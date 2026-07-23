@@ -191,6 +191,11 @@ export function StatusMenuButton<V extends string>({
       listbox.style.top = '';
       listbox.style.maxHeight = '';
 
+      // getBoundingClientRect() returns viewport-relative coordinates, which is
+      // exactly what's needed here because the listbox is rendered with
+      // `position: fixed` (see the inline style below) — no scrollX/scrollY
+      // offset is required. If that positioning ever changes to `absolute`,
+      // these left/top/right assignments would need document-relative offsets.
       const buttonRect = button.getBoundingClientRect();
       const listboxRect = listbox.getBoundingClientRect();
       const viewportWidth = document.documentElement.clientWidth;
