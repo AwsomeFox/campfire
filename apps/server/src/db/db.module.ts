@@ -1705,7 +1705,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0055_participant_support_preferences', run: migrateParticipantSupportPreferences },
   { name: '0056_characters_death_temp_hp', run: migrateCharactersTableForDeathTempHp },
   { name: '0057_campaigns_active_encounter', run: migrateCampaignsTableForActiveEncounter },
-  { name: '0058_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
+  { name: '0059_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
 
 ];
 

@@ -293,7 +293,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(MIGRATION_NAMES).toContain('0055_participant_support_preferences');
       expect(MIGRATION_NAMES).toContain('0057_campaigns_active_encounter');
-      expect(MIGRATION_NAMES).toContain('0058_encounter_links_campaign_scope');
+      expect(MIGRATION_NAMES).toContain('0059_encounter_links_campaign_scope');
       // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
 
@@ -556,11 +556,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0058 nullifies cross-campaign encounter links and preserves valid ones (issue #864)', () => {
+  it('0059 nullifies cross-campaign encounter links and preserves valid ones (issue #864)', () => {
     dataDir = makeTempDataDir();
 
     // Seed a fully-migrated DB, plant a cross-campaign encounter link (SQLite FKs
-    // only check the target row exists — not campaign_id match), then re-run 0058.
+    // only check the target row exists — not campaign_id match), then re-run 0059.
     const seeded = openDatabase(dataDir);
     seeded.sqlite.close();
     const legacy = new Database(dbFilePath(dataDir));
@@ -592,7 +592,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (3, 1, 'Mixed', 10, 21, 12, ?, ?)",
         )
         .run(now, now);
-      legacy.prepare("DELETE FROM __migrations WHERE name = '0058_encounter_links_campaign_scope'").run();
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0059_encounter_links_campaign_scope'").run();
     } finally {
       legacy.close();
     }
