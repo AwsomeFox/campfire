@@ -670,7 +670,7 @@ export class DiagnosticsService {
       // Avoid leaking the absolute host path in admin API error responses,
       // matching the other unreadable-storage error messages in this file.
       throw new ServiceUnavailableException(
-        `Attachment storage is unavailable or inaccessible (${code ?? 'unknown error'}); cannot run diagnostics.`,
+        `Attachment storage is unavailable or inaccessible (${code ?? 'unknown error'}).`,
       );
     }
   }
