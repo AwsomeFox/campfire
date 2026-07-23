@@ -69,6 +69,7 @@ import {
 } from './narrationAccessibility';
 import {
   followLatestAfterUserScroll,
+  FEED_NEAR_BOTTOM_PX,
   isFeedNearBottom,
   shouldScrollTranscriptToTailOnMount,
   unreadAfterFeedGrowth,
