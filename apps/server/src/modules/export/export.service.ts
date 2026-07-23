@@ -20,6 +20,7 @@ import { TimelineService } from '../timeline/timeline.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import type { RequestUser } from '../../common/user.types';
 
 /** Filesystem/URL-safe slug for filenames — lowercase, alnum + hyphens. */
@@ -117,6 +118,7 @@ export class ExportService {
     private readonly sessionZero: SessionZeroService,
     private readonly supportPreferences: SupportPreferencesService,
     private readonly inventory: InventoryService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /** Archive-relative path an attachment's bytes live at inside a zip export. */
@@ -158,6 +160,7 @@ export class ExportService {
       sessionZero,
       inventoryList,
       treasury,
+      revisionList,
     ] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.quests.listForCampaignWithObjectives(campaignId, role),
@@ -183,6 +186,8 @@ export class ExportService {
       this.sessionZero.get(campaignId),
       this.inventory.listForCampaign(campaignId),
       this.inventory.getTreasury(campaignId),
+      // Issue #813: immutable prose versions (author + replacer provenance), including tips.
+      this.revisions.listForCampaign(campaignId),
     ]);
 
     // Attachment manifest (issue #87): the export used to reference attachment ids
@@ -252,6 +257,8 @@ export class ExportService {
       sessionZero,
       inventory: inventoryList,
       treasury,
+      // Issue #813: version authorship + replacer metadata round-trips with remapped ids.
+      revisions: revisionList,
       attachments,
       attachmentsNote:
         'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl ' +

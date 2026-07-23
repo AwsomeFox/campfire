@@ -28,11 +28,31 @@ export function memberCharacterControlLabel(memberName: string): string {
 }
 
 /**
- * Explains ownership vs seat linkage: linking sets sheet ownership; removing a
- * membership keeps the character and only closes the seat.
+ * Explains ownership vs seat linkage: linking sets exclusive sheet ownership;
+ * transferring requires confirmation; removing a membership keeps the character
+ * and only closes the seat (issue #819).
  */
 export const MEMBER_CHARACTER_LINK_HELP =
-  'Linking a character makes that player its owner so they can edit its sheet. Removing a member keeps their character and notes — only the campaign seat closes.';
+  'Each character has one exclusive seat. Linking makes that player its owner so they can edit its sheet; choosing a character already linked to someone else asks you to confirm the transfer. Removing a member keeps their character and notes — only the campaign seat closes.';
+
+/** Label for a character option that already has another seat holder. */
+export function memberCharacterOptionLabel(
+  characterName: string,
+  holderName: string | null,
+): string {
+  return holderName ? `${characterName} (${holderName})` : characterName;
+}
+
+/** Confirm-dialog title when transferring an exclusive character seat. */
+export function memberCharacterTransferTitle(characterName: string, fromName: string, toName: string): string {
+  return `Transfer ${characterName} from ${fromName} to ${toName}?`;
+}
+
+/** Confirm-dialog body spelling out the permission consequences of a transfer. */
+export const MEMBER_CHARACTER_TRANSFER_BODY =
+  'The previous player loses sheet edit rights and encounter controls for this character immediately. Only the new player keeps ownership.';
+
+export const MEMBER_CHARACTER_TRANSFER_CONFIRM_LABEL = 'Transfer character';
 
 /** Accessible name for the add-member dialog role selector. */
 export const ADD_MEMBER_ROLE_LABEL = 'Role for new member';

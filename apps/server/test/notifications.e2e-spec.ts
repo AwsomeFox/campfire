@@ -426,6 +426,9 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(scheduled).toHaveLength(1);
     expect(scheduled[0].title).toContain('Game night');
     expect(scheduled[0].actorName).toBe('Dana DM');
+    // Issue #446: schedule row id is stamped so the UI can open the exact card.
+    expect(scheduled[0].entityId).toBe(res.body.id);
+    expect(scheduled[0].entityType).toBeNull();
     // The scheduling DM does not notify themselves.
     expect(ofType(await listFor(dm), 'session_scheduled')).toHaveLength(0);
   });
@@ -442,6 +445,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(dmRsvps).toHaveLength(1);
     expect(dmRsvps[0].title).toContain('Pat Player');
     expect(dmRsvps[0].title).toContain('yes');
+    expect(dmRsvps[0].entityId).toBe(sched.body.id);
     // The RSVPing player is not notified about their own availability.
     expect(ofType(await listFor(player), 'session_rsvp')).toHaveLength(0);
   });

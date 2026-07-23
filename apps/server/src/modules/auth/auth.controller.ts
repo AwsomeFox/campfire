@@ -24,6 +24,7 @@ import {
 } from './auth.dto';
 import { PreferencesUpdateDto } from '../users/users.dto';
 import { SESSION_COOKIE_NAME, VERSION } from './auth.constants';
+import { APP_COMMIT } from '../../common/build-metadata';
 import { sessionCookieOptions } from './session-cookie';
 import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
 
@@ -66,6 +67,7 @@ export class AuthController {
       oidcEnabled: oidcStatus.enabled,
       oidcProviderName: oidcStatus.providerName,
       version: VERSION,
+      ...(APP_COMMIT ? { commit: APP_COMMIT } : {}),
     };
   }
 

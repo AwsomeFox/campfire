@@ -49,19 +49,21 @@ const RECONNECT_MAX_MS = 15_000;
 /**
  * Runtime guard for the CampaignEvent union (issue #527 widened it to a
  * discriminated union; #582 added treasury.updated; #790 added schedule.updated;
- * #421 added character.updated).
+ * #421 added character.updated; #437 added membership.updated).
  * Accepts every variant: the
  * encounter.* signals carry an encounterId; membership.revoked carries
- * userId/memberId; treasury.updated carries userId (the actor); schedule.updated
+ * userId/memberId; membership.updated carries userId/memberId/role;
+ * treasury.updated carries userId (the actor); schedule.updated
  * carries scheduleId; character.updated carries characterId + userId. Consumers
  * narrow by `type` before reading variant-specific fields (see RunSessionPage
  * and DashboardPage).
  *
  * Note: the server filters membership.revoked out of the data path as an internal
  * control signal, so in practice this client sees encounter.*, treasury.updated,
- * schedule.updated, and character.updated frames — but validating the full union
- * here keeps the guard correct if that filtering ever changes, and lets the type
- * system prove that `onEvent` callbacks handle every variant (or explicitly narrow).
+ * schedule.updated, character.updated, and membership.updated frames — but validating
+ * the full union here keeps the guard correct if that filtering ever changes, and
+ * lets the type system prove that `onEvent` callbacks handle every variant (or
+ * explicitly narrow).
  */
 const ENCOUNTER_EVENT_TYPES = new Set(['encounter.updated', 'encounter.deleted', 'encounter.ping']);
 function isCampaignEvent(value: unknown): value is CampaignEvent {
@@ -83,6 +85,14 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (v.type === 'membership.revoked') {
     // membership.revoked: userId + memberId instead of encounterId.
     return typeof v.userId === 'string' && typeof v.memberId === 'number';
+  }
+  if (v.type === 'membership.updated') {
+    // membership.updated (#437): role change invalidation for the affected member.
+    return (
+      typeof v.userId === 'string'
+      && typeof v.memberId === 'number'
+      && (v.role === 'dm' || v.role === 'player' || v.role === 'viewer')
+    );
   }
   if (v.type === 'treasury.updated') {
     // treasury.updated (#582): the actor's userId so the editor can attribute the

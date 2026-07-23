@@ -4,8 +4,8 @@
  * The Storylines beat rail rendered as `borderLeft: '2px solid var(--color-border)'`,
  * but `--color-border` is not a defined token — neither in the design-system
  * cascade (index.css / nocturne.css) nor in the runtime accent override
- * (AuthProvider.tsx, which sets --color-accent / --color-accent-2 and the
- * --cf-accent / --cf-accent-2 aliases). With no value and no fallback, the
+ * (accentPalette.ts via AuthProvider — full --color-accent* / --cf-accent*
+ * token set, issue #795). With no value and no fallback, the
  * whole declaration becomes invalid-at-parse-time and the nested-beat visual
  * rail silently disappeared.
  *
@@ -41,8 +41,33 @@ const STORYLINES_PAGE = join(WEB_SRC, 'features', 'storylines', 'StorylinesPage.
 
 /** Files whose contents can hold `var(--token)` references or token definitions. */
 const SCAN_EXTENSIONS = new Set(['.tsx', '.ts', '.css']);
-/** Token names that are set at runtime (AuthProvider accent override). */
-const RUNTIME_TOKENS = new Set(['--color-accent', '--color-accent-2', '--cf-accent', '--cf-accent-2']);
+/** Token names that are set at runtime (accentPalette / AuthProvider override). */
+const RUNTIME_TOKENS = new Set([
+  '--color-accent',
+  '--color-accent-2',
+  '--cf-accent',
+  '--cf-accent-2',
+  // Full tonal ramps — issue #795 generates these from the canonical accent so
+  // consumers of --color-accent-100…900 never stay stuck on the static blurple.
+  '--color-accent-100',
+  '--color-accent-200',
+  '--color-accent-300',
+  '--color-accent-400',
+  '--color-accent-500',
+  '--color-accent-600',
+  '--color-accent-700',
+  '--color-accent-800',
+  '--color-accent-900',
+  '--color-accent-2-100',
+  '--color-accent-2-200',
+  '--color-accent-2-300',
+  '--color-accent-2-400',
+  '--color-accent-2-500',
+  '--color-accent-2-600',
+  '--color-accent-2-700',
+  '--color-accent-2-800',
+  '--color-accent-2-900',
+]);
 
 /**
  * Recursively collect source files under `root` whose extension is in the scan
