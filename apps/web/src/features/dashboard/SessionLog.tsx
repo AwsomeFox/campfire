@@ -1,11 +1,13 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
+import type { Role, ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
+import { isScheduleInProgress, scheduleEndsAtMs } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { dashboardRsvpCue, findViewerRsvp, viewerRsvpIds } from '../../lib/dashboardRsvp';
 import { formatDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { Markdown } from '../../components/Markdown';
 
 /** Strip basic markdown syntax from a recap excerpt for a one-line preview. */
 function firstLinePlain(text: string): string {
@@ -16,92 +18,114 @@ function firstLinePlain(text: string): string {
     .trim();
 }
 
-export function SessionLog({
+function rsvpSummary(rsvps: ScheduledSessionWithRsvps['rsvps']): string | null {
+  if (rsvps.length === 0) return null;
+  let yes = 0;
+  let maybe = 0;
+  let no = 0;
+  for (const r of rsvps) {
+    if (r.status === 'yes') yes += 1;
+    else if (r.status === 'maybe') maybe += 1;
+    else if (r.status === 'no') no += 1;
+  }
+  const parts: string[] = [];
+  if (yes) parts.push(`${yes} in`);
+  if (maybe) parts.push(`${maybe} maybe`);
+  if (no) parts.push(`${no} out`);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+function ScheduleCard({
   campaignId,
-  sessions,
-  nextSession,
-  scheduleSync,
+  schedule,
+  happeningNow,
+  role,
+  rsvpCue,
 }: {
   campaignId: number;
-  sessions: SessionListItem[];
-  nextSession: ScheduledSessionWithRsvps | null;
-  scheduleSync: 'live' | 'stale' | 'offline';
+  schedule: ScheduledSessionWithRsvps;
+  happeningNow: boolean;
+  role: Role | null;
+  rsvpCue?: ReturnType<typeof dashboardRsvpCue>;
 }) {
-  useFormattingLocale();
-  const { me } = useAuth();
-  const myIds = useMemo(() => viewerRsvpIds(me?.user ?? null), [me]);
-  const mine = nextSession ? findViewerRsvp(nextSession.rsvps, myIds) : undefined;
-  const rsvpCue = dashboardRsvpCue(mine?.status);
-
-  const sorted = [...sessions].sort((a, b) => b.number - a.number);
-  const latest3 = sorted.slice(0, 3);
-
-  const syncMessage = scheduleSync === 'offline'
-    ? 'Offline — showing last-known next-session details.'
-    : scheduleSync === 'stale'
-      ? 'Live updates interrupted — showing last-known next-session details.'
-      : null;
+  const roster = rsvpSummary(schedule.rsvps);
+  const canOpenSessionTools = role === 'dm' || role === 'player' || role === 'viewer';
+  const showDmTools = role === 'dm';
 
   return (
-    <section className="card elev-sm dashboard-session-log" aria-labelledby="dashboard-session-log-title">
-      <div style={{ display: 'flex', alignItems: 'center' }}>
-        <h2 id="dashboard-session-log-title" className="card-kicker">Session log</h2>
-        <div style={{ flex: 1 }} />
-        <Link to={`/c/${campaignId}/sessions`} className="btn btn-ghost" style={{ fontSize: 12 }}>
-          All sessions →
-        </Link>
-      </div>
-      {syncMessage && (
-        <p
-          role="status"
-          aria-live="polite"
-          className={scheduleSync === 'offline' ? 'cf-chip cf-chip-offline' : 'cf-chip cf-chip-neutral'}
-          style={{ display: 'block', width: 'fit-content', maxWidth: '100%', margin: '8px 0', whiteSpace: 'normal' }}
-        >
-          {syncMessage}
-        </p>
-      )}
-      {nextSession && (
-        <Link
-          to={`/c/${campaignId}/sessions?tab=schedule`}
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'minmax(0, 1fr) auto',
-            gap: '3px 12px',
-            alignItems: 'center',
-            textDecoration: 'none',
-            padding: '8px 12px',
-            minHeight: 48,
-            marginBottom: 8,
-            borderRadius: 8,
-            background: 'var(--color-accent-900, rgba(145,132,217,0.12))',
-            color: 'var(--color-text)',
-          }}
-        >
-          <span style={{ minWidth: 0 }}>
-            <span style={{ display: 'block', fontSize: 12, color: 'var(--color-accent-2-300)' }}>
-              <GameIcon slug="calendar" size={12} className="inline align-text-bottom mr-1" />Next session
-            </span>
-            <span style={{ display: 'block', fontSize: 13 }}>
-              {formatDateTime(nextSession.scheduledAt, {
-                weekday: 'short',
-                month: 'short',
-                day: 'numeric',
-                hour: 'numeric',
-                minute: '2-digit',
-              })}
-            </span>
-            {nextSession.title && (
-              <span className="text-muted" style={{ display: 'block', fontSize: 12, overflowWrap: 'anywhere' }}>
-                {nextSession.title}
-              </span>
-            )}
+    <div
+      style={{
+        display: 'grid',
+        gap: 8,
+        padding: '10px 12px',
+        minHeight: 48,
+        marginBottom: 8,
+        borderRadius: 8,
+        background: happeningNow
+          ? 'var(--color-accent-800, rgba(145,132,217,0.22))'
+          : 'var(--color-accent-900, rgba(145,132,217,0.12))',
+        color: 'var(--color-text)',
+        border: happeningNow ? '1px solid var(--color-accent, #9184d9)' : '1px solid transparent',
+      }}
+    >
+      <Link
+        to={`/c/${campaignId}/sessions?tab=schedule`}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1fr) auto',
+          gap: '3px 12px',
+          alignItems: 'center',
+          textDecoration: 'none',
+          color: 'inherit',
+        }}
+      >
+        <span style={{ minWidth: 0 }}>
+          <span
+            style={{
+              display: 'block',
+              fontSize: happeningNow ? 13 : 12,
+              fontWeight: happeningNow ? 700 : 400,
+              color: happeningNow ? 'var(--color-accent-2-200, #f0e9ff)' : 'var(--color-accent-2-300)',
+            }}
+          >
+            <GameIcon slug="calendar" size={12} className="inline align-text-bottom mr-1" />
+            {happeningNow ? 'Happening now' : 'Next session'}
           </span>
-          {/*
-            Issue #785: surface the viewer's saved RSVP. Only unanswered keeps
-            the urgent "RSVP needed →" cue; answered states show the status plus
-            a quieter Change RSVP affordance.
-          */}
+          <span style={{ display: 'block', fontSize: happeningNow ? 14 : 13, fontWeight: happeningNow ? 600 : 400 }}>
+            {formatDateTime(schedule.scheduledAt, {
+              weekday: 'short',
+              month: 'short',
+              day: 'numeric',
+              hour: 'numeric',
+              minute: '2-digit',
+            })}
+            <span className="text-muted" style={{ fontWeight: 400 }}>
+              {' '}
+              · {formatDuration(schedule.durationMinutes)}
+            </span>
+          </span>
+          {schedule.title && (
+            <span className="text-muted" style={{ display: 'block', fontSize: 12, overflowWrap: 'anywhere' }}>
+              {schedule.title}
+            </span>
+          )}
+          {schedule.location && (
+            <span className="text-muted" style={{ display: 'block', fontSize: 12, overflowWrap: 'anywhere' }}>
+              <GameIcon slug="position-marker" size={11} className="inline align-text-bottom mr-1" />
+              {schedule.location}
+            </span>
+          )}
+          {roster && (
+            <span className="text-muted" style={{ display: 'block', fontSize: 12 }}>
+              RSVP: {roster}
+            </span>
+          )}
+        </span>
+        {happeningNow || !rsvpCue ? (
+          <span className="text-muted" style={{ fontSize: 'var(--type-meta)', marginLeft: 'auto', flex: 'none' }}>
+            {happeningNow ? 'Schedule →' : 'RSVP →'}
+          </span>
+        ) : (
           <span
             data-testid="dashboard-rsvp-cue"
             data-rsvp-unanswered={rsvpCue.unanswered ? 'true' : 'false'}
@@ -132,7 +156,132 @@ export function SessionLog({
               </span>
             )}
           </span>
+        )}
+      </Link>
+      {happeningNow && schedule.notes && (
+        <Markdown className="!text-xs !text-[color:var(--color-text)] !m-0">{schedule.notes}</Markdown>
+      )}
+      {happeningNow && canOpenSessionTools && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {showDmTools && (
+            <Link to={`/c/${campaignId}/encounters`} className="btn btn-ghost" style={{ fontSize: 12, minHeight: 36 }}>
+              Encounters
+            </Link>
+          )}
+          <Link to={`/c/${campaignId}/screen`} className="btn btn-ghost" style={{ fontSize: 12, minHeight: 36 }}>
+            Player display
+          </Link>
+          <Link to={`/c/${campaignId}/notes`} className="btn btn-ghost" style={{ fontSize: 12, minHeight: 36 }}>
+            Session notes
+          </Link>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatDuration(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m}min`;
+  return m === 0 ? `${h}h` : `${h}h ${m}min`;
+}
+
+export function SessionLog({
+  campaignId,
+  sessions,
+  inProgressSession,
+  nextSession,
+  scheduleSync,
+  role,
+}: {
+  campaignId: number;
+  sessions: SessionListItem[];
+  inProgressSession: ScheduledSessionWithRsvps | null;
+  nextSession: ScheduledSessionWithRsvps | null;
+  scheduleSync: 'live' | 'stale' | 'offline';
+  role: Role | null;
+}) {
+  useFormattingLocale();
+  const { me } = useAuth();
+  const myIds = useMemo(() => viewerRsvpIds(me?.user ?? null), [me]);
+  const mine = nextSession ? findViewerRsvp(nextSession.rsvps, myIds) : undefined;
+  const rsvpCue = dashboardRsvpCue(mine?.status);
+
+  const sorted = [...sessions].sort((a, b) => b.number - a.number);
+  const latest3 = sorted.slice(0, 3);
+
+  const syncMessage = scheduleSync === 'offline'
+    ? 'Offline — showing last-known next-session details.'
+    : scheduleSync === 'stale'
+      ? 'Live updates interrupted — showing last-known next-session details.'
+      : null;
+
+  // Re-check the duration window on a local clock so "Happening now" clears at the
+  // phase boundary even if the ~5s summary poll is late (parity with SchedulePanel).
+  const [scheduleNowMs, setScheduleNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const candidates = [inProgressSession, nextSession].filter(
+      (s): s is ScheduledSessionWithRsvps => s != null,
+    );
+    const boundaries: number[] = [];
+    for (const s of candidates) {
+      const startMs = Date.parse(s.scheduledAt);
+      const endMs = scheduleEndsAtMs(s.scheduledAt, s.durationMinutes);
+      if (Number.isFinite(startMs) && startMs > scheduleNowMs) boundaries.push(startMs);
+      if (Number.isFinite(endMs) && endMs > scheduleNowMs) boundaries.push(endMs);
+    }
+    if (boundaries.length === 0) return;
+    const delay = Math.min(...boundaries) - scheduleNowMs + 25;
+    const timer = window.setTimeout(() => setScheduleNowMs(Date.now()), Math.max(25, delay));
+    return () => window.clearTimeout(timer);
+  }, [inProgressSession, nextSession, scheduleNowMs]);
+
+  // Prefer the summary's in-progress projection; fall back to classifying nextSession
+  // so older cached payloads still surface "Happening now" during the duration window.
+  const happeningCandidate =
+    inProgressSession
+    ?? (nextSession && isScheduleInProgress(nextSession.scheduledAt, nextSession.durationMinutes, scheduleNowMs)
+      ? nextSession
+      : null);
+  const happening =
+    happeningCandidate &&
+    isScheduleInProgress(happeningCandidate.scheduledAt, happeningCandidate.durationMinutes, scheduleNowMs)
+      ? happeningCandidate
+      : null;
+  const upcoming =
+    nextSession && (!happening || nextSession.id !== happening.id) ? nextSession : null;
+
+  return (
+    <section className="card elev-sm dashboard-session-log" aria-labelledby="dashboard-session-log-title">
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <h2 id="dashboard-session-log-title" className="card-kicker">Session log</h2>
+        <div style={{ flex: 1 }} />
+        <Link to={`/c/${campaignId}/sessions`} className="btn btn-ghost" style={{ fontSize: 12 }}>
+          All sessions →
         </Link>
+      </div>
+      {syncMessage && (
+        <p
+          role="status"
+          aria-live="polite"
+          className={scheduleSync === 'offline' ? 'cf-chip cf-chip-offline' : 'cf-chip cf-chip-neutral'}
+          style={{ display: 'block', width: 'fit-content', maxWidth: '100%', margin: '8px 0', whiteSpace: 'normal' }}
+        >
+          {syncMessage}
+        </p>
+      )}
+      {happening && (
+        <ScheduleCard campaignId={campaignId} schedule={happening} happeningNow role={role} />
+      )}
+      {upcoming && (
+        <ScheduleCard
+          campaignId={campaignId}
+          schedule={upcoming}
+          happeningNow={false}
+          role={role}
+          rsvpCue={rsvpCue}
+        />
       )}
       {latest3.length === 0 ? (
         <EmptyState icon="book-cover" title="No sessions logged yet" />

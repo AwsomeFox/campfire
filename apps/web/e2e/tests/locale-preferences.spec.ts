@@ -78,6 +78,7 @@ test('Preferences keeps catalog language separate from System formatting across 
     const summary = await response.json();
     await route.fulfill({ response, json: {
       ...summary,
+      inProgressSession: null,
       nextSession: {
         id: 99_001,
         campaignId: seed().campaignId,

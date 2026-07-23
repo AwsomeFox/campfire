@@ -338,6 +338,7 @@ describe('campaign events SSE (e2e, dev auth)', () => {
 
     const afterCreate = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
     expect(afterCreate.status).toBe(200);
+    expect(afterCreate.body.inProgressSession).toBeNull();
     expect(afterCreate.body.nextSession).toMatchObject({
       id: scheduleId,
       scheduledAt: '2098-08-10T18:00:00.000Z',
@@ -384,6 +385,7 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     expect(cancelled.status).toBe(200);
     await expectScheduleUpdate(scheduleId);
     const afterCancel = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+    expect(afterCancel.body.inProgressSession).toBeNull();
     expect(afterCancel.body.nextSession).toBeNull();
 
     conn.close();
