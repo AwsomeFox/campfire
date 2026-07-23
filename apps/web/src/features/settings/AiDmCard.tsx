@@ -19,8 +19,6 @@ import { api, ApiError, API } from '../../lib/api';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
 
-export { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
-
 export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
   {
     value: 'off',

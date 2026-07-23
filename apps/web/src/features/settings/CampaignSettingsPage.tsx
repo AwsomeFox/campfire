@@ -70,43 +70,57 @@ export default function CampaignSettingsPage() {
   // auto-scroll to a hash, and the target may appear only after AiDmCard finishes its
   // own async seat load — retry on a short interval until the anchor exists (or 10s).
   useEffect(() => {
-    if (!campaign || !location.hash) return;
+    if (!campaign?.id || !location.hash) return;
     const hashId = decodeLocationHashId(location.hash);
-    let frame = 0;
-    let interval = 0;
-    let timeout = 0;
+    let frame: number | null = null;
+    let retryTimer: number | null = null;
+    let cancelled = false;
+    let delay = 100;
 
-    const scrollToAnchor = () => {
+    const clearRetry = () => {
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+
+    const scrollToAnchor = (): boolean => {
       const el = document.getElementById(hashId);
       if (!el) return false;
-      if (interval) window.clearInterval(interval);
-      if (timeout) window.clearTimeout(timeout);
-      interval = 0;
-      timeout = 0;
+      clearRetry();
+      if (frame !== null) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
+        frame = null;
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
       return true;
     };
 
+    const scheduleRetry = (startedAt: number) => {
+      clearRetry();
+      if (cancelled) return;
+      if (Date.now() - startedAt >= 10_000) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (cancelled) return;
+        if (scrollToAnchor()) return;
+        delay = Math.min(delay * 2, 250);
+        scheduleRetry(startedAt);
+      }, delay);
+    };
+
     if (!scrollToAnchor()) {
-      // Bounded polling avoids a subtree MutationObserver on #root, which would
-      // re-run on every interactive DOM change while waiting for AiDmCard.
-      interval = window.setInterval(() => {
-        void scrollToAnchor();
-      }, 50);
-      timeout = window.setTimeout(() => {
-        if (interval) window.clearInterval(interval);
-        interval = 0;
-      }, 10_000);
+      // Bounded backoff polling avoids a subtree MutationObserver on #root.
+      const startedAt = Date.now();
+      scheduleRetry(startedAt);
     }
 
     return () => {
-      if (interval) window.clearInterval(interval);
-      if (timeout) window.clearTimeout(timeout);
-      if (frame) window.cancelAnimationFrame(frame);
+      cancelled = true;
+      clearRetry();
+      if (frame !== null) window.cancelAnimationFrame(frame);
     };
-  }, [campaign, location.hash]);
+  }, [campaign?.id, location.hash]);
 
   if (!Number.isFinite(id)) {
     return (
