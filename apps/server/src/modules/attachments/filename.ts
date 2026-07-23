@@ -20,6 +20,7 @@ export const MAX_ATTACHMENT_FILENAME_LENGTH = 255;
 const DEFAULT_BASENAME = 'attachment';
 
 /** ASCII controls (0x00–0x1F) and DEL — never safe in stored names or headers. */
+// eslint-disable-next-line no-control-regex -- intentionally match ASCII controls + DEL
 const CONTROL_OR_DEL = /[\u0000-\u001f\u007f]/g;
 
 type GraphemeSegmenter = { segment(input: string): Iterable<{ segment: string }> };

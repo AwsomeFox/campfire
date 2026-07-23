@@ -31,7 +31,7 @@ import { CREDS } from '../global-setup';
 async function signInAsDm(page: Page) {
   await page.goto('/login');
   await page.getByLabel('Username').fill(CREDS.dm.username);
-  await page.getByLabel('Password').fill(CREDS.dm.password);
+  await page.getByLabel('Password', { exact: true }).fill(CREDS.dm.password);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await page.waitForURL((url) => !url.pathname.startsWith('/login'));
 }

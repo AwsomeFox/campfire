@@ -10,6 +10,7 @@ import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+import { PasswordInput } from '../../components/PasswordInput';
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -164,9 +165,8 @@ export function SignupPage() {
             </div>
             <div className="field">
               <label htmlFor={AUTH_FIELD_IDS.password}>Password</label>
-              <input
+              <PasswordInput
                 id={AUTH_FIELD_IDS.password}
-                type="password"
                 className="input"
                 value={password}
                 onChange={(e) => {
@@ -186,9 +186,8 @@ export function SignupPage() {
             </div>
             <div className="field">
               <label htmlFor={AUTH_FIELD_IDS.confirm}>Confirm password</label>
-              <input
+              <PasswordInput
                 id={AUTH_FIELD_IDS.confirm}
-                type="password"
                 className="input"
                 value={confirm}
                 onChange={(e) => {
@@ -196,6 +195,7 @@ export function SignupPage() {
                   if (fieldErrors.confirm) setError(null);
                 }}
                 autoComplete="new-password"
+                revealNoun="confirm password"
                 required
                 aria-invalid={fieldErrors.confirm ? true : undefined}
                 aria-describedby={describedBy(fieldErrors.confirm && AUTH_ERROR_IDS.confirm)}

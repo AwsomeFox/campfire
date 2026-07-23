@@ -284,7 +284,7 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm)).status).toBe(201);
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm)).status).toBe(201);
 
-    let seen = conn.events.length;
+    const seen = conn.events.length;
     const patch = await request(server)
       .patch(`/api/v1/characters/${characterId}`)
       .set(dm)

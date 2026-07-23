@@ -4568,10 +4568,13 @@ export type AdminMetrics = z.infer<typeof AdminMetrics>;
 export const StorageCampaignUsage = z.object({
   campaignId: Id,
   name: z.string(),
-  fileCount: z.number().int().nonnegative(), // attachment rows for this campaign
-  totalBytes: z.number().int().nonnegative(), // sum of attachment.size for this campaign
+  fileCount: z.number().int().nonnegative(), // committed attachment rows for this campaign
+  reservedFileCount: z.number().int().nonnegative(), // in-flight quota reservations
+  totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
+  committedBytes: z.number().int().nonnegative(), // publicly readable attachment bytes
+  reservedBytes: z.number().int().nonnegative(), // quota held by in-flight publications
   quotaBytes: z.number().int().nonnegative().nullable(), // per-campaign cap, or null for unlimited
-  overQuota: z.boolean(), // totalBytes > quotaBytes (always false when unlimited)
+  overQuota: z.boolean(), // committed + reserved > quotaBytes (always false when unlimited)
 });
 export type StorageCampaignUsage = z.infer<typeof StorageCampaignUsage>;
 
@@ -4584,8 +4587,11 @@ export const StorageOrphans = z.object({
 export type StorageOrphans = z.infer<typeof StorageOrphans>;
 
 export const StorageStats = z.object({
-  totalBytes: z.number().int().nonnegative(), // sum of attachment.size across all campaigns (DB view)
-  fileCount: z.number().int().nonnegative(), // total attachment rows
+  totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
+  committedBytes: z.number().int().nonnegative(), // publicly readable bytes across all campaigns
+  reservedBytes: z.number().int().nonnegative(), // quota held by in-flight publications
+  fileCount: z.number().int().nonnegative(), // total committed attachment rows
+  reservedFileCount: z.number().int().nonnegative(), // total reservation rows
   diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
   campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
   orphans: StorageOrphans,
