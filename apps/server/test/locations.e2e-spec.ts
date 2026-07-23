@@ -22,7 +22,10 @@ describe('locations (e2e)', () => {
     await closeTestApp(ctx);
   });
 
-  it('discover promotes new location to current and demotes previous', async () => {
+  // Issue #481: Mark current (POST /discover status=current) must update
+  // campaign.currentLocationId — the pointer the dashboard summary reads — not
+  // only location.status. Switching current demotes the previous location.
+  it('Mark current updates campaign.currentLocationId used by the dashboard', async () => {
     const server = ctx.app.getHttpServer();
 
     const locA = await request(server)
@@ -43,6 +46,9 @@ describe('locations (e2e)', () => {
 
     const campaignAfterA = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(dm);
     expect(campaignAfterA.body.currentLocationId).toBe(locAId);
+    // Dashboard summary must reflect currentLocationId after Mark current.
+    const summaryAfterA = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(dm);
+    expect(summaryAfterA.body.currentLocation.id).toBe(locAId);
 
     const discoverB = await request(server).post(`/api/v1/locations/${locBId}/discover`).set(dm).send({ status: 'current' });
     expect(discoverB.status).toBe(201);
