@@ -344,6 +344,7 @@ function UserRow({
   const [serverRole, setServerRole] = useState<ServerRole>(user.serverRole);
   const [disabled, setDisabled] = useState(user.disabled);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [removing, setRemoving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -359,7 +360,8 @@ function UserRow({
   useEffect(() => {
     if (!editing) return;
     setFormError(null);
-    requestAnimationFrame(() => displayNameRef.current?.focus());
+    const focusHandle = requestAnimationFrame(() => displayNameRef.current?.focus());
+    return () => cancelAnimationFrame(focusHandle);
   }, [editing]);
 
   function startEdit() {
@@ -372,7 +374,8 @@ function UserRow({
 
   async function save(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (saving) return;
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     setFormError(null);
     onError(null);
@@ -391,6 +394,7 @@ function UserRow({
       onError(message);
       requestAnimationFrame(() => displayNameRef.current?.focus());
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -587,6 +591,7 @@ function ResetPasswordRow({
 }) {
   const [newPassword, setNewPassword] = useState('');
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [done, setDone] = useState(false);
   const [fieldError, setFieldError] = useState<string | null>(null);
   const announce = useAnnounce();
@@ -598,12 +603,13 @@ function ResetPasswordRow({
   const passwordRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    requestAnimationFrame(() => passwordRef.current?.focus());
+    const focusHandle = requestAnimationFrame(() => passwordRef.current?.focus());
+    return () => cancelAnimationFrame(focusHandle);
   }, []);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (saving) return;
+    if (savingRef.current) return;
 
     if (!newPassword) {
       setFieldError('Enter a new password.');
@@ -616,6 +622,7 @@ function ResetPasswordRow({
       return;
     }
 
+    savingRef.current = true;
     setSaving(true);
     setFieldError(null);
     onError(null);
@@ -629,6 +636,7 @@ function ResetPasswordRow({
       onError(message);
       requestAnimationFrame(() => passwordRef.current?.focus());
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
