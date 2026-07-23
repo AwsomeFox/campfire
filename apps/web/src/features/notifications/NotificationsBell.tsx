@@ -20,7 +20,8 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import type { Notification } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
-import { Btn, Skeleton } from '../../components/ui';
+import { Btn, ErrorNote, Skeleton } from '../../components/ui';
+import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
@@ -67,8 +68,9 @@ type NotificationContextValue = {
   loadError: boolean;
   togglePanel(): void;
   closePanel(): void;
+  retryLoadItems(): void;
   markRead(notification: Notification): Promise<void>;
-  markAllRead(): Promise<void>;
+  markAllRead(): Promise<boolean>;
 };
 
 const NotificationContext = createContext<NotificationContextValue | null>(null);
@@ -175,6 +177,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notification[] | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const announce = useAnnounce();
 
   const mountedRef = useRef(false);
   const initializedRef = useRef(false);
@@ -505,13 +508,15 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         channelRef.current?.postMessage({ type: 'read', id: notification.id, readAt } satisfies NotificationSyncMessage);
         publishSnapshot({ count: Math.max(0, countRef.current - 1), refreshedAt: Date.now() });
       } catch {
-        /* best-effort — user already landed on the destination */
+        // User already navigated; still announce the failed mark-read so the
+        // unread badge state is explainable (issue #592 mark-read announce AC).
+        announce("Couldn't mark notification as read.", { assertive: true });
       }
       void refreshCount(true);
     }
-  }, [cancelCountRequest, closePanel, navigate, publishSnapshot, refreshCount, syncReadMessage]);
+  }, [announce, cancelCountRequest, closePanel, navigate, publishSnapshot, refreshCount, syncReadMessage]);
 
-  const markAllRead = useCallback(async () => {
+  const markAllRead = useCallback(async (): Promise<boolean> => {
     try {
       await api.post(`${API}/notifications/read-all`);
       cancelCountRequest();
@@ -519,8 +524,9 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       syncReadMessage({ type: 'read-all', readAt });
       channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
       publishSnapshot({ count: 0, refreshedAt: Date.now() });
+      return true;
     } catch {
-      /* best-effort */
+      return false;
     }
   }, [cancelCountRequest, publishSnapshot, syncReadMessage]);
 
@@ -531,6 +537,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     loadError,
     togglePanel,
     closePanel,
+    retryLoadItems: loadItems,
     markRead,
     markAllRead,
   };
@@ -601,15 +608,39 @@ function CloseButton({ onClose, label }: { onClose: () => void; label: string })
 }
 
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
-  const { count, items, loadError, closePanel, markRead, markAllRead } = notifications;
+  const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead } = notifications;
   const narrow = useIsNarrowViewport();
+  const [markAllAnnouncement, setMarkAllAnnouncement] = useState<string | null>(null);
+  // Panel unmounts on close; mark-all may still resolve after Escape/backdrop.
+  const panelMountedRef = useRef(true);
+  useEffect(() => {
+    panelMountedRef.current = true;
+    return () => {
+      panelMountedRef.current = false;
+    };
+  }, []);
   // useDialog already wires Escape-to-close, focus trap, focus restore to the
   // trigger, and an inert background (issue #650/#92). It runs once per mount,
   // so it stays put when the panel re-renders across the breakpoint.
   const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
-  const itemCountAnnouncement = items === null
-    ? (loadError ? "Couldn't load notifications." : 'Loading items.')
-    : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`;
+  // Stable dialog description (aria-describedby) stays on list state. Transient
+  // mark-all results go to a separate live status region so the dialog does not
+  // permanently describe itself as “All notifications marked as read.” (#592).
+  const listDescription =
+    items === null
+      ? loadError
+        ? 'Notification list unavailable.'
+        : 'Loading items.'
+      : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`;
+  const statusAnnouncement = markAllAnnouncement ?? listDescription;
+
+  const handleMarkAllRead = useCallback(async () => {
+    const ok = await markAllRead();
+    if (!panelMountedRef.current) return;
+    setMarkAllAnnouncement(
+      ok ? 'All notifications marked as read.' : "Couldn't mark all notifications as read.",
+    );
+  }, [markAllRead]);
 
   // Bottom sheet on phones (issue #664), top-right flyout everywhere else —
   // matches the MoreSheet pattern in Layout.tsx so a thumb reaches the close
@@ -674,18 +705,15 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
           <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-heading)' }}>
             Notifications
           </span>
-          <span
-            id={NOTIFICATIONS_COUNT_ID}
-            className="sr-only"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-          >
-            {itemCountAnnouncement}
+          <span id={NOTIFICATIONS_COUNT_ID} className="sr-only">
+            {listDescription}
+          </span>
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {statusAnnouncement}
           </span>
           <div className="flex-1" />
           {count > 0 && (
-            <Btn ghost style={{ fontSize: 11, minHeight: 32 }} onClick={() => void markAllRead()}>
+            <Btn ghost style={{ fontSize: 11, minHeight: 32 }} onClick={() => void handleMarkAllRead()}>
               Mark all read
             </Btn>
           )}
@@ -698,9 +726,9 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
             </div>
           )}
           {loadError && (
-            <p className="text-sm p-3" style={{ color: 'var(--color-neutral-400)' }}>
-              Couldn't load notifications.
-            </p>
+            <div className="p-3">
+              <ErrorNote message="Couldn't load notifications." onRetry={retryLoadItems} />
+            </div>
           )}
           {items !== null && items.length === 0 && (
             <div className="cf-inset border-dashed p-6 text-center space-y-1">
