@@ -72,8 +72,8 @@ export class CampaignAttachmentsController {
     FileInterceptor('file', {
       limits: { fileSize: MAX_UPLOAD_BYTES },
       // No `storage` option -> multer defaults to MemoryStorage, giving us file.buffer
-      // directly (no temp file). We write the final bytes ourselves, keyed by the new
-      // attachment row's id (see AttachmentsService.create / filePath).
+      // directly. The service reserves quota, then writes/fsyncs its own same-directory
+      // stage file before atomically publishing the final id-keyed path.
       fileFilter: (_req, file, cb) => {
         if (!Object.prototype.hasOwnProperty.call(ALLOWED_MIME_TO_EXT, file.mimetype)) {
           cb(new BadRequestException('Unsupported file type — allowed: image/png, image/jpeg, image/webp'), false);

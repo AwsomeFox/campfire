@@ -66,6 +66,7 @@ import { InvitesService } from '../membership/invites.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
+import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { sanitizeAttachmentFilename } from '../attachments/filename';
 
 /** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
@@ -390,7 +391,13 @@ export class CampaignsService {
     const [row] = await this.db
       .select({ id: attachments.id })
       .from(attachments)
-      .where(and(eq(attachments.id, attachmentId), eq(attachments.campaignId, campaignId)))
+      .where(
+        and(
+          eq(attachments.id, attachmentId),
+          eq(attachments.campaignId, campaignId),
+          eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+        ),
+      )
       .limit(1);
     if (!row) throw new BadRequestException(`mapAttachmentId ${attachmentId} does not exist in this campaign`);
   }
@@ -476,7 +483,13 @@ export class CampaignsService {
       await this.db
         .update(attachments)
         .set({ hidden: false, updatedAt: nowIso() })
-        .where(and(eq(attachments.id, input.mapAttachmentId), eq(attachments.campaignId, id)));
+        .where(
+          and(
+            eq(attachments.id, input.mapAttachmentId),
+            eq(attachments.campaignId, id),
+            eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+          ),
+        );
     }
 
     const archiving =
