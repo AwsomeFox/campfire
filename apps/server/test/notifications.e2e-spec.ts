@@ -762,7 +762,7 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
 
   it('keeps inbox create durable when inbox_submitted notification delivery fails', async () => {
     const db = ctx.app.get<DrizzleDb>(DB);
-    db.run(sql`
+    await db.run(sql`
       CREATE TRIGGER fail_inbox_submitted_notification
       BEFORE INSERT ON notifications
       WHEN NEW.type = 'inbox_submitted'
@@ -779,7 +779,7 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
       expect(inbox.body.body).toContain('Notify failure');
       expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo);
     } finally {
-      db.run(sql`DROP TRIGGER IF EXISTS fail_inbox_submitted_notification`);
+      await db.run(sql`DROP TRIGGER IF EXISTS fail_inbox_submitted_notification`);
     }
   });
 });
