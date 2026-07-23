@@ -627,6 +627,23 @@ CREATE TABLE IF NOT EXISTS attachments (
   updated_at TEXT NOT NULL
 );
 
+-- Filesystem cleanup retry queue (issue #727). Rows describe upload paths whose DB
+-- metadata was removed but bytes could not be verified erased. No FKs so entries
+-- survive campaign purge.
+CREATE TABLE IF NOT EXISTS fs_deletion_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rel_path TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  campaign_id INTEGER,
+  entity_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS encounters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
