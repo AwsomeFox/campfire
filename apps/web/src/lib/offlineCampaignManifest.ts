@@ -209,7 +209,7 @@ export async function inspectCampaignOfflineManifest(
       }
     }
 
-    let status: OfflineEntryStatus = 'missing';
+    let status: OfflineEntryStatus;
     if (inCache && stored) {
       status = isStale(stored.cachedAt, now) ? 'stale' : 'present';
     } else if (inCache && !stored) {
