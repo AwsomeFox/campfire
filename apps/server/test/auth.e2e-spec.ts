@@ -2,8 +2,15 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { hashSessionToken } from '../src/common/crypto';
 import { DB, DB_HOLDER, DbHolder, type DrizzleDb } from '../src/db/db.module';
 import { users, userSessions } from '../src/db/schema';
+import {
+  SESSION_ABSOLUTE_MAX_AGE_MS,
+  SESSION_COOKIE_NAME,
+  SESSION_MAX_AGE_MS,
+  SESSION_SLIDING_UPDATE_INTERVAL_MS,
+} from '../src/modules/auth/auth.constants';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 describe('auth setup/login/logout (e2e, real cookie sessions, DEV_AUTH unset)', () => {
@@ -847,5 +854,147 @@ describe('self-delete account (e2e, issue #128)', () => {
     expect((await soleDm.delete('/api/v1/me')).status).toBe(204);
     const roster = await adminAgent.get('/api/v1/users');
     expect(roster.body.some((u: { id: number }) => u.id === soleDmId)).toBe(false);
+  });
+});
+
+/**
+ * Issue #661: cookie sessions are sliding — activity (rate-limited to once/hour)
+ * extends expiresAt by SESSION_MAX_AGE_MS, capped at createdAt + SESSION_ABSOLUTE_MAX_AGE_MS.
+ */
+describe('sliding session expiry (#661)', () => {
+  let ctx: TestAppContext;
+  const password = 'sliding-password-1';
+  const username = 'slide-admin';
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const setupRes = await request(ctx.app.getHttpServer())
+      .post('/api/v1/auth/setup')
+      .send({ username, password, displayName: 'Slider' });
+    expect(setupRes.status).toBe(201);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  /** Fresh login → cookie pair + the matching user_sessions row (by token hash). */
+  async function loginSession(): Promise<{ cookie: string; sessionId: number }> {
+    const loginRes = await request(ctx.app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ username, password });
+    expect(loginRes.status).toBe(201);
+    const setCookies = loginRes.headers['set-cookie'] as unknown as string[];
+    const cookie = setCookies[0].split(';')[0];
+    const rawToken = cookie.slice(`${SESSION_COOKIE_NAME}=`.length);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [current] = await db
+      .select()
+      .from(userSessions)
+      .where(eq(userSessions.tokenHash, hashSessionToken(rawToken)))
+      .limit(1);
+    expect(current).toBeDefined();
+    return { cookie, sessionId: current.id };
+  }
+
+  it('extends expiresAt (and re-issues the cookie) when lastSeenAt is outside the rate-limit window', async () => {
+    const { cookie, sessionId } = await loginSession();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    const now = Date.now();
+    const priorExpiresAt = new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(); // 2 days left
+    const staleLastSeen = new Date(now - SESSION_SLIDING_UPDATE_INTERVAL_MS - 1_000).toISOString();
+    await db
+      .update(userSessions)
+      .set({ expiresAt: priorExpiresAt, lastSeenAt: staleLastSeen })
+      .where(eq(userSessions.id, sessionId));
+
+    const before = Date.now();
+    const meRes = await request(ctx.app.getHttpServer()).get('/api/v1/me').set('Cookie', cookie);
+    const after = Date.now();
+    expect(meRes.status).toBe(200);
+
+    const [updated] = await db.select().from(userSessions).where(eq(userSessions.id, sessionId));
+    const expiresMs = new Date(updated.expiresAt).getTime();
+    // Slid to approximately now + SESSION_MAX_AGE_MS (not left at the 2-day prior).
+    expect(expiresMs).toBeGreaterThan(new Date(priorExpiresAt).getTime());
+    expect(expiresMs).toBeGreaterThanOrEqual(before + SESSION_MAX_AGE_MS - 5_000);
+    expect(expiresMs).toBeLessThanOrEqual(after + SESSION_MAX_AGE_MS + 5_000);
+    expect(new Date(updated.lastSeenAt).getTime()).toBeGreaterThanOrEqual(before - 1_000);
+
+    const setCookie = meRes.headers['set-cookie'];
+    expect(setCookie).toBeDefined();
+    const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : String(setCookie);
+    expect(cookieHeader).toContain(SESSION_COOKIE_NAME);
+    expect(cookieHeader.toLowerCase()).toMatch(/max-age=\d+/);
+  });
+
+  it('does not write expiresAt / lastSeenAt inside the rate-limit window', async () => {
+    const { cookie, sessionId } = await loginSession();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    const fixedExpires = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+    const freshLastSeen = new Date(Date.now() - 60_000).toISOString(); // 1 minute ago — inside 1h window
+    await db
+      .update(userSessions)
+      .set({ expiresAt: fixedExpires, lastSeenAt: freshLastSeen })
+      .where(eq(userSessions.id, sessionId));
+
+    const meRes = await request(ctx.app.getHttpServer()).get('/api/v1/me').set('Cookie', cookie);
+    expect(meRes.status).toBe(200);
+    expect(meRes.headers['set-cookie']).toBeUndefined();
+
+    const [updated] = await db.select().from(userSessions).where(eq(userSessions.id, sessionId));
+    expect(updated.expiresAt).toBe(fixedExpires);
+    expect(updated.lastSeenAt).toBe(freshLastSeen);
+  });
+
+  it('rejects a session past the absolute max age even when expiresAt is still in the future', async () => {
+    const { cookie, sessionId } = await loginSession();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    const createdAt = new Date(Date.now() - SESSION_ABSOLUTE_MAX_AGE_MS - 60_000).toISOString();
+    const futureExpiry = new Date(Date.now() + SESSION_MAX_AGE_MS).toISOString();
+    await db
+      .update(userSessions)
+      .set({
+        createdAt,
+        expiresAt: futureExpiry,
+        lastSeenAt: new Date(Date.now() - SESSION_SLIDING_UPDATE_INTERVAL_MS - 1_000).toISOString(),
+      })
+      .where(eq(userSessions.id, sessionId));
+
+    const meRes = await request(ctx.app.getHttpServer()).get('/api/v1/me').set('Cookie', cookie);
+    expect(meRes.status).toBe(401);
+
+    const remaining = await db.select().from(userSessions).where(eq(userSessions.id, sessionId));
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('clamps a slid expiresAt to createdAt + absolute max', async () => {
+    const { cookie, sessionId } = await loginSession();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    // Absolute deadline is ~5 days from now; a naive slide would ask for +30d.
+    const createdAtMs = Date.now() - (SESSION_ABSOLUTE_MAX_AGE_MS - 5 * 24 * 60 * 60 * 1000);
+    const createdAt = new Date(createdAtMs).toISOString();
+    const absoluteDeadline = createdAtMs + SESSION_ABSOLUTE_MAX_AGE_MS;
+    await db
+      .update(userSessions)
+      .set({
+        createdAt,
+        expiresAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+        lastSeenAt: new Date(Date.now() - SESSION_SLIDING_UPDATE_INTERVAL_MS - 1_000).toISOString(),
+      })
+      .where(eq(userSessions.id, sessionId));
+
+    expect((await request(ctx.app.getHttpServer()).get('/api/v1/me').set('Cookie', cookie)).status).toBe(200);
+
+    const [updated] = await db.select().from(userSessions).where(eq(userSessions.id, sessionId));
+    const expiresMs = new Date(updated.expiresAt).getTime();
+    expect(expiresMs).toBeLessThanOrEqual(absoluteDeadline + 1_000);
+    // Must be clamped well below a full idle extension from now.
+    expect(expiresMs).toBeLessThan(Date.now() + SESSION_MAX_AGE_MS - 24 * 60 * 60 * 1000);
+    expect(expiresMs).toBeGreaterThan(Date.now() + 4 * 24 * 60 * 60 * 1000);
   });
 });

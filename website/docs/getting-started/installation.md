@@ -92,6 +92,19 @@ documented in [Authentication](../administration/authentication.md).
 | `OIDC_ALLOW_INSECURE` | *(unset)* | Allow OIDC over plain HTTP — dev/testing only, never in production |
 | `APP_URL` | `http://localhost:8080` | Only used to build the default `OIDC_REDIRECT_URI` |
 
+**AI provider host policy (SSRF)** — applies to every `baseUrl` on the server-default
+and per-campaign AI provider forms (including Test connection / Fetch models). Cloud
+metadata and link-local targets (`169.254.0.0/16`, `fe80::/10`,
+`metadata.google.internal`, …) are **always blocked**. Private / loopback hosts
+(RFC1918, `localhost`, ULA, …) are blocked by default so a campaign DM cannot use
+the server as a blind SSRF proxy on a shared multi-tenant host.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | *(unset)* | Set to `1` to allow private/loopback `baseUrl` hosts for **local model servers** (Ollama, llama.cpp, LM Studio on `http://127.0.0.1:11434`, a LAN IP, etc.). Metadata / link-local remain blocked. Only enable on a host you trust; a DM can then point probes at other machines on that private network |
+| `AI_PROVIDER_BASEURL_ALLOW_HOSTS` | *(unset)* | Optional comma-separated hostname allowlist. When set, only listed hosts are accepted (metadata / link-local still blocked). Prefer this over the blanket private opt-in when you know the exact local hostname |
+| `AI_PROVIDER_BASEURL_DENY_HOSTS` | *(unset)* | Optional comma-separated hostname denylist — always rejected |
+
 **Backups** — see [Backups & upgrades](../administration/operations.md).
 
 | Variable | Default | Purpose |

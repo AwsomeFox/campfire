@@ -19,6 +19,37 @@ import { AiProviderConfigService } from '../ai-provider-config/ai-provider-confi
 
 type AiCapsUpdateInput = z.infer<typeof AiCapsUpdate>;
 
+/** Per-provider health probe bound (issue #1061). Hanging providers must not block admin. */
+export const AI_CONSOLE_PROBE_TIMEOUT_MS = 15_000;
+
+type ProbeResult = Pick<AiProviderHealthEntry, 'ok' | 'providerType' | 'model' | 'error'>;
+
+/**
+ * Race a connection probe against a hard deadline. On timeout, return
+ * `{ ok: false, error: 'timeout' }` using the known provider metadata as fallback
+ * (the live probe never completed, so we cannot trust its fields).
+ */
+export async function raceProbe(
+  probe: Promise<ProbeResult>,
+  fallback: { providerType: string; model: string },
+  timeoutMs: number = AI_CONSOLE_PROBE_TIMEOUT_MS,
+): Promise<ProbeResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      probe,
+      new Promise<ProbeResult>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ ok: false, providerType: fallback.providerType, model: fallback.model, error: 'timeout' }),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /**
  * Admin AI console (issue #315) — the server-admin cockpit over the AI program
  * (epic #308). It OWNS no metering of its own: budgets are enforced where the
@@ -222,13 +253,20 @@ export class AiConsoleService {
    * AiProviderConfigService.testConnection, which builds the real provider from the
    * decrypted (in-process) config and runs a minimal generation — returning ok/error
    * only, never a credential.
+   *
+   * Each probe is bounded by {@link AI_CONSOLE_PROBE_TIMEOUT_MS} (issue #1061) so a
+   * hanging provider cannot block the admin health endpoint indefinitely. Timed-out
+   * probes report `{ ok: false, error: 'timeout' }` and the loop continues.
    */
   async testAll(): Promise<AiProviderHealthEntry[]> {
     const out: AiProviderHealthEntry[] = [];
 
     const serverView = await this.providers.getServerView();
     if (serverView) {
-      const r = await this.providers.testConnection(null);
+      const r = await raceProbe(this.providers.testConnection(null), {
+        providerType: serverView.providerType,
+        model: serverView.model,
+      });
       out.push({
         scope: 'server',
         campaignId: null,
@@ -240,16 +278,25 @@ export class AiConsoleService {
       });
     }
 
-    // Every campaign that has its own provider override, joined to its name.
+    // Every campaign that has its own provider override, joined to its name + type/model
+    // so a timed-out probe can still label which provider hung.
     const overrides = await this.db
-      .select({ campaignId: aiProviderConfigs.campaignId, campaignName: campaigns.name })
+      .select({
+        campaignId: aiProviderConfigs.campaignId,
+        campaignName: campaigns.name,
+        providerType: aiProviderConfigs.providerType,
+        model: aiProviderConfigs.model,
+      })
       .from(aiProviderConfigs)
       .leftJoin(campaigns, eq(campaigns.id, aiProviderConfigs.campaignId))
       .where(eq(aiProviderConfigs.scope, 'campaign'));
 
     for (const o of overrides) {
       if (o.campaignId == null) continue;
-      const r = await this.providers.testConnection(o.campaignId);
+      const r = await raceProbe(this.providers.testConnection(o.campaignId), {
+        providerType: o.providerType,
+        model: o.model,
+      });
       out.push({
         scope: 'campaign',
         campaignId: o.campaignId,
