@@ -38,8 +38,9 @@ export function passwordInputType(revealed: boolean): 'password' | 'text' {
 }
 
 /** Credential-safe spellcheck default when callers omit the prop. */
-export function passwordSpellCheck(spellCheck: boolean | undefined): boolean {
-  return spellCheck ?? false;
+export function passwordSpellCheck(spellCheck: boolean | `${boolean}` | undefined): boolean {
+  if (spellCheck === true || spellCheck === 'true') return true;
+  return false;
 }
 
 function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {

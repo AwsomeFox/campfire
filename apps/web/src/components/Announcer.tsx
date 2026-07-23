@@ -138,9 +138,10 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
     const w = window as CampfireE2EWindow;
     if (!shouldAttachE2EBridge(w)) return;
 
-    const reusedExisting =
-      typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null;
-    const hooks: CampfireE2EHooks = reusedExisting ? w.__CAMPFIRE_E2E__ : {};
+    const existing = w.__CAMPFIRE_E2E__;
+    const reusedExisting = typeof existing === 'object' && existing != null;
+    // Narrow before assign: `__CAMPFIRE_E2E__` is `CampfireE2EHooks | true | undefined`.
+    const hooks: CampfireE2EHooks = reusedExisting ? existing : {};
     hooks.announce = announce;
     hooks.clearAnnouncements = clear;
     w.__CAMPFIRE_E2E__ = hooks;

@@ -18,12 +18,24 @@ import { useEffect, useState } from 'react';
 import type { MapSource } from '@campfire/schema';
 import { api, API, ApiError } from '../lib/api';
 import { importMapWithAttribution } from './ImageUpload';
-import { Btn, TextInput } from './ui';
+import { Field } from './Field';
+import {
+  MAP_AUTHOR_HELP,
+  MAP_AUTHOR_LABEL,
+  MAP_FILE_ACCEPT,
+  MAP_FILE_HELP,
+  MAP_FILE_LABEL,
+  MAP_IMPORT_FIELD,
+  MAP_IMPORT_PREFIX,
+  MAP_SOURCE_URL_HELP,
+  MAP_SOURCE_URL_LABEL,
+  MAP_TITLE_HELP,
+  MAP_TITLE_LABEL,
+} from './formFieldLabels';
+import { Btn } from './ui';
 import { DraftWithAiButton } from '../features/ai-dm/DraftWithAiButton';
 import { useAuth } from '../app/auth';
 import { useAiDmSeat } from '../lib/query';
-
-const ACCEPTED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
 
 export function GetAMapPanel({
   campaignId,
@@ -188,19 +200,47 @@ function ImportForm({
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <TextInput placeholder="Map title (e.g. The Sunken Abbey)" value={title} onChange={(e) => setTitle(e.target.value)} />
-      <TextInput placeholder="Author to credit" value={author} onChange={(e) => setAuthor(e.target.value)} />
-      <TextInput placeholder="Source URL (optional)" value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} />
-      <input
-        type="file"
-        accept={ACCEPTED_MIME.join(',')}
-        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-        style={{ fontSize: 11 }}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-testid="map-import-form">
+      <Field
+        idPrefix={MAP_IMPORT_PREFIX}
+        name={MAP_IMPORT_FIELD.title}
+        label={MAP_TITLE_LABEL}
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        help={MAP_TITLE_HELP}
+        placeholder="The Sunken Abbey"
+        required
       />
-      <p className="text-muted" style={{ fontSize: 10, margin: 0 }}>
-        Imports under {source.license}. The credit is stamped onto the saved map, which stays DM-only until you reveal it.
-      </p>
+      <Field
+        idPrefix={MAP_IMPORT_PREFIX}
+        name={MAP_IMPORT_FIELD.author}
+        label={MAP_AUTHOR_LABEL}
+        value={author}
+        onChange={(e) => setAuthor(e.target.value)}
+        help={MAP_AUTHOR_HELP}
+        placeholder="Cartographer name"
+        required
+      />
+      <Field
+        idPrefix={MAP_IMPORT_PREFIX}
+        name={MAP_IMPORT_FIELD.sourceUrl}
+        label={MAP_SOURCE_URL_LABEL}
+        value={sourceUrl}
+        onChange={(e) => setSourceUrl(e.target.value)}
+        help={MAP_SOURCE_URL_HELP}
+        placeholder="https://"
+        optional
+      />
+      <Field
+        idPrefix={MAP_IMPORT_PREFIX}
+        name={MAP_IMPORT_FIELD.file}
+        as="file"
+        label={MAP_FILE_LABEL}
+        accept={MAP_FILE_ACCEPT}
+        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+        help={`${MAP_FILE_HELP} Imports under ${source.license}.`}
+        required
+      />
       <div style={{ display: 'flex', gap: 6 }}>
         <Btn className="!min-h-0 !py-1 text-[11px]" disabled={!canSubmit} onClick={() => void submit()}>
           {busy ? 'Importing…' : 'Import map'}

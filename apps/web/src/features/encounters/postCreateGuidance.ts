@@ -7,6 +7,7 @@
  * without mounting the pages.
  */
 
+/** Stable control id — matches Field `fieldIds('encounter', 'name')` (issue #886). */
 export const ENCOUNTER_NAME_ID = 'encounter-name';
 export const ENCOUNTER_NAME_LABEL = 'Encounter name';
 /** Visible help under the name field (also wired via aria-describedby). */
