@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { expect, test, request as pwRequest, type Page, type Route } from '@playwright/test';
-import { CREDS, MONSTERS } from '../global-setup';
+import { expect, test, type Page, type Route } from '@playwright/test';
+import { CREDS } from '../global-setup';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 /**
@@ -10,8 +9,6 @@ import { seed, stateFor, restoreSeedEncounter } from './seed';
  * Scenarios: background 401 during encounters, uploads, AI stream connect, and
  * campaign-events reconnect after login. Campaign 403 must NOT look like expiry.
  */
-
-const [boss] = MONSTERS;
 
 async function fulfillJson(route: Route, status: number, body: unknown) {
   await route.fulfill({
