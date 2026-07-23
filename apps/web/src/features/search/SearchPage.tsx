@@ -196,7 +196,7 @@ export default function SearchPage() {
                       }}
                       onKeyDown={(event) => moveResultFocus(event, resultIndex.get(`${r.type}-${r.id}`)!)}
                     >
-                      <Card className="hover:border-slate-600 transition-colors">
+                      <Card className="cf-card-hover">
                         <div className="text-sm font-medium text-white">{r.title}</div>
                         {r.snippet && (
                           <div className="text-xs text-slate-400 mt-0.5">
