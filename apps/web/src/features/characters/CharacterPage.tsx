@@ -292,7 +292,7 @@ export default function CharacterPage() {
                 <span className="text-base text-slate-500"> / {character.hpMax}</span>
               </span>
               <div className="flex-1 min-w-[120px]">
-                <HpBar current={character.hpCurrent} max={character.hpMax} />
+                <HpBar key={character.id} current={character.hpCurrent} max={character.hpMax} />
               </div>
             </div>
             {canEdit && <HpEditor character={character} onChange={load} onError={setActionError} />}
