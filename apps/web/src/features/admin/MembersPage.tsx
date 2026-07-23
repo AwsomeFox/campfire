@@ -52,6 +52,7 @@ import {
   memberRoleSavedAnnouncement,
 } from './memberControlsA11y';
 import { useDisclosure } from '../../components/useDisclosure';
+import { InviteQrCard } from './InviteQrCard';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -446,6 +447,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
           style={{ maxWidth: 220 }}
           value={expiryPreset}
           onChange={(e) => setExpiryPreset(e.target.value as ExpiryPreset)}
+          disabled={!canCreate}
         >
           <option value="end-of-today">End of today</option>
           <option value="24h">24 hours</option>
@@ -463,6 +465,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
             max={maxDate}
             value={customDate}
             onChange={(e) => setCustomDate(e.target.value)}
+            disabled={!canCreate}
           />
         )}
       </div>
@@ -476,6 +479,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
           style={{ maxWidth: 220 }}
           value={maxUsesPreset}
           onChange={(e) => setMaxUsesPreset(e.target.value as MaxUsesPreset)}
+          disabled={!canCreate}
         >
           <option value="unlimited">Unlimited</option>
           <option value="1">1 use</option>
@@ -493,6 +497,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
             max={1000}
             value={customMaxUses}
             onChange={(e) => setCustomMaxUses(e.target.value)}
+            disabled={!canCreate}
           />
         )}
       </div>
@@ -548,56 +553,59 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       {invites.map((invite) => {
         const linkFieldId = `invite-link-${invite.id}`;
         return (
-        <div key={invite.id} className="flex gap-2 flex-wrap items-center" data-testid="invite-row">
-          <div className="field !mb-0" style={{ flex: 1, minWidth: 190 }}>
-            <label className="sr-only" htmlFor={linkFieldId}>
-              {inviteLinkFieldLabel(invite.role, invite.id)}
-            </label>
-            <input
-              id={linkFieldId}
-              className="input"
-              style={{ width: '100%' }}
-              readOnly
-              aria-readonly="true"
-              value={inviteLinkFor(invite.code)}
-              onFocus={(e) => e.currentTarget.select()}
+        <div key={invite.id} className="space-y-2" data-testid="invite-row">
+          <div className="flex gap-2 flex-wrap items-center">
+            <div className="field !mb-0" style={{ flex: 1, minWidth: 190 }}>
+              <label className="sr-only" htmlFor={linkFieldId}>
+                {inviteLinkFieldLabel(invite.role, invite.id)}
+              </label>
+              <input
+                id={linkFieldId}
+                className="input"
+                style={{ width: '100%' }}
+                readOnly
+                aria-readonly="true"
+                value={inviteLinkFor(invite.code)}
+                onFocus={(e) => e.currentTarget.select()}
+              />
+            </div>
+            <span className={`cf-chip ${ROLE_CHIP[invite.role]}`}>{ROLE_LABEL[invite.role]}</span>
+            <span className="text-muted text-[11px] whitespace-nowrap" data-testid="invite-status">
+              {expiresIn(invite.expiresAt)}
+              {invite.maxUses != null
+                ? ` · ${invite.maxUses - invite.useCount} of ${invite.maxUses} remaining`
+                : ` · used ${invite.useCount}×`}
+            </span>
+            <CopyControl
+              text={inviteLinkFor(invite.code)}
+              selectTargetId={linkFieldId}
+              label="Copy link"
+              aria-label={inviteCopyButtonLabel(invite.role, invite.id)}
+              successAnnouncement={INVITE_COPY_SUCCESS}
+              failureAnnouncement={INVITE_COPY_FAILURE}
+              // Card-level error paragraph owns the visible failure copy (and the
+              // #516 e2e assertion); skip the control's inline failure line.
+              showFailureMessage={false}
+              unstyled
+              className="btn btn-primary"
+              style={{ minHeight: 36 }}
+              onResult={(outcome) => {
+                // `error` is shared across create/revoke/copy for this card, so
+                // only clear it on success if it's the copy-failure message —
+                // otherwise a successful copy could silently dismiss an unrelated
+                // create/revoke failure that's still unresolved.
+                if (outcome.ok) {
+                  setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
+                } else {
+                  setError(INVITE_COPY_FAILURE);
+                }
+              }}
             />
+            <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
+              Revoke
+            </button>
           </div>
-          <span className={`cf-chip ${ROLE_CHIP[invite.role]}`}>{ROLE_LABEL[invite.role]}</span>
-          <span className="text-muted text-[11px] whitespace-nowrap" data-testid="invite-status">
-            {expiresIn(invite.expiresAt)}
-            {invite.maxUses != null
-              ? ` · ${invite.maxUses - invite.useCount} of ${invite.maxUses} remaining`
-              : ` · used ${invite.useCount}×`}
-          </span>
-          <CopyControl
-            text={inviteLinkFor(invite.code)}
-            selectTargetId={linkFieldId}
-            label="Copy link"
-            aria-label={inviteCopyButtonLabel(invite.role, invite.id)}
-            successAnnouncement={INVITE_COPY_SUCCESS}
-            failureAnnouncement={INVITE_COPY_FAILURE}
-            // Card-level error paragraph owns the visible failure copy (and the
-            // #516 e2e assertion); skip the control's inline failure line.
-            showFailureMessage={false}
-            unstyled
-            className="btn btn-primary"
-            style={{ minHeight: 36 }}
-            onResult={(outcome) => {
-              // `error` is shared across create/revoke/copy for this card, so
-              // only clear it on success if it's the copy-failure message —
-              // otherwise a successful copy could silently dismiss an unrelated
-              // create/revoke failure that's still unresolved.
-              if (outcome.ok) {
-                setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
-              } else {
-                setError(INVITE_COPY_FAILURE);
-              }
-            }}
-          />
-          <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
-            Revoke
-          </button>
+          <InviteQrCard invite={invite} scannable={invitesEnabled} />
         </div>
         );
       })}
