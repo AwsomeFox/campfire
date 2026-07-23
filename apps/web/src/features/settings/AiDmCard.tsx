@@ -322,9 +322,9 @@ function BudgetSection({
         A hard token cap. Turns stop once it's reached — a positive budget is required to run Driver mode.
       </p>
       <div className="field" style={{ maxWidth: 200 }}>
-        <label htmlFor="ai-dm-budget">Token budget</label>
+        <label htmlFor="ai-dm-token-budget">Token budget</label>
         <input
-          id="ai-dm-budget"
+          id="ai-dm-token-budget"
           className="input"
           type="number"
           min={0}
