@@ -29,7 +29,7 @@ import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote } from '../../components/ui';
+import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, HpBar } from '../../components/ui';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
@@ -171,7 +171,6 @@ export default function CharacterPage() {
   const myUserId = me?.user.id;
   const isOwner = character.ownerUserId != null && myUserId != null && character.ownerUserId === String(myUserId);
   const canEdit = isDm || isOwner;
-  const hpPct = character.hpMax > 0 ? Math.max(0, Math.min(100, (character.hpCurrent / character.hpMax) * 100)) : 0;
 
   async function savePortrait(attachment: Attachment) {
     setActionError(null);
@@ -292,8 +291,8 @@ export default function CharacterPage() {
                 {character.hpCurrent}
                 <span className="text-base text-slate-500"> / {character.hpMax}</span>
               </span>
-              <div className="flex-1 min-w-[120px] h-[7px] rounded bg-[var(--color-neutral-800)] overflow-hidden">
-                <div className="h-full bg-[var(--color-accent)]" style={{ width: `${hpPct}%` }} />
+              <div className="flex-1 min-w-[120px]">
+                <HpBar current={character.hpCurrent} max={character.hpMax} />
               </div>
             </div>
             {canEdit && <HpEditor character={character} onChange={load} onError={setActionError} />}

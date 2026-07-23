@@ -62,9 +62,23 @@ export const TextArea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
   },
 );
 
+/**
+ * HP bar tone for a current/max pair (issue #642).
+ *
+ * Extracted from `HpBar` so every HP surface — combat tracker, Party card,
+ * character sheet — resolves the SAME danger ramp from the same pure helper.
+ * Returns the CSS modifier class name appended to `.cf-hp` (`crit` < 25%,
+ * `low` < 50%, otherwise empty). Kept here next to the bar so the threshold
+ * table and the rendered bar can't drift apart.
+ */
+export function hpTone(current: number, max: number): '' | 'low' | 'crit' {
+  const pct = max > 0 ? Math.max(0, Math.min(100, (current / max) * 100)) : 0;
+  return pct < 25 ? 'crit' : pct < 50 ? 'low' : '';
+}
+
 export function HpBar({ current, max }: { current: number; max: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (current / max) * 100)) : 0;
-  const tone = pct < 25 ? 'crit' : pct < 50 ? 'low' : '';
+  const tone = hpTone(current, max);
   // Flash + shake on HP change (issue #67). Track the previous value across
   // renders and fire a one-shot 'damage'/'heal' pulse cleared on animation end.
   // CSS disables the motion under prefers-reduced-motion; the bar width still
