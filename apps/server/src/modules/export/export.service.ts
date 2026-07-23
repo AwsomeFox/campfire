@@ -224,8 +224,10 @@ export class ExportService {
     // AI seat + scribe config (issue #1078): export the DM's hand-authored steering
     // and trigger settings. Runtime counters (tokensUsed, turnCount, lastTurnAt) and
     // provider keys (aiProviderConfigs — encrypted, install-specific) are excluded.
-    const [aiSeatRow] = await this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1);
-    const [aiScribeConfigRow] = await this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, campaignId)).limit(1);
+    const [[aiSeatRow], [aiScribeConfigRow]] = await Promise.all([
+      this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1),
+      this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, campaignId)).limit(1),
+    ]);
 
     // members "sans anything sensitive" — CampaignMember already carries no
     // password/session data, but drop nothing further needed; kept explicit
@@ -270,8 +272,22 @@ export class ExportService {
       // Issue #813: version authorship + replacer metadata round-trips with remapped ids.
       revisions: revisionList,
       // Issue #1078: AI seat + scribe config (DM-authored steering, NOT runtime counters or provider keys).
-      aiSeat: aiSeatRow ? { mode: aiSeatRow.mode, enabled: aiSeatRow.enabled, model: aiSeatRow.model, instructions: aiSeatRow.instructions, tokenBudget: aiSeatRow.tokenBudget } : null,
-      aiScribeConfig: aiScribeConfigRow ? { postSession: aiScribeConfigRow.postSession, cron: aiScribeConfigRow.cron, budgetPerRun: aiScribeConfigRow.budgetPerRun } : null,
+      aiSeat: aiSeatRow
+        ? {
+            mode: aiSeatRow.mode,
+            enabled: aiSeatRow.enabled,
+            model: aiSeatRow.model,
+            instructions: aiSeatRow.instructions,
+            tokenBudget: aiSeatRow.tokenBudget,
+          }
+        : null,
+      aiScribeConfig: aiScribeConfigRow
+        ? {
+            postSession: aiScribeConfigRow.postSession,
+            cron: aiScribeConfigRow.cron,
+            budgetPerRun: aiScribeConfigRow.budgetPerRun,
+          }
+        : null,
       attachments,
       attachmentsNote:
         'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl ' +

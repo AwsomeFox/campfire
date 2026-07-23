@@ -648,8 +648,10 @@ export class CampaignsService {
       : [];
 
     // AI seat + scribe config (issue #1078): read up front with the other bulk reads.
-    const [aiSeatRow] = await this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).limit(1);
-    const [aiScribeConfigRow] = await this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, id)).limit(1);
+    const [[aiSeatRow], [aiScribeConfigRow]] = await Promise.all([
+      this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).limit(1),
+      this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, id)).limit(1),
+    ]);
 
     const ts = nowIso();
     const newId = this.db.transaction((tx) => {
