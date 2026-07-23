@@ -530,6 +530,7 @@ function ScheduleForm({
           help={SCHEDULE_DURATION_HELP}
           min={initial ? 0 : 15}
           max={1440}
+          step={15}
           value={duration}
           onChange={(e) => setDuration(e.target.value)}
           disabled={saving}
