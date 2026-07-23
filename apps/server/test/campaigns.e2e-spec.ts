@@ -147,7 +147,7 @@ describe('campaigns (e2e)', () => {
     const atomic = await request(server)
       .post('/api/v1/campaigns')
       .set(dm)
-      .send({ name: 'Atomic PF2e Choice', ruleSystem: 'dnd5e-srd' });
+      .send({ name: 'Atomic D&D 5e Choice', ruleSystem: 'dnd5e-srd' });
     expect(atomic.status).toBe(201);
     expect(atomic.body.ruleSystem).toBe('dnd5e-srd');
     const getAtomic = await request(server).get(`/api/v1/campaigns/${atomic.body.id}`).set(dm);
