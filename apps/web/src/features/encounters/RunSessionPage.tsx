@@ -1183,7 +1183,8 @@ export default function RunSessionPage() {
         <ConfirmDialog
           title="End this encounter?"
           body="HP writes back to character sheets. This cannot be undone."
-          confirmLabel={runControl.isPending ? 'Ending…' : 'End encounter'}
+          confirmLabel="End encounter"
+          pendingLabel="Ending encounter…"
           busy={runControl.isPending}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
@@ -1193,7 +1194,8 @@ export default function RunSessionPage() {
         <ConfirmDialog
           title="Reopen this encounter?"
           body="It returns to Running where combat left off. HP was written back to character sheets when it ended; it will write back again the next time you End."
-          confirmLabel={runControl.isPending ? 'Reopening…' : 'Reopen encounter'}
+          confirmLabel="Reopen encounter"
+          pendingLabel="Reopening encounter…"
           busy={runControl.isPending}
           onConfirm={reopenEncounter}
           onCancel={() => setConfirmReopen(false)}
@@ -1203,7 +1205,8 @@ export default function RunSessionPage() {
         <ConfirmDialog
           title="Delete this encounter?"
           body="This cannot be undone."
-          confirmLabel={deleteEncounterMut.isPending ? 'Deleting…' : 'Delete encounter'}
+          confirmLabel="Delete encounter"
+          pendingLabel="Deleting encounter…"
           busy={deleteEncounterMut.isPending}
           onConfirm={deleteEncounter}
           onCancel={() => setConfirmDelete(false)}
@@ -1212,7 +1215,8 @@ export default function RunSessionPage() {
       {confirmRemoveCombatantId != null && (
         <ConfirmDialog
           title="Remove this combatant from the encounter?"
-          confirmLabel={pendingCombatantIds.has(confirmRemoveCombatantId) ? 'Removing…' : 'Remove'}
+          confirmLabel="Remove"
+          pendingLabel="Removing…"
           busy={pendingCombatantIds.has(confirmRemoveCombatantId)}
           onConfirm={() => removeCombatant(confirmRemoveCombatantId)}
           onCancel={() => setConfirmRemoveCombatantId(null)}

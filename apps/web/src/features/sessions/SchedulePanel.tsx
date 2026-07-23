@@ -243,7 +243,7 @@ function ScheduleItem({
         <ConfirmDialog
           title="Cancel this session?"
           body="The scheduled session and everyone's RSVPs will be removed."
-          confirmLabel={busy ? 'Cancelling…' : 'Cancel session'}
+          confirmLabel="Cancel session"
           busy={busy}
           onConfirm={cancel}
           onCancel={() => setConfirmingCancel(false)}

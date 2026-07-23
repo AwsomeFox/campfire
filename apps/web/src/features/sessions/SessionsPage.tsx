@@ -799,7 +799,7 @@ function SessionDetail({
               .
             </>
           }
-          confirmLabel={deleting ? 'Deleting…' : 'Delete session'}
+          confirmLabel="Delete session"
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}

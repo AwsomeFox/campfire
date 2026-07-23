@@ -604,7 +604,7 @@ export default function NpcPage() {
         <ConfirmDialog
           title={`Delete ${npc?.name}?`}
           body="This moves the NPC to the Trash — you can undo it, or restore it from the campaign Trash."
-          confirmLabel={deleting ? 'Deleting…' : 'Delete NPC'}
+          confirmLabel="Delete NPC"
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}

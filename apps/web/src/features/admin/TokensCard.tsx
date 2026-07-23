@@ -205,7 +205,7 @@ export function TokensCard() {
         <ConfirmDialog
           title={`Revoke token "${confirmRevoke.name}"?`}
           body="Anything using it will stop working immediately."
-          confirmLabel={revoking ? 'Revoking…' : 'Revoke'}
+          confirmLabel="Revoke"
           busy={revoking}
           onConfirm={() => revoke(confirmRevoke)}
           onCancel={() => setConfirmRevoke(null)}

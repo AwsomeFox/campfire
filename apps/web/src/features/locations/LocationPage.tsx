@@ -740,7 +740,7 @@ export default function LocationPage() {
         <ConfirmDialog
           title={`Delete ${location?.name}?`}
           body="This moves the location to the Trash — you can undo it, or restore it from the campaign Trash."
-          confirmLabel={deleting ? 'Deleting…' : 'Delete location'}
+          confirmLabel="Delete location"
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}
