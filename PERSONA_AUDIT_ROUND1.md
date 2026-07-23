@@ -27,7 +27,7 @@
 
 **User Story:** As a player at an AI-run table, I want the AI DM to remember what happened earlier in the session (my character's plan, the NPC dialogue two turns ago, the clue I found), so that the game feels coherent rather than amnesia-ridden.
 
-**Evidence:** `ai-driver.service.ts:602-617` — each turn builds a fresh `messages` array containing only the current player input:
+**Evidence:** [`ai-driver.service.ts` @ `fa52628` L664](https://github.com/AwsomeFox/campfire/blob/fa52628/apps/server/src/modules/ai-driver/ai-driver.service.ts#L664) — each turn builds a fresh `messages` array containing only the current player input:
 ```typescript
 const messages: AiMessage[] = [{ role: 'user', content: wrapUntrustedPlayerInput(input) }];
 ```
@@ -317,14 +317,14 @@ The only "memory" is `session.lastNarration` (one string) and `lastInputs` (one 
 
 ---
 
-### 18. Scribe metering transaction not reliably committed
+### 18. Scribe metering updates tokensUsed but skips turnCount / lastTurnAt
 
 **Persona:** QA Engineer  
 **Labels:** `bug`, `persona-audit`, `theme: ai`
 
-**Evidence:** `scribe.service.ts:349` — `this.db.transaction((tx) => { ... })` may not await properly; return value not captured; `turnCount` not incremented (unlike driver metering).
+**Evidence:** [`scribe.service.ts` @ `fa52628` L349–L355](https://github.com/AwsomeFox/campfire/blob/fa52628/apps/server/src/modules/scribe/scribe.service.ts#L349-L355) — the metering transaction updates `aiDmSeats.tokensUsed` only. Unlike [`AiDmService.takeTurn()` @ `fa52628` L336–L338](https://github.com/AwsomeFox/campfire/blob/fa52628/apps/server/src/modules/ai-dm/ai-dm.service.ts#L336-L338), it does not increment `turnCount` or set `lastTurnAt`, so Scribe spend is invisible in seat turn metrics / “last used” UI.
 
-**Acceptance Criteria:** Metering transaction properly captured/awaited; turnCount incremented; failing meter records status `failed`.
+**Acceptance Criteria:** Scribe metering increments `turnCount` and sets `lastTurnAt` in the same seat update as `tokensUsed` (parity with `AiDmService.takeTurn()`); failing meter records status `failed`.
 
 ---
 
@@ -390,7 +390,7 @@ The only "memory" is `session.lastNarration` (one string) and `lastInputs` (one 
 **Persona:** QA Engineer  
 **Labels:** `bug`, `persona-audit`, `theme: ai`
 
-**Evidence:** `ai-console.service.ts:201` — sequential loop calling `testConnection` with no `Promise.race` timeout. One hanging provider blocks the entire health endpoint.
+**Evidence:** [`ai-console.service.ts` `testAll()` @ `fa52628` L226–L265](https://github.com/AwsomeFox/campfire/blob/fa52628/apps/server/src/modules/ai-console/ai-console.service.ts#L226-L265) — sequential loop calling `testConnection` with no `Promise.race` timeout. One hanging provider blocks the entire health endpoint.
 
 **Acceptance Criteria:** Each probe has bounded timeout (15s); timed-out probes return `{ok: false, error: 'timeout'}`.
 
