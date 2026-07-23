@@ -129,7 +129,12 @@ async function openPingFixture(page: Page) {
   await page.goto(encounterUrl());
   const surface = page.getByTestId('battle-map-surface');
   await expect(surface).toBeVisible();
-  await expect(page.getByTestId('battle-map-layer')).toBeVisible();
+  const layer = page.getByTestId('battle-map-layer');
+  await expect(layer).toBeVisible();
+  await expect.poll(async () => {
+    const box = await layer.boundingBox();
+    return box != null && box.width > 50 && box.height > 50;
+  }).toBeTruthy();
   await page.getByRole('button', { name: 'Ping', exact: true }).click();
   await expect(surface).toHaveAttribute('role', 'button');
   return { surface, pings };
