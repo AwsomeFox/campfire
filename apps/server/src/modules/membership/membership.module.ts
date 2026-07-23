@@ -15,6 +15,6 @@ import { CampaignInvitesController, JoinController } from './invites.controller'
   imports: [AuditModule, AuthModule, EventsModule, UsersModule, SettingsModule, NotificationsModule, RoleAccessModule],
   controllers: [MembersController, CampaignInvitesController, JoinController],
   providers: [MembersService, InvitesService],
-  exports: [RoleAccessModule, MembersService],
+  exports: [RoleAccessModule, MembersService, InvitesService],
 })
 export class MembershipModule {}

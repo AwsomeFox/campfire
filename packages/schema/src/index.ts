@@ -73,6 +73,13 @@ export const Campaign = z.object({
   // can atomically revoke every active capability rather than leaving old URLs
   // ready to spring back to life when the setting is re-enabled.
   publicRecapSharingEnabled: z.boolean().default(true),
+  // Campaign-level join-link kill switch (issue #857). Archive/trash auto-clears
+  // this so paused/completed/trashed campaigns stop disclosing via bearer invite
+  // links; restoring the campaign does NOT flip it back — the DM must deliberately
+  // re-enable via PUT /campaigns/:id/invites/policy. Distinct from revoke-all
+  // (row delete): suspension keeps invite rows so a deliberate reactivation can
+  // restore the same codes.
+  publicInvitesEnabled: z.boolean().default(true),
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
@@ -88,7 +95,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // Clone/template input — POST /campaigns/:id/clone.
@@ -2694,6 +2701,14 @@ export const InviteCreate = z.object({
   maxUses: z.number().int().min(1).max(1000).nullable().optional(),
 });
 export type InviteCreate = z.infer<typeof InviteCreate>;
+
+// DM kill-switch for public invite links (issue #857) — mirrors SessionSharePolicyUpdate.
+// Disabling suspends every outstanding code without deleting rows; re-enabling is a
+// deliberate act and is refused while the campaign is archived or trashed.
+export const InvitePolicyUpdate = z.object({ enabled: z.boolean() });
+export type InvitePolicyUpdate = z.infer<typeof InvitePolicyUpdate>;
+export const InviteMutationResult = z.object({ revoked: z.number().int().nonnegative() });
+export type InviteMutationResult = z.infer<typeof InviteMutationResult>;
 
 // Public preview of a valid invite (GET /invites/:code) — just enough for the
 // join page to say what you're joining and as what. campaignId is included so
