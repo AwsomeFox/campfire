@@ -101,6 +101,7 @@ export default function InventoryPage() {
       [refreshTreasury],
     ),
     onReconnect: useCallback(() => void refreshTreasury(), [refreshTreasury]),
+    onStreamRecovery: useCallback(() => void refreshTreasury(), [refreshTreasury]),
   });
 
   const ownsCharacter = useCallback(
