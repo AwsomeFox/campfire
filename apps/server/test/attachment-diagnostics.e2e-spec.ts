@@ -638,6 +638,29 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       expect(res.status).toBe(400);
       expect(String(res.body.message)).toContain('uploads root');
     });
+
+    it('rejects diskPath that escapes uploads via a directory symlink', async () => {
+      const uploadsRoot = path.join(ctx.dataDir, 'uploads');
+      const outsideDir = path.join(ctx.dataDir, 'outside-of-uploads');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      const outsideFile = path.join(outsideDir, 'secret.png');
+      fs.writeFileSync(outsideFile, TINY_PNG);
+
+      const linkPath = path.join(uploadsRoot, 'symlink-escape');
+      fs.rmSync(linkPath, { recursive: true, force: true });
+      fs.symlinkSync(outsideDir, linkPath, 'dir');
+
+      const res = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ action: 'quarantine', diskPath: 'symlink-escape/secret.png' });
+      expect(res.status).toBe(400);
+      expect(String(res.body.message)).toContain('uploads root');
+      // Outside file must remain untouched.
+      expect(fs.existsSync(outsideFile)).toBe(true);
+
+      fs.rmSync(linkPath, { recursive: true, force: true });
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    });
   });
 
 

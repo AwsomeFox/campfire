@@ -107,6 +107,59 @@ function escapesRoot(relative: string): boolean {
   return relative === '..' || relative.startsWith(`..${path.sep}`);
 }
 
+/**
+ * Resolve `candidate` and ensure it (and any symlink target) stays inside `root`.
+ * Lexical `path.resolve` alone is not enough: a directory symlink under the root
+ * can make `path.join(root, 'link/file')` reach outside the intended tree.
+ */
+function assertPathContained(root: string, candidate: string, label: string): string {
+  const rootResolved = path.resolve(root);
+  const candidateResolved = path.resolve(candidate);
+  const lexicalRelative = path.relative(rootResolved, candidateResolved);
+  if (escapesRoot(lexicalRelative) || path.isAbsolute(lexicalRelative)) {
+    throw new BadRequestException(`${label} must stay within ${path.basename(rootResolved)} root`);
+  }
+
+  // Without an on-disk root we can only enforce lexical containment (callers then
+  // report missing-file / empty-storage outcomes instead of a hard 400).
+  if (!fs.existsSync(rootResolved)) {
+    return candidateResolved;
+  }
+
+  let rootReal: string;
+  try {
+    rootReal = fs.realpathSync(rootResolved);
+  } catch {
+    throw new BadRequestException(`${label} must stay within ${path.basename(rootResolved)} root`);
+  }
+
+  // If the candidate exists, require its realpath (symlink target) to stay inside
+  // the real root. If it does not exist yet (e.g. quarantine destination), require
+  // the nearest existing ancestor to stay contained instead — but do not walk past
+  // the lexical root (missing intermediate dirs under a valid root are fine).
+  let probe = candidateResolved;
+  while (!fs.existsSync(probe)) {
+    if (probe === rootResolved) return candidateResolved;
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+
+  try {
+    const probeReal = fs.realpathSync(probe);
+    const realRelative = path.relative(rootReal, probeReal);
+    if (escapesRoot(realRelative) || path.isAbsolute(realRelative)) {
+      throw new BadRequestException(`${label} must stay within ${path.basename(rootResolved)} root`);
+    }
+  } catch (err) {
+    if (err instanceof BadRequestException) throw err;
+    // Unresolvable path — treat as containment failure rather than following blindly.
+    throw new BadRequestException(`${label} must stay within ${path.basename(rootResolved)} root`);
+  }
+
+  return candidateResolved;
+}
+
 /** Compute sha256 hex of a file, or empty string if unreadable. */
 function checksumFile(filePath: string): string {
   const hash = crypto.createHash('sha256');
@@ -547,11 +600,8 @@ export class DiagnosticsService {
       throw new BadRequestException('diskPath must be a non-empty relative path');
     }
 
-    const srcPath = path.resolve(root, safeRelPath);
-    const srcRelative = path.relative(root, srcPath);
-    if (escapesRoot(srcRelative)) {
-      throw new BadRequestException('diskPath must stay within uploads root');
-    }
+    const srcPath = assertPathContained(root, path.resolve(root, safeRelPath), 'diskPath');
+    const srcRelative = path.relative(path.resolve(root), srcPath);
 
     if (!fs.existsSync(srcPath)) {
       return {
@@ -562,11 +612,9 @@ export class DiagnosticsService {
       };
     }
 
-    const destPath = path.resolve(qRoot, srcRelative);
-    const destRelative = path.relative(qRoot, destPath);
-    if (escapesRoot(destRelative)) {
-      throw new BadRequestException('diskPath must stay within quarantine root');
-    }
+    // Ensure quarantine root exists before realpath-based containment checks.
+    fs.mkdirSync(qRoot, { recursive: true });
+    const destPath = assertPathContained(qRoot, path.resolve(qRoot, srcRelative), 'diskPath');
 
     // The move can fail for storage-health reasons (EACCES/EIO/ENOSPC/EXDEV,
     // etc.). Since these endpoints exist to diagnose storage health, surface an
@@ -574,8 +622,12 @@ export class DiagnosticsService {
     // exception bubble up as a bare 500.
     try {
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      // Re-check after mkdir: a symlink planted in the destination tree must not
+      // let the final rename escape the quarantine root.
+      assertPathContained(qRoot, destPath, 'diskPath');
       fs.renameSync(srcPath, destPath);
     } catch (err) {
+      if (err instanceof BadRequestException) throw err;
       const code = (err as NodeJS.ErrnoException)?.code;
       throw new ServiceUnavailableException(
         `Failed to move ${srcRelative} to quarantine (${code ?? 'unknown error'}); attachment storage may be unavailable.`,
