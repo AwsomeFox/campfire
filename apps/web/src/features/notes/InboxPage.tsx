@@ -8,11 +8,15 @@
  * Two views: "Open" (unresolved items, GET /campaigns/:cid/inbox) and "History"
  * (resolved items, GET /campaigns/:cid/inbox?resolved=true) — history shows each
  * item's resolution note and a link to the entity it was resolved into.
+ *
+ * Pagination (issue #608): both lists return `{ items, total, hasMore, nextCursor? }`
+ * newest-first; load-more appends; page-aware errors keep prior rows visible.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import type { Note } from '@campfire/schema';
+import type { Note, NoteListPage } from '@campfire/schema';
+import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -21,6 +25,15 @@ import { GameIcon } from '../../components/GameIcon';
 import { firstGrapheme } from '../../lib/avatarText';
 import { ENTITY_ICON } from '../../lib/uiIcons';
 import { entityHref as targetHref, entityTargetProps } from '../../lib/entityLinks';
+
+interface InboxListState {
+  items: Note[];
+  total: number;
+  hasMore: boolean;
+  nextCursor?: string;
+}
+
+const EMPTY_LIST: InboxListState = { items: [], total: 0, hasMore: false };
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 type ViewValue = 'open' | 'history';
@@ -70,34 +83,88 @@ export default function InboxPage() {
   const deepInboxId = inboxParam != null && inboxParam !== '' ? Number(inboxParam) : Number.NaN;
 
   const [view, setView] = useState<ViewValue>('open');
-  const [items, setItems] = useState<Note[]>([]);
-  const [resolvedItems, setResolvedItems] = useState<Note[]>([]);
+  const [openList, setOpenList] = useState<InboxListState>(EMPTY_LIST);
+  const [historyList, setHistoryList] = useState<InboxListState>(EMPTY_LIST);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const fetchGeneration = useRef(0);
+
+  const inboxUrl = useCallback(
+    (resolved: boolean, cursor?: string) => {
+      const params = new URLSearchParams();
+      params.set('limit', String(NOTES_LIST_DEFAULT_LIMIT));
+      if (resolved) params.set('resolved', 'true');
+      if (cursor) params.set('cursor', cursor);
+      return `${API}/campaigns/${cid}/inbox?${params.toString()}`;
+    },
+    [cid],
+  );
 
   const load = useCallback(async () => {
+    const gen = ++fetchGeneration.current;
     setError(null);
     setForbidden(false);
     setLoading(true);
     try {
       const [open, resolved] = await Promise.all([
-        api.get<Note[]>(`${API}/campaigns/${cid}/inbox`),
-        api.get<Note[]>(`${API}/campaigns/${cid}/inbox?resolved=true`),
+        api.get<NoteListPage>(inboxUrl(false)),
+        api.get<NoteListPage>(inboxUrl(true)),
       ]);
-      setItems(open);
-      setResolvedItems(resolved);
+      if (gen !== fetchGeneration.current) return;
+      setOpenList({
+        items: open.items,
+        total: open.total,
+        hasMore: open.hasMore,
+        nextCursor: open.nextCursor,
+      });
+      setHistoryList({
+        items: resolved.items,
+        total: resolved.total,
+        hasMore: resolved.hasMore,
+        nextCursor: resolved.nextCursor,
+      });
     } catch (e) {
+      if (gen !== fetchGeneration.current) return;
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
       } else {
         setError(t('notes.inboxCouldntLoad'));
       }
     } finally {
-      setLoading(false);
+      if (gen === fetchGeneration.current) setLoading(false);
     }
-  }, [cid, t]);
+  }, [inboxUrl, t]);
+
+  const loadMore = useCallback(async () => {
+    const active = view === 'open' ? openList : historyList;
+    if (!active.nextCursor || loadingMore || loading) return;
+    const gen = fetchGeneration.current;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const page = await api.get<NoteListPage>(inboxUrl(view === 'history', active.nextCursor));
+      if (gen !== fetchGeneration.current) return;
+      const merge = (prev: InboxListState): InboxListState => {
+        const seen = new Set(prev.items.map((n) => n.id));
+        return {
+          items: [...prev.items, ...page.items.filter((n) => !seen.has(n.id))],
+          total: page.total,
+          hasMore: page.hasMore,
+          nextCursor: page.nextCursor,
+        };
+      };
+      if (view === 'open') setOpenList(merge);
+      else setHistoryList(merge);
+    } catch (e) {
+      if (gen !== fetchGeneration.current) return;
+      setError(e instanceof ApiError ? e.message : t('notes.inboxCouldntLoadMore'));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [view, openList, historyList, loadingMore, loading, inboxUrl, t]);
 
   useEffect(() => {
     if (Number.isFinite(cid) && role === 'dm') void load();
@@ -107,15 +174,15 @@ export default function InboxPage() {
   // only render under History, so switch the tab before EntityDeepLinkFocus runs.
   useEffect(() => {
     if (!Number.isFinite(deepInboxId)) return;
-    if (items.some((item) => item.id === deepInboxId)) {
+    if (openList.items.some((item) => item.id === deepInboxId)) {
       setView('open');
       setExpandedId(deepInboxId);
       return;
     }
-    if (resolvedItems.some((item) => item.id === deepInboxId)) {
+    if (historyList.items.some((item) => item.id === deepInboxId)) {
       setView('history');
     }
-  }, [deepInboxId, items, resolvedItems]);
+  }, [deepInboxId, openList.items, historyList.items]);
 
   async function resolve(item: Note, resolvedNote: string, link: { entityType: EntityTypeValue; entityId: number } | null) {
     try {
@@ -171,27 +238,31 @@ export default function InboxPage() {
 
       <div className="flex gap-1.5 flex-wrap">
         <button onClick={() => setView('open')}>
-          <Chip variant={view === 'open' ? 'active' : 'available'}>{t('notes.tabOpen')}{items.length > 0 ? ` (${items.length})` : ''}</Chip>
+          <Chip variant={view === 'open' ? 'active' : 'available'}>
+            {t('notes.tabOpen')}
+            {openList.total > 0 ? ` (${openList.total})` : ''}
+          </Chip>
         </button>
         <button onClick={() => setView('history')}>
           <Chip variant={view === 'history' ? 'active' : 'available'}>
-            {t('notes.tabHistory')}{resolvedItems.length > 0 ? ` (${resolvedItems.length})` : ''}
+            {t('notes.tabHistory')}
+            {historyList.total > 0 ? ` (${historyList.total})` : ''}
           </Chip>
         </button>
       </div>
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {loading && items.length === 0 && resolvedItems.length === 0 ? (
+      {loading && openList.items.length === 0 && historyList.items.length === 0 ? (
         <Card>
           <Skeleton lines={4} />
         </Card>
       ) : view === 'open' ? (
-        items.length === 0 ? (
+        openList.items.length === 0 ? (
           <EmptyState icon="envelope" title={t('notes.inboxClearTitle')} hint={t('notes.inboxClearHint')} />
         ) : (
           <div className="space-y-3">
-            {items.map((item) => (
+            {openList.items.map((item) => (
               <InboxItem
                 key={item.id}
                 campaignId={cid}
@@ -204,15 +275,43 @@ export default function InboxPage() {
             ))}
           </div>
         )
-      ) : resolvedItems.length === 0 ? (
+      ) : historyList.items.length === 0 ? (
         <EmptyState icon="archive-register" title={t('notes.noHistoryTitle')} hint={t('notes.noHistoryHint')} />
       ) : (
         <div className="space-y-3">
-          {resolvedItems.map((item) => (
+          {historyList.items.map((item) => (
             <ResolvedItem key={item.id} campaignId={cid} item={item} />
           ))}
         </div>
       )}
+
+      {(() => {
+        const active = view === 'open' ? openList : historyList;
+        return (
+          <>
+            {active.items.length > 0 && (
+              <p className="text-[11px] text-slate-500 m-0" aria-live="polite">
+                {active.hasMore || active.total > active.items.length
+                  ? t('notes.inboxShowingOf', { shown: active.items.length, total: active.total })
+                  : t('notes.showingAll', { count: active.items.length })}
+              </p>
+            )}
+            {active.hasMore && (
+              <div className="flex justify-center pt-1">
+                <Btn
+                  type="button"
+                  ghost
+                  className="!min-h-0 !py-1.5 text-xs"
+                  disabled={loadingMore || loading}
+                  onClick={() => void loadMore()}
+                >
+                  {loadingMore ? t('notes.inboxLoadingMore') : t('notes.inboxLoadMore')}
+                </Btn>
+              </div>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }

@@ -44,3 +44,22 @@ quest, update an NPC, or drop a line in a recap. Resolving clears it from the qu
     Connect an AI (see [Connect an AI](../ai/connect.md)) and ask it to sweep the
     inbox — it can read the captures and propose the quest/NPC/recap updates for you
     to approve, turning a pile of one-liners into structured canon.
+
+## List capacity & pagination
+
+`GET /api/v1/campaigns/:id/notes` and `GET /api/v1/campaigns/:id/inbox` return a
+**page**, not an unbounded array:
+
+```json
+{ "items": [/* Note */], "total": 1234, "hasMore": true, "nextCursor": "…", "limit": 50 }
+```
+
+- **Default page size** is 50; `?limit=` may raise it up to **200**. Larger result
+  sets continue with the opaque `?cursor=` from the previous page's `nextCursor`.
+- **Order is newest-first** (by note id for notes and open inbox; by resolution
+  time for resolved inbox history).
+- **Filters stay correct under paging**: `q`, `mine`, `visibility`, and
+  `entityType`/`entityId` are applied before the page is cut.
+- The dashboard **My notes** rail asks for exactly **5** newest notes
+  (`?limit=5`) — it does not fetch the whole list and slice.
+- Over MCP, `list_notes` and `read_inbox` use the same page shape and cursor.

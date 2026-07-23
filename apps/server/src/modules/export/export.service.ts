@@ -178,7 +178,7 @@ export class ExportService {
       // dashboard's list-shape excerpts (issue #71).
       this.sessions.listRecapsForCampaign(campaignId, role),
       this.characters.listForCampaign(campaignId, role),
-      this.notes.listForCampaign(campaignId, user, role, {}),
+      this.notes.listAllForCampaign(campaignId, user, role, {}),
       this.comments.listForCampaign(campaignId, role),
       this.members.listForCampaign(campaignId),
       this.proposals.listForCampaign(campaignId, undefined, role),
@@ -334,7 +334,7 @@ export class ExportService {
     const [campaign, characterList, noteList, commentList, proposalList, supportPreference] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.characters.listForCampaign(campaignId, role),
-      this.notes.listForCampaign(campaignId, user, role, { mine: true }),
+      this.notes.listAllForCampaign(campaignId, user, role, { mine: true }),
       this.comments.listForCampaign(campaignId, role, { authorUserId: user.id }),
       this.proposals.listForCampaign(campaignId, undefined, role, { proposerUserId: user.id }),
       this.supportPreferences.getOwn(campaignId, user.id),
@@ -553,7 +553,7 @@ export class ExportService {
     return lines.join('\n') + '\n';
   }
 
-  private campaignMarkdown(campaign: Awaited<ReturnType<CampaignsService['getOrThrow']>>, notes: Awaited<ReturnType<NotesService['listForCampaign']>>): string {
+  private campaignMarkdown(campaign: Awaited<ReturnType<CampaignsService['getOrThrow']>>, notes: Awaited<ReturnType<NotesService['listAllForCampaign']>>): string {
     const lines = [
       `# ${campaign.name}`,
       '',

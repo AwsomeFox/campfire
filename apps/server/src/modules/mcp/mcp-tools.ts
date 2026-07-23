@@ -821,7 +821,7 @@ export class McpToolsService {
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        const resolvedInbox = await this.notes.listInbox(campaignId as number, true);
+        const resolvedInbox = await this.notes.listAllInbox(campaignId as number, true);
         const encounterList = await this.encounters.listForCampaign(campaignId as number);
         const encounters = await Promise.all(
           encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
@@ -881,19 +881,19 @@ export class McpToolsService {
       'read_inbox',
       'DM only: list player inbox items for a campaign — messages players sent up via submit_inbox_item. ' +
         'Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest first), ' +
-        'including any entity link each item was resolved into.',
+        'including any entity link each item was resolved into. Returns a page ' +
+        '({ items, total, hasMore, nextCursor?, limit }) — default 50, max 200; continue with cursor (issue #608).',
       {
         campaignId: CampaignIdArg,
         resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones'),
-        limit: LimitArg(200, 200),
-        offset: OffsetArg,
+        limit: LimitArg(200, 50),
+        cursor: z.string().max(512).optional().describe('Opaque cursor from a previous page\'s nextCursor'),
       },
-      async ({ campaignId, resolved, limit, offset }) => {
+      async ({ campaignId, resolved, limit, cursor }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        // issue #71: limit/offset pushed into SQL.
         return this.notes.listInbox(campaignId as number, (resolved as boolean | undefined) ?? false, {
           limit: limit as number | undefined,
-          offset: offset as number | undefined,
+          cursor: cursor as string | undefined,
         });
       },
     );
@@ -1113,24 +1113,29 @@ export class McpToolsService {
       'list_notes',
       'List notes visible to the caller in a campaign: private (author only), dm_shared (author+dm), party_shared ' +
         '(everyone), or whisper (author + the single targeted recipient + any dm). A whisper the caller is not the ' +
-        'target of is never returned. Optionally filter by the entity the note is linked to, or to just the caller\'s own notes.',
+        'target of is never returned. Optionally filter by the entity the note is linked to, visibility, or to just ' +
+        'the caller\'s own notes. Returns a page ({ items, total, hasMore, nextCursor?, limit }) — default 50, max 200; ' +
+        'newest first; continue with cursor (issue #608).',
       {
         campaignId: CampaignIdArg,
         entityType: EntityType.optional().describe('Filter to notes linked to this entity type'),
         entityId: Id.optional().describe('Filter to notes linked to this entity id (use with entityType)'),
         mine: z.boolean().optional().describe('If true, only the caller\'s own notes'),
-        limit: LimitArg(200, 200),
-        offset: OffsetArg,
+        visibility: NoteVisibility.optional().describe('Filter to a single visibility'),
+        q: z.string().max(200).optional().describe('Free-text search over note bodies'),
+        limit: LimitArg(200, 50),
+        cursor: z.string().max(512).optional().describe('Opaque cursor from a previous page\'s nextCursor'),
       },
-      async ({ campaignId, entityType, entityId, mine, limit, offset }) => {
+      async ({ campaignId, entityType, entityId, mine, visibility, q, limit, cursor }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        // issue #71: limit/offset pushed into SQL (was rows.slice() after a full read).
         return this.notes.listForCampaign(campaignId as number, user, role, {
           entityType: entityType as string | undefined,
           entityId: entityId as number | undefined,
           mine: mine as boolean | undefined,
+          visibility: visibility as z.infer<typeof NoteVisibility> | undefined,
+          q: q as string | undefined,
           limit: limit as number | undefined,
-          offset: offset as number | undefined,
+          cursor: cursor as string | undefined,
         });
       },
     );

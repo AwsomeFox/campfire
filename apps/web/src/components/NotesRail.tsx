@@ -9,7 +9,7 @@
  * one scope is selected and secret implications are announced.
  */
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
-import type { CampaignMember, Note } from '@campfire/schema';
+import type { CampaignMember, Note, NoteListPage } from '@campfire/schema';
 import { api, API } from '../lib/api';
 import { Card, Chip, Btn, ErrorNote, type ChipVariant } from './ui';
 import { Field, sanitizeFieldPrefix } from './Field';
@@ -64,7 +64,12 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
   const load = useCallback(async () => {
     setError(null);
     try {
-      setNotes(await api.get<Note[]>(`${API}/campaigns/${campaignId}/notes?entityType=${entityType}&entityId=${entityId}`));
+      // Entity rails are typically small; still consume the paginated page shape
+      // (issue #608) so an unbounded array is never the contract.
+      const page = await api.get<NoteListPage>(
+        `${API}/campaigns/${campaignId}/notes?entityType=${entityType}&entityId=${entityId}&limit=200`,
+      );
+      setNotes(page.items);
     } catch {
       setError("Couldn't load notes.");
     }
