@@ -61,10 +61,23 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     campaignId: number;
     cursor: DiceRollAnnouncementCursor;
   } | null>(null);
+  /** Which campaign the in-memory `rolls` array came from (guards campaign switches). */
+  const rollsCampaignIdRef = useRef<number | null>(campaignId);
+
+  useEffect(() => {
+    rollAnnouncementRef.current = null;
+    rollsCampaignIdRef.current = null;
+    setRolls([]);
+    setRetention(undefined);
+    setJustRolledId(null);
+    setError(null);
+  }, [campaignId]);
 
   // Remote (and local) rolls share one ID cursor so poll refetches never double-speak.
   // Skip the pre-fetch empty render — otherwise the first poll would announce full history.
   useEffect(() => {
+    if (rollsCampaignIdRef.current !== campaignId) return;
+
     const previous = rollAnnouncementRef.current;
     const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
     if (cursor === null && rolls.length === 0) return;
@@ -85,6 +98,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const load = useCallback(async () => {
     try {
       const { data, headers } = await getWithHeaders<DiceRoll[]>(`${API}/campaigns/${campaignId}/rolls?limit=${limit}`);
+      rollsCampaignIdRef.current = campaignId;
       setRolls(data);
       // Retention is disclosed per-response so it tracks the server's current
       // policy (incl. the "unlimited" keep-all mode) without a separate call.
@@ -134,6 +148,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         }
         // Prepend own roll immediately (dedupe by id — the next poll returns it too).
         setRolls((prev) => {
+          rollsCampaignIdRef.current = campaignId;
           const next = [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit);
           const previous = rollAnnouncementRef.current;
           const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
