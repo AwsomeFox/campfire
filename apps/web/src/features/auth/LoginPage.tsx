@@ -7,12 +7,14 @@
  * every viewport. SSO is first when OIDC is configured; local authentication is
  * the primary option when OIDC is off and secondary/collapsible when both are available.
  */
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 
 function FlameMark({ size = 44 }: { size?: number }) {
@@ -199,8 +201,10 @@ function safeInternalPath(raw: string | null | undefined): string | null {
 }
 
 export function LoginPage() {
+  const { t } = useTranslation();
   const { status, loading } = useAuthStatus();
   const { me, ready, refresh } = useAuth();
+  const announce = useAnnounce();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -223,6 +227,31 @@ export function LoginPage() {
   const [showLocalForm, setShowLocalForm] = useState(
     () => new URLSearchParams(location.search).get('local') === '1',
   );
+
+  // Issue #506: Layout's sign-out flow lands here via `navigate(..., { state:
+  // { signedOut: true } })`. Move focus to the "Sign in" heading so keyboard and
+  // screen-reader users get a clear landing point confirming the account is
+  // gone — without this, focus is left wherever it was on the DOM node React
+  // Router just removed (often nowhere, per WCAG 2.4.3). A normal cold visit or
+  // a session-expiry bounce doesn't carry this flag, so the local form's own
+  // autoFocus (aimed at the username field) is left alone for those.
+  //
+  // Assertive "Signed out" is announced here (not in Layout.onLogout) so it
+  // survives AuthedLayout/Layout unmount clears from issue #434.
+  const cameFromSignOut = Boolean((location.state as { signedOut?: boolean } | null)?.signedOut);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const announcedSignOut = useRef(false);
+  // useLayoutEffect so heading focus wins over a later paint; skip username
+  // autoFocus when cameFromSignOut (see LocalLoginForm below).
+  useLayoutEffect(() => {
+    if (cameFromSignOut) headingRef.current?.focus();
+  }, [cameFromSignOut]);
+
+  useEffect(() => {
+    if (!cameFromSignOut || announcedSignOut.current) return;
+    announcedSignOut.current = true;
+    announce(t('nav.signedOutAnnouncement'), { assertive: true });
+  }, [cameFromSignOut, announce, t]);
 
   // React Router keeps this page mounted for query-only navigation. Mirror the
   // URL on back/forward and recovery-page navigation instead of treating the
@@ -284,7 +313,9 @@ export function LoginPage() {
         <div className="login-auth-heading">
           <span className="login-auth-mark" aria-hidden="true"><FlameMark /></span>
           <div>
-            <h2 id="login-title" style={{ margin: 0 }}>Sign in</h2>
+            <h2 id="login-title" ref={headingRef} tabIndex={-1} style={{ margin: 0 }}>
+              Sign in
+            </h2>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
               to your Campfire server
             </p>
@@ -353,7 +384,7 @@ export function LoginPage() {
               password={password}
               setPassword={setPassword}
               error={error}
-              primary
+              primary={!cameFromSignOut}
             />
           </div>
         )}

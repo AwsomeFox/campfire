@@ -22,15 +22,42 @@ type AnnounceFn = (message: string, options?: AnnounceOptions) => void;
 type ClearFn = () => void;
 
 const AnnounceContext = createContext<AnnounceFn>(() => {});
-// Separate from `announce` so logout / scope teardown can wipe without inventing
-// a dummy message string (and without re-triggering a screen-reader utterance).
+// Issue #506: sign-out on a shared device must not leave a stale live-region
+// message (an HP change, a roll result, an unread count…) sitting in the DOM
+// for the next person at the keyboard to stumble onto in browse mode. Exposed
+// separately from `announce` so callers that only need "wipe it" (logout)
+// don't have to reach for a message string.
 const ClearContext = createContext<ClearFn>(() => {});
 
-/** E2E bridge so specs can seed React announcer state without mutating shared fixtures. */
-type AnnouncerTestWindow = Window & {
-  __campfireAnnounce?: AnnounceFn;
-  __campfireClearAnnouncements?: ClearFn;
+// Module-level clear for callers outside AnnounceProvider's React tree
+// (AuthProvider.handleMultiTabSignOut sits ABOVE AnnounceProvider in App.tsx).
+let clearLiveRegionImpl: ClearFn = () => {};
+
+/** Wipe polite/assertive live-region text. Safe no-op before provider mount. */
+export function clearLiveAnnouncements(): void {
+  clearLiveRegionImpl();
+}
+
+/**
+ * Playwright / automation bridge (issue #434). Namespaced under one symbol and
+ * attached only when automation is detected (`navigator.webdriver`) or an
+ * explicit `__CAMPFIRE_E2E__` flag/object is already present — never in normal
+ * production browsing. Specs seed React announcer state via
+ * `window.__CAMPFIRE_E2E__.announce` without mutating shared fixtures.
+ */
+type CampfireE2EHooks = {
+  announce?: AnnounceFn;
+  clearAnnouncements?: ClearFn;
 };
+
+type CampfireE2EWindow = Window & {
+  __CAMPFIRE_E2E__?: CampfireE2EHooks | true;
+};
+
+function shouldAttachE2EBridge(w: CampfireE2EWindow): boolean {
+  if (typeof navigator !== 'undefined' && Boolean(navigator.webdriver)) return true;
+  return w.__CAMPFIRE_E2E__ != null;
+}
 
 export function AnnounceProvider({ children }: { children: ReactNode }) {
   const [polite, setPolite] = useState('');
@@ -68,14 +95,23 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
     setAssertive('');
   }, []);
 
-  // Playwright specs (issue #434) seed + assert via these hooks; production UI
-  // never reads them. Cleared on unmount so a hot reload cannot leave a stale fn.
-  // Also cancel pending announce() frames — otherwise a rAF scheduled just before
-  // unmount (hot reload / test teardown) can still call setState after unmount.
+  // Keep the module-level entrypoint pointed at the mounted provider's clear.
+  clearLiveRegionImpl = clear;
+
+  // Attach the e2e bridge only under automation. Cancel pending announce() frames
+  // on cleanup — otherwise a rAF scheduled just before unmount (hot reload /
+  // test teardown) can still call setState after unmount. Also drop our hooks
+  // so a remount cannot leave stale callbacks behind.
   useEffect(() => {
-    const w = window as AnnouncerTestWindow;
-    w.__campfireAnnounce = announce;
-    w.__campfireClearAnnouncements = clear;
+    const w = window as CampfireE2EWindow;
+    if (!shouldAttachE2EBridge(w)) return;
+
+    const hooks: CampfireE2EHooks =
+      typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null ? w.__CAMPFIRE_E2E__ : {};
+    hooks.announce = announce;
+    hooks.clearAnnouncements = clear;
+    w.__CAMPFIRE_E2E__ = hooks;
+
     return () => {
       if (politeRafRef.current != null) {
         cancelAnimationFrame(politeRafRef.current);
@@ -85,8 +121,14 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
         cancelAnimationFrame(assertiveRafRef.current);
         assertiveRafRef.current = null;
       }
-      delete w.__campfireAnnounce;
-      delete w.__campfireClearAnnouncements;
+      if (w.__CAMPFIRE_E2E__ === hooks) {
+        delete hooks.announce;
+        delete hooks.clearAnnouncements;
+        delete w.__CAMPFIRE_E2E__;
+      } else if (typeof w.__CAMPFIRE_E2E__ === 'object' && w.__CAMPFIRE_E2E__ != null) {
+        if (w.__CAMPFIRE_E2E__.announce === announce) delete w.__CAMPFIRE_E2E__.announce;
+        if (w.__CAMPFIRE_E2E__.clearAnnouncements === clear) delete w.__CAMPFIRE_E2E__.clearAnnouncements;
+      }
     };
   }, [announce, clear]);
 

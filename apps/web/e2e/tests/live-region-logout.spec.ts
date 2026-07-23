@@ -9,10 +9,17 @@ import { seed } from './seed';
  * Each test signs in through the UI (not the shared storageState): a real
  * sign-out revokes that session server-side, and reusing dm.json would poison
  * the rest of the suite.
+ *
+ * Note: issue #506 announces an assertive "Signed out" confirmation on the
+ * login page after the encounter wipe — assertions below allow that while
+ * rejecting prior campaign text.
  */
 
-interface AnnouncerTestWindow extends Window {
-  __campfireAnnounce?: (message: string, options?: { assertive?: boolean }) => void;
+interface CampfireE2EWindow extends Window {
+  __CAMPFIRE_E2E__?: {
+    announce?: (message: string, options?: { assertive?: boolean }) => void;
+    clearAnnouncements?: () => void;
+  };
 }
 
 async function signIn(page: Page, who: keyof typeof CREDS) {
@@ -44,9 +51,12 @@ async function seedEncounterAnnouncement(page: Page) {
   // Seed via the Announcer React state (not a bare DOM write) so clear() must
   // actually reset provider state for the assertion to pass. Announcer paints
   // on rAF after blanking the node — wait a frame before asserting.
-  await page.waitForFunction(() => typeof (window as AnnouncerTestWindow).__campfireAnnounce === 'function');
+  // Bridge is namespaced under window.__CAMPFIRE_E2E__ and gated to automation.
+  await page.waitForFunction(
+    () => typeof (window as CampfireE2EWindow).__CAMPFIRE_E2E__?.announce === 'function',
+  );
   await page.evaluate(() => {
-    const announce = (window as AnnouncerTestWindow).__campfireAnnounce;
+    const announce = (window as CampfireE2EWindow).__CAMPFIRE_E2E__?.announce;
     if (!announce) throw new Error('Announce bridge missing');
     announce("Round 1 — Goblin Boss's turn");
     announce('Encounter secret leak', { assertive: true });
@@ -66,7 +76,10 @@ test.describe('live-region clear on logout / identity change (issue #434)', () =
     await page.waitForURL('**/login');
 
     await expect(politeRegion(page)).toHaveText('');
-    await expect(assertiveRegion(page)).toHaveText('');
+    // #506 may place an assertive "Signed out" confirmation — prior campaign
+    // text must still be gone.
+    await expect(assertiveRegion(page)).not.toContainText('Encounter secret leak');
+    await expect(assertiveRegion(page)).not.toContainText(/Round 1/);
     await expect(page.locator('body')).not.toContainText("Goblin Boss's turn");
     await expect(page.locator('body')).not.toContainText('Encounter secret leak');
   });
@@ -80,20 +93,21 @@ test.describe('live-region clear on logout / identity change (issue #434)', () =
     await page.getByRole('button', { name: 'Sign out' }).click();
     await page.waitForURL('**/login');
     await expect(politeRegion(page)).toHaveText('');
-    await expect(assertiveRegion(page)).toHaveText('');
+    await expect(assertiveRegion(page)).not.toContainText('Encounter secret leak');
 
     await signIn(page, 'player');
     // Player lands authed — prior DM encounter text must not reappear in the
     // app-root live regions (AnnounceProvider outlives the router).
     await expect(politeRegion(page)).toHaveText('');
-    await expect(assertiveRegion(page)).toHaveText('');
+    await expect(assertiveRegion(page)).not.toContainText('Encounter secret leak');
+    await expect(assertiveRegion(page)).not.toContainText(/Round 1/);
     await expect(page.locator('body')).not.toContainText("Goblin Boss's turn");
     await expect(page.locator('body')).not.toContainText('Encounter secret leak');
 
     // Same campaign under the new identity still starts with a clean announcer.
     await page.goto(`/c/${campaignId}`);
     await expect(politeRegion(page)).toHaveText('');
-    await expect(assertiveRegion(page)).toHaveText('');
+    await expect(assertiveRegion(page)).not.toContainText(/Round 1/);
     await expect(politeRegion(page)).not.toContainText(/Round 1/);
   });
 });
