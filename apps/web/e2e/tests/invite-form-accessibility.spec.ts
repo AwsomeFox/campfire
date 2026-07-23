@@ -5,7 +5,7 @@ import {
   inviteCopyButtonLabel,
   inviteLinkFieldLabel,
 } from '../../src/features/admin/inviteRoleOptions';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 function politeAnnouncement(page: import('@playwright/test').Page, message: string) {
   return page.locator('[aria-live="polite"]').filter({ hasText: message });
@@ -13,6 +13,10 @@ function politeAnnouncement(page: import('@playwright/test').Page, message: stri
 
 test.describe('invite form accessibility (issue #516)', () => {
   test.use({ storageState: stateFor('dm') });
+
+  test.beforeEach(async ({ page }) => {
+    await restoreSeedEncounter(page);
+  });
 
   test('labels the role selector and generated links and announces copy without moving focus', async ({ page }) => {
     const { campaignId } = seed();

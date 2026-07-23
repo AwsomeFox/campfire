@@ -79,6 +79,8 @@ export interface SeedData {
   baseURL: string;
   campaignId: number;
   encounterId: number;
+  bossId: number;
+  skirmisherId: number;
   /** Hidden source map for the Ambush encounter; fog-protected (#463). */
   mapAttachmentId: number;
   /** A second encounter that was started and then ended — must render read-only (#368). */
@@ -529,12 +531,14 @@ export default async function globalSetup(config: FullConfig) {
   });
   if (!mapPatch.ok()) throw new Error(`PATCH encounter map -> ${mapPatch.status()}: ${await mapPatch.text()}`);
 
+  const monsterCombatantIds: number[] = [];
   for (const m of MONSTERS) {
     const c = await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/combatants`, {
       kind: 'monster',
       name: m.name,
       hpMax: m.hpMax,
     });
+    monsterCombatantIds.push(c.id);
     // Fix initiative deterministically (roll-initiative is random) so turn order is stable.
     const patched = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
       data: { initiative: m.initiative },
@@ -543,6 +547,8 @@ export default async function globalSetup(config: FullConfig) {
       throw new Error(`PATCH combatant initiative -> ${patched.status()}: ${await patched.text()}`);
     }
   }
+  const bossId = monsterCombatantIds[0];
+  const skirmisherId = monsterCombatantIds[1];
   // Start the fight: status -> running, round 1, current actor = highest initiative.
   // Started LAST (issue #744) so it remains the campaign's single authoritative live
   // fight for the combat-tracker and combat-log-accessibility suites.
@@ -634,6 +640,8 @@ export default async function globalSetup(config: FullConfig) {
     baseURL,
     campaignId,
     encounterId,
+    bossId,
+    skirmisherId,
     mapAttachmentId,
     endedEncounterId,
     linkedEndedEncounterId,
