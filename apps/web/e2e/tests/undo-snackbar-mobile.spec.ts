@@ -17,29 +17,38 @@ const CREDS = {
 } as const;
 
 async function login(ctx: APIRequestContext, baseURL: string, who: keyof typeof CREDS) {
-  await ctx.post(`${baseURL}/api/v1/auth/login`, { data: CREDS[who] });
+  const res = await ctx.post(`${baseURL}/api/v1/auth/login`, { data: CREDS[who] });
+  if (!res.ok()) {
+    throw new Error(`login ${who} -> ${res.status()}: ${await res.text()}`);
+  }
 }
 
 async function createCharacter(baseURL: string, name: string): Promise<number> {
   const { campaignId } = seed();
   const ctx = await request.newContext({ baseURL });
-  await login(ctx, baseURL, 'player');
-  const res = await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
-    data: { name, className: 'Fighter', level: 1 },
-  });
-  if (!res.ok()) throw new Error(`create character -> ${res.status()}: ${await res.text()}`);
-  const body = await res.json();
-  await ctx.dispose();
-  return body.id as number;
+  try {
+    await login(ctx, baseURL, 'player');
+    const res = await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name, className: 'Fighter', level: 1 },
+    });
+    if (!res.ok()) throw new Error(`create character -> ${res.status()}: ${await res.text()}`);
+    const body = await res.json();
+    return body.id as number;
+  } finally {
+    await ctx.dispose();
+  }
 }
 
 async function restore(baseURL: string, id: number) {
   const ctx = await request.newContext({ baseURL });
-  await login(ctx, baseURL, 'dm');
-  const res = await ctx.post(`/api/v1/characters/${id}/restore`);
-  await ctx.dispose();
-  if (!res.ok() && res.status() !== 404) {
-    throw new Error(`restore ${id} -> ${res.status()}: ${await res.text()}`);
+  try {
+    await login(ctx, baseURL, 'dm');
+    const res = await ctx.post(`/api/v1/characters/${id}/restore`);
+    if (!res.ok() && res.status() !== 404) {
+      throw new Error(`restore ${id} -> ${res.status()}: ${await res.text()}`);
+    }
+  } finally {
+    await ctx.dispose();
   }
 }
 

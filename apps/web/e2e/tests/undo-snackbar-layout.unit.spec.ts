@@ -150,5 +150,8 @@ test.describe('undo snackbar CSS / layer contracts (issue #794)', () => {
     expect(publishBody).toBeTruthy();
     expect(publishBody).not.toMatch(/createElement/);
     expect(publishBody).not.toMatch(/\.remove\(\)/);
+    // High-frequency observers coalesce onto rAF; owners ref-count shared vars.
+    expect(source).toMatch(/requestAnimationFrame/);
+    expect(source).toMatch(/chromeOwnerCount/);
   });
 });

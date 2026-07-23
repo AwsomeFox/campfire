@@ -9,6 +9,8 @@
  *
  * Vars are published in `useLayoutEffect` (before paint) so the first visible
  * frame already clears the tab bar instead of sitting at the `0px` defaults.
+ * High-frequency resize/scroll observers coalesce onto a single rAF tick to
+ * avoid layout thrash while the mobile keyboard animates.
  */
 import { useLayoutEffect } from 'react';
 import {
@@ -21,6 +23,9 @@ const KEYBOARD_VAR = '--cf-keyboard-inset';
 
 /** Reused probe — create once, read via getComputedStyle on each publish. */
 let safeAreaProbe: HTMLDivElement | null = null;
+
+/** How many mounted snackbars currently own the shared CSS vars. */
+let chromeOwnerCount = 0;
 
 function ensureSafeAreaProbe(): HTMLDivElement {
   if (safeAreaProbe?.isConnected) return safeAreaProbe;
@@ -64,34 +69,71 @@ function publishChromeVars(): void {
   root.setProperty(KEYBOARD_VAR, `${keyboard}px`);
 }
 
+/**
+ * Schedule at most one publish per animation frame. ResizeObserver +
+ * visualViewport scroll/resize can fire in bursts; coalescing keeps forced
+ * reflow off the critical path while the keyboard animates.
+ */
+function createChromePublishScheduler(): {
+  schedule: () => void;
+  cancel: () => void;
+} {
+  let rafId: number | null = null;
+  return {
+    schedule: () => {
+      if (rafId != null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        publishChromeVars();
+      });
+    },
+    cancel: () => {
+      if (rafId != null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    },
+  };
+}
+
 /** Keep snackbar chrome CSS variables in sync while the bar is mounted. */
 export function useUndoSnackbarChrome(): void {
   useLayoutEffect(() => {
+    chromeOwnerCount += 1;
+
     // Measure + publish before the browser paints so the first frame already
     // clears the tab bar / keyboard instead of using the 0px CSS defaults.
     publishChromeVars();
 
+    const { schedule, cancel } = createChromePublishScheduler();
+
     const tabbar = document.querySelector('.cf-tabbar');
     const ro =
       typeof ResizeObserver !== 'undefined' && tabbar instanceof HTMLElement
-        ? new ResizeObserver(() => publishChromeVars())
+        ? new ResizeObserver(() => schedule())
         : null;
     if (ro && tabbar instanceof HTMLElement) ro.observe(tabbar);
 
     const vv = window.visualViewport;
-    const onViewport = () => publishChromeVars();
+    const onViewport = () => schedule();
     window.addEventListener('resize', onViewport);
     vv?.addEventListener('resize', onViewport);
     vv?.addEventListener('scroll', onViewport);
 
     return () => {
+      cancel();
       ro?.disconnect();
       window.removeEventListener('resize', onViewport);
       vv?.removeEventListener('resize', onViewport);
       vv?.removeEventListener('scroll', onViewport);
-      const root = document.documentElement.style;
-      root.removeProperty(TABBAR_VAR);
-      root.removeProperty(KEYBOARD_VAR);
+      chromeOwnerCount = Math.max(0, chromeOwnerCount - 1);
+      // Only the last mounted owner clears the shared vars — concurrent
+      // snackbars (or mount/unmount overlap) must not yank positioning.
+      if (chromeOwnerCount === 0) {
+        const root = document.documentElement.style;
+        root.removeProperty(TABBAR_VAR);
+        root.removeProperty(KEYBOARD_VAR);
+      }
       // Leave the cached probe in the document — safe-area rarely changes and
       // recreating it on every snackbar mount would reintroduce DOM thrash.
     };
