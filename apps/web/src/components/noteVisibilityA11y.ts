@@ -37,3 +37,7 @@ export function noteVisibilityOptionLabel(visibility: Note['visibility']): strin
 
 export const NOTE_BODY_LABEL = 'Note body';
 export const NOTE_BODY_HELP = 'Private by default until you pick a visibility scope below.';
+export const NOTE_EDIT_BODY_LABEL = 'Note';
+export const NOTE_EDIT_BODY_HELP = 'Edit the note body. Markdown is supported.';
+export const NOTE_EDIT_ANCHOR_LABEL = 'Attach to';
+export const NOTE_EDIT_AUDIENCE_LABEL = 'Who can see this';

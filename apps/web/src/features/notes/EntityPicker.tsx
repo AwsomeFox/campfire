@@ -7,6 +7,9 @@
  *
  * `resetKey` — change it (e.g. after a successful save) to clear the picker back to
  * "No entity" without the parent needing to reach into internal state.
+ *
+ * `initial` — seed an existing anchor when editing a note (issue #784). Prefer remounting
+ * with a stable `key` when entering edit so the initializer picks up the tip.
  */
 import { useEffect, useState } from 'react';
 import type { Note } from '@campfire/schema';
@@ -45,26 +48,32 @@ export function EntityPicker({
   onChange,
   disabled,
   resetKey,
+  initial = null,
 }: {
   campaignId: number;
   onChange: (link: EntityLink | null) => void;
   disabled?: boolean;
   resetKey?: unknown;
+  /** Existing anchor to seed (My Notes edit). Cleared/re-seeded when resetKey changes. */
+  initial?: EntityLink | null;
 }) {
-  const [type, setType] = useState<EntityTypeValue | ''>('');
-  const [id, setId] = useState<number | ''>('');
+  const [type, setType] = useState<EntityTypeValue | ''>(() => initial?.entityType ?? '');
+  const [id, setId] = useState<number | ''>(() => initial?.entityId ?? '');
   const [options, setOptions] = useState<EntityOption[]>([]);
   const [optionsLoading, setOptionsLoading] = useState(false);
 
-  // Parent-driven reset (e.g. after a save): clear both selections.
+  // Parent-driven reset (compose save). Edit mode remounts via `key` so the
+  // useState initializer picks up a new `initial` — do NOT re-seed whenever
+  // `initial` identity changes, or a half-chosen type would be wiped mid-edit.
   useEffect(() => {
-    setType('');
-    setId('');
+    setType(initial?.entityType ?? '');
+    setId(initial?.entityId ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed only on resetKey
   }, [resetKey]);
 
-  // Load the option list whenever the chosen type changes.
+  // Load the option list whenever the chosen type changes. Does NOT clear `id` —
+  // the type <select> onChange owns that, so an edit-mode seed survives options load.
   useEffect(() => {
-    setId('');
     setOptions([]);
     if (!type) return;
     const meta = ATTACHABLE.find((l) => l.value === type);
@@ -94,7 +103,7 @@ export function EntityPicker({
   }
 
   return (
-    <div className="flex gap-2 flex-wrap">
+    <div className="flex gap-2 flex-wrap w-full">
       <select
         className="cf-select !min-h-0 !py-2 text-xs"
         aria-label="Attach note to entity type"
