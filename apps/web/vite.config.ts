@@ -27,7 +27,11 @@ export default defineConfig({
         theme_color: "#9184d9",
         background_color: "#161826",
         display: "standalone",
-        orientation: "portrait",
+        // Issue #797: do not lock the installed PWA to portrait — encounter maps,
+        // AI table, and player display need landscape on tablets/phones. `"any"`
+        // lets the OS/user rotate freely; there is no route-local Screen Orientation
+        // lock (any future lock must be user-initiated, reversible, and failure-tolerant).
+        orientation: "any",
         scope: "/",
         start_url: "/",
         icons: [

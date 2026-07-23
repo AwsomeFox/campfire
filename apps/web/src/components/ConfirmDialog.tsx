@@ -8,8 +8,11 @@
  * - focus trap: Tab/Shift+Tab cycle within the dialog while open
  * - Escape closes (calls onCancel), unless `busy` is true
  * - clicking the backdrop closes, unless `busy` is true
+ * - portals to `document.body` above navigation chrome (issue #791)
+ * - inert background so obscured UI is removed from focus / pointer targets
  */
 import { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Btn } from './ui';
 import { useDialog } from './useDialog';
 
@@ -38,16 +41,24 @@ export function ConfirmDialog({
   const cancelRef = useRef<HTMLButtonElement>(null);
   const titleId = useRef(`confirm-dialog-title-${Math.random().toString(36).slice(2)}`).current;
 
-  // Escape-to-close (suppressed while busy), focus trap, and focus restore.
-  const dialogRef = useDialog<HTMLDivElement>({ onClose: onCancel, disabled: busy, autoFocus: false });
+  // Escape-to-close (suppressed while busy), focus trap, focus restore, and an
+  // inert background so mobile chrome under the portal cannot be activated.
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose: onCancel,
+    disabled: busy,
+    autoFocus: false,
+    inertBackground: true,
+  });
 
   // Initial focus on Cancel — the safe default for a destructive confirmation.
   useEffect(() => {
     cancelRef.current?.focus();
   }, []);
 
-  return (
-    <div className="dialog-backdrop" onClick={() => !busy && onCancel()}>
+  // Portal above #root so sticky header / tab-bar stacking contexts cannot paint
+  // over the backdrop. Nested ConfirmDialogs keep open order via DOM order.
+  return createPortal(
+    <div className="dialog-backdrop" data-overlay="dialog" onClick={() => !busy && onCancel()}>
       <div
         ref={dialogRef}
         className="dialog"
@@ -69,6 +80,7 @@ export function ConfirmDialog({
           </Btn>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
