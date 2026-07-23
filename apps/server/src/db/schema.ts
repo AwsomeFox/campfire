@@ -786,6 +786,12 @@ export const attachments = sqliteTable('attachments', {
   // New map/image uploads default hidden; portraits default visible. Migrated via
   // migrateAttachmentsTableForHidden().
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Publication state for the filesystem/SQLite recovery protocol (issue #728).
+  // A reserved row counts against quota but is never returned by attachment reads.
+  // It becomes committed only after the final file has been renamed into place and
+  // both the staged bytes and containing directory have been fsynced. Existing rows
+  // are backfilled committed by migrateAttachmentsTableForPublicationState().
+  state: text('state').notNull().default('committed'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

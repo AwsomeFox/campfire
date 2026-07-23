@@ -383,7 +383,7 @@ body {
 
 /* A short landscape viewport still exposes the complete local submit path.
    The fields become a compact row only when there is enough horizontal room;
-   DOM and tab order remain username -> password -> submit. */
+   DOM and tab order remain username -> password -> show/hide -> submit. */
 @media (min-width: 560px) and (max-width: 1023px) and (max-height: 500px) {
   .login-shell {
     padding-block: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-bottom));

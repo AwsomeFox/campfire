@@ -22,7 +22,6 @@ import type { RequestUser } from '../../common/user.types';
 import {
   advanceTurn,
   applyCombatantHp,
-  computeEncounterDifficulty,
   crToXp,
   generateEncounterGroup,
   hpBandFor,
@@ -32,6 +31,7 @@ import {
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
 import type { CombatantHpState, GeneratorCandidate } from './encounters.logic';
+import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { canWriteBackHp, hpSyncSliceOf, hpSyncSlicesEqual } from './hp-sync';
 
@@ -830,7 +830,13 @@ export class EncountersService {
     const [row] = await this.db
       .select({ id: attachments.id })
       .from(attachments)
-      .where(and(eq(attachments.id, attachmentId), eq(attachments.campaignId, campaignId)))
+      .where(
+        and(
+          eq(attachments.id, attachmentId),
+          eq(attachments.campaignId, campaignId),
+          eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+        ),
+      )
       .limit(1);
     if (!row) throw new BadRequestException(`mapAttachmentId ${attachmentId} does not exist in this campaign`);
   }
