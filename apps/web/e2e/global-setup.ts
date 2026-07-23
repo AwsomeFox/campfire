@@ -451,13 +451,27 @@ export default async function globalSetup(config: FullConfig) {
   // slot is free when "Ambush" is started and stays that way.
 
   // A linked ended encounter exercises the session-aware branch of the concise
-  // post-encounter hand-off (#663). It intentionally has no combatants: the fixture
-  // only needs a completed lifecycle plus a valid same-campaign session relation.
+  // post-encounter hand-off (#663). The fixture only needs a completed lifecycle
+  // plus a valid same-campaign session relation. Start requires at least one
+  // combatant with initiative (issue #469), so seed a throwaway monster first.
   const linkedEndedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'Linked Aftermath at the Moon Gate',
     sessionId: navSession.id,
   });
   const linkedEndedEncounterId: number = linkedEndedEncounter.id;
+  {
+    const linkedCombatant = await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/combatants`, {
+      kind: 'monster',
+      name: MONSTERS[0].name,
+      hpMax: MONSTERS[0].hpMax,
+    });
+    const patched = await dm.patch(`/api/v1/encounters/${linkedEndedEncounterId}/combatants/${linkedCombatant.id}`, {
+      data: { initiative: MONSTERS[0].initiative },
+    });
+    if (!patched.ok()) {
+      throw new Error(`PATCH linked ended combatant initiative -> ${patched.status()}: ${await patched.text()}`);
+    }
+  }
   await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/start`);
   await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/end`);
 
