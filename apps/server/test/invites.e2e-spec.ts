@@ -422,6 +422,47 @@ describe('issue #857: campaign lifecycle suspends public invites', () => {
     await dmAgent.put(`/api/v1/campaigns/${campaignId}/invites/policy`).send({ enabled: true });
   });
 
+  it('archive?revokeInvites=true deletes invite rows atomically with the status change', async () => {
+    const invite = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
+    expect(invite.status).toBe(201);
+    const code = invite.body.code as string;
+
+    const archived = await dmAgent
+      .patch(`/api/v1/campaigns/${campaignId}?revokeInvites=true`)
+      .send({ status: 'paused' });
+    expect(archived.status).toBe(200);
+    expect(archived.body.status).toBe('paused');
+    expect(archived.body.publicInvitesEnabled).toBe(false);
+
+    expect((await dmAgent.get(`/api/v1/campaigns/${campaignId}/invites`)).body).toEqual([]);
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'active' });
+    await dmAgent.put(`/api/v1/campaigns/${campaignId}/invites/policy`).send({ enabled: true });
+    // Rows were deleted (not merely suspended) — reactivation cannot revive the code.
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+  });
+
+  it('trash?revokeInvites=true deletes invite rows atomically with the trash stamp', async () => {
+    const created = await dmAgent.post('/api/v1/campaigns').send({ name: 'Revoke Trash Vale' });
+    expect(created.status).toBe(201);
+    const cid = created.body.id as number;
+    const invite = await dmAgent.post(`/api/v1/campaigns/${cid}/invites`).send({ role: 'viewer' });
+    expect(invite.status).toBe(201);
+    const code = invite.body.code as string;
+
+    const trash = await dmAgent.delete(`/api/v1/campaigns/${cid}?revokeInvites=true`);
+    expect(trash.status).toBe(200);
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+
+    const restore = await dmAgent.post(`/api/v1/campaigns/${cid}/restore`);
+    expect(restore.status).toBe(201);
+    expect(restore.body.publicInvitesEnabled).toBe(false);
+    await dmAgent.put(`/api/v1/campaigns/${cid}/invites/policy`).send({ enabled: true });
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+    expect((await dmAgent.get(`/api/v1/campaigns/${cid}/invites`)).body).toEqual([]);
+  });
+
   it('audit log records suspend, revoke_all, and reactivate', async () => {
     const invite = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
     expect(invite.status).toBe(201);
