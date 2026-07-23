@@ -39,7 +39,7 @@ export function isModalDialogOpen(doc: Document): boolean {
 const NATURALLY_FOCUSABLE = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA']);
 
 export function isNaturallyFocusable(el: HTMLElement): boolean {
-  if (el.tagName === 'A') return el.hasAttribute('href');
+  if (el.tagName === 'A') return el.hasAttribute('href') || el.tabIndex >= 0;
   if (NATURALLY_FOCUSABLE.has(el.tagName)) return true;
   return el.tabIndex >= 0;
 }
@@ -51,9 +51,11 @@ export function isNaturallyFocusable(el: HTMLElement): boolean {
  */
 export function shouldPreserveFocusInsideMain(main: HTMLElement, doc: Document): boolean {
   const active = doc.activeElement;
-  if (!(active instanceof HTMLElement)) return false;
-  if (active === doc.body || active === main) return false;
-  return main.contains(active);
+  if (active == null || typeof active !== 'object') return false;
+  if (typeof HTMLElement !== 'undefined' && !(active instanceof HTMLElement)) return false;
+  const el = active as HTMLElement;
+  if (el === doc.body || el === main) return false;
+  return main.contains(el);
 }
 
 /** Prefer the page h1; fall back to the stable main landmark. */

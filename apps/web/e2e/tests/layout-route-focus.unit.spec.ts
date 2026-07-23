@@ -6,6 +6,8 @@ import {
   focusSkipDestination,
   formatDocumentTitle,
   isEntityDeepLinkHash,
+  isNaturallyFocusable,
+  isModalDialogOpen,
   shouldMoveFocusOnNavigation,
   shouldPreserveFocusInsideMain,
 } from '../../src/app/routeFocus';
@@ -57,6 +59,27 @@ test.describe('route focus helpers (#591)', () => {
     expect(formatDocumentTitle({ page: APP_DOCUMENT_TITLE, campaignName: 'Cinderhaven' })).toBe(
       `${APP_DOCUMENT_TITLE} · Cinderhaven`,
     );
+  });
+
+  test('isNaturallyFocusable requires href on anchors unless tabbable', () => {
+    const withHref = { tagName: 'A', hasAttribute: (name: string) => name === 'href' } as unknown as HTMLElement;
+    const withoutHref = { tagName: 'A', hasAttribute: () => false, tabIndex: -1 } as unknown as HTMLElement;
+    const tabindexAnchor = { tagName: 'A', hasAttribute: () => false, tabIndex: 0 } as unknown as HTMLElement;
+
+    expect(isNaturallyFocusable(withHref)).toBe(true);
+    expect(isNaturallyFocusable(withoutHref)).toBe(false);
+    expect(isNaturallyFocusable(tabindexAnchor)).toBe(true);
+  });
+
+  test('isModalDialogOpen detects aria-modal dialogs', () => {
+    const doc = {
+      querySelector: (sel: string) =>
+        sel === '[role="dialog"][aria-modal="true"]' ? { role: 'dialog' } : null,
+    } as unknown as Document;
+    expect(isModalDialogOpen(doc)).toBe(true);
+
+    const emptyDoc = { querySelector: () => null } as unknown as Document;
+    expect(isModalDialogOpen(emptyDoc)).toBe(false);
   });
 
   test('shouldPreserveFocusInsideMain keeps page-managed focus inside main', () => {
