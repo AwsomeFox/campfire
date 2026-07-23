@@ -48,7 +48,11 @@ export interface StatusMenuButtonProps<V extends string> {
   /** The currently-committed (server-acknowledged) value. */
   value: V;
   options: readonly StatusMenuOption<V>[];
-  /** Called when the user commits an option; the menu closes when this settles. */
+  /**
+   * Called when the user commits an option. Enter/Space keep the menu open
+   * until this settles (then close with focus restored); Tab closes the menu
+   * immediately without restoring focus, then awaits this in the background.
+   */
   onSelect: (value: V) => void | Promise<void>;
   /** Disables the trigger (e.g. while a status save is in flight). */
   disabled?: boolean;
