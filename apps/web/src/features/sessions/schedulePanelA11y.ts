@@ -32,7 +32,10 @@ export function formatDatetimeLocalInputValue(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** Relative future datetime-local value (e.g. Playwright fills) that stays in the future. */
+/**
+ * Relative datetime-local value for Playwright fills (days from today at hour:minute).
+ * Callers that need a guaranteed-future instant should pass days >= 1.
+ */
 export function datetimeLocalDaysFromNow(days: number, hour = 18, minute = 0): string {
   const d = new Date();
   d.setDate(d.getDate() + days);
