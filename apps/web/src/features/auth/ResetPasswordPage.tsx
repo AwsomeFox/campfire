@@ -5,9 +5,20 @@
  * below to set a new password. Deep-linkable as /reset-password?code=... so an
  * admin can send a ready-to-use link along with the code.
  */
-import { useState, type FormEvent } from 'react';
+import { useLayoutEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
+import {
+  AUTH_ERROR_IDS,
+  AUTH_FIELD_IDS,
+  AUTH_GENERIC_ERROR,
+  AUTH_PASSWORD_LENGTH_ERROR,
+  AUTH_RATE_LIMIT_ERROR,
+  AUTH_RESET_CODE_ERROR,
+  type AuthErrorState,
+  describedBy,
+  focusAuthError,
+} from './authFormA11y';
 
 export function ResetPasswordPage() {
   const [searchParams] = useSearchParams();
@@ -17,14 +28,35 @@ export function ResetPasswordPage() {
   const [username, setUsername] = useState('');
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);
-  const [requestError, setRequestError] = useState<string | null>(null);
+  const [requestError, setRequestError] = useState<AuthErrorState | null>(null);
 
   // Step 2 — redeem a code.
   const [code, setCode] = useState(searchParams.get('code') ?? '');
   const [newPassword, setNewPassword] = useState('');
   const [confirming, setConfirming] = useState(false);
-  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [confirmError, setConfirmError] = useState<AuthErrorState | null>(null);
   const [done, setDone] = useState(false);
+
+  useLayoutEffect(() => {
+    if (requestError) {
+      focusAuthError(requestError, {
+        fieldIds: { username: 'reset-username' },
+        formErrorId: 'reset-request-error',
+      });
+    }
+  }, [requestError]);
+
+  useLayoutEffect(() => {
+    if (confirmError) {
+      focusAuthError(confirmError, {
+        fieldIds: {
+          code: AUTH_FIELD_IDS.code,
+          newPassword: AUTH_FIELD_IDS.newPassword,
+        },
+        formErrorId: 'reset-confirm-error',
+      });
+    }
+  }, [confirmError]);
 
   async function onRequest(e: FormEvent) {
     e.preventDefault();
@@ -35,9 +67,12 @@ export function ResetPasswordPage() {
       setRequested(true);
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
-        setRequestError('Too many attempts — wait a minute and try again.');
+        setRequestError({ kind: 'form', message: AUTH_RATE_LIMIT_ERROR });
       } else {
-        setRequestError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+        setRequestError({
+          kind: 'form',
+          message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+        });
       }
     } finally {
       setRequesting(false);
@@ -47,6 +82,16 @@ export function ResetPasswordPage() {
   async function onConfirm(e: FormEvent) {
     e.preventDefault();
     setConfirmError(null);
+
+    if (newPassword.length < 8) {
+      setConfirmError({
+        kind: 'fields',
+        fields: { newPassword: AUTH_PASSWORD_LENGTH_ERROR },
+        focus: 'newPassword',
+      });
+      return;
+    }
+
     setConfirming(true);
     try {
       await api.post(`${API}/auth/reset-confirm`, { code: code.trim(), newPassword });
@@ -54,16 +99,27 @@ export function ResetPasswordPage() {
       setTimeout(() => navigate('/login', { replace: true }), 1500);
     } catch (err) {
       if (err instanceof ApiError && err.status === 400) {
-        setConfirmError('That code is invalid or has expired — ask your admin for a fresh one.');
+        setConfirmError({
+          kind: 'fields',
+          fields: { code: AUTH_RESET_CODE_ERROR },
+          focus: 'code',
+        });
       } else if (err instanceof ApiError && err.status === 429) {
-        setConfirmError('Too many attempts — wait a minute and try again.');
+        setConfirmError({ kind: 'form', message: AUTH_RATE_LIMIT_ERROR });
       } else {
-        setConfirmError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+        setConfirmError({
+          kind: 'form',
+          message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+        });
       }
     } finally {
       setConfirming(false);
     }
   }
+
+  const requestFormError = requestError?.kind === 'form' ? requestError.message : null;
+  const confirmFieldErrors = confirmError?.kind === 'fields' ? confirmError.fields : {};
+  const confirmFormError = confirmError?.kind === 'form' ? confirmError.message : null;
 
   return (
     <div
@@ -87,20 +143,33 @@ export function ResetPasswordPage() {
               Request received. Ask your server admin to approve it — they&apos;ll give you a reset code to enter below.
             </p>
           ) : (
-            <form onSubmit={onRequest} className="flex flex-col gap-3">
+            <form onSubmit={onRequest} className="flex flex-col gap-3" noValidate>
               <div className="field">
                 <label htmlFor="reset-username">Username</label>
                 <input
                   id="reset-username"
                   className="input"
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  onChange={(e) => {
+                    setUsername(e.target.value);
+                    if (requestError) setRequestError(null);
+                  }}
                   autoComplete="username"
                   autoFocus={!code}
                   required
                 />
               </div>
-              {requestError && <p className="text-sm text-rose-400">{requestError}</p>}
+              {requestFormError && (
+                <p
+                  id="reset-request-error"
+                  role="alert"
+                  tabIndex={-1}
+                  className="text-sm text-rose-400"
+                  style={{ margin: 0 }}
+                >
+                  {requestFormError}
+                </p>
+              )}
               <button type="submit" className="btn btn-secondary btn-block" style={{ minHeight: 44 }} disabled={requesting}>
                 {requesting ? 'Sending…' : 'Request a reset'}
               </button>
@@ -119,40 +188,77 @@ export function ResetPasswordPage() {
               Password updated — taking you to sign in…
             </p>
           ) : (
-            <form onSubmit={onConfirm} className="flex flex-col gap-3">
+            <form onSubmit={onConfirm} className="flex flex-col gap-3" noValidate>
               <div className="field">
-                <label htmlFor="reset-code">Reset code</label>
+                <label htmlFor={AUTH_FIELD_IDS.code}>Reset code</label>
                 <input
-                  id="reset-code"
+                  id={AUTH_FIELD_IDS.code}
                   className="input"
                   value={code}
-                  onChange={(e) => setCode(e.target.value)}
+                  onChange={(e) => {
+                    setCode(e.target.value);
+                    if (confirmFieldErrors.code) setConfirmError(null);
+                  }}
                   placeholder="cf_reset_…"
                   autoComplete="off"
                   autoFocus={Boolean(code)}
                   required
+                  aria-invalid={confirmFieldErrors.code ? true : undefined}
+                  aria-describedby={describedBy(confirmFieldErrors.code && AUTH_ERROR_IDS.code)}
                 />
+                {confirmFieldErrors.code && (
+                  <p id={AUTH_ERROR_IDS.code} role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>
+                    {confirmFieldErrors.code}
+                  </p>
+                )}
               </div>
               <div className="field">
-                <label htmlFor="reset-new-password">New password</label>
+                <label htmlFor={AUTH_FIELD_IDS.newPassword}>New password</label>
                 <input
-                  id="reset-new-password"
+                  id={AUTH_FIELD_IDS.newPassword}
                   type="password"
                   className="input"
                   value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
+                  onChange={(e) => {
+                    setNewPassword(e.target.value);
+                    if (confirmFieldErrors.newPassword) setConfirmError(null);
+                  }}
                   placeholder="Min 8 characters"
                   autoComplete="new-password"
                   required
                   minLength={8}
+                  aria-invalid={confirmFieldErrors.newPassword ? true : undefined}
+                  aria-describedby={describedBy(
+                    confirmFieldErrors.newPassword && AUTH_ERROR_IDS.newPassword,
+                  )}
                 />
+                {confirmFieldErrors.newPassword && (
+                  <p
+                    id={AUTH_ERROR_IDS.newPassword}
+                    role="alert"
+                    className="text-sm text-rose-400"
+                    style={{ margin: 0 }}
+                  >
+                    {confirmFieldErrors.newPassword}
+                  </p>
+                )}
               </div>
-              {confirmError && <p className="text-sm text-rose-400">{confirmError}</p>}
+              {confirmFormError && (
+                <p
+                  id="reset-confirm-error"
+                  role="alert"
+                  tabIndex={-1}
+                  className="text-sm text-rose-400"
+                  style={{ margin: 0 }}
+                >
+                  {confirmFormError}
+                </p>
+              )}
               <button
                 type="submit"
                 className="btn btn-primary btn-block"
                 style={{ minHeight: 44 }}
-                disabled={confirming || newPassword.length < 8 || !code.trim()}
+                disabled={confirming || !code.trim()}
               >
                 {confirming ? 'Resetting…' : 'Set new password'}
               </button>
