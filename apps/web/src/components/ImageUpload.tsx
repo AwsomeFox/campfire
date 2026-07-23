@@ -14,12 +14,23 @@
  * resolves does the component reset to the committed url, revoking the staged
  * object URL to avoid a blob leak. See imageUploadState.ts for the pure model.
  */
-import { useCallback, useEffect, useReducer, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useReducer, useRef, type DragEvent } from 'react';
 import type { Attachment, AttachmentKind } from '@campfire/schema';
 import { API, ApiError } from '../lib/api';
 import { noteUnauthorizedResponse } from '../lib/sessionExpiry';
 import { Btn } from './ui';
-import { initialUploadState, isPreviewUncommitted, reduceUpload, visiblePreview } from './imageUploadState';
+import {
+  initialDropzoneDrag,
+  isDropzoneDragActive,
+  isRelatedTargetInside,
+  reduceDropzoneDrag,
+} from './imageUploadDragState';
+import {
+  initialUploadState,
+  isPreviewUncommitted,
+  reduceUpload,
+  visiblePreview,
+} from './imageUploadState';
 
 const ACCEPTED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
 const MAX_BYTES = 32 * 1024 * 1024;
@@ -228,8 +239,24 @@ export function ImageUpload({
   // The staged object URL we are responsible for revoking. Tracked alongside the
   // reducer state so we never lose the handle to revoke (issue #583 leak fix).
   const stagedUrlRef = useRef<string | null>(null);
-  const [dragOver, setDragOver] = useState(false);
+  // Issue #845: boolean drag-active + relatedTarget containment so crossing
+  // child boundaries does not flicker the drop affordance. Cleared on drop /
+  // cancel / window blur (not a depth counter — see imageUploadDragState.ts).
+  const [drag, dispatchDrag] = useReducer(reduceDropzoneDrag, initialDropzoneDrag);
+  const dragOver = isDropzoneDragActive(drag);
   const [state, dispatch] = useReducer(reduceUpload, initialUploadState);
+
+  useEffect(() => {
+    const clearDrag = () => dispatchDrag({ type: 'reset' });
+    // dragend covers cancel (Esc) and successful drops that finish outside;
+    // blur covers the tab/window losing focus mid-drag.
+    window.addEventListener('dragend', clearDrag);
+    window.addEventListener('blur', clearDrag);
+    return () => {
+      window.removeEventListener('dragend', clearDrag);
+      window.removeEventListener('blur', clearDrag);
+    };
+  }, []);
 
   // Revoke the staged object URL whenever it is replaced or cleared, and on
   // unmount. This is the leak fix: previously the URL was created on select and
@@ -311,7 +338,7 @@ export function ImageUpload({
 
   function onDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
-    setDragOver(false);
+    dispatchDrag({ type: 'reset' });
     const file = e.dataTransfer.files?.[0];
     if (file) void doUpload(file);
   }
@@ -355,6 +382,7 @@ export function ImageUpload({
           dragOver ? 'border-amber-400/70' : stateBorder
         } ${isFailed ? '' : 'cursor-pointer'}`}
         style={shape === 'circle' ? { width: 96, height: 96 } : { minHeight: 140 }}
+        data-drag-active={dragOver ? 'true' : 'false'}
         onClick={() => {
           // Don't open the picker while a failed upload is awaiting a decision —
           // force an explicit Retry/Discard so the staged file isn't silently
@@ -362,11 +390,20 @@ export function ImageUpload({
           if (isFailed) return;
           inputRef.current?.click();
         }}
-        onDragOver={(e) => {
+        onDragEnter={(e) => {
           e.preventDefault();
-          setDragOver(true);
+          dispatchDrag({ type: 'enter' });
         }}
-        onDragLeave={() => setDragOver(false)}
+        onDragOver={(e) => {
+          // Required so the browser treats this element as a drop target.
+          e.preventDefault();
+        }}
+        onDragLeave={(e) => {
+          dispatchDrag({
+            type: 'leave',
+            stillInside: isRelatedTargetInside(e.currentTarget, e.relatedTarget),
+          });
+        }}
         onDrop={onDrop}
         role="button"
         tabIndex={isFailed ? -1 : 0}
@@ -374,7 +411,11 @@ export function ImageUpload({
         aria-busy={isUploading}
         onKeyDown={(e) => {
           if (isFailed) return;
-          if (e.key === 'Enter' || e.key === ' ') inputRef.current?.click();
+          if (e.key === 'Enter' || e.key === ' ') {
+            // Prevent Space from scrolling the page on a role="button" div.
+            e.preventDefault();
+            inputRef.current?.click();
+          }
         }}
       >
         <input

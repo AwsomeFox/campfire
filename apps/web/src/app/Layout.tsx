@@ -942,8 +942,12 @@ function MoreSheet({
   const sheetRef = useDialog<HTMLDivElement>({ onClose });
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center"
-      style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)' }}
+      className="fixed inset-0 flex items-end justify-center"
+      style={{
+        // Same dialog tier as ConfirmDialog / notifications (issue #794).
+        zIndex: 'var(--cf-layer-dialog)',
+        background: 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)',
+      }}
       onClick={onClose}
     >
       <div
