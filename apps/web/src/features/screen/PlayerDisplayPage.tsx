@@ -169,9 +169,15 @@ export default function PlayerDisplayPage() {
       setLoading(false);
       return;
     }
-    // Persistent failure (404/403/…): invalidate prior projection so a fight the
-    // server no longer treats as live cannot linger on the cast rail.
-    setProjection((current) => projectionAfterLoadFailure(current, cid, false));
+    // Persistent failure (404/403/…): drop the initiative rail. When this load
+    // already fetched a summary, keep the cast painted and surface a rail-scoped
+    // error — do not wipe the whole Player Display to a full-screen failure.
+    setProjection((current) =>
+      projectionAfterLoadFailure(current, cid, {
+        keepLastKnown: false,
+        summary: result.summary,
+      }),
+    );
     setFailure({ campaignId: cid, message: result.message });
     setDisplayStale(false);
     setLoading(false);
@@ -566,7 +572,7 @@ export default function PlayerDisplayPage() {
 
       <div className="cf-screen-grid">
         {/* Initiative rail takes the stage while combat is live */}
-        {encounter && combatants.length > 0 && (
+        {encounter && combatants.length > 0 ? (
           <section className="cf-panel cf-panel-wide">
             <div className="cf-panel-head">
               <h2>Initiative</h2>
@@ -580,7 +586,20 @@ export default function PlayerDisplayPage() {
               ))}
             </ol>
           </section>
-        )}
+        ) : error ? (
+          // Rail-scoped failure after summary succeeded — keep cast/summary visible.
+          <section className="cf-panel cf-panel-wide" aria-label="Initiative">
+            <div className="cf-panel-head">
+              <h2>Initiative</h2>
+            </div>
+            <p className="cf-empty" role="alert">
+              {error}
+            </p>
+            <button className="btn btn-primary cf-rail-retry" onClick={() => void load()}>
+              Retry
+            </button>
+          </section>
+        ) : null}
 
         {/* Party */}
         <section className="cf-panel">
@@ -891,6 +910,7 @@ const SCREEN_CSS = `
   letter-spacing: 0.04em;
 }
 .cf-empty { color: var(--color-neutral-500); font-size: clamp(14px, 1.2vw, 18px); margin: 4px 0 0; }
+.cf-rail-retry { margin-top: 12px; }
 
 /* Initiative */
 .cf-init-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
