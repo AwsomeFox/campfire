@@ -155,7 +155,6 @@ export function NewCampaignWizard({
               id="new-campaign-step-title"
               ref={stepHeadingRef}
               tabIndex={-1}
-              className="focus:outline-none"
               style={{ margin: 0, fontSize: 'inherit', fontWeight: 600 }}
             >
               {STEP_TITLES.details}
@@ -205,7 +204,6 @@ export function NewCampaignWizard({
               id="new-campaign-step-title"
               ref={stepHeadingRef}
               tabIndex={-1}
-              className="focus:outline-none"
               style={{ margin: 0, fontSize: 'inherit', fontWeight: 600 }}
             >
               {STEP_TITLES.system}
