@@ -754,7 +754,8 @@ export class AttachmentsService {
         try {
           size = fs.statSync(filePath).size;
         } catch {
-          continue;
+          // Default to 0 when the file vanishes between readdir and stat.
+          size = 0;
         }
         totalBytes += size;
         // Leading integer is the attachment id (`12.png`, `12.thumb.png`).
