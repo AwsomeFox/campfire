@@ -1363,7 +1363,10 @@ export class EncountersService {
         if (hp !== null) hpMax = hp;
       }
       if (input.initMod === undefined) {
-        initMod = adapter.initiativeModifier(adapter.mapStatblock(data).abilityScores);
+        // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
+        // attributes) are not score-converted a second time (issue #767).
+        const mapped = adapter.mapStatblock(data);
+        initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
       }
     }
 
@@ -1505,6 +1508,11 @@ export class EncountersService {
       // able to rename a combatant or rewrite its hpMax/initMod, only adjust HP.
       if (patch.initiative !== undefined) {
         throw new ForbiddenException('Only dm may set initiative');
+      }
+      // Combat-log actor attribution is DM-authored (apply-damage UI). A player
+      // patching their own combatant must not spoof who dealt the damage/heal.
+      if (patch.actorId !== undefined) {
+        throw new ForbiddenException('Only dm may set combat log actor');
       }
       if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined || patch.tokenSize !== undefined) {
         throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, initMod, or tokenSize');
