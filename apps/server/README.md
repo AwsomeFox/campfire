@@ -461,15 +461,18 @@ domain modules. If the domain modules imported `ProposalsModule` directly
   new campaign's enabled DM, through the same FK-checked membership path used by
   normal campaign creation. `audit` is capped at the latest 500 entries.
   `Content-Disposition: attachment; filename="campfire-<slug>-<date>.json"`.
-- **mdzip**: a zip (via `jszip`, pure-JS, no native dep) of markdown —
-  `campaign.md` (+ visible notes), `quests/<slug>.md` (objectives rendered as
-  a `- [ ]`/`- [x]` checklist, `dmSecret` as a trailing section),
-  `npcs/<slug>.md`, `locations/<slug>.md`, `sessions/<slug-or-number>.md`,
-  `characters/<slug>.md` — same dm-secret/notes-visibility rules as the json
-  export. `Content-Type: application/zip`, same `Content-Disposition`
-  pattern (`.zip` extension). Filenames are slugified (`slugify()` in
-  `export.service.ts`) from each entity's display name; collisions within a
-  folder simply overwrite (not deduped — acceptable for an export snapshot).
+- **mdzip**: a zip (via `jszip`, pure-JS, no native dep) of markdown for every
+  first-class export module (or an explicit exclusion in
+  `archive-manifest.json`). Entity files use collision-proof
+  `{displayStem}__{type}-{id}.md` paths that preserve Unicode stems (CJK,
+  Arabic, emoji, case) while embedding a stable record id — duplicate /
+  case-only / punctuation-only names never overwrite. The zip also carries
+  `campaign.json` (machine round-trip), `archive-manifest.json` (app/schema
+  version, secrecy profile `dm-full`, per-type counts, checksums,
+  exclusions/truncations), and `attachments.md` (campaign map + character
+  portraits + encounter battle maps). Same dm-secret/notes-visibility rules
+  as the json export. `Content-Type: application/zip`, same
+  `Content-Disposition` pattern (`.zip` extension).
 - Both formats write the response manually via `@Res() res` +
   `res.end()`/`res.send()` (not Nest's default return-value handling) —
   returning a `Buffer`/pre-serialized string through Nest's normal
