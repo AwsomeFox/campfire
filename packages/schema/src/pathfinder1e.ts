@@ -1,4 +1,4 @@
-import type { MonsterStatblockData, RuleSystemAdapter } from './index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from './index';
 
 /**
  * Pathfinder 1e rule-system adapter (issue #296, part of the #275 open-ruleset program).
@@ -162,9 +162,15 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   initiativeDie: 20,
   // Pathfinder 1e caps at character level 20 (Core Rulebook), matching the 5e ceiling.
   maxLevel: 20,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = pf1eDexScore(abilities);
-    return dex === null ? 0 : pf1eAbilityModifier(dex);
+    if (dex === null) return 0;
+    // Inline of resolveAbilityModifier — this file cannot runtime-import from ./index
+    // without creating a cycle (index registers Pathfinder1eAdapter).
+    return representation === 'score' ? pf1eAbilityModifier(dex) : Math.trunc(dex);
   },
   conditions: PF1E_CONDITIONS,
   // PF1e statblocks share the 5e-family field vocabulary (size/type/CR/AC/HP/speed/ability
@@ -181,6 +187,7 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
       hitPoints: d.hitPoints ?? d.hit_points ?? d.hp,
       speed: d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
     };
