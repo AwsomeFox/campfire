@@ -391,11 +391,15 @@ export class ExportService {
 
     // Encounter combat logs are markdown-only enrichment (not part of campaign.json).
     const encounterEvents = new Map<number, EncounterEvent[]>();
-    await Promise.all(
-      data.encounters.map(async (e) => {
-        encounterEvents.set(e.id, await this.encounters.listEvents(e.id));
-      }),
-    );
+    const encounterEventChunk = 8;
+    for (let i = 0; i < data.encounters.length; i += encounterEventChunk) {
+      const chunk = data.encounters.slice(i, i + encounterEventChunk);
+      await Promise.all(
+        chunk.map(async (e) => {
+          encounterEvents.set(e.id, await this.encounters.listEvents(e.id));
+        }),
+      );
+    }
 
     const encounterAlloc: Array<{ stem: string; filename: string }> = [];
     for (const e of [...data.encounters].sort((a, b) => a.id - b.id)) {
