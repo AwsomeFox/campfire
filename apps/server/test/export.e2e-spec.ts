@@ -380,14 +380,11 @@ describe('export audit history — full snapshot + metadata (e2e, #731)', () => 
     }
 
     let postSnapshotInsertsDone = false;
-    const realCountForCampaign = audit.countForCampaign.bind(audit);
-    const countSpy = jest.spyOn(audit, 'countForCampaign').mockImplementation(async (targetCampaignId, maxId?) => {
-      const result = await realCountForCampaign(targetCampaignId, maxId);
-      if (
-        targetCampaignId === concurrentCampaignId &&
-        maxId != null &&
-        !postSnapshotInsertsDone
-      ) {
+    // listForCampaignExport counts post-snapshot rows via countForCampaignAbove —
+    // inject race inserts there so truncated reflects concurrent appends (#731).
+    const realCountAbove = audit.countForCampaignAbove.bind(audit);
+    const countSpy = jest.spyOn(audit, 'countForCampaignAbove').mockImplementation(async (targetCampaignId, minId) => {
+      if (targetCampaignId === concurrentCampaignId && !postSnapshotInsertsDone) {
         postSnapshotInsertsDone = true;
         for (let i = 0; i < 20; i++) {
           await audit.log({
@@ -399,7 +396,7 @@ describe('export audit history — full snapshot + metadata (e2e, #731)', () => 
           });
         }
       }
-      return result;
+      return realCountAbove(targetCampaignId, minId);
     });
 
     let exportRes: request.Response;
