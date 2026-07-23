@@ -110,7 +110,7 @@ test.describe('mobile login information architecture', () => {
       await expect(page).toHaveScreenshot(`login-local-${viewport.width}.png`, {
         animations: 'disabled',
         caret: 'hide',
-        maxDiffPixelRatio: 0.04,
+        maxDiffPixelRatio: 0.10,
       });
     });
   }

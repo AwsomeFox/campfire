@@ -152,11 +152,13 @@ export const MAP_FILE_HELP =
   'Upload the battle or location map image to attach. Accepts PNG, JPEG, or WebP. The credit is stamped onto the saved map, which stays DM-only until you reveal it.';
 export const MAP_FILE_ACCEPT = 'image/png,image/jpeg,image/webp';
 
-/** Notes compose (NotesRail). */
+/** Notes compose (NotesRail) and author edit (MyNotesPage, issue #784). */
 export const NOTES_COMPOSE_PREFIX = 'notes-compose';
+export const NOTES_EDIT_PREFIX = 'notes-edit';
 export const NOTES_FIELD = {
   body: 'body',
   whisperTo: 'whisperTo',
+  visibility: 'visibility',
 } as const;
 
 /** Comments compose / edit. */

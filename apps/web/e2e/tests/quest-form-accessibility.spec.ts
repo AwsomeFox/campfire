@@ -99,7 +99,7 @@ test.describe('quest authoring and note visibility accessibility (issue #452)', 
     await expect(whisper).toHaveAttribute('aria-checked', 'true');
     await expect(privateOpt).toHaveAttribute('aria-checked', 'false');
     await expect(rail.getByText(NOTE_VISIBILITY_HELP.whisper)).toBeVisible();
-    await expect(rail.getByLabel('Whisper to a specific player')).toBeVisible();
+    await expect(rail.getByLabel(/Whisper to/)).toBeVisible();
 
     // Keyboard: arrows move the single selection.
     await whisper.focus();

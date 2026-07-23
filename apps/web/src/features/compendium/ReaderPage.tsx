@@ -19,6 +19,11 @@ import { IconPicker } from '../../components/IconPicker';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign } from '../../app/CampaignContext';
 import { useAuth } from '../../app/auth';
+import {
+  COMPENDIUM_SOURCE_COPIED_LABEL,
+  COMPENDIUM_SOURCE_COPY_LABEL,
+  resolveCompendiumSource,
+} from './compendiumProvenance';
 
 export default function ReaderPage() {
   const { campaignId, entryId } = useParams<{ campaignId: string; entryId: string }>();
@@ -151,24 +156,93 @@ export default function ReaderPage() {
           ) : (
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}
-          <p className="text-muted" style={{ margin: 0, fontSize: 11, borderTop: '1px solid var(--color-divider)', paddingTop: 12 }}>
+          <div
+            className="text-muted"
+            style={{ margin: 0, fontSize: 11, borderTop: '1px solid var(--color-divider)', paddingTop: 12 }}
+          >
             {/* Per-entry provenance (issue #734): credit the entry under its OWN license
                 rather than the pack's — a pack may mix OGL/ORC/CC entries, and the reader
                 previously labelled every entry with the pack license. The entry's effective
                 license falls back to the pack's only when the entry didn't carry one
                 (older imports, or a uniformly-licensed pack). Attribution/author are shown
                 when the source data recorded the credit line the licence obliges. */}
-            From {entry.source || pack?.name || 'the installed rule system'}
-            {entry.source && pack?.name && entry.source !== pack.name ? ` (${pack.name})` : ''}
-            {entry.author ? ` · by ${entry.author}` : ''}
-            {(entry.license || pack?.license) ? ` · ${entry.license || pack?.license}` : ''}
-            {entry.attribution ? `. ${entry.attribution}` : ''}.
-          </p>
+            <p style={{ margin: 0 }}>
+              From {entry.source || pack?.name || 'the installed rule system'}
+              {entry.source && pack?.name && entry.source !== pack.name ? ` (${pack.name})` : ''}
+              {entry.author ? ` · by ${entry.author}` : ''}
+              {(entry.license || pack?.license) ? ` · ${entry.license || pack?.license}` : ''}
+              {entry.attribution ? `. ${entry.attribution}` : ''}.
+            </p>
+            {/* Actionable source URL (issue #740): labeled http(s) link + copy, or an
+                honest "Source unavailable" — never dead text that implies traceability. */}
+            <CompendiumSourceRow entrySourceUrl={entry.sourceUrl} packSourceUrl={pack?.sourceUrl} />
+          </div>
         </div>
       )}
       {pickingIcon && entry && (
         <IconPicker value={entry.iconSlug} onSelect={saveIcon} onClose={() => setPickingIcon(false)} />
       )}
     </div>
+  );
+}
+
+/**
+ * Source provenance row (issue #740). Renders a labeled external link when the
+ * stored URL is a safe http(s) value, distinguishes entry-specific deep links
+ * from the pack/API homepage, and offers copy-link. Missing/malformed/non-http
+ * values say "Source unavailable" instead of implying a working upstream.
+ */
+function CompendiumSourceRow({
+  entrySourceUrl,
+  packSourceUrl,
+}: {
+  entrySourceUrl?: string | null;
+  packSourceUrl?: string | null;
+}) {
+  const source = resolveCompendiumSource({ entrySourceUrl, packSourceUrl });
+  const [copied, setCopied] = useState(false);
+
+  if (source.unavailable) {
+    return <p style={{ margin: '6px 0 0' }}>{source.label}</p>;
+  }
+
+  // Capture narrowed fields so the copy closure keeps `string` (TS does not
+  // carry early-return narrowing into nested function declarations).
+  const href = source.href;
+  const label = source.label;
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable — the href is still selectable via the link */
+    }
+  }
+
+  return (
+    <p style={{ margin: '6px 0 0' }}>
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer nofollow"
+        className="underline"
+        style={{ color: 'inherit' }}
+        title={href}
+      >
+        {label} ↗
+      </a>
+      {' · '}
+      <button
+        type="button"
+        onClick={copyLink}
+        title="Copy source URL"
+        className="underline"
+        style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: 'pointer', color: 'inherit' }}
+      >
+        {copied ? COMPENDIUM_SOURCE_COPIED_LABEL : COMPENDIUM_SOURCE_COPY_LABEL}
+      </button>
+    </p>
   );
 }
