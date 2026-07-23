@@ -9,14 +9,16 @@ import { seed, stateFor } from './seed';
  * Covers each RunSessionPage confirm action with a held network request.
  */
 
+// Seed once per worker — fixture ids are stable/idempotent, and calling seed()
+// repeatedly in helpers can diverge if that contract ever changes.
+const seeded = seed();
+
 function encounterUrl(): string {
-  const { campaignId, encounterId } = seed();
-  return `/c/${campaignId}/encounters/${encounterId}`;
+  return `/c/${seeded.campaignId}/encounters/${seeded.encounterId}`;
 }
 
 function endedEncounterUrl(): string {
-  const { campaignId, endedEncounterId } = seed();
-  return `/c/${campaignId}/encounters/${endedEncounterId}`;
+  return `/c/${seeded.campaignId}/encounters/${seeded.endedEncounterId}`;
 }
 
 async function holdRoute(
@@ -78,8 +80,7 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
   test.use({ storageState: stateFor('dm'), serviceWorkers: 'block' });
 
   test('End encounter keeps Ending encounter… while /end is held', async ({ page }) => {
-    const { encounterId } = seed();
-    const { release, started } = await holdRoute(page, `**/api/v1/encounters/${encounterId}/end`, 'POST');
+    const { release, started } = await holdRoute(page, `**/api/v1/encounters/${seeded.encounterId}/end`, 'POST');
 
     await page.goto(encounterUrl());
     await page.getByRole('button', { name: 'End', exact: true }).click();
@@ -91,10 +92,9 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
 
   test('Delete encounter keeps Deleting encounter… while DELETE is held', async ({ page }) => {
     // Delete is only offered for ended/preparing encounters (not running).
-    const { endedEncounterId } = seed();
     const { release, started } = await holdRoute(
       page,
-      `**/api/v1/encounters/${endedEncounterId}`,
+      `**/api/v1/encounters/${seeded.endedEncounterId}`,
       'DELETE',
     );
 
@@ -113,7 +113,7 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
   });
 
   test('Reopen encounter keeps Reopening encounter… while /reopen is held', async ({ page }) => {
-    const { endedEncounterId } = seed();
+    const { endedEncounterId } = seeded;
     const { release, started } = await holdRoute(
       page,
       `**/api/v1/encounters/${endedEncounterId}/reopen`,
@@ -135,7 +135,7 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
   });
 
   test('Remove combatant keeps Removing… while DELETE is held', async ({ page }) => {
-    const { encounterId } = seed();
+    const { encounterId } = seeded;
     const { release, started } = await holdRoute(
       page,
       `**/api/v1/encounters/${encounterId}/combatants/**`,

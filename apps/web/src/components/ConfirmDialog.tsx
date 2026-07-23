@@ -70,9 +70,11 @@ export function ConfirmDialog({
   const [liveStatus, setLiveStatus] = useState('');
   const wasBusy = useRef(false);
   useEffect(() => {
-    if (busy && !wasBusy.current) {
+    if (busy) {
+      // Keep the live region in sync if busyLabel changes while pending
+      // (locale switch / caller prop update).
       setLiveStatus(busyLabel);
-    } else if (!busy && wasBusy.current) {
+    } else if (wasBusy.current) {
       setLiveStatus('');
     }
     wasBusy.current = busy;
