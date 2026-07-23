@@ -111,4 +111,23 @@ export class AiProviderCampaignConfigController {
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
     return this.configs.testConnection(id, body);
   }
+
+  @Post('models')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Fetch available models from the effective or draft AI provider',
+    description:
+      'DM only. Queries the provider\'s model list. Accepts an optional draft body so models can be discovered before saving.',
+  })
+  @ApiBody({ schema: AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA })
+  @ApiResponse({ status: 201, description: 'Available model IDs.', type: Object })
+  async models(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiProviderTestRequestDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    const models = await this.configs.fetchAvailableModels(id, body);
+    return { models };
+  }
 }

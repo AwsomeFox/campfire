@@ -30,7 +30,7 @@ export const AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA: SchemaObject = {
   additionalProperties: false,
   required: ['providerType', 'model'],
   properties: {
-    providerType: { type: 'string', enum: ['openai', 'anthropic', 'mock'] },
+    providerType: { type: 'string', enum: ['openai', 'anthropic', 'gemini', 'mock'] },
     model: { type: 'string', minLength: 1, maxLength: 120 },
     baseUrl: {
       type: 'string',

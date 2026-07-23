@@ -3032,7 +3032,7 @@ export type CoDmDraftResult = z.infer<typeof CoDmDraftResult>;
 // operator environment fallback, server fallback, and a missing credential. The
 // decrypted key is materialized in-process only at call time (the effective-config
 // resolver hands it straight to createAiProvider) and is never serialized to a client.
-export const AiProviderConfigType = z.enum(['openai', 'anthropic', 'mock']);
+export const AiProviderConfigType = z.enum(['openai', 'anthropic', 'gemini', 'mock']);
 export type AiProviderConfigType = z.infer<typeof AiProviderConfigType>;
 
 // Non-secret description of where the effective credential comes from. `server`
