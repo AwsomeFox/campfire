@@ -2525,8 +2525,13 @@ export class EncountersService {
    * Reopens an 'ended' encounter back to 'running' (issue #109) — an accidental /end
    * was previously unrecoverable (the ended page offered only Refresh/Delete). Requires
    * status 'ended'; clears endedAt and restores 'running' while PRESERVING round /
-   * turnIndex / currentCombatantId, so combat resumes exactly where it stopped rather
-   * than resetting to the top of the order.
+   * turnIndex / currentCombatantId when still valid, so combat resumes where it stopped
+   * rather than resetting to the top of the order.
+   *
+   * Issue #489: reopen re-validates the turn pointer against the present roster.
+   * Zero combatants → 409. A missing `currentCombatantId` or one whose initiative is
+   * now null snaps to the top of the server-sorted running order and emits a combat-
+   * log notice. `turnIndex` is always re-derived from that identity pointer.
    *
    * Issue #466: when sheet HP diverged from the combatant snapshot after the previous
    * End, the caller MUST supply a per-conflict `hpResync` direction (`keep_combatant`
@@ -2549,6 +2554,15 @@ export class EncountersService {
     }
 
     const combatantRows = await this.listCombatantRows(encounterId);
+    // Issue #489: refuse to resume a fight with nobody in it (start has the same
+    // guard via #469; reopen previously flipped status and left a null pointer).
+    if (combatantRows.length === 0) {
+      throw new ConflictException({
+        code: 'REOPEN_NO_COMBATANTS',
+        message: 'Cannot reopen an encounter with no combatants — add at least one combatant first',
+      });
+    }
+
     const conflicts = await this.collectHpSyncConflicts(combatantRows);
     const decisions = new Map((input.hpResync ?? []).map((d) => [d.combatantId, d.direction]));
     if (conflicts.length > 0) {
@@ -2562,6 +2576,20 @@ export class EncountersService {
         });
       }
     }
+
+    // Issue #489: re-derive the turn pointer against the present, initiative-bearing
+    // roster before flipping status. A combatant removed (or initiative cleared) while
+    // the fight was ended would otherwise leave a stale currentCombatantId until the
+    // next /next-turn self-healed via advanceTurn.
+    const sorted = sortCombatants(combatantRows.map(combatantToDomain), 'running');
+    const priorCurrentId = encounterRow.currentCombatantId;
+    const priorCurrent = priorCurrentId == null ? undefined : sorted.find((c) => c.id === priorCurrentId);
+    // Missing id OR present-but-null-initiative both snap to the top of the order
+    // and emit a notice (issue #489) — even when that top happens to be the same id.
+    const pointerInvalid = priorCurrent == null || priorCurrent.initiative === null;
+    const currentCombatantId = pointerInvalid ? (sorted[0]?.id ?? null) : priorCurrentId;
+    const turnIndex = turnIndexFor(sorted, currentCombatantId);
+    const turnPointerSnapped = pointerInvalid;
 
     const campaignId = encounterRow.campaignId;
     const ts = nowIso();
@@ -2620,9 +2648,36 @@ export class EncountersService {
         }
       }
 
-      tx.update(encounters).set({ status: 'running', endedAt: null, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
+      tx.update(encounters)
+        .set({
+          status: 'running',
+          endedAt: null,
+          // Issue #489: persist the re-validated pointer with the status flip.
+          currentCombatantId,
+          turnIndex,
+          updatedAt: ts,
+        })
+        .where(eq(encounters.id, encounterId))
+        .run();
       tx.update(campaigns).set({ activeEncounterId: encounterId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
     });
+
+    // Combat-log notice when reopen had to repair a dangling/null-initiative pointer
+    // (issue #489). Appended after the status flip commits — a log failure must not
+    // roll back a successful reopen.
+    if (turnPointerSnapped) {
+      const top = sorted.find((c) => c.id === currentCombatantId);
+      await this.appendEvent(encounterId, encounterRow.round, 'note', {
+        actor: top?.name ?? null,
+        target: top?.name ?? null,
+        actorId: currentCombatantId,
+        targetId: currentCombatantId,
+        detail:
+          priorCurrentId == null || priorCurrent == null
+            ? 'Turn pointer reset to top of order on reopen (previous current combatant missing)'
+            : 'Turn pointer reset to top of order on reopen (previous current combatant had no initiative)',
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -2631,7 +2686,12 @@ export class EncountersService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId,
-      detail: decisionAudit.length > 0 ? JSON.stringify({ hpResync: decisionAudit }) : undefined,
+      detail: JSON.stringify({
+        ...(decisionAudit.length > 0 ? { hpResync: decisionAudit } : {}),
+        ...(turnPointerSnapped
+          ? { turnPointerSnapped: true, previousCombatantId: priorCurrentId, currentCombatantId, turnIndex }
+          : { currentCombatantId, turnIndex }),
+      }),
     });
 
     this.emitEncounterEvent('encounter.updated', campaignId, encounterId);
