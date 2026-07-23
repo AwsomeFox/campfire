@@ -140,12 +140,15 @@ export class AuditService implements OnApplicationBootstrap {
     meta: CampaignAuditExportMeta;
   }> {
     const capturedAt = nowIso();
-    const [maxRow] = await this.db
-      .select({ maxId: sql<number>`coalesce(max(${auditLog.id}), 0)` })
+    const [snapshotRow] = await this.db
+      .select({
+        maxId: sql<number>`coalesce(max(${auditLog.id}), 0)`,
+        total: sql<number>`count(*)`,
+      })
       .from(auditLog)
       .where(eq(auditLog.campaignId, campaignId));
-    const snapshotMaxId = Number(maxRow?.maxId ?? 0);
-    const total = snapshotMaxId === 0 ? 0 : await this.countForCampaign(campaignId, snapshotMaxId);
+    const snapshotMaxId = Number(snapshotRow?.maxId ?? 0);
+    const total = snapshotMaxId === 0 ? 0 : Number(snapshotRow?.total ?? 0);
 
     type Row = Awaited<ReturnType<AuditService['listForCampaign']>>[number];
     const entries: Row[] = [];
