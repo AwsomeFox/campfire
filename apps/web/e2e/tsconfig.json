@@ -12,6 +12,7 @@
   },
   "include": [
     "**/*.ts",
+    "**/*.mts",
     "../playwright.config.ts",
     "../playwright.first-run.config.ts",
     "../src/vite-env.d.ts"

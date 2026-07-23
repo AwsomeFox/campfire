@@ -34,6 +34,7 @@
     "preferences": "Preferences",
     "changePassword": "Change password",
     "signOut": "Sign out",
+    "signedOutAnnouncement": "Signed out",
     "logout": "Logout",
     "dungeonMaster": "Dungeon master",
     "selfHosted": "self-hosted",
