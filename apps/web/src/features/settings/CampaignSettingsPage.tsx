@@ -31,6 +31,12 @@ import {
   type CampaignStatus,
   type StatusConfirmSnapshot,
 } from './statusConfirmState';
+import {
+  assertMutationTarget,
+  decideRouteBoundCommit,
+  mutationsEnabledForRoute,
+  RouteBoundLoadSequencer,
+} from '../../lib/routeBoundRecord';
 
 export default function CampaignSettingsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -45,24 +51,39 @@ export default function CampaignSettingsPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Issue #853: campaign switch must not leave prior settings/forms painted against
+  // the new route id (child cards key off campaign.id; sequencer drops stale commits).
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
 
   const load = async () => {
+    const { generation, signal } = loadSequencerRef.current.begin(id);
     setLoading(true);
     setError(null);
+    setCampaign(null);
     try {
-      const data = await api.get<Campaign>(`${API}/campaigns/${id}`);
-      setCampaign(data);
+      const data = await api.get<Campaign>(`${API}/campaigns/${id}`, { signal });
+      const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, id, data);
+      if (decision.kind !== 'commit') return;
+      setCampaign(decision.record);
     } catch (err) {
+      if (!loadSequencerRef.current.isCurrent(generation, id)) return;
+      setCampaign(null);
+      if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
       setError(err instanceof ApiError ? err.message : "Couldn't load campaign settings.");
     } finally {
-      setLoading(false);
+      if (loadSequencerRef.current.isCurrent(generation, id)) setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (Number.isFinite(id) && role) void load();
+    if (!Number.isFinite(id) || !role) return;
+    void load();
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, role]);
+
+  const settingsReady = mutationsEnabledForRoute(campaign, id, loading);
 
   // Deep-link support (#343): the AI-DM onboarding checklist links to specific controls
   // by hash (e.g. #ai-dm-provider). React Router doesn't auto-scroll to a hash, and the
@@ -98,16 +119,11 @@ export default function CampaignSettingsPage() {
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 640 }}>
       <h3 style={{ margin: '4px 0 0' }}>Campaign settings</h3>
 
-      {loading && !campaign ? (
-        <Card>
-          <Skeleton lines={6} />
-        </Card>
-      ) : error && !campaign ? (
-        <ErrorNote message={error} onRetry={load} />
-      ) : campaign ? (
+      {campaign && settingsReady ? (
         <>
           {error && <ErrorNote message={error} onRetry={load} />}
           <GeneralCard
+            key={`general-${campaign.id}`}
             campaignId={id}
             campaign={campaign}
             onSaved={(c) => {
@@ -116,6 +132,7 @@ export default function CampaignSettingsPage() {
             }}
           />
           <StatusCard
+            key={`status-${campaign.id}`}
             campaignId={id}
             campaign={campaign}
             onSaved={(c) => {
@@ -124,6 +141,7 @@ export default function CampaignSettingsPage() {
             }}
           />
           <PublicRecapSharingCard
+            key={`recap-${campaign.id}`}
             campaign={campaign}
             onChanged={async () => {
               await load();
@@ -131,6 +149,7 @@ export default function CampaignSettingsPage() {
             }}
           />
           <PublicInvitesCard
+            key={`invites-${campaign.id}`}
             campaign={campaign}
             onChanged={async () => {
               await load();
@@ -138,14 +157,16 @@ export default function CampaignSettingsPage() {
             }}
           />
           <RuleSystemCard
+            key={`rules-${campaign.id}`}
             campaignId={id}
             campaign={campaign}
             isAdmin={isAdmin}
             onSaved={(c) => setCampaign(c)}
           />
-          <AiDmCard campaignId={id} />
-          <ExportCard campaignId={id} />
+          <AiDmCard key={`aidm-${campaign.id}`} campaignId={id} />
+          <ExportCard key={`export-${campaign.id}`} campaignId={id} />
           <CloneCard
+            key={`clone-${campaign.id}`}
             campaign={campaign}
             onCloned={(c) => {
               void refreshCampaigns();
@@ -153,6 +174,7 @@ export default function CampaignSettingsPage() {
             }}
           />
           <DangerZoneCard
+            key={`danger-${campaign.id}`}
             campaign={campaign}
             onDeleted={() => {
               void refreshCampaigns();
@@ -160,7 +182,13 @@ export default function CampaignSettingsPage() {
             }}
           />
         </>
-      ) : null}
+      ) : error && !campaign ? (
+        <ErrorNote message={error} onRetry={load} />
+      ) : (
+        <Card>
+          <Skeleton lines={6} />
+        </Card>
+      )}
     </div>
   );
 }
@@ -394,6 +422,8 @@ function GeneralCard({
       setError('Campaign name is required.');
       return;
     }
+    // Issue #853: refuse to PATCH B with form state opened against A.
+    if (!assertMutationTarget(campaign.id, campaignId).ok) return;
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -589,10 +619,14 @@ function StatusCard({
     setError(null);
     const from = campaign.status;
     try {
-      if (isArchivingTransition(from, value) && revokeInvitesOnArchive) {
-        await api.delete(`${API}/campaigns/${campaignId}/invites`);
-      }
-      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { status: value });
+      // Revoke+archive in one server transaction via query flag — never revoke
+      // client-side before the status change, or a failed archive permanently
+      // destroys invite rows while the campaign stays active (#857 Bugbot).
+      const revokeQs =
+        isArchivingTransition(from, value) && revokeInvitesOnArchive ? '?revokeInvites=true' : '';
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}${revokeQs}`, {
+        status: value,
+      });
       onSaved(updated);
       // Announce via the app-root live region (survives the card re-rendering
       // into the archived state) so a screen reader hears the lock land.
@@ -1114,10 +1148,11 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
     setDeleting(true);
     setError(null);
     try {
-      if (revokeInvitesOnTrash) {
-        await api.delete(`${API}/campaigns/${campaign.id}/invites`);
-      }
-      await api.delete(`${API}/campaigns/${campaign.id}`);
+      // Revoke+trash in one server transaction via query flag — never revoke
+      // client-side before trash, or a failed trash permanently destroys invite
+      // rows while the campaign stays live (#857 Bugbot).
+      const revokeQs = revokeInvitesOnTrash ? '?revokeInvites=true' : '';
+      await api.delete(`${API}/campaigns/${campaign.id}${revokeQs}`);
       onDeleted();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't delete campaign.");
