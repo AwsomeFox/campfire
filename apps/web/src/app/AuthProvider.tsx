@@ -205,24 +205,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
+    // Issue #506: clear auth/query/global state FIRST, before waiting on the
+    // server round-trip. On a shared device a slow (or failed) network call must
+    // not leave the authed UI, cached campaign data, or accent/reading-preference
+    // overrides on screen a moment longer than necessary — the local session is
+    // over the instant the user asks to sign out, regardless of what the server
+    // says. `clearAuthStorage()` also fires the storage event that drives
+    // multi-tab sign-out (issue #666), so other tabs clear immediately too.
+    clearAuthStorage();
+    setMe(null);
+    // Drop this account's cached campaign data so the next person to sign in on
+    // this device never inherits it (issue #268), and clear the persisted
+    // offline identity so an offline reload no longer restores this account.
+    lastUserIdRef.current = null;
+    lastInstanceRef.current = null;
+    await clearApiCache();
+    queryClient.clear();
+    clearMeSnapshot();
+    setStaleIdentity(false);
+    setLastSyncedAt(null);
+    setConnectionError(false);
+    applyAccentColor(null);
+    applyReadingPreference(document.documentElement, 'default');
+
+    // Best-effort server-side session invalidation. Client state is already
+    // fully cleared above, so a network failure here (offline, server down,
+    // request already raced by a concurrent logout) must not block, delay, or
+    // reverse the sign-out the user already sees — there is nothing left to
+    // roll back client-side, and a stale/expired session cookie is harmless.
     try {
       await api.post(`${API}/auth/logout`);
-    } finally {
-      clearAuthStorage();
-      setMe(null);
-      // Drop this account's cached campaign data so the next person to sign in on
-      // this device never inherits it (issue #268), and clear the persisted
-      // offline identity so an offline reload no longer restores this account.
-      lastUserIdRef.current = null;
-      lastInstanceRef.current = null;
-      await clearApiCache();
-      queryClient.clear();
-      clearMeSnapshot();
-      setStaleIdentity(false);
-      setLastSyncedAt(null);
-      setConnectionError(false);
-      applyAccentColor(null);
-      applyReadingPreference(document.documentElement, 'default');
+    } catch {
+      // Swallowed intentionally — see comment above.
     }
   }, []);
 

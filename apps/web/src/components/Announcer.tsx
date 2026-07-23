@@ -15,8 +15,15 @@ import { createContext, useCallback, useContext, useRef, useState, type ReactNod
 
 type AnnounceOptions = { assertive?: boolean };
 type AnnounceFn = (message: string, options?: AnnounceOptions) => void;
+type ClearFn = () => void;
 
 const AnnounceContext = createContext<AnnounceFn>(() => {});
+// Issue #506: sign-out on a shared device must not leave a stale live-region
+// message (an HP change, a roll result, an unread count…) sitting in the DOM
+// for the next person at the keyboard to stumble onto in browse mode. Exposed
+// separately from `announce` so callers that only need "wipe it" (logout)
+// don't have to reach for a message string.
+const ClearContext = createContext<ClearFn>(() => {});
 
 export function AnnounceProvider({ children }: { children: ReactNode }) {
   const [polite, setPolite] = useState('');
@@ -31,15 +38,23 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
     rafRef.current = requestAnimationFrame(() => setter(message));
   }, []);
 
+  const clear = useCallback<ClearFn>(() => {
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    setPolite('');
+    setAssertive('');
+  }, []);
+
   return (
     <AnnounceContext.Provider value={announce}>
-      {children}
-      <div aria-live="polite" aria-atomic="true" className="sr-only">
-        {polite}
-      </div>
-      <div role="alert" aria-live="assertive" aria-atomic="true" className="sr-only">
-        {assertive}
-      </div>
+      <ClearContext.Provider value={clear}>
+        {children}
+        <div aria-live="polite" aria-atomic="true" className="sr-only">
+          {polite}
+        </div>
+        <div role="alert" aria-live="assertive" aria-atomic="true" className="sr-only">
+          {assertive}
+        </div>
+      </ClearContext.Provider>
     </AnnounceContext.Provider>
   );
 }
@@ -47,4 +62,9 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
 // eslint-disable-next-line react-refresh/only-export-components
 export function useAnnounce(): AnnounceFn {
   return useContext(AnnounceContext);
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function useClearAnnouncements(): ClearFn {
+  return useContext(ClearContext);
 }

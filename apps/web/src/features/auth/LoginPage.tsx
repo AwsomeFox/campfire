@@ -7,7 +7,7 @@
  * every viewport. SSO is first when OIDC is configured; local authentication is
  * the primary option when OIDC is off and secondary/collapsible when both are available.
  */
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
@@ -224,6 +224,20 @@ export function LoginPage() {
     () => new URLSearchParams(location.search).get('local') === '1',
   );
 
+  // Issue #506: Layout's sign-out flow lands here via `navigate(..., { state:
+  // { signedOut: true } })`. Move focus to the "Sign in" heading so keyboard and
+  // screen-reader users get a clear landing point confirming the account is
+  // gone — without this, focus is left wherever it was on the DOM node React
+  // Router just removed (often nowhere, per WCAG 2.4.3). A normal cold visit or
+  // a session-expiry bounce doesn't carry this flag, so the local form's own
+  // autoFocus (aimed at the username field) is left alone for those.
+  const cameFromSignOut = Boolean((location.state as { signedOut?: boolean } | null)?.signedOut);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (cameFromSignOut) headingRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameFromSignOut]);
+
   // React Router keeps this page mounted for query-only navigation. Mirror the
   // URL on back/forward and recovery-page navigation instead of treating the
   // initial query string as immutable component state.
@@ -284,7 +298,9 @@ export function LoginPage() {
         <div className="login-auth-heading">
           <span className="login-auth-mark" aria-hidden="true"><FlameMark /></span>
           <div>
-            <h2 id="login-title" style={{ margin: 0 }}>Sign in</h2>
+            <h2 id="login-title" ref={headingRef} tabIndex={-1} style={{ margin: 0, outline: 'none' }}>
+              Sign in
+            </h2>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
               to your Campfire server
             </p>
