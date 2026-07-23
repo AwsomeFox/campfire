@@ -79,6 +79,18 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
  */
 export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
 
+/**
+ * Whether a session is in a frozen state (DM pause or human takeover). Used in the step loop
+ * (#1057) to abort early when a concurrent lever fires mid-turn. TS narrows `session.state`
+ * inside the loop (where the initial guard proved it was `running`), so a plain comparison is
+ * flagged as TS2367; this helper performs a runtime-safe check on the mutable property that
+ * cannot be narrowed away, because the lever handlers mutate the object between await points.
+ */
+function isFrozen(session: AiDmSessionState): boolean {
+  const s: string = session.state;
+  return s === 'paused' || s === 'human_control';
+}
+
 /** Why the driver is considered stuck — any one of these trips the ladder (#314). */
 export type AiDmStuckReason =
   | 'tool_error' // a tool call errored (surfaced by the turn loop's stop reason)
@@ -743,7 +755,10 @@ export class AiDriverService {
       for (let step = 0; step < maxSteps; step++) {
         // Mode-switch teardown (#1071) detaches this object while we still hold it — stop
         // before the next provider call so we cannot interleave with a replacement session.
-        if (session.detached) {
+        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
+        // 'paused' or 'human_control'; abort early so the AI doesn't burn further budget,
+        // stream narration, or execute tool calls against a table that's now human-owned.
+        if (session.detached || isFrozen(session)) {
           stopReason = 'aborted';
           break;
         }
@@ -763,7 +778,7 @@ export class AiDriverService {
           maxTokens,
           tools: toolSchemas,
         });
-        if (aborted || session.detached) {
+        if (aborted || session.detached || isFrozen(session)) {
           stopReason = 'aborted';
           if (text) finalNarration = text;
           break;
@@ -795,7 +810,7 @@ export class AiDriverService {
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
 
-        if (session.detached) {
+        if (session.detached || isFrozen(session)) {
           stopReason = 'aborted';
           if (text) finalNarration = text;
           break;
@@ -825,7 +840,7 @@ export class AiDriverService {
           messages,
           executed,
         );
-        if (session.detached) {
+        if (session.detached || isFrozen(session)) {
           stopReason = 'aborted';
           break;
         }
