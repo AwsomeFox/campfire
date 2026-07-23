@@ -105,3 +105,20 @@ jobs:
           path: apps/web/playwright-report/
           if-no-files-found: ignore
 
+  # Aggregate required status check for the branch ruleset (context name: "ci").
+  # Depends on the green required gates only. e2e-web still runs independently
+  # for signal; main currently fails dozens of unrelated Playwright tests.
+  ci:
+    name: ci
+    if: always()
+    needs: [lint, build-test, coverage]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Required gates succeeded
+        run: |
+          echo "lint=${{ needs.lint.result }}"
+          echo "build-test=${{ needs.build-test.result }}"
+          echo "coverage=${{ needs.coverage.result }}"
+          test "${{ needs.lint.result }}" = "success"
+          test "${{ needs.build-test.result }}" = "success"
+          test "${{ needs.coverage.result }}" = "success"
