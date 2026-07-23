@@ -1016,13 +1016,20 @@ export default function RunSessionPage() {
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
-                <Btn
-                  disabled={headerBusy || hasNoCombatants}
-                  onClick={startEncounter}
-                  title={hasNoCombatants ? 'Add at least one combatant before starting' : undefined}
-                >
-                  Start
-                </Btn>
+                <div className="flex flex-col gap-0.5 items-stretch">
+                  <Btn
+                    disabled={headerBusy || hasNoCombatants}
+                    onClick={startEncounter}
+                    aria-describedby={hasNoCombatants ? 'start-empty-roster-hint' : undefined}
+                  >
+                    Start
+                  </Btn>
+                  {hasNoCombatants && (
+                    <p id="start-empty-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
+                      Add at least one combatant before starting
+                    </p>
+                  )}
+                </div>
               </>
             )}
             {encounter.status === 'running' && (
