@@ -4830,6 +4830,8 @@ export type FsCleanupPendingItem = z.infer<typeof FsCleanupPendingItem>;
 export const FsCleanupSummary = z.object({
   pendingCount: z.number().int().nonnegative(),
   failedCount: z.number().int().nonnegative(),
+  /** Total rows in fs_deletion_queue (items may be truncated for the admin UI). */
+  queueCount: z.number().int().nonnegative(),
   items: z.array(FsCleanupPendingItem),
 });
 export type FsCleanupSummary = z.infer<typeof FsCleanupSummary>;

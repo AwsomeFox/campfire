@@ -165,6 +165,11 @@ export function StorageCard() {
             ))}
           </ul>
         )}
+        {stats.fsCleanup.queueCount > stats.fsCleanup.items.length && (
+          <p className="text-[10px] text-slate-500 m-0">
+            Showing {stats.fsCleanup.items.length} of {stats.fsCleanup.queueCount} queued paths (oldest first).
+          </p>
+        )}
         <div className="flex gap-2 justify-end">
           <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void retryFsCleanup()} disabled={busy || fsPending === 0}>
             {busy ? 'Working…' : 'Retry cleanup'}

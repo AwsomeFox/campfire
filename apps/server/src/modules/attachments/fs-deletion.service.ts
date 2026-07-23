@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import fs from 'node:fs';
-import { eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 import type { AuditActorRole, FsCleanupSummary } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { fsDeletionQueue } from '../../db/schema';
@@ -12,6 +12,9 @@ import {
   removePathVerified,
 } from './fs-deletion.util';
 import { uploadsAbsolutePath, uploadsRelativePath, uploadsRoot } from './uploads-path';
+
+/** Max queue rows returned in GET /admin/storage fsCleanup.items (counts stay exact). */
+const FS_CLEANUP_SUMMARY_ITEMS_LIMIT = 100;
 
 export type FsDeletionScope = 'attachment' | 'campaign_purge';
 
@@ -142,12 +145,24 @@ export class FsDeletionService implements OnApplicationBootstrap {
   }
 
   async listPendingSummary(): Promise<FsCleanupSummary> {
-    const rows = await this.db.select().from(fsDeletionQueue).orderBy(fsDeletionQueue.updatedAt);
-    const pendingCount = rows.filter((r) => r.status === 'pending').length;
-    const failedCount = rows.filter((r) => r.status === 'failed').length;
+    const [pendingRow] = await this.db
+      .select({ value: count() })
+      .from(fsDeletionQueue)
+      .where(eq(fsDeletionQueue.status, 'pending'));
+    const [failedRow] = await this.db
+      .select({ value: count() })
+      .from(fsDeletionQueue)
+      .where(eq(fsDeletionQueue.status, 'failed'));
+    const [queueRow] = await this.db.select({ value: count() }).from(fsDeletionQueue);
+    const rows = await this.db
+      .select()
+      .from(fsDeletionQueue)
+      .orderBy(fsDeletionQueue.updatedAt)
+      .limit(FS_CLEANUP_SUMMARY_ITEMS_LIMIT);
     return {
-      pendingCount,
-      failedCount,
+      pendingCount: pendingRow?.value ?? 0,
+      failedCount: failedRow?.value ?? 0,
+      queueCount: queueRow?.value ?? 0,
       items: rows.map((r) => ({
         id: r.id,
         relPath: r.relPath,
