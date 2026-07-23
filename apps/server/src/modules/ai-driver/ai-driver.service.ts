@@ -34,7 +34,8 @@ export type AiDmStopReason =
   | 'budget_exhausted' // the per-campaign token budget hit its hard cap
   | 'tool_error' // a tool call returned an error (hand-off point for the stuck ladder, #314)
   | 'max_steps' // the tool loop hit its iteration ceiling
-  | 'aborted'; // seat left Driver mid-turn; session was torn down (#1071)
+  | 'aborted' // seat left Driver mid-turn; session was torn down (#1071)
+  | 'provider_error'; // provider threw mid-stream (#1046) — unlocks SSE composers
 
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
 export interface AiDmExecutedTool {
@@ -72,7 +73,8 @@ export type AiDmStuckReason =
   | 'max_steps' // the tool loop hit its ceiling without producing final narration
   | 'no_narration' // the turn produced no narration at all
   | 'loop' // the model repeated its previous narration verbatim
-  | 'dispute'; // a player flagged the AI's last ruling as wrong/unfair
+  | 'dispute' // a player flagged the AI's last ruling as wrong/unfair
+  | 'provider_error'; // provider failed mid-stream (#1046)
 
 /** Snapshot of the current stuck condition; null when the seat is healthy. */
 export interface AiDmStuckInfo {
@@ -801,6 +803,23 @@ export class AiDriverService {
 
         if (step === maxSteps - 1) stopReason = 'max_steps';
       }
+    } catch (err) {
+      // Issue #1046: if streamStep throws (provider 5xx / timeout / transport), the exception
+      // used to propagate past this block. `finally` released the seat, but `turn.end` below
+      // never ran — every SSE client's composer stayed locked on "A driver turn is already
+      // in progress." Catch here so we still emit turn.end with provider_error and park the
+      // ladder in awaiting_players for recovery.
+      stopReason = 'provider_error';
+      const detail = err instanceof Error ? err.message : String(err);
+      this.logger.error(`AI DM provider failure on campaign ${campaignId}: ${detail}`, err instanceof Error ? err.stack : undefined);
+      await this.audit.log({
+        actor,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.provider_error',
+        entityType: 'ai-dm',
+        campaignId,
+        detail: `${detail} (triggered by ${triggeredBy.id})`,
+      });
     } finally {
       // Compare-and-set (#381): only release the seat if THIS turn still owns the `running` status.
       // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
@@ -1753,6 +1772,7 @@ function classifyStuck(ctx: {
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
+  if (ctx.stopReason === 'provider_error') return 'provider_error';
   const narration = ctx.narration.trim();
   if (narration === '') return 'no_narration';
   if (ctx.prevNarration && narration === ctx.prevNarration.trim()) return 'loop';
@@ -1774,6 +1794,8 @@ function describeStuck(reason: AiDmStuckReason): string {
       return 'The AI repeated its previous narration verbatim (looping).';
     case 'dispute':
       return 'A player disputed the AI’s last ruling.';
+    case 'provider_error':
+      return 'The AI provider failed mid-response.';
     default:
       return 'The AI needs help.';
   }

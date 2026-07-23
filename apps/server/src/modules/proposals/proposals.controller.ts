@@ -18,7 +18,7 @@ export class CampaignProposalsController {
   @ApiOperation({
     summary: 'List proposals for a campaign',
     description:
-      'Any member may call this. The DM sees ALL proposals for the campaign; a non-DM member sees only their OWN submissions (the proposer self-view — issue #124). Proposals are create/update/delete writes submitted via `?proposed=true` on the underlying entity route, pending dm approval.',
+      'Any member may call this. The DM sees ALL proposals for the campaign; a non-DM member sees only their OWN submissions (the proposer self-view — issue #124). Proposals are create/update/delete writes submitted via `?proposed=true` on the underlying entity route, pending dm approval. Non-DM responses project redacted snapshots (dmSecret stripped; hidden/unexplored targets omitted — issue #817); the DM review queue retains the full persisted snapshot.',
   })
   @ApiQuery({ name: 'status', required: false, enum: ['pending', 'approved', 'rejected', 'withdrawn'], description: 'Filter to a single proposal status.' })
   @ApiResponse({ status: 200, description: 'Proposals for the campaign (all for a DM; the caller\'s own for a non-DM member).' })
@@ -32,7 +32,7 @@ export class CampaignProposalsController {
     // non-DM member sees only their own (filter by their user id).
     const role = await this.access.requireMember(user, campaignId);
     const opts = role === 'dm' ? undefined : { proposerUserId: user.id };
-    return this.proposals.listForCampaign(campaignId, status, opts);
+    return this.proposals.listForCampaign(campaignId, status, role, opts);
   }
 }
 
@@ -117,7 +117,7 @@ export class ProposalsController {
   async revise(@Param('id', ParseIntPipe) id: number, @Body() body: ProposalReviseDto, @CurrentUser() user: RequestUser) {
     const row = await this.proposals.getRowOrThrow(id);
     // Any member may reach this; revise() enforces that the caller is the proposer.
-    await this.access.requireMember(user, row.campaignId);
-    return this.proposals.revise(id, body, user);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.proposals.revise(id, body, user, role);
   }
 }
