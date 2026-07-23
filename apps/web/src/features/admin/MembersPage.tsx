@@ -231,6 +231,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     try {
       await navigator.clipboard.writeText(inviteLinkFor(invite.code));
       setCopiedId(invite.id);
+      setError(null);
       announce(INVITE_COPY_SUCCESS);
       setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
     } catch {
