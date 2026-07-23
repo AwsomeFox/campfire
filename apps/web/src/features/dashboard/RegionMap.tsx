@@ -63,17 +63,37 @@ export function RegionMap({
   const [kbPos, setKbPos] = useState<{ x: number; y: number } | null>(null);
   const [kbAnnouncement, setKbAnnouncement] = useState('');
   const [kbSaving, setKbSaving] = useState(false);
+  const kbAnnounceRaf = useRef<number | null>(null);
 
   const kbMovingLoc = kbMovingId != null ? locations.find((l) => l.id === kbMovingId) : null;
 
-  const startKbMove = useCallback((loc: Location) => {
-    setKbMovingId(loc.id);
-    setKbPos({ x: loc.mapX ?? 50, y: loc.mapY ?? 50 });
-    setKbAnnouncement(`Moving ${loc.name} pin. Use arrow keys to position. Current: ${loc.mapX ?? 50}% horizontal, ${loc.mapY ?? 50}% vertical.`);
+  /** Re-announce identical consecutive messages (matches shared Announcer). */
+  const announceKb = useCallback((message: string) => {
+    setKbAnnouncement('');
+    if (kbAnnounceRaf.current != null) cancelAnimationFrame(kbAnnounceRaf.current);
+    kbAnnounceRaf.current = requestAnimationFrame(() => setKbAnnouncement(message));
   }, []);
+
+  const startKbMove = useCallback((loc: Location) => {
+    const x = Math.max(0, Math.min(100, loc.mapX ?? 50));
+    const y = Math.max(0, Math.min(100, loc.mapY ?? 50));
+    setKbMovingId(loc.id);
+    setKbPos({ x, y });
+    announceKb(
+      `Moving ${loc.name} pin. Use arrow keys to position. Current: ${Math.round(x)}% horizontal, ${Math.round(y)}% vertical.`,
+    );
+  }, [announceKb]);
 
   function handleKbArrow(e: ReactKeyboardEvent) {
     if (kbMovingId == null || kbPos == null) return;
+    const target = e.target as HTMLElement | null;
+    // Let native button activation own Enter/Space; avoid double-save.
+    if (
+      (e.key === 'Enter' || e.key === ' ') &&
+      target?.closest('button, [role="button"]')
+    ) {
+      return;
+    }
     const step = e.shiftKey ? 5 : 1;
     let { x, y } = kbPos;
     switch (e.key) {
@@ -90,35 +110,42 @@ export function RegionMap({
         y = Math.min(100, y + step);
         break;
       case 'Escape':
+        e.preventDefault();
+        e.stopPropagation();
         cancelKbMove();
         return;
       case 'Enter':
+        e.preventDefault();
+        e.stopPropagation();
         void saveKbMove();
         return;
       default:
         return;
     }
     e.preventDefault();
+    e.stopPropagation();
     setKbPos({ x, y });
-    setKbAnnouncement(`${Math.round(x)}% horizontal, ${Math.round(y)}% vertical`);
+    announceKb(`${Math.round(x)}% horizontal, ${Math.round(y)}% vertical`);
   }
 
   function cancelKbMove() {
     setKbMovingId(null);
     setKbPos(null);
-    setKbAnnouncement('Pin move cancelled.');
+    announceKb('Pin move cancelled.');
   }
 
   async function saveKbMove() {
-    if (kbMovingId == null || kbPos == null) return;
+    if (kbMovingId == null || kbPos == null || kbSaving) return;
     setKbSaving(true);
     try {
-      await savePinPercent(kbMovingId, kbPos.x, kbPos.y);
-      setKbAnnouncement(`Pin saved at ${Math.round(kbPos.x)}% horizontal, ${Math.round(kbPos.y)}% vertical.`);
+      const ok = await savePinPercent(kbMovingId, kbPos.x, kbPos.y);
+      if (!ok) {
+        announceKb('Failed to save pin position.');
+        return;
+      }
+      announceKb(`Pin saved at ${Math.round(kbPos.x)}% horizontal, ${Math.round(kbPos.y)}% vertical.`);
       setKbMovingId(null);
       setKbPos(null);
-    } catch {
-      setKbAnnouncement('Failed to save pin position.');
     } finally {
       setKbSaving(false);
     }
@@ -166,15 +193,18 @@ export function RegionMap({
     }
   }
 
-  async function savePinPercent(locationId: number, xPct: number, yPct: number) {
+  /** Returns false when the patch fails (error state is set; does not throw). */
+  async function savePinPercent(locationId: number, xPct: number, yPct: number): Promise<boolean> {
     try {
       await api.patch(`${API}/locations/${locationId}`, {
         mapX: Math.max(0, Math.min(100, xPct)),
         mapY: Math.max(0, Math.min(100, yPct)),
       });
       onChange();
+      return true;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't move the pin.");
+      return false;
     }
   }
 
@@ -290,7 +320,9 @@ export function RegionMap({
                   <Link
                     to={`/c/${campaignId}/locations/${loc.id}`}
                     onClick={(e) => {
-                      if (draggingId != null) e.preventDefault();
+                      // Block navigation during pointer drag or in-progress keyboard move
+                      // so unsaved coordinates aren't abandoned by an accidental open.
+                      if (draggingId != null || kbMovingId != null) e.preventDefault();
                     }}
                     className="flex flex-col items-center gap-0.5"
                   >
@@ -399,9 +431,8 @@ export function RegionMap({
               onChange={(e) => {
                 const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
                 setKbPos({ ...kbPos, x: v });
-                setKbAnnouncement(`${v}% horizontal, ${Math.round(kbPos.y)}% vertical`);
+                announceKb(`${v}% horizontal, ${Math.round(kbPos.y)}% vertical`);
               }}
-              onKeyDown={handleKbArrow}
               aria-describedby="kb-pin-help"
             />
           </div>
@@ -417,9 +448,8 @@ export function RegionMap({
               onChange={(e) => {
                 const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
                 setKbPos({ ...kbPos, y: v });
-                setKbAnnouncement(`${Math.round(kbPos.x)}% horizontal, ${v}% vertical`);
+                announceKb(`${Math.round(kbPos.x)}% horizontal, ${v}% vertical`);
               }}
-              onKeyDown={handleKbArrow}
               aria-describedby="kb-pin-help"
             />
           </div>

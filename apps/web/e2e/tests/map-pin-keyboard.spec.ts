@@ -6,34 +6,61 @@ import { seed, stateFor } from './seed';
  *
  * Validates that map pins can be moved with keyboard alone, labels are properly
  * associated with coordinate fields, help text is visible, and screen reader
- * announcements fire via aria-live.
+ * announcements fire via aria-live. Also covers pointer/touch drag on the
+ * dashboard map surface.
  */
+
+async function pinSeedLocation(page: import('@playwright/test').Page, locationId: number, mapX = 50, mapY = 50) {
+  const res = await page.context().request.patch(`/api/v1/locations/${locationId}`, {
+    data: { mapX, mapY },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Tiny 1×1 PNG so RegionMap renders the image-pin drag surface (not the SVG fallback). */
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+async function ensureCampaignMap(page: import('@playwright/test').Page, campaignId: number) {
+  const upload = await page.context().request.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+    multipart: {
+      kind: 'map',
+      file: {
+        name: 'world.png',
+        mimeType: 'image/png',
+        buffer: TINY_PNG,
+      },
+    },
+  });
+  expect(upload.ok()).toBeTruthy();
+  const attachment = await upload.json();
+  const patch = await page.context().request.patch(`/api/v1/campaigns/${campaignId}`, {
+    data: { mapAttachmentId: attachment.id },
+  });
+  expect(patch.ok()).toBeTruthy();
+}
 
 test.describe('map pin keyboard positioning', () => {
   test.use({ storageState: stateFor('dm') });
 
   test.describe('RegionMap dashboard — DM move buttons', () => {
-    test('shows modality-neutral help text when map card is present', async ({ page }) => {
-      const { campaignId } = seed();
+    test('shows modality-neutral help text and Move pin buttons', async ({ page }) => {
+      const { campaignId, navigation } = seed();
+      await pinSeedLocation(page, navigation.locationId);
+
       await page.goto(`/c/${campaignId}`);
-      await page.waitForLoadState('networkidle');
       const mapCard = page.getByTestId('dashboard-map');
-      // Skip assertion if the seed campaign has no world map
-      if (await mapCard.isVisible()) {
-        // At minimum the help text should be modality-neutral
-        await expect(mapCard.getByText('Open or move a pin')).toBeVisible();
-      }
+      await expect(mapCard).toBeVisible();
+
+      await expect(mapCard.getByText('Open or move a pin')).toBeVisible();
+      await expect(mapCard.getByRole('button', { name: /Move .+ pin/ }).first()).toBeVisible();
     });
 
     test('arrow-key pin movement changes coordinates', async ({ page }) => {
       const { campaignId, navigation } = seed();
-      // First, set mapX/mapY on the seed location so it's pinned
-      const ctx = page.context();
-      const api = await ctx.request.patch(
-        `/api/v1/locations/${navigation.locationId}`,
-        { data: { mapX: 50, mapY: 50 } },
-      );
-      expect(api.ok()).toBeTruthy();
+      await pinSeedLocation(page, navigation.locationId);
 
       await page.goto(`/c/${campaignId}`);
       const mapCard = page.getByTestId('dashboard-map');
@@ -65,10 +92,7 @@ test.describe('map pin keyboard positioning', () => {
 
     test('labels are associated with fields', async ({ page }) => {
       const { campaignId, navigation } = seed();
-      await page.context().request.patch(
-        `/api/v1/locations/${navigation.locationId}`,
-        { data: { mapX: 50, mapY: 50 } },
-      );
+      await pinSeedLocation(page, navigation.locationId);
       await page.goto(`/c/${campaignId}`);
       const mapCard = page.getByTestId('dashboard-map');
       const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
@@ -87,10 +111,7 @@ test.describe('map pin keyboard positioning', () => {
 
     test('help text explaining percentage range is visible', async ({ page }) => {
       const { campaignId, navigation } = seed();
-      await page.context().request.patch(
-        `/api/v1/locations/${navigation.locationId}`,
-        { data: { mapX: 50, mapY: 50 } },
-      );
+      await pinSeedLocation(page, navigation.locationId);
       await page.goto(`/c/${campaignId}`);
       const mapCard = page.getByTestId('dashboard-map');
       const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
@@ -104,10 +125,7 @@ test.describe('map pin keyboard positioning', () => {
 
     test('screen reader announcements via aria-live', async ({ page }) => {
       const { campaignId, navigation } = seed();
-      await page.context().request.patch(
-        `/api/v1/locations/${navigation.locationId}`,
-        { data: { mapX: 50, mapY: 50 } },
-      );
+      await pinSeedLocation(page, navigation.locationId);
       await page.goto(`/c/${campaignId}`);
       const mapCard = page.getByTestId('dashboard-map');
       const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
@@ -129,10 +147,7 @@ test.describe('map pin keyboard positioning', () => {
 
     test('save and cancel after keyboard move', async ({ page }) => {
       const { campaignId, navigation } = seed();
-      await page.context().request.patch(
-        `/api/v1/locations/${navigation.locationId}`,
-        { data: { mapX: 50, mapY: 50 } },
-      );
+      await pinSeedLocation(page, navigation.locationId);
       await page.goto(`/c/${campaignId}`);
       const mapCard = page.getByTestId('dashboard-map');
       const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
@@ -165,10 +180,7 @@ test.describe('map pin keyboard positioning', () => {
 
     test('edge values (0, 100) are clamped correctly', async ({ page }) => {
       const { campaignId, navigation } = seed();
-      await page.context().request.patch(
-        `/api/v1/locations/${navigation.locationId}`,
-        { data: { mapX: 0, mapY: 100 } },
-      );
+      await pinSeedLocation(page, navigation.locationId, 0, 100);
       await page.goto(`/c/${campaignId}`);
       const mapCard = page.getByTestId('dashboard-map');
       const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
@@ -187,6 +199,50 @@ test.describe('map pin keyboard positioning', () => {
       await yInput.focus();
       await page.keyboard.press('ArrowDown');
       await expect(yInput).toHaveValue('100');
+    });
+
+    test('pointer/touch drag repositions a pinned location', async ({ page }) => {
+      const { campaignId, navigation } = seed();
+      await ensureCampaignMap(page, campaignId);
+      await pinSeedLocation(page, navigation.locationId, 20, 20);
+
+      await page.goto(`/c/${campaignId}`);
+      const mapCard = page.getByTestId('dashboard-map');
+      await expect(mapCard).toBeVisible();
+      await expect(mapCard.getByRole('img', { name: 'Campaign map' })).toBeVisible();
+
+      const pinLink = mapCard.locator(`a[href="/c/${campaignId}/locations/${navigation.locationId}"]`);
+      await expect(pinLink).toBeVisible();
+      const pin = pinLink.locator('xpath=..'); // absolute-positioned drag handle wrapper
+
+      const surface = mapCard.locator('.relative.overflow-hidden').first();
+      const box = await surface.boundingBox();
+      expect(box).toBeTruthy();
+      if (!box) return;
+
+      const start = await pin.boundingBox();
+      expect(start).toBeTruthy();
+      if (!start) return;
+
+      const fromX = start.x + start.width / 2;
+      const fromY = start.y + start.height / 2;
+      // Drag toward the lower-right quadrant (~70%, ~70%)
+      const toX = box.x + box.width * 0.7;
+      const toY = box.y + box.height * 0.7;
+
+      await page.mouse.move(fromX, fromY);
+      await page.mouse.down();
+      await page.mouse.move(toX, toY, { steps: 8 });
+      await page.mouse.up();
+
+      // Drag should leave the pin away from the 20/20 seed toward the lower-right.
+      await expect
+        .poll(async () => {
+          const res = await page.context().request.get(`/api/v1/locations/${navigation.locationId}`);
+          const body = await res.json();
+          return Number(body.mapX) > 40 && Number(body.mapY) > 40;
+        })
+        .toBe(true);
     });
   });
 
@@ -220,7 +276,8 @@ test.describe('map pin keyboard positioning', () => {
       const xInput = page.getByLabel('Horizontal position (%)');
       await xInput.fill('42');
 
-      const pinForm = page.getByLabel(/Move .+ pin/);
+      // LocationPage pin UI is a role=group named via aria-labelledby, not a labeled control
+      const pinForm = page.getByRole('group', { name: /Move .+ pin/ });
       const saveBtn = pinForm.getByRole('button', { name: 'Save' });
       await saveBtn.click();
 

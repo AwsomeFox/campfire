@@ -338,6 +338,9 @@ export default function LocationPage() {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     const clampedX = Math.max(0, Math.min(100, x));
     const clampedY = Math.max(0, Math.min(100, y));
+    // Keep the form in sync with the clamped values that will be submitted.
+    setPinX(String(clampedX));
+    setPinY(String(clampedY));
     setPinSaving(true);
     try {
       const updated = await api.patch<Location>(`${API}/locations/${id}`, { mapX: clampedX, mapY: clampedY });
@@ -347,7 +350,7 @@ export default function LocationPage() {
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "Couldn't move the pin.";
       setError(msg);
-      announce(`Failed to save pin position: ${msg}`);
+      announce(`Failed to save pin position: ${msg}`, { assertive: true });
     } finally {
       setPinSaving(false);
     }
