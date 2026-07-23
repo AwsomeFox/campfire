@@ -2261,6 +2261,10 @@ export class CampaignsService {
     };
     await this.fsDeletion.auditRequested(auditCtx);
 
+    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
+    const plannedFsCleanup = await this.fsDeletion.reserveUploadPaths([campaignUploadsDir], auditCtx);
+
+
     // This hand-rolled cascade is the ONLY teardown mechanism on databases created
     // before FK enforcement shipped (issue #69) — SQLite cannot ALTER-ADD a foreign
     // key, so a pre-#69 DB carries no constraints and a bare `DELETE FROM campaigns`
@@ -2340,8 +2344,7 @@ export class CampaignsService {
 
     await this.fsDeletion.auditMetadataComplete(auditCtx);
 
-    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
-    return this.fsDeletion.removeUploadPaths([campaignUploadsDir], auditCtx);
+    return this.fsDeletion.completeReservedUploadPaths(plannedFsCleanup, auditCtx);
   }
 
   async summary(id: number, role: Role): Promise<CampaignSummary> {

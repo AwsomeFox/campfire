@@ -76,40 +76,65 @@ export class FsDeletionService implements OnApplicationBootstrap {
   }
 
   /**
-   * Remove absolute paths under uploads/, enqueue any path that could not be verified
-   * gone, and emit filesystem audit stages.
+   * Durably reserve upload paths for erasure BEFORE metadata deletion commits, then
+   * attempt verified removal. Crash between reserve+metadata commit and FS remove
+   * leaves retryable queue rows (issue #727). Paths that erase successfully are
+   * dequeued immediately.
    */
-  async removeUploadPaths(
+  async reserveUploadPaths(
     absolutePaths: string[],
     ctx: FsDeletionAuditContext,
-  ): Promise<FsDeletionOutcome> {
-    const pendingPaths: string[] = [];
+  ): Promise<Array<{ abs: string; rel: string; kind: 'file' | 'directory' }>> {
+    const planned: Array<{ abs: string; rel: string; kind: 'file' | 'directory' }> = [];
     for (const abs of absolutePaths) {
       let rel: string;
       try {
         rel = uploadsRelativePath(abs);
       } catch (err) {
         this.logger.error(
-          `Refusing to enqueue invalid upload path ${abs}: ${
+          `Refusing to reserve invalid upload path ${abs}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
         continue;
       }
+      let kind: 'file' | 'directory' = 'file';
+      try {
+        if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) kind = 'directory';
+      } catch {
+        /* path may already be gone — still reserve so drain can no-op cleanly */
+      }
+      await this.enqueue(rel, {
+        kind,
+        scope: ctx.scope,
+        campaignId: ctx.campaignId,
+        entityId: ctx.entityId,
+        error: 'awaiting verified erasure',
+      });
+      planned.push({ abs, rel, kind });
+    }
+    return planned;
+  }
+
+  /**
+   * After metadata deletion: verify FS removal for reserved paths, dequeue successes,
+   * and emit filesystem audit stages.
+   */
+  async completeReservedUploadPaths(
+    planned: Array<{ abs: string; rel: string; kind: 'file' | 'directory' }>,
+    ctx: FsDeletionAuditContext,
+  ): Promise<FsDeletionOutcome> {
+    const pendingPaths: string[] = [];
+    for (const { abs, rel, kind } of planned) {
       const result = removePathVerified(abs, {
         recursive: true,
         rmSync: fs.rmSync.bind(fs),
         existsSync: fs.existsSync.bind(fs),
       });
-      if (result.ok) continue;
-
-      let kind: 'file' | 'directory' = 'file';
-      try {
-        if (fs.statSync(abs).isDirectory()) kind = 'directory';
-      } catch {
-        /* path may have disappeared between remove attempt and enqueue */
+      if (result.ok) {
+        await this.db.delete(fsDeletionQueue).where(eq(fsDeletionQueue.relPath, rel));
+        continue;
       }
-
       pendingPaths.push(rel);
       await this.enqueue(rel, {
         kind,
@@ -142,6 +167,15 @@ export class FsDeletionService implements OnApplicationBootstrap {
       detail: pendingPaths.join(', '),
     });
     return { filesPending: true, pendingPaths };
+  }
+
+  /** Convenience: reserve → caller deletes metadata → complete. Prefer split APIs for crash safety. */
+  async removeUploadPaths(
+    absolutePaths: string[],
+    ctx: FsDeletionAuditContext,
+  ): Promise<FsDeletionOutcome> {
+    const planned = await this.reserveUploadPaths(absolutePaths, ctx);
+    return this.completeReservedUploadPaths(planned, ctx);
   }
 
   async listPendingSummary(): Promise<FsCleanupSummary> {

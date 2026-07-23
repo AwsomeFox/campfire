@@ -895,6 +895,12 @@ export class AttachmentsService implements OnApplicationBootstrap {
     };
     await this.fsDeletion.auditRequested(auditCtx);
 
+    const filePath = this.filePath(existing);
+    const thumbPath = this.thumbPath(existing);
+    // Reserve FS cleanup rows BEFORE metadata commit so a crash cannot orphan bytes
+    // without a durable retry record (issue #727).
+    const planned = await this.fsDeletion.reserveUploadPaths([filePath, thumbPath], auditCtx);
+
     const portraitSuffix = `%/attachments/${id}/file`;
     this.db.transaction((tx) => {
       tx.delete(attachments).where(eq(attachments.id, id)).run();
@@ -905,12 +911,10 @@ export class AttachmentsService implements OnApplicationBootstrap {
 
     await this.fsDeletion.auditMetadataComplete(auditCtx, existing.kind);
 
-    const filePath = this.filePath(existing);
-    const thumbPath = this.thumbPath(existing);
     this.etagCache.delete(filePath);
     this.etagCache.delete(thumbPath);
 
-    return this.fsDeletion.removeUploadPaths([filePath, thumbPath], auditCtx);
+    return this.fsDeletion.completeReservedUploadPaths(planned, auditCtx);
   }
 
   // ---------- storage management (issue #24) ----------
