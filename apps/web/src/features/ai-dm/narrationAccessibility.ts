@@ -53,7 +53,8 @@ export type NarrationLogAddition =
     };
 
 export interface NarrationLogAdvance {
-  cursor: NarrationLogCursor;
+  /** Null only for an empty mount snapshot before seed/hydration settles. */
+  cursor: NarrationLogCursor | null;
   additions: NarrationLogAddition[];
 }
 
@@ -96,14 +97,40 @@ function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
 }
 
 /**
+ * Pins the cursor past every currently announceable entry without producing
+ * live-region additions. Use once mount/seed/hydration has settled so join
+ * context is never re-read aloud; afterward {@link advanceNarrationLog} treats
+ * further ids as live.
+ */
+export function silenceNarrationLogBaseline(
+  entries: readonly TranscriptEntry[],
+): NarrationLogCursor {
+  const seenEntryIds = new Set<string>();
+  for (const entry of entries) {
+    if (!isAnnounceable(entry)) continue;
+    seenEntryIds.add(entry.id);
+  }
+  return { seenEntryIds };
+}
+
+/**
  * Advances an id-based cursor without re-announcing hydrated/seeded history.
  * A null cursor establishes the baseline (open or reload never reads the past
- * aloud). Streaming DM bubbles are ignored until `status === 'done'` (turn.end).
+ * aloud). An empty snapshot with a null cursor stays null so a later session
+ * seed can still be silenced via {@link silenceNarrationLogBaseline} / a null
+ * pass — promoting to an empty cursor here would treat seed lines as live.
+ * Streaming DM bubbles are ignored until `status === 'done'` (turn.end).
  */
 export function advanceNarrationLog(
   entries: readonly TranscriptEntry[],
   cursor: NarrationLogCursor | null,
 ): NarrationLogAdvance {
+  // Keep the cursor unset on an empty mount snapshot. Callers that have finished
+  // the seed/hydration phase should pin via silenceNarrationLogBaseline([]).
+  if (cursor === null && entries.length === 0) {
+    return { cursor: null, additions: [] };
+  }
+
   const seenEntryIds = cursor?.seenEntryIds ?? new Set<string>();
   const additions: NarrationLogAddition[] = [];
 

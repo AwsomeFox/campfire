@@ -59,6 +59,7 @@ import {
   NARRATION_LOG_LIVE_REGION,
   NARRATION_STATUS_LIVE_REGION,
   resolveComposerA11ySnapshot,
+  silenceNarrationLogBaseline,
   type ComposerA11ySnapshot,
   type NarrationLogAddition,
   type NarrationLogCursor,
@@ -169,20 +170,47 @@ export default function AiTablePage() {
 
   // Seed a fresh transcript (empty localStorage) from thin session state so a brand-new
   // browser drops in behind a "joined mid-session" divider showing scene + last narration.
+  // `narrationLogLive` stays false until this phase settles so the SR log mirror does not
+  // treat the delayed seed as live additions (#1077 / Bugbot).
   const seededRef = useRef(false);
+  const [narrationLogLive, setNarrationLogLive] = useState(false);
   useEffect(() => {
-    if (seededRef.current || !isDriver) return;
     if (transcript.entries.length > 0) {
-      seededRef.current = true;
+      // Hydrated history (or seed applied on the previous commit): no further seed.
+      if (!seededRef.current) seededRef.current = true;
+      if (!narrationLogLive) setNarrationLogLive(true);
       return;
     }
-    if (session) {
-      if (session.scene || session.lastNarration) {
-        dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
-      }
-      seededRef.current = true;
+    if (seededRef.current) {
+      if (!narrationLogLive) setNarrationLogLive(true);
+      return;
     }
-  }, [session, isDriver, transcript.entries.length]);
+    // Seat still loading: `isDriver` is false while data is missing, but a driver
+    // session seed may still arrive — wait before enabling the live log.
+    if (!seatQuery.isFetched) return;
+    if (!isDriver) {
+      seededRef.current = true;
+      setNarrationLogLive(true);
+      return;
+    }
+    // Driver: wait for the session read so join-context seed can land in the same
+    // settle pass as enabling the live log (empty/error session → empty baseline).
+    if (!sessionQuery.isFetched) return;
+    if (session?.scene || session?.lastNarration) {
+      dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
+    }
+    seededRef.current = true;
+    // Batched with the seed dispatch so the next commit sees seeded entries + live
+    // together; the log effect then silences the baseline instead of announcing it.
+    setNarrationLogLive(true);
+  }, [
+    session,
+    isDriver,
+    transcript.entries.length,
+    seatQuery.isFetched,
+    sessionQuery.isFetched,
+    narrationLogLive,
+  ]);
 
   // Subscribe to the narration stream. Only opened in Driver mode; the hook itself also
   // stops on a 401/403 (feature off / not a member), so a non-member simply gets nothing.
@@ -253,11 +281,18 @@ export default function AiTablePage() {
   const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
 
   useEffect(() => {
+    // Delay until seed/hydration settles — an early pass on [] would pin an empty
+    // cursor and then announce the later session seed as live additions.
+    if (!narrationLogLive) return;
+    if (narrationLogCursorRef.current === null) {
+      narrationLogCursorRef.current = silenceNarrationLogBaseline(transcript.entries);
+      return;
+    }
     const advanced = advanceNarrationLog(transcript.entries, narrationLogCursorRef.current);
     narrationLogCursorRef.current = advanced.cursor;
     if (advanced.additions.length === 0) return;
     setNarrationLogMirror((prev) => [...prev, ...advanced.additions]);
-  }, [transcript.entries]);
+  }, [transcript.entries, narrationLogLive]);
 
   useEffect(() => {
     // Non-streaming lock reasons already carry the localized copy; streaming uses

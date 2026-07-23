@@ -8,6 +8,8 @@ import {
   NARRATION_STREAM_DEBOUNCE_MS,
   pendingStreamingNarrationChunk,
   resolveComposerA11ySnapshot,
+  silenceNarrationLogBaseline,
+  type NarrationLogCursor,
 } from '../../src/features/ai-dm/narrationAccessibility';
 import {
   dmEntryText,
@@ -122,7 +124,9 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
   });
 
   test('announces player actions as log additions without waiting on the DM', () => {
-    const baseline = advanceNarrationLog([], null);
+    // Empty tables pin an empty baseline after seed/hydration settles (not via
+    // advanceNarrationLog([], null), which must keep the cursor unset).
+    const baseline = silenceNarrationLogBaseline([]);
     const withPlayer = transcriptReducer(emptyTranscript, {
       type: 'localPlayer',
       memberName: 'Runa',
@@ -131,7 +135,7 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
       id: 'p1',
       at,
     });
-    const advanced = advanceNarrationLog(withPlayer.entries, baseline.cursor);
+    const advanced = advanceNarrationLog(withPlayer.entries, baseline);
     expect(advanced.additions).toEqual([
       {
         id: 'p1',
@@ -144,6 +148,86 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     expect(formatNarrationLogAddition(advanced.additions[0]!)).toBe(
       'Aria, played by Runa: I peek through the keyhole.',
     );
+  });
+
+  test('empty start → session seed stays silent (no join-context re-read)', () => {
+    // Page mount with empty localStorage: the log effect must not promote a
+    // cursor yet. Promoting here is the Bugbot failure mode (seed then looks live).
+    const premature = advanceNarrationLog([], null);
+    expect(premature.cursor).toBeNull();
+    expect(premature.additions).toEqual([]);
+
+    const seeded = transcriptReducer(emptyTranscript, {
+      type: 'seed',
+      scene: 'Candlelit cellar',
+      lastNarration: 'Rats skitter in the dark.',
+      at,
+    });
+    expect(seeded.entries.length).toBeGreaterThanOrEqual(2);
+
+    // After seed settles, pin baseline without mirroring (page: silenceNarrationLogBaseline).
+    const baseline = silenceNarrationLogBaseline(seeded.entries);
+    expect(advanceNarrationLog(seeded.entries, baseline).additions).toEqual([]);
+
+    // Same seed snapshot with a still-null cursor also silences (null = baseline pass).
+    const nullPass = advanceNarrationLog(seeded.entries, null);
+    expect(nullPass.additions).toEqual([]);
+    expect(nullPass.cursor).not.toBeNull();
+
+    // Mirror stays empty through the empty→seed path; only a later live line announces.
+    const mirror: ReturnType<typeof advanceNarrationLog>['additions'] = [];
+    let cursor: NarrationLogCursor | null = premature.cursor;
+    let live = false;
+
+    // Mount: live log not enabled yet.
+    if (live) {
+      const step = advanceNarrationLog([], cursor);
+      cursor = step.cursor;
+      mirror.push(...step.additions);
+    }
+
+    // Seed arrives; enable live and silence baseline in one settled pass.
+    live = true;
+    if (cursor === null) {
+      cursor = silenceNarrationLogBaseline(seeded.entries);
+    } else {
+      const step = advanceNarrationLog(seeded.entries, cursor);
+      cursor = step.cursor;
+      mirror.push(...step.additions);
+    }
+    expect(mirror).toEqual([]);
+
+    const withPlayer = transcriptReducer(seeded, {
+      type: 'localPlayer',
+      memberName: 'Runa',
+      text: 'I light a torch.',
+      id: 'p-live',
+      at,
+    });
+    const liveStep = advanceNarrationLog(withPlayer.entries, cursor);
+    expect(liveStep.additions).toEqual([
+      {
+        id: 'p-live',
+        kind: 'player',
+        memberName: 'Runa',
+        characterName: undefined,
+        text: 'I light a torch.',
+      },
+    ]);
+  });
+
+  test('premature empty cursor would wrongly announce seed (failure mode)', () => {
+    // Guard: if a caller pins `{ seenEntryIds: new Set() }` on [], seed looks live.
+    const bogusCursor: NarrationLogCursor = { seenEntryIds: new Set() };
+    const seeded = transcriptReducer(emptyTranscript, {
+      type: 'seed',
+      scene: 'The tavern',
+      lastNarration: 'The bard sings.',
+      at,
+    });
+    const leaked = advanceNarrationLog(seeded.entries, bogusCursor);
+    expect(leaked.additions.length).toBeGreaterThan(0);
+    expect(leaked.additions.some((a) => a.kind === 'system' && a.variant === 'divider')).toBe(true);
   });
 
   test('turn.start/end and composer lock/unlock produce distinct status messages', () => {
