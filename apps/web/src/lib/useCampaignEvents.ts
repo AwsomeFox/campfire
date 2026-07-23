@@ -16,6 +16,7 @@
 import { useEffect, useRef } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
 import { API } from './api';
+import { SseParser, type SseParseSignal } from './sseParse';
 
 export interface CampaignEventsHandlers {
   onEvent: (event: CampaignEvent) => void;
@@ -78,15 +79,6 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
     return typeof v.scheduleId === 'number';
   }
   return false;
-}
-
-/** Extracts the concatenated `data:` payload of one SSE event block. */
-function sseBlockData(block: string): string {
-  return block
-    .split('\n')
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice('data:'.length).trimStart())
-    .join('\n');
 }
 
 export function useCampaignEvents(campaignId: number | undefined, handlers: CampaignEventsHandlers): void {
@@ -170,25 +162,36 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
           if (reconnected) handlersRef.current.onReconnect?.();
 
           const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let sep: number;
-            while ((sep = buffer.indexOf('\n\n')) !== -1) {
-              const data = sseBlockData(buffer.slice(0, sep));
-              buffer = buffer.slice(sep + 2);
+          // Incremental SSE parser (#748): CRLF/CR/LF frames, heartbeats, multiline
+          // data, UTF-8 chunk splits, and bounded recovery for malformed streams.
+          const parser = new SseParser();
+          const consume = (signals: SseParseSignal[]) => {
+            for (const signal of signals) {
+              if (signal.kind === 'recovered') {
+                // Parser discarded mid-stream bytes — connection stays up, but
+                // UI may have missed events; mark catch-up and refetch now.
+                needsCatchUp = true;
+                if (!disposed) handlersRef.current.onReconnect?.();
+                continue;
+              }
+              const data = signal.message.data;
               if (!data) continue;
               try {
                 const parsed: unknown = JSON.parse(data);
                 // Keepalive pings and unknown future event types are ignored here.
                 if (isCampaignEvent(parsed) && !disposed) handlersRef.current.onEvent(parsed);
               } catch {
-                /* malformed frame — skip */
+                /* malformed JSON payload — skip */
               }
             }
+          };
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) {
+              consume(parser.flush());
+              break;
+            }
+            consume(parser.push(value));
           }
           // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
           throw new Error('SSE stream ended');
