@@ -2840,6 +2840,48 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(digest.questId).toBe(questId);
     expect(digest.combatantCount).toBe(4); // the four auto-added PCs
     expect(digest.downCount).toBe(0);
+    expect(digest.monstersDefeated).toBe(0); // no monsters in this fight
+  });
+
+  // Issue #625: the campaign-summary down tally used to sum EVERY combatant at 0 HP /
+  // dead — including dead monsters — so 5 dropped goblins + 1 fallen PC read as "6 down."
+  // downCount must now count only PCs/NPCs who fell, with monsters reported separately
+  // in monstersDefeated.
+  it('digest downCount excludes dead monsters and reports them via monstersDefeated (issue #625)', async () => {
+    const server = ctx.app.getHttpServer();
+    const enc = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Goblin ambush' });
+
+    // Add two CR-10 ogres (the seeded statblock) — auto-added PCs make up the party.
+    const mon1 = await request(server)
+      .post(`/api/v1/encounters/${enc.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: cr10EntryId });
+    expect(mon1.status).toBe(201);
+    const mon2 = await request(server)
+      .post(`/api/v1/encounters/${enc.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: cr10EntryId });
+    expect(mon2.status).toBe(201);
+
+    // Drop both ogres to 0 HP (defeated) and drop ONE of the four PCs to 0 HP (fallen).
+    await request(server).patch(`/api/v1/encounters/${enc.body.id}/combatants/${mon1.body.id}`).set(dm).send({ hpSet: 0 });
+    await request(server).patch(`/api/v1/encounters/${enc.body.id}/combatants/${mon2.body.id}`).set(dm).send({ hpSet: 0 });
+    const pcList = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(dm);
+    const firstPc = pcList.body.combatants.find((c: { kind: string }) => c.kind === 'character');
+    expect(firstPc).toBeDefined();
+    await request(server).patch(`/api/v1/encounters/${enc.body.id}/combatants/${firstPc.id}`).set(dm).send({ hpSet: 0 });
+
+    const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(dm);
+    expect(summary.status).toBe(200);
+    const digest = summary.body.encounters.find((e: { id: number }) => e.id === enc.body.id);
+    expect(digest).toBeDefined();
+    expect(digest.combatantCount).toBe(6); // 4 PCs + 2 ogres
+    // The fix: only the one fallen PC is counted, not the two dead ogres.
+    expect(digest.downCount).toBe(1);
+    expect(digest.monstersDefeated).toBe(2);
   });
 
   it("a note can pin to entityType 'encounter'", async () => {

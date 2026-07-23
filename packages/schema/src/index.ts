@@ -2317,7 +2317,12 @@ export const EncounterDigest = z.object({
   questId: Id.nullable(),
   sessionId: Id.nullable(),
   combatantCount: z.number().int().nonnegative(),
-  downCount: z.number().int().nonnegative(), // combatants at 0 HP / down / dead
+  // Issue #625: the "down" tally used to sum EVERY combatant at 0 HP / dead — including
+  // every dead monster — which inflated a glance at the summary. It now counts only
+  // PCs (and NPCs) who fell; defeated monsters are reported separately so each number
+  // is meaningful on its own.
+  downCount: z.number().int().nonnegative(), // kind='character'|'npc' at 0 HP / down / dead
+  monstersDefeated: z.number().int().nonnegative(), // kind='monster' at 0 HP / dead
 });
 export type EncounterDigest = z.infer<typeof EncounterDigest>;
 export const CampaignSummary = z.object({
