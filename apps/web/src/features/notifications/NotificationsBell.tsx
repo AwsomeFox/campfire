@@ -132,6 +132,8 @@ function typeIcon(type: Notification['type']): string {
       return 'scroll-unfurled';
     case 'proposal_submitted':
       return 'quill-ink';
+    case 'inbox_submitted':
+      return 'envelope';
     case 'proposal_resolved':
       return 'scales';
     case 'ai_dm_alert':

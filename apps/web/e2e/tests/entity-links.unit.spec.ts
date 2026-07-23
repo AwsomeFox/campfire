@@ -28,6 +28,7 @@ const expected = {
   timeline: '/c/7/timeline?event=11#entity-timeline-11',
   item: '/c/7/inventory?item=11#entity-item-11',
   note: '/c/7/notes?note=11#entity-note-11',
+  inbox: '/c/7/inbox?inbox=11#entity-inbox-11',
   arc: '/c/7/storylines?arc=11#entity-arc-11',
   beat: '/c/7/storylines?beat=11#entity-beat-11',
 } as const;
@@ -152,6 +153,8 @@ test.describe('source adapters', () => {
     expect(href('note_shared')).toBe('/c/7/notes');
     expect(href('proposal_submitted')).toBe('/c/7/proposals');
     expect(href('proposal_resolved')).toBe('/c/7/proposals');
+    expect(href('inbox_submitted')).toBe('/c/7/inbox');
+    expect(href('inbox_submitted', { entityId: 11 })).toBe(expected.inbox);
     expect(href('ai_dm_alert')).toBe('/c/7/table');
     expect(href('added_to_campaign')).toBe('/c/7');
     expect(href('character_reassigned', { entityType: 'character', entityId: 11 })).toBe(expected.character);
