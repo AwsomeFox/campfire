@@ -105,9 +105,11 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     const sessions = await request(harness.server).get(`${API}/campaigns/${campaignId}/sessions`).set(dm);
     expect(sessions.body).toHaveLength(0);
 
-    // Budget was metered against the seat.
+    // Budget was metered against the seat (#1055: scribe runs bump activity counters too).
     const seat = await harness.getSeat(campaignId);
     expect(seat.body.tokensUsed).toBeGreaterThan(0);
+    expect(seat.body.turnCount).toBe(1);
+    expect(seat.body.lastTurnAt).not.toBeNull();
 
     // Approving the proposal is what finally publishes the recap (co-DM discipline).
     const approve = await request(harness.server).post(`${API}/proposals/${proposal.id}/approve`).set(dm).send({});

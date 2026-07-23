@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   Note,
@@ -344,20 +344,22 @@ export class ScribeService implements OnApplicationBootstrap {
       return this.record(campaignId, trigger, user, 'failed', { detail: 'provider returned empty recap', sourceHash, tokensUsed, provider: providerName });
     }
 
-    // 6. Meter the cost against the seat budget atomically (mirrors AiDmService.meterTurn's
-    //    #272 in-SQL clamp so two concurrent runs can't under-count the cap).
-    //    Also increments turnCount (#1055) so scribe runs count toward the seat's activity.
-    this.db.transaction((tx) => {
-      tx.update(aiDmSeats)
-        .set({
-          tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${tokensUsed})`,
-          turnCount: sql`${aiDmSeats.turnCount} + 1`,
-          lastTurnAt: nowIso(),
-          updatedAt: nowIso(),
-        })
-        .where(eq(aiDmSeats.campaignId, campaignId))
-        .run();
-    });
+    // 6. Meter the cost against the seat budget atomically (AiDmService.meterTurn's
+    //    #272 in-SQL clamp + turnCount/lastTurnAt for #1055). On failure, still record a job.
+    try {
+      await this.aiDm.meterTurn(campaignId, tokensUsed, {
+        actor: auditActor(user),
+        action: 'scribe.meter',
+        detail: `${trigger} metering (+${tokensUsed} tokens)`,
+      });
+    } catch (err) {
+      return this.record(campaignId, trigger, user, 'failed', {
+        detail: `metering error: ${err instanceof Error ? err.message : String(err)}`,
+        sourceHash,
+        tokensUsed,
+        provider: providerName,
+      });
+    }
 
     // 7. Dry run: preview only — metered (a real call was made) but nothing filed.
     if (dryRun) {
