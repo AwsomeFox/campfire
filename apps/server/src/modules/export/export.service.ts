@@ -249,12 +249,12 @@ export class ExportService {
       audit: auditExport.entries,
       auditMeta: auditExport.meta,
       auditNote:
-        'Campaign portability export (GET /campaigns/:id/export) includes the retained audit trail captured in ' +
+        'Campaign portability export (GET /api/v1/campaigns/:campaignId/export) includes the retained audit trail captured in ' +
         'auditMeta.cutoff — not a full-server backup. A server-wide SQLite/disk backup preserves every table ' +
         'row (including audit appended after the snapshot and server-admin audit with campaign_id NULL). Imports ' +
         'do not replay audit history. When auditMeta.truncated > 0, rows are missing from this snapshot ' +
         '(retention pruning during export and/or audit appended after auditMeta.cutoff.snapshotMaxId); ' +
-        'page GET /campaigns/:id/audit for the live log.',
+        'page GET /api/v1/campaigns/:campaignId/audit for the live log.',
       proposals: proposalList,
       encounters: encountersWithCombatants,
       // Issue #266: these were silently omitted before — a DM's export/backup lost

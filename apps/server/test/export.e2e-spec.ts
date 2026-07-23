@@ -5,7 +5,7 @@ import JSZip from 'jszip';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { auditLog } from '../src/db/schema';
-import { AuditService } from '../src/modules/audit/audit.service';
+import { AuditService, computeCampaignAuditExportTruncated } from '../src/modules/audit/audit.service';
 
 // Minimal valid 1x1 PNG (smallest possible real PNG payload) — matches the fixture
 // used in attachments.e2e-spec.ts.
@@ -355,6 +355,8 @@ describe('export audit history — full snapshot + metadata (e2e, #731)', () => 
     expect(res.body.auditMeta.cutoff.oldestExportedCreatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(res.body.auditNote).toMatch(/portability export/i);
     expect(res.body.auditNote).toMatch(/backup/i);
+    expect(res.body.auditNote).toMatch(/\/api\/v1\/campaigns\/:campaignId\/export/);
+    expect(res.body.auditNote).toMatch(/\/api\/v1\/campaigns\/:campaignId\/audit/);
   });
 
   it('concurrent audit inserts during export surface in auditMeta.truncated', async () => {
@@ -377,31 +379,57 @@ describe('export audit history — full snapshot + metadata (e2e, #731)', () => 
       await db.insert(auditLog).values(batch.slice(i, i + 100));
     }
 
-    const concurrentInserts = (async () => {
-      for (let i = 0; i < 20; i++) {
-        await audit.log({
-          actor: 'export-dm',
-          actorRole: 'dm',
-          action: 'test.export.race',
-          campaignId: concurrentCampaignId,
-          detail: `race-${i}`,
-        });
+    let postSnapshotInsertsDone = false;
+    const realCountForCampaign = audit.countForCampaign.bind(audit);
+    const countSpy = jest.spyOn(audit, 'countForCampaign').mockImplementation(async (targetCampaignId, maxId?) => {
+      const result = await realCountForCampaign(targetCampaignId, maxId);
+      if (
+        targetCampaignId === concurrentCampaignId &&
+        maxId != null &&
+        !postSnapshotInsertsDone
+      ) {
+        postSnapshotInsertsDone = true;
+        for (let i = 0; i < 20; i++) {
+          await audit.log({
+            actor: 'export-dm',
+            actorRole: 'dm',
+            action: 'test.export.race',
+            campaignId: concurrentCampaignId,
+            detail: `race-${i}`,
+          });
+        }
       }
-    })();
+      return result;
+    });
 
-    const [exportRes] = await Promise.all([
-      dmAgent.get(`/api/v1/campaigns/${concurrentCampaignId}/export?format=json`),
-      concurrentInserts,
-    ]);
+    let exportRes: request.Response;
+    try {
+      exportRes = await dmAgent.get(`/api/v1/campaigns/${concurrentCampaignId}/export?format=json`);
+    } finally {
+      countSpy.mockRestore();
+    }
 
     expect(exportRes.status).toBe(200);
     expect(exportRes.body.auditMeta.exported).toBeGreaterThanOrEqual(concurrentExtra);
     expect(exportRes.body.auditMeta.exported).toBe(exportRes.body.audit.length);
-    expect(exportRes.body.auditMeta.total).toBe(exportRes.body.auditMeta.exported);
-    expect(exportRes.body.auditMeta.truncated).toBeGreaterThanOrEqual(0);
-    expect(exportRes.body.auditMeta.exported + exportRes.body.auditMeta.truncated).toBeGreaterThanOrEqual(
-      exportRes.body.auditMeta.total,
+
+    const snapshotMaxId = exportRes.body.auditMeta.cutoff.snapshotMaxId as number;
+    const retainedNow = await audit.countForCampaign(concurrentCampaignId);
+    const retainedInSnapshotNow = await audit.countForCampaign(concurrentCampaignId, snapshotMaxId);
+    const appendedAfterSnapshot = Math.max(0, retainedNow - retainedInSnapshotNow);
+
+    expect(appendedAfterSnapshot).toBeGreaterThan(0);
+    expect(exportRes.body.auditMeta.truncated).toBe(
+      computeCampaignAuditExportTruncated(
+        exportRes.body.auditMeta.total,
+        exportRes.body.auditMeta.exported,
+        retainedNow,
+        retainedInSnapshotNow,
+      ),
     );
+    expect(exportRes.body.auditMeta.truncated).toBeGreaterThanOrEqual(appendedAfterSnapshot);
+    expect(postSnapshotInsertsDone).toBe(true);
+    expect(retainedNow).toBeGreaterThanOrEqual(concurrentExtra + 20);
   });
 });
 
