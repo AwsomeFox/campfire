@@ -156,8 +156,10 @@ test.describe('semantic consistency across representative shipped surfaces', () 
     await page.goto(`/c/${fixture.campaignId}/quests/${fixture.quests.active.id}`);
     await expect(semantic(page, 'quest-status', 'active')).toHaveCount(2); // header + facts
     await page.getByRole('button', { name: /Quest status:/i }).click();
+    const listbox = page.getByRole('listbox');
+    await expect(listbox).toBeVisible();
     for (const [status, expected] of Object.entries(QUEST_EXPECTATIONS)) {
-      const menuBadge = page.getByRole('button').filter({ has: semantic(page, 'quest-status', status) });
+      const menuBadge = listbox.getByRole('option').filter({ has: semantic(page, 'quest-status', status) });
       await expect(menuBadge).toHaveCount(1);
       await expectSemanticBadge(menuBadge.locator('[data-semantic="quest-status"]'), expected.label, expected.variant);
     }
