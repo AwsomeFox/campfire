@@ -44,7 +44,7 @@ function ScheduleCard({
   role: Role | null;
 }) {
   const roster = rsvpSummary(schedule.rsvps);
-  const canOpenEncounters = role === 'dm' || role === 'player' || role === 'viewer';
+  const canOpenSessionTools = role === 'dm' || role === 'player' || role === 'viewer';
   const showDmTools = role === 'dm';
 
   return (
@@ -123,7 +123,7 @@ function ScheduleCard({
       {happeningNow && schedule.notes && (
         <Markdown className="!text-xs !text-[color:var(--color-text)] !m-0">{schedule.notes}</Markdown>
       )}
-      {happeningNow && canOpenEncounters && (
+      {happeningNow && canOpenSessionTools && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {showDmTools && (
             <Link to={`/c/${campaignId}/encounters`} className="btn btn-ghost" style={{ fontSize: 12, minHeight: 36 }}>

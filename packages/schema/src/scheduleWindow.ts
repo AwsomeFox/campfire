@@ -58,25 +58,35 @@ export function isScheduleNotEnded(
 /**
  * Split schedules into in-progress / upcoming / past.
  * In-progress and upcoming keep soonest-first order; past is most-recent first.
+ * Invalid `scheduledAt` values sort last in ascending lists / first in past
+ * (finite sentinel), so comparators never return NaN.
  */
 export function partitionSchedules<T extends ScheduleWindowFields>(
   schedules: readonly T[],
   nowMs: number = Date.now(),
 ): { inProgress: T[]; upcoming: T[]; past: T[] } {
-  const inProgress: T[] = [];
-  const upcoming: T[] = [];
-  const past: T[] = [];
-  for (const s of schedules) {
-    const phase = schedulePhase(s.scheduledAt, s.durationMinutes, nowMs);
-    if (phase === 'in_progress') inProgress.push(s);
-    else if (phase === 'upcoming') upcoming.push(s);
-    else past.push(s);
-  }
-  const byStartAsc = (a: T, b: T) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt);
-  const byStartDesc = (a: T, b: T) => Date.parse(b.scheduledAt) - Date.parse(a.scheduledAt);
-  inProgress.sort(byStartAsc);
-  upcoming.sort(byStartAsc);
-  past.sort(byStartDesc);
+  type Row = { row: T; startMs: number; phase: SchedulePhase };
+  const classified: Row[] = schedules.map((row) => {
+    const startMs = Date.parse(row.scheduledAt);
+    const phase = schedulePhase(row.scheduledAt, row.durationMinutes, nowMs);
+    return {
+      row,
+      startMs: Number.isFinite(startMs) ? startMs : Number.POSITIVE_INFINITY,
+      phase,
+    };
+  });
+  const inProgress = classified
+    .filter((r) => r.phase === 'in_progress')
+    .sort((a, b) => a.startMs - b.startMs)
+    .map((r) => r.row);
+  const upcoming = classified
+    .filter((r) => r.phase === 'upcoming')
+    .sort((a, b) => a.startMs - b.startMs)
+    .map((r) => r.row);
+  const past = classified
+    .filter((r) => r.phase === 'past')
+    .sort((a, b) => b.startMs - a.startMs)
+    .map((r) => r.row);
   return { inProgress, upcoming, past };
 }
 

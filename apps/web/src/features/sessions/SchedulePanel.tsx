@@ -12,6 +12,7 @@ import {
   endSessionDurationMinutes,
   extendSessionDurationMinutes,
   partitionSchedules,
+  scheduleEndsAtMs,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
@@ -66,16 +67,22 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   }, [load]);
 
   // Issue #818: keep a game night in the live lists until scheduledAt+duration ends.
-  // Re-render when the soonest in-progress window ends so "Happening now" does not stale.
+  // Wake at the next phase boundary (soonest upcoming start or in-progress end) so
+  // "Next session" ↔ "Happening now" flips without a reload.
   const [scheduleNowMs, setScheduleNowMs] = useState(() => Date.now());
   useEffect(() => {
-    const { inProgress: live } = partitionSchedules(schedules, scheduleNowMs);
-    if (live.length === 0) return;
-    const ends = live
-      .map((s) => Date.parse(s.scheduledAt) + s.durationMinutes * 60_000)
-      .filter((ms) => Number.isFinite(ms) && ms > scheduleNowMs);
-    if (ends.length === 0) return;
-    const delay = Math.min(...ends) - scheduleNowMs + 25;
+    const { inProgress: live, upcoming: nextUp } = partitionSchedules(schedules, scheduleNowMs);
+    const boundaries: number[] = [];
+    for (const s of live) {
+      const endMs = scheduleEndsAtMs(s.scheduledAt, s.durationMinutes);
+      if (Number.isFinite(endMs) && endMs > scheduleNowMs) boundaries.push(endMs);
+    }
+    for (const s of nextUp) {
+      const startMs = Date.parse(s.scheduledAt);
+      if (Number.isFinite(startMs) && startMs > scheduleNowMs) boundaries.push(startMs);
+    }
+    if (boundaries.length === 0) return;
+    const delay = Math.min(...boundaries) - scheduleNowMs + 25;
     const timer = window.setTimeout(() => setScheduleNowMs(Date.now()), Math.max(25, delay));
     return () => window.clearTimeout(timer);
   }, [schedules, scheduleNowMs]);
