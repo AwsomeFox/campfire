@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { SettingsService } from '../../src/modules/settings/settings.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
+import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { BackupService } from '../../src/modules/backup/backup.service';
 import { BACKUP_CADENCE_KEY, type BackupCadenceState } from '../../src/modules/backup/backup-cadence';
 import { settings } from '../../src/db/schema';
@@ -90,7 +91,8 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     // receives (see db.module DbHolder). AuditService/SettingsService only use
     // it for inserts/reads, so handing them the proxy directly mirrors runtime.
     const db = holder.proxy as DrizzleDb;
-    return new BackupService(holder, new AuditService(db), new SettingsService(db));
+    const audit = new AuditService(db);
+    return new BackupService(holder, audit, new SettingsService(db), new AttachmentsService(db, audit));
   }
 
   it('runs an initial catch-up backup on the first boot after enabling (no prior cadence row)', async () => {

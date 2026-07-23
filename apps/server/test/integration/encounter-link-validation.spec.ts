@@ -7,6 +7,7 @@ import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
+import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -44,7 +45,8 @@ describe('encounter link validation on create (real SQLite, issue #864)', () => 
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm, audit);
-    const encountersService = new EncountersService(orm, audit, events, rolls, revisions);
+    const attachments = new AttachmentsService(orm, audit);
+    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments);
     // Capture SSE emits without needing a live subscriber — reject paths must not emit.
     const emitted: Array<{ type: string; campaignId: number }> = [];
     jest.spyOn(events, 'emit').mockImplementation((event) => {
