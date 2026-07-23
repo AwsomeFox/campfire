@@ -4,6 +4,7 @@ import type { CampaignSummary, Role, Campaign, Encounter } from '@campfire/schem
 
 type DangerLevel = Campaign['dangerLevel'];
 import { api, API, ApiError } from '../../lib/api';
+import { useUnsavedWork } from '../../lib/useUnsavedWork';
 import { Btn } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
@@ -42,6 +43,8 @@ export function StatusHeader({
   // Inline editor status line mirrors the Settings card: a transient "Saved."
   // confirmation after a successful write, cleared by a short timer.
   const dirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
+  // Issue #760: block Switch campaign while the inline dashboard editor is dirty.
+  useUnsavedWork(`dashboard-metadata:${campaignId}`, editing && dirty);
 
   function startEdit() {
     setName(campaign.name);
