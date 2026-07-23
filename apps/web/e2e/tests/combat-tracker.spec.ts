@@ -24,6 +24,7 @@ function endedEncounterUrl(): string {
 }
 
 async function openEncounter(page: Page) {
+  await page.request.post(`/api/v1/encounters/${seed().encounterId}/reopen`);
   await page.goto(encounterUrl());
   await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
 }
