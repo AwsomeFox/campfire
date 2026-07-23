@@ -4,8 +4,8 @@ import {
   fallbackPageTitle,
   focusMainDestination,
   formatDocumentTitle,
+  isEntityDeepLinkHash,
   pageTitleFromMain,
-  shouldMoveFocusOnNavigation,
 } from './routeFocus';
 
 type Props = {
@@ -31,19 +31,30 @@ export function RouteChangeFocus({ mainRef, campaignName = null }: Props) {
     const previousPathname = previousPathnameRef.current;
     previousPathnameRef.current = location.pathname;
 
-    if (!shouldMoveFocusOnNavigation(previousPathname, location.pathname, location.hash)) {
-      return;
-    }
+    // Pathname unchanged (query/hash-only) — leave title/focus to the page.
+    if (previousPathname === location.pathname) return;
 
     const pathFallback = fallbackPageTitle(location.pathname);
+    const onPageTitle = (pageTitle: string) => {
+      document.title = formatDocumentTitle({
+        page: pageTitle,
+        campaignName: campaignRef.current,
+      });
+    };
+
+    // Entity deep-links: EntityDeepLinkFocus owns keyboard focus, but we still
+    // observe async h1 text so document.title does not stick on the path fallback.
+    if (isEntityDeepLinkHash(location.hash)) {
+      return focusMainDestination(main, {
+        fallbackPageTitle: pathFallback,
+        onPageTitle,
+        moveFocus: false,
+      });
+    }
+
     return focusMainDestination(main, {
       fallbackPageTitle: pathFallback,
-      onPageTitle: (pageTitle) => {
-        document.title = formatDocumentTitle({
-          page: pageTitle,
-          campaignName: campaignRef.current,
-        });
-      },
+      onPageTitle,
     });
   }, [location.pathname, location.hash, mainRef]);
 

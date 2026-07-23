@@ -153,6 +153,12 @@ export type FocusMainOptions = {
   fallbackPageTitle?: string;
   /** Skip when a modal dialog owns focus management. */
   skipWhenModalOpen?: boolean;
+  /**
+   * When false, only resolve/publish the page title (MutationObserver for async h1)
+   * without moving keyboard focus. Used for entity deep-links where EntityDeepLinkFocus
+   * owns focus (issue #591 / Copilot).
+   */
+  moveFocus?: boolean;
 };
 
 /**
@@ -164,6 +170,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     return () => {};
   }
 
+  const moveFocus = opts.moveFocus !== false;
   let observer: MutationObserver | null = null;
   let frame = 0;
   let timeout = 0;
@@ -174,12 +181,14 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     opts.onPageTitle?.(page);
   };
 
-  const focusTarget = (target: HTMLElement) => {
+  const settleOnTarget = (target: HTMLElement) => {
     publishTitle();
-    frame = window.requestAnimationFrame(() => {
-      if (shouldPreserveFocusInsideMain(main, document)) return;
-      focusProgrammatically(target);
-    });
+    if (moveFocus) {
+      frame = window.requestAnimationFrame(() => {
+        if (shouldPreserveFocusInsideMain(main, document)) return;
+        focusProgrammatically(target);
+      });
+    }
     observer?.disconnect();
     if (timeout) window.clearTimeout(timeout);
   };
@@ -187,7 +196,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   const tryFocusHeading = (): boolean => {
     const h1 = main.querySelector('h1');
     if (!(h1 instanceof HTMLElement)) return false;
-    focusTarget(h1);
+    settleOnTarget(h1);
     return true;
   };
 
@@ -199,7 +208,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
 
     const focusMainIfStillHeadless = () => {
       if (main.querySelector('h1')) return;
-      focusTarget(main);
+      settleOnTarget(main);
     };
 
     // Many list screens have no h1 — do not leave focus on nav chrome for seconds.
