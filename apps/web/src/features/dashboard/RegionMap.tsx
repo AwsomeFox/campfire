@@ -16,7 +16,8 @@ const VIEW_W = 500;
 const VIEW_H = 260;
 
 /** Clamp to 0–100 and round to an integer percent (matches 1%/5% keyboard steps). */
-function clampPercentInt(value: number): number {
+export function clampPercentInt(value: number): number {
+  if (!Number.isFinite(value)) return 0;
   return Math.round(Math.max(0, Math.min(100, value)));
 }
 

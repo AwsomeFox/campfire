@@ -153,10 +153,10 @@ test.describe('map pin keyboard positioning', () => {
       await page.route(`**/api/v1/locations/${navigation.locationId}`, async (route) => {
         if (route.request().method() === 'PATCH') {
           patchAttempts += 1;
-          // Stall so Cancel can fire while Saving… is shown. Never forward to the
-          // server — AbortController should cancel the client fetch first; if the
-          // route later settles, aborting keeps mapX/mapY at the seed.
-          await new Promise((r) => setTimeout(r, 2000));
+          // Stall briefly so Cancel can fire while Saving… is shown. The test
+          // waits on the Saving… button before clicking Cancel — no multi-second
+          // sleep needed. Never forward to the server.
+          await new Promise((r) => setTimeout(r, 250));
           try {
             await route.abort('failed');
           } catch {
