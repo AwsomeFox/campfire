@@ -893,6 +893,182 @@ describe('ai-provider-config key-exfiltration guard (issue #373, e2e)', () => {
 });
 
 /**
+ * SSRF host policy for provider baseUrl (issue #1064). Distinct from #373 (key+endpoint
+ * binding): a DM with their own candidate key must still be unable to point the server
+ * at cloud metadata / private ranges unless the operator opts in.
+ */
+describe('ai-provider-config baseUrl SSRF host policy (issue #1064, e2e)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let campaignId: number;
+  let fake: FakeAiProvider;
+
+  const ORIGINAL_ALLOW_PRIVATE = process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS;
+  const ORIGINAL_ALLOW_HOSTS = process.env.AI_PROVIDER_BASEURL_ALLOW_HOSTS;
+  const ORIGINAL_DENY_HOSTS = process.env.AI_PROVIDER_BASEURL_DENY_HOSTS;
+
+  beforeAll(async () => {
+    delete process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS;
+    delete process.env.AI_PROVIDER_BASEURL_ALLOW_HOSTS;
+    delete process.env.AI_PROVIDER_BASEURL_DENY_HOSTS;
+    ctx = await createTestApp();
+    // createTestApp opts into private hosts for the fake provider; lock the default
+    // production posture for this suite.
+    delete process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS;
+    delete process.env.AI_PROVIDER_BASEURL_ALLOW_HOSTS;
+    delete process.env.AI_PROVIDER_BASEURL_DENY_HOSTS;
+    server = ctx.app.getHttpServer();
+    fake = await startFakeAiProvider();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'SSRF Guard Campaign' });
+    campaignId = campRes.body.id;
+  });
+
+  afterAll(async () => {
+    await fake.close();
+    await closeTestApp(ctx);
+    if (ORIGINAL_ALLOW_PRIVATE === undefined) delete process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS;
+    else process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = ORIGINAL_ALLOW_PRIVATE;
+    if (ORIGINAL_ALLOW_HOSTS === undefined) delete process.env.AI_PROVIDER_BASEURL_ALLOW_HOSTS;
+    else process.env.AI_PROVIDER_BASEURL_ALLOW_HOSTS = ORIGINAL_ALLOW_HOSTS;
+    if (ORIGINAL_DENY_HOSTS === undefined) delete process.env.AI_PROVIDER_BASEURL_DENY_HOSTS;
+    else process.env.AI_PROVIDER_BASEURL_DENY_HOSTS = ORIGINAL_DENY_HOSTS;
+  });
+
+  afterEach(() => {
+    delete process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS;
+    delete process.env.AI_PROVIDER_BASEURL_ALLOW_HOSTS;
+    delete process.env.AI_PROVIDER_BASEURL_DENY_HOSTS;
+    fake.calls.length = 0;
+  });
+
+  it('rejects persisting a cloud metadata baseUrl (PUT 400, no host-class detail)', async () => {
+    const res = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'sk-ssrf-meta',
+        baseUrl: 'http://169.254.169.254/latest/meta-data/',
+      });
+    expect(res.status).toBe(400);
+    const msg = JSON.stringify(res.body).toLowerCase();
+    expect(msg).toContain('not permitted');
+    expect(msg).not.toMatch(/metadata|link-local|private range/);
+  });
+
+  it('rejects persisting a private-range baseUrl by default', async () => {
+    const res = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'sk-ssrf-private',
+        baseUrl: 'http://192.168.1.50:11434/v1',
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it('allows a public host baseUrl under the default policy', async () => {
+    const res = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'sk-ssrf-public',
+        baseUrl: 'https://api.openai.com/v1',
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.baseUrl).toBe('https://api.openai.com/v1');
+  });
+
+  it('test-connection returns a generic failure for metadata / private hosts and never probes them', async () => {
+    for (const baseUrl of [
+      'http://169.254.169.254/latest/meta-data/',
+      'http://10.0.0.8/v1',
+      'http://127.0.0.1:9/v1',
+    ]) {
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+        .set(dm)
+        .send({
+          providerType: 'openai',
+          model: 'ssrf-probe',
+          baseUrl,
+          apiKey: 'sk-ssrf-probe-candidate',
+        });
+      expect(res.status).toBe(201);
+      expect(res.body.ok).toBe(false);
+      // Same generic failure for every blocked class — no reachability / host-class leak.
+      expect(res.body.error).toBe('Provider connection failed.');
+      expect(String(res.body.error).toLowerCase()).not.toMatch(/metadata|private|link-local|denied|blocked/);
+    }
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('/models does not fetch from a blocked host', async () => {
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/models`)
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'ssrf-models',
+        baseUrl: 'http://169.254.169.254/latest/meta-data/',
+        apiKey: 'sk-ssrf-models',
+      });
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body)).not.toContain('ami-id');
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('with AI_PROVIDER_ALLOW_PRIVATE_HOSTS=1, local fake provider baseUrl can be tested', async () => {
+    process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = '1';
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'local-ok',
+        baseUrl: fake.baseUrl,
+        apiKey: 'sk-local-ok',
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.ok).toBe(true);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('metadata remains blocked even when private hosts are opted in', async () => {
+    process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = '1';
+    const put = await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'sk-still-blocked',
+        baseUrl: 'http://169.254.169.254/',
+      });
+    expect(put.status).toBe(400);
+
+    const probe = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(dm)
+      .send({
+        providerType: 'openai',
+        model: 'still-blocked',
+        baseUrl: 'http://metadata.google.internal/',
+        apiKey: 'sk-still-blocked',
+      });
+    expect(probe.status).toBe(201);
+    expect(probe.body.ok).toBe(false);
+    expect(probe.body.error).toBe('Provider connection failed.');
+    expect(fake.calls).toHaveLength(0);
+  });
+});
+
+/**
  * Server-default endpoints are server-admin gated. All dev-auth users are admin, so
  * the non-admin 403 needs a real cookie-session (no-dev-auth) non-admin user.
  */
