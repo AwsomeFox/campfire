@@ -250,8 +250,18 @@ export default function TimelinePage() {
       setEditFieldErrors({});
       setEditingId(null);
       await load();
-      // The deleted row's Edit trigger is gone; return to the page-level create control.
-      requestAnimationFrame(() => newEventTriggerRef.current?.focus());
+      // The deleted row's Edit trigger is gone. Prefer "+ New event" when it is
+      // mounted; while creating=true that control is not rendered, so focus a
+      // stable visible control in the open create form instead.
+      requestAnimationFrame(() => {
+        if (newEventTriggerRef.current) {
+          newEventTriggerRef.current.focus();
+          return;
+        }
+        if (creating) {
+          document.getElementById(timelineFieldId(TIMELINE_NEW_FORM_PREFIX, 'title'))?.focus();
+        }
+      });
     } catch {
       setActionError("Couldn't delete the event.");
     } finally {
