@@ -1712,6 +1712,97 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
   });
 });
 
+describe('encounters — issue #469: reject Start when there are zero combatants (e2e)', () => {
+  let ctx: TestAppContext;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('starting a truly empty encounter (no party, never added) is rejected 400 and stays preparing', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Empty Roster Campaign' })).body.id;
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'No Combatants' })
+    ).body.id;
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/no combatants/i);
+
+    // The encounter must not have been silently flipped to running.
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.status).toBe('preparing');
+    expect(getRes.body.currentCombatantId).toBeNull();
+  });
+
+  it('a campaign whose only characters are dead/retired auto-adds nobody, so Start is rejected 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'All Defeated Campaign' })).body.id;
+    // Issue #115: encounter auto-add only picks up ACTIVE characters — dead/retired PCs
+    // are skipped, so an all-defeated party still yields a zero-combatant encounter.
+    await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Fallen Aria', status: 'dead' });
+    await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Retired Boro', status: 'retired' });
+
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Nobody Left' })
+    ).body.id;
+    const getBeforeStart = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((getBeforeStart.body.combatants as CombatantShape[]).length).toBe(0);
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/no combatants/i);
+  });
+
+  it('removing every combatant after auto-add empties the roster and Start is rejected 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Removed Roster Campaign' })).body.id;
+    await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
+
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Emptied Out' })
+    ).body.id;
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatants = getRes.body.combatants as CombatantShape[];
+    expect(combatants.length).toBeGreaterThan(0);
+
+    // Roll initiative first so the only remaining guard, once combatants are removed,
+    // is the zero-combatant check (not the initiative check).
+    await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    for (const c of combatants) {
+      const del = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${c.id}`).set(dm);
+      expect(del.status).toBe(200);
+    }
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/no combatants/i);
+  });
+
+  it('two concurrent Start attempts on a zero-combatant encounter both 400 (no partial/racy running state)', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Concurrent Empty Start Campaign' })).body.id;
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Race' })
+    ).body.id;
+
+    const [a, b] = await Promise.all([
+      request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm),
+      request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm),
+    ]);
+    expect(a.status).toBe(400);
+    expect(b.status).toBe(400);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.status).toBe('preparing');
+  });
+});
+
 describe('encounters — issue #50: character/combatant HP stay in sync (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;

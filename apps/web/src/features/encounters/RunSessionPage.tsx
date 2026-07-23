@@ -790,6 +790,11 @@ export default function RunSessionPage() {
     ? encounter.combatants.filter((c) => c.initiative === null || c.initiative === undefined).length
     : 0;
 
+  // Issue #469: the server rejects Start on an empty roster (it would otherwise flip
+  // to 'running' with nobody in the turn order). Mirror that here so the DM sees a
+  // disabled control with an explanation instead of a round-trip 400.
+  const hasNoCombatants = encounter ? encounter.combatants.length === 0 : true;
+
   const removeCombatant = (combatantId: number) => {
     setActionError(null);
     markCombatantPending(combatantId, true);
@@ -1011,9 +1016,20 @@ export default function RunSessionPage() {
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
-                <Btn disabled={headerBusy} onClick={startEncounter}>
-                  Start
-                </Btn>
+                <div className="flex flex-col gap-0.5 items-stretch">
+                  <Btn
+                    disabled={headerBusy || hasNoCombatants}
+                    onClick={startEncounter}
+                    aria-describedby={hasNoCombatants ? 'start-empty-roster-hint' : undefined}
+                  >
+                    Start
+                  </Btn>
+                  {hasNoCombatants && (
+                    <p id="start-empty-roster-hint" className="text-muted text-xs m-0 max-w-[14rem]">
+                      Add at least one combatant before starting
+                    </p>
+                  )}
+                </div>
               </>
             )}
             {encounter.status === 'running' && (

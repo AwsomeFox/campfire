@@ -1960,6 +1960,13 @@ export class EncountersService {
       throw new BadRequestException(`Encounter must be in 'preparing' status to start (currently '${encounterRow.status}')`);
     }
     const rows = await this.listCombatantRows(encounterId);
+    if (rows.length === 0) {
+      // Without this guard an empty roster passes the (vacuous) initiative check below
+      // and Start flips the encounter to 'running' with round=1 and currentCombatantId
+      // null — a nonsensical fight with nobody in it that only manual End can clear
+      // (issue #469). At least one combatant must exist before Start is meaningful.
+      throw new BadRequestException('Cannot start an encounter with no combatants — add at least one combatant first');
+    }
     if (rows.some((r) => r.initiative === null)) {
       throw new BadRequestException('All combatants must have initiative rolled before starting the encounter');
     }
