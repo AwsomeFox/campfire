@@ -4,9 +4,13 @@
  * create/revoke their own tokens regardless of server role.
  * Per design/10-admin.html "API tokens" section.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ApiToken, Campaign } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import {
+  compositionSafeFormSubmit,
+  createCompositionSubmitGate,
+} from '../../lib/compositionSafeSubmit';
 import { Card, Btn, TextInput, Skeleton, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
@@ -257,6 +261,8 @@ function NewTokenForm({
   const [writeScope, setWriteScope] = useState<WriteScope>('propose');
   const [campaignId, setCampaignId] = useState<string>('');
   const [saving, setSaving] = useState(false);
+  // Issue #854: Enter confirming IME composition must not mint a token.
+  const compositionGate = useRef(createCompositionSubmitGate()).current;
 
   async function create() {
     if (saving || !name.trim()) return;
@@ -278,7 +284,12 @@ function NewTokenForm({
   }
 
   return (
-    <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
+    <form
+      className="cf-inset border-amber-500/30 p-3.5 space-y-2"
+      onSubmit={compositionSafeFormSubmit(compositionGate, () => {
+        void create();
+      })}
+    >
       <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">New token</p>
       <p className="text-[11px] text-slate-400">
         Two independent controls decide what an AI (or REST/MCP caller) can do
@@ -295,9 +306,7 @@ function NewTokenForm({
           aria-label="Token name (required)"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void create();
-          }}
+          {...compositionGate.inputProps}
           autoFocus
         />
         <select
@@ -344,19 +353,19 @@ function NewTokenForm({
       )}
       <div className="flex items-center gap-2 justify-end">
         {!name.trim() && <p className="text-[11px] text-slate-500 mr-auto">Name your token to enable Create.</p>}
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
+        <Btn type="button" ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
         <Btn
+          type="submit"
           className="!min-h-0 !py-1.5 text-xs"
-          onClick={create}
           disabled={saving || !name.trim()}
           title={!name.trim() ? 'Enter a token name first' : undefined}
         >
           Create
         </Btn>
       </div>
-    </div>
+    </form>
   );
 }
 

@@ -10,7 +10,7 @@
  *
  * Data: GET/POST /api/v1/campaigns/:campaignId/arcs, plus /arcs/:id and /beats/:id routes.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type {
   StoryArc,
@@ -22,6 +22,10 @@ import type {
   BeatStatus,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import {
+  compositionSafeFormSubmit,
+  createCompositionSubmitGate,
+} from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
@@ -98,6 +102,8 @@ export default function StorylinesPage() {
   const [arcCreateError, setArcCreateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const newArcTitleRef = useRef<HTMLInputElement>(null);
+  // Issue #854: Enter confirming IME composition must not create an arc.
+  const arcCompositionGate = useRef(createCompositionSubmitGate()).current;
   const pendingFocusIdRef = useRef<string | null>(null);
   // Play-record link options (issue #264) — the sessions/quests/encounters a beat can
   // link to. Fetched once; empty lists just leave the pickers showing "— none —".
@@ -249,10 +255,9 @@ export default function StorylinesPage() {
         <form
           className="card elev-sm"
           style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}
-          onSubmit={(event) => {
-            event.preventDefault();
+          onSubmit={compositionSafeFormSubmit(arcCompositionGate, () => {
             void createArc();
-          }}
+          })}
         >
           <div className="field" style={{ flex: '1 1 180px', minWidth: 0 }}>
             <label htmlFor="storyline-new-arc-title">New arc title</label>
@@ -270,6 +275,7 @@ export default function StorylinesPage() {
                 setNewArcTitle(event.target.value);
                 setArcCreateError(null);
               }}
+              {...arcCompositionGate.inputProps}
             />
           </div>
           <button type="submit" className="btn btn-primary" style={{ fontSize: 13 }} disabled={busy || !newArcTitle.trim()}>
@@ -336,6 +342,8 @@ function ArcCard({
   const [statusError, setStatusError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const newBeatTitleRef = useRef<HTMLInputElement>(null);
+  // Issue #854: Enter confirming IME composition must not create a beat.
+  const beatCompositionGate = useRef(createCompositionSubmitGate()).current;
   const announce = useAnnounce();
   const arcTitleId = `storyline-arc-${arc.id}-title`;
   const arcStatusId = `storyline-arc-${arc.id}-status`;
@@ -498,10 +506,9 @@ function ArcCard({
       {isDm && (
         <form
           style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', minWidth: 0 }}
-          onSubmit={(event: FormEvent<HTMLFormElement>) => {
-            event.preventDefault();
+          onSubmit={compositionSafeFormSubmit(beatCompositionGate, () => {
             void addBeat();
-          }}
+          })}
         >
           <div className="field" style={{ flex: '1 1 160px', minWidth: 0 }}>
             <label htmlFor={newBeatTitleId} style={{ overflowWrap: 'anywhere' }}>New beat in {arc.title}</label>
@@ -520,6 +527,7 @@ function ArcCard({
                 setBeatCreateError(null);
               }}
               style={{ fontSize: 13 }}
+              {...beatCompositionGate.inputProps}
             />
           </div>
           <button type="submit" className="btn btn-ghost" style={{ fontSize: 12 }} disabled={busy || !newBeatTitle.trim()}>
@@ -574,6 +582,8 @@ function BeatRow({
   const [branchDeleteError, setBranchDeleteError] = useState<{ id: number; message: string } | null>(null);
   const branchLabelRef = useRef<HTMLInputElement>(null);
   const branchTriggerRef = useRef<HTMLButtonElement>(null);
+  // Issue #854: Enter confirming IME composition must not create a branch.
+  const branchCompositionGate = useRef(createCompositionSubmitGate()).current;
   const announce = useAnnounce();
   const beatTitleId = `storyline-beat-${beat.id}-title`;
   const beatStatusId = `storyline-beat-${beat.id}-status`;
@@ -899,10 +909,9 @@ function BeatRow({
           <form
             id={branchFormId}
             style={{ marginLeft: 22, minWidth: 0 }}
-            onSubmit={(event) => {
-              event.preventDefault();
+            onSubmit={compositionSafeFormSubmit(branchCompositionGate, () => {
               void addBranch();
-            }}
+            })}
           >
             <fieldset style={{ minWidth: 0 }}>
               <legend style={{ marginBottom: 5, fontSize: 12, fontWeight: 600, overflowWrap: 'anywhere' }}>
@@ -934,6 +943,7 @@ function BeatRow({
                       setBranchCreateError(null);
                     }}
                     style={{ fontSize: 12, minWidth: 0 }}
+                    {...branchCompositionGate.inputProps}
                   />
                 </div>
                 <div className="field" style={{ minWidth: 0 }}>
