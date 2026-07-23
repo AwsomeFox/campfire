@@ -141,8 +141,13 @@ export class GeminiProvider implements AiProvider {
       body.generationConfig = { ...(body.generationConfig as object | undefined), maxOutputTokens: maxTokens };
     }
 
-    if (req.tools && req.tools.length > 0) {
+    // Honor the neutral toolChoice (parity with the OpenAI/Anthropic adapters):
+    // 'none' opts out entirely (advertise nothing), 'required' forces a call (ANY),
+    // 'auto'/default lets the model decide (AUTO).
+    if (req.tools && req.tools.length > 0 && req.toolChoice !== 'none') {
       body.tools = [{ functionDeclarations: req.tools.map(toGeminiTool) }];
+      const mode = req.toolChoice === 'required' ? 'ANY' : 'AUTO';
+      body.toolConfig = { functionCallingConfig: { mode } };
     }
 
     return body;

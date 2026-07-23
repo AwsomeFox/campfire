@@ -75,7 +75,7 @@ describe('GeminiProvider — request mapping (#1062)', () => {
     ]);
   });
 
-  it('wraps a non-object tool result under a `result` key and a bare tool-call assistant turn gets an empty text part', async () => {
+  it('emits only a functionCall part for a text-less tool-call turn and wraps a non-object tool result under `result`', async () => {
     const { fetchImpl, calls } = fakeFetch(jsonResponse(response([{ text: 'k' }])));
     const p = new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl });
     await p.generate({
@@ -88,6 +88,33 @@ describe('GeminiProvider — request mapping (#1062)', () => {
     const body = sentBody(calls[0].init) as { contents: Array<{ role: string; parts: unknown[] }> };
     expect(body.contents[0]).toEqual({ role: 'model', parts: [{ functionCall: { name: 'roll_dice', args: {} } }] });
     expect(body.contents[1]).toEqual({ role: 'user', parts: [{ functionResponse: { name: 'roll_dice', response: { result: 17 } } }] });
+  });
+
+  it('gives an empty-content, no-tool-call assistant turn a single empty text part (model turns need a part)', async () => {
+    const { fetchImpl, calls } = fakeFetch(jsonResponse(response([{ text: 'k' }])));
+    const p = new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    await p.generate({ model: 'm', messages: [{ role: 'assistant' }] });
+    const body = sentBody(calls[0].init) as { contents: unknown[] };
+    expect(body.contents).toEqual([{ role: 'model', parts: [{ text: '' }] }]);
+  });
+
+  it('honors toolChoice: omits tools for "none" and sets functionCallingConfig mode for auto/required', async () => {
+    const tools = [{ name: 'roll_dice', description: 'Roll dice', parameters: { type: 'object', properties: {} } }];
+    const mk = () => fakeFetch(jsonResponse(response([{ text: 'ok' }])));
+
+    const none = mk();
+    await new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl: none.fetchImpl }).generate({ ...req, tools, toolChoice: 'none' });
+    const noneBody = sentBody(none.calls[0].init);
+    expect(noneBody.tools).toBeUndefined();
+    expect(noneBody.toolConfig).toBeUndefined();
+
+    const required = mk();
+    await new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl: required.fetchImpl }).generate({ ...req, tools, toolChoice: 'required' });
+    expect(sentBody(required.calls[0].init).toolConfig).toEqual({ functionCallingConfig: { mode: 'ANY' } });
+
+    const auto = mk();
+    await new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl: auto.fetchImpl }).generate({ ...req, tools, toolChoice: 'auto' });
+    expect(sentBody(auto.calls[0].init).toolConfig).toEqual({ functionCallingConfig: { mode: 'AUTO' } });
   });
 });
 
