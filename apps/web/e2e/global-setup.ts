@@ -621,7 +621,6 @@ export default async function globalSetup(config: FullConfig) {
   const completedObjective = await okJson(dm, 'post', `/api/v1/quests/${semanticQuests.active.id}/objectives`, {
     text: 'Recover the weathered star map',
     sortOrder: 10,
-      hidden: false
   });
   await okJson(dm, 'post', `/api/v1/quests/${semanticQuests.active.id}/objectives`, {
     text: QUEST_NEXT_OBJECTIVE,
