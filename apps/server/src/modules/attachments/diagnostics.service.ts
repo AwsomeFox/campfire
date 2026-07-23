@@ -504,7 +504,10 @@ export class DiagnosticsService {
 
   private assertAccessible(root: string): void {
     try {
-      fs.accessSync(root, fs.constants.R_OK);
+      // Directory listing requires execute (search) permission in addition to
+      // read; checking R_OK alone can pass while a subsequent readdirSync()
+      // still fails with EACCES, defeating the intended 503 error mapping.
+      fs.accessSync(root, fs.constants.R_OK | fs.constants.X_OK);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       throw new ServiceUnavailableException(
