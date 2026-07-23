@@ -300,7 +300,12 @@ export default function AiTablePage() {
   const transcriptMountScrollDoneRef = useRef(false);
 
   useEffect(() => {
+    // Campaign switches must not inherit follow/unread state from the previous table.
     transcriptMountScrollDoneRef.current = false;
+    followLatestRef.current = true;
+    setFollowLatest(true);
+    setUnreadBelow(0);
+    prevEntryCountRef.current = 0;
   }, [campaignId]);
 
   useEffect(() => {
@@ -329,7 +334,7 @@ export default function AiTablePage() {
     const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
     const pin = followLatestAfterUserScroll(near);
     followLatestRef.current = pin;
-    setFollowLatest(pin);
+    setFollowLatest((prev) => (prev === pin ? prev : pin));
     if (pin) setUnreadBelow(0);
   }, []);
 

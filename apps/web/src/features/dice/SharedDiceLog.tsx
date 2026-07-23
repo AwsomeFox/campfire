@@ -27,6 +27,11 @@ import {
   formatDiceRollAnnouncementBatch,
   type DiceRollAnnouncementCursor,
 } from './diceLogAccessibility';
+import {
+  clearLocalDiceAnnouncements,
+  rememberLocalDiceAnnouncement,
+  takeLocalDiceAnnouncements,
+} from './localDiceAnnouncements';
 
 const POLL_MS = 5000;
 
@@ -76,6 +81,8 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
 
   // Remote (and local) rolls share one ID cursor so poll refetches never double-speak.
   // Skip the pre-fetch empty render — otherwise the first poll would announce full history.
+  // A null cursor establishes the silent baseline; never pass a non-null seed on first
+  // load or every hydrated id would be treated as "appended" (orchestrator / #590).
   useEffect(() => {
     if (rollsCampaignIdRef.current !== campaignId) return;
 
@@ -83,13 +90,18 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
     if (cursor === null && rolls.length === 0) return;
 
-    // Seed cursor with ids already spoken by useRoller / submitExpr so poll
-    // refetches do not double-announce local rolls (orchestrator / #590).
-    const seeded =
-      cursor === null
-        ? { seenIds: new Set(takeLocalDiceAnnouncements(campaignId)) }
-        : { seenIds: new Set([...cursor.seenIds, ...takeLocalDiceAnnouncements(campaignId)]) };
-    const advanced = advanceDiceRollAnnouncements(rolls, seeded);
+    const localIds = takeLocalDiceAnnouncements(campaignId);
+    if (cursor === null) {
+      const baseline = advanceDiceRollAnnouncements(rolls, null);
+      for (const id of localIds) baseline.cursor.seenRollIds.add(id);
+      rollAnnouncementRef.current = { campaignId, cursor: baseline.cursor };
+      return;
+    }
+
+    const merged: DiceRollAnnouncementCursor = {
+      seenRollIds: new Set([...cursor.seenRollIds, ...localIds]),
+    };
+    const advanced = advanceDiceRollAnnouncements(rolls, merged);
     rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
 
     const message = formatDiceRollAnnouncementBatch(advanced.appendedRolls, t);
