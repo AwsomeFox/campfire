@@ -91,7 +91,11 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
         ownerUserId: playerId,
         portraitUrl: 'https://images.example.test/remote-voice.png',
       });
-    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Goblin Ambush' });
+    // Issue #864: clone must remap encounter location/quest/session links into the
+    // new campaign (never copy raw source ids that would become cross-campaign).
+    const encRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'Goblin Ambush', locationId, questId, sessionId });
     await dmAgent.post(`/api/v1/encounters/${encRes.body.id}/combatants`).send({ kind: 'monster', name: 'Goblin', hpMax: 7 });
 
     await dmAgent
@@ -202,10 +206,18 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
 
     // Encounters copied with combatants (Hero + Remote Voice were auto-added on
     // encounter create, so there are 3). The character combatant's characterId
-    // must be remapped to the cloned character.
+    // must be remapped to the cloned character. Location/quest/session links
+    // (issue #864) must also remap into the clone — never keep the source
+    // campaign's ids.
     const encs = await dmAgent.get(`/api/v1/campaigns/${clone.id}/encounters`);
     expect(encs.body.length).toBe(1);
     const encDetail = await dmAgent.get(`/api/v1/encounters/${encs.body[0].id}`);
+    expect(encDetail.body.locationId).toBe(locs.body[0].id);
+    expect(encDetail.body.questId).toBe(q.id);
+    expect(encDetail.body.sessionId).toBe(sessions.body[0].id);
+    expect(encDetail.body.locationId).not.toBe(locationId);
+    expect(encDetail.body.questId).not.toBe(questId);
+    expect(encDetail.body.sessionId).not.toBe(sessionId);
     expect(encDetail.body.combatants.length).toBe(3);
     const goblin = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Goblin');
     expect(goblin).toBeDefined();

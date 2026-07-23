@@ -881,6 +881,12 @@ export class CampaignsService {
               status: e.status,
               round: e.round,
               turnIndex: e.turnIndex,
+              // Where/why/when links (issue #126/#864): remap through the clone maps.
+              // A dangling/cross-campaign source link drops to null rather than copying
+              // a stale foreign id into the new campaign.
+              locationId: e.locationId != null ? (locMap.get(e.locationId) ?? null) : null,
+              questId: e.questId != null ? (questMap.get(e.questId) ?? null) : null,
+              sessionId: e.sessionId != null ? (sessionMap.get(e.sessionId) ?? null) : null,
               endedAt: e.endedAt,
               createdAt: ts,
               updatedAt: ts,
@@ -1494,6 +1500,20 @@ export class CampaignsService {
             round: intOr(e.round, 0),
             turnIndex: intOr(e.turnIndex, 0),
             currentCombatantId: null, // remapped below once combatants have fresh ids
+            // Where/why/when links (issue #126/#864): remap through the import maps.
+            // A missing/foreign source id drops to null — never a stale cross-campaign link.
+            locationId: (() => {
+              const src = intOrNull(e.locationId);
+              return src != null ? (locMap.get(src) ?? null) : null;
+            })(),
+            questId: (() => {
+              const src = intOrNull(e.questId);
+              return src != null ? (questMap.get(src) ?? null) : null;
+            })(),
+            sessionId: (() => {
+              const src = intOrNull(e.sessionId);
+              return src != null ? (sessionMap.get(src) ?? null) : null;
+            })(),
             // Battle map (issue #39/#236): remap the map attachment to its imported id so an
             // exported VTT encounter re-imports WITH its map, not as a mapless initiative list.
             // The grid + fog overlay travel with the map (coordinate/scale data — no remap needed).

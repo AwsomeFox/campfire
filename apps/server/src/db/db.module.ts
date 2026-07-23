@@ -1574,6 +1574,85 @@ function migrateServerMetaTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #864: encounter create historically accepted arbitrary location/quest/session
+ * ids without checking they belong to the encounter's campaign. SQLite FKs only prove
+ * the target ROW exists — not that its campaign_id matches — so cross-campaign links
+ * could persist. This repair nullifies any location_id / quest_id / session_id whose
+ * target is missing or owned by a different campaign. Valid same-campaign links are
+ * untouched. Idempotent: a second run finds nothing left to clear. Fresh DBs never
+ * hit real work (encounters table absent during early migration pass; bootstrap then
+ * creates a clean schema, and create() now validates before insert).
+ */
+function migrateEncounterLinksCampaignScope(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  // Pre-0019 DBs may lack some/all link columns. Repair whichever exist —
+  // each UPDATE below is independently gated on its column.
+  if (!has('location_id') && !has('quest_id') && !has('session_id')) return;
+
+  const hasLocations = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'").get();
+  const hasQuests = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='quests'").get();
+  const hasSessions = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get();
+
+  // Clear each link independently so a single bad field never wipes the other two
+  // valid attachments on the same encounter. When the target table is absent we
+  // cannot prove campaign ownership — nullify those links so stale ids do not linger.
+  if (has('location_id')) {
+    if (hasLocations) {
+      sqlite.exec(`
+        UPDATE encounters
+        SET location_id = NULL
+        WHERE location_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM locations
+            WHERE locations.id = encounters.location_id
+              AND locations.campaign_id = encounters.campaign_id
+          )
+      `);
+    } else {
+      sqlite.exec(`UPDATE encounters SET location_id = NULL WHERE location_id IS NOT NULL`);
+    }
+  }
+  if (has('quest_id')) {
+    if (hasQuests) {
+      sqlite.exec(`
+        UPDATE encounters
+        SET quest_id = NULL
+        WHERE quest_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM quests
+            WHERE quests.id = encounters.quest_id
+              AND quests.campaign_id = encounters.campaign_id
+          )
+      `);
+    } else {
+      sqlite.exec(`UPDATE encounters SET quest_id = NULL WHERE quest_id IS NOT NULL`);
+    }
+  }
+  if (has('session_id')) {
+    if (hasSessions) {
+      sqlite.exec(`
+        UPDATE encounters
+        SET session_id = NULL
+        WHERE session_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM sessions
+            WHERE sessions.id = encounters.session_id
+              AND sessions.campaign_id = encounters.campaign_id
+          )
+      `);
+    } else {
+      sqlite.exec(`UPDATE encounters SET session_id = NULL WHERE session_id IS NOT NULL`);
+    }
+  }
+}
+
+/**
 
  * Issue #679: retain consumed refresh-token generations as replay sentinels and
  * link rotations into a revocable family. Existing live rows each become the
@@ -1769,6 +1848,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0061_combatants_sheet_synced_updated_at', run: migrateCombatantsTableForSheetSyncedUpdatedAt },
   { name: '0062_attachments_publication_state', run: migrateAttachmentsTableForPublicationState },
   { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
+  { name: '0064_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
 ];
 
 /**

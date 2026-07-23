@@ -327,6 +327,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0060_encounter_events_combatant_ids');
       expect(MIGRATION_NAMES).toContain('0062_attachments_publication_state');
       expect(MIGRATION_NAMES).toContain('0063_comments_character_attribution');
+      expect(MIGRATION_NAMES).toContain('0064_encounter_links_campaign_scope');
       // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['public_invites_enabled']));
@@ -588,6 +589,62 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(
         (upgraded.sqlite.prepare('SELECT COUNT(*) AS n FROM campaign_members WHERE user_id = 2').get() as { n: number }).n,
       ).toBe(0);
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('0059 nullifies cross-campaign encounter links and preserves valid ones (issue #864)', () => {
+    dataDir = makeTempDataDir();
+
+    // Seed a fully-migrated DB, plant a cross-campaign encounter link (SQLite FKs
+    // only check the target row exists — not campaign_id match), then re-run 0059.
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      const now = '2026-07-23T00:00:00.000Z';
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Camp A', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (2, 'Camp B', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO locations (id, campaign_id, name, created_at, updated_at) VALUES (10, 1, 'Home', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO locations (id, campaign_id, name, created_at, updated_at) VALUES (20, 2, 'Away', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO quests (id, campaign_id, title, created_at, updated_at) VALUES (11, 1, 'Local Quest', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO quests (id, campaign_id, title, created_at, updated_at) VALUES (21, 2, 'Foreign Quest', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO sessions (id, campaign_id, number, title, created_at, updated_at) VALUES (12, 1, 1, 'Local Session', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO sessions (id, campaign_id, number, title, created_at, updated_at) VALUES (22, 2, 1, 'Foreign Session', ?, ?)").run(now, now);
+      // Valid same-campaign links — must survive the repair.
+      legacy
+        .prepare(
+          "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (1, 1, 'Good', 10, 11, 12, ?, ?)",
+        )
+        .run(now, now);
+      // Cross-campaign links — must be nullified.
+      legacy
+        .prepare(
+          "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (2, 1, 'Bad', 20, 21, 22, ?, ?)",
+        )
+        .run(now, now);
+      // Mixed: valid location, foreign quest — only the bad field clears.
+      legacy
+        .prepare(
+          "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (3, 1, 'Mixed', 10, 21, 12, ?, ?)",
+        )
+        .run(now, now);
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0064_encounter_links_campaign_scope'").run();
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      const rows = upgraded.sqlite
+        .prepare('SELECT id, location_id, quest_id, session_id FROM encounters ORDER BY id')
+        .all() as Array<{ id: number; location_id: number | null; quest_id: number | null; session_id: number | null }>;
+      expect(rows).toEqual([
+        { id: 1, location_id: 10, quest_id: 11, session_id: 12 },
+        { id: 2, location_id: null, quest_id: null, session_id: null },
+        { id: 3, location_id: 10, quest_id: null, session_id: 12 },
+      ]);
     } finally {
       upgraded.sqlite.close();
     }
