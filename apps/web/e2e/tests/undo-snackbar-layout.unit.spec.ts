@@ -22,6 +22,7 @@ const WEB_SRC = resolve(__dirname, '../../src');
 const INDEX_CSS = resolve(WEB_SRC, 'index.css');
 const NOCTURNE_CSS = resolve(WEB_SRC, 'nocturne.css');
 const UNDO_SNACKBAR_TSX = resolve(WEB_SRC, 'components/UndoSnackbar.tsx');
+const UNDO_SNACKBAR_CHROME_TS = resolve(WEB_SRC, 'components/useUndoSnackbarChrome.ts');
 
 test.describe('undo snackbar bottom offset math (issue #794)', () => {
   test('sums measured tab-bar content, safe-area, keyboard inset, and gap', () => {
@@ -133,5 +134,21 @@ test.describe('undo snackbar CSS / layer contracts (issue #794)', () => {
     expect(source).toMatch(/useUndoSnackbarChrome/);
     expect(source).not.toMatch(/bottom:\s*24/);
     expect(source).not.toMatch(/zIndex:\s*1000/);
+  });
+
+  test('chrome hook publishes before paint and reuses the safe-area probe', () => {
+    const source = readFileSync(UNDO_SNACKBAR_CHROME_TS, 'utf8');
+    // useLayoutEffect (not useEffect) so vars land before the first paint.
+    expect(source).toMatch(/useLayoutEffect/);
+    expect(source).not.toMatch(/\buseEffect\b/);
+    // Probe is cached/reused — createElement must not sit inside publishChromeVars.
+    expect(source).toMatch(/safeAreaProbe/);
+    expect(source).toMatch(/ensureSafeAreaProbe/);
+    const publishBody = source.match(
+      /function publishChromeVars\(\)[^{]*\{([\s\S]*?)\n\}/,
+    )?.[1];
+    expect(publishBody).toBeTruthy();
+    expect(publishBody).not.toMatch(/createElement/);
+    expect(publishBody).not.toMatch(/\.remove\(\)/);
   });
 });
