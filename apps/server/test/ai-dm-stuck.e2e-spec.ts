@@ -245,7 +245,7 @@ describe('ai-dm stuck ladder — player levers recover or hand off (e2e)', () =>
     expect(actions).toEqual(expect.arrayContaining(['ai-dm.driver.takeover.request', 'ai-dm.driver.takeover.grant', 'ai-dm.driver.handback']));
   });
 
-  it('#314 rules-lookup routes to the compendium instead of the model', async () => {
+  it('#314 rules-lookup routes to the compendium instead of the model (no rule system → human note, not raw JSON)', async () => {
     const campaignId = await h.createCampaign('Lever Rules');
     await h.configureSeat(campaignId, seat);
 
@@ -253,9 +253,117 @@ describe('ai-dm stuck ladder — player levers recover or hand off (e2e)', () =>
     const res = await h.lever(campaignId, 'rules-lookup', { query: 'grappling rules' }, player);
     expect(res.status).toBe(201);
     expect(res.body.query).toBe('grappling rules');
+    // #717: with no rule system configured the answer is a human-readable note, not raw
+    // tool JSON. It must say no authoritative source is configured and point at settings.
+    expect(typeof res.body.result).toBe('string');
+    expect(res.body.result).not.toContain('{');
+    expect(res.body.result).toMatch(/no rule system/i);
+    expect(res.body.result).toMatch(/campaign settings/i);
     // No generative call was made — the model queue is untouched.
     expect(h.mock.received.length).toBe(before);
     const audit = await h.getAudit(campaignId);
     expect(audit.body.some((e: { action: string }) => e.action === 'ai-dm.driver.rules_lookup')).toBe(true);
+  });
+});
+
+/**
+ * Issue #717 — campaign-scoped rules lookups. The AI table's rules help must bind to the
+ * campaign's active rule system so a multi-pack server answers a 5e question from the 5e
+ * pack, not a Pathfinder pack, and render a concise human answer (system, source, pack,
+ * compendium link) instead of injecting the raw serialized tool JSON into the transcript.
+ */
+describe('ai-dm rules-lookup — campaign rule-system scoping (#717)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'rules-model' });
+    await h.enableExperimental();
+  });
+  afterAll(async () => {
+    await h.close();
+  });
+
+  /** Upload a small open-licensed pack via the REST upload endpoint and wait for the job. */
+  async function uploadPack(body: Record<string, unknown>): Promise<{ packId: number; slug: string }> {
+    const res = await request(h.server).post('/api/v1/rules/packs/upload').set(dm).send(body);
+    expect(res.status).toBe(202);
+    const jobId = res.body.id as string;
+    const start = Date.now();
+    for (;;) {
+      const jobRes = await request(h.server).get(`/api/v1/rules/packs/install-jobs/${jobId}`).set(dm);
+      if (jobRes.body.status === 'completed' || jobRes.body.status === 'failed') {
+        expect(jobRes.body.status).toBe('completed');
+        return { packId: jobRes.body.pack.id, slug: jobRes.body.pack.slug };
+      }
+      if (Date.now() - start > 10_000) throw new Error(`pack upload job did not finish (last ${jobRes.body.status})`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  // Two distinct packs that share an entry NAME ("Fireball") but live under different
+  // systems — the isolation test proves the campaign's ruleSystem picks the right one.
+  const dndPack = {
+    source: 'upload' as const,
+    pack: { slug: 'dnd-homebrew-srd', name: 'D&D Homebrew SRD', version: '1.0', license: 'OGL 1.0a', sourceUrl: 'https://example.com/dnd' },
+    entries: [
+      { slug: 'dnd-fireball', name: 'Fireball', type: 'spell', summary: 'A D&D fireball.', body: 'A bright streak flashes to a point you choose, then erupts.' },
+      { slug: 'dnd-grappled', name: 'Grappled', type: 'condition', body: 'A grappled creature speed becomes 0.' },
+    ],
+  };
+  const pfPack = {
+    source: 'upload' as const,
+    pack: { slug: 'pf-homebrew-srd', name: 'Pathfinder Homebrew SRD', version: '1.0', license: 'OGL 1.0a', sourceUrl: 'https://example.com/pf' },
+    entries: [
+      { slug: 'pf-fireball', name: 'Fireball', type: 'spell', summary: 'A Pathfinder fireball.', body: 'A bead of fire bursts into a roaring blast.' },
+      { slug: 'pf-flat-footed', name: 'Flat-Footed', type: 'condition', body: 'You are unable to move freely.' },
+    ],
+  };
+
+  it('scopes the answer to the campaign\'s configured rule system, never cross-system', async () => {
+    const dnd = await uploadPack(dndPack);
+    const pf = await uploadPack(pfPack);
+
+    const campaignId = await h.createCampaign('Scoped Rules D&D');
+    await h.configureSeat(campaignId, seat);
+    // Point the campaign at the D&D pack.
+    await request(h.server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: dnd.slug });
+
+    const res = await h.lever(campaignId, 'rules-lookup', { query: 'fireball' }, player);
+    expect(res.status).toBe(201);
+    // Human-readable answer: the D&D Fireball, its body, and a compendium link — not raw JSON.
+    expect(res.body.result).toContain('Fireball');
+    expect(res.body.result).toContain('bright streak');
+    expect(res.body.result).toMatch(/Source: D&D Homebrew SRD/);
+    expect(res.body.result).toMatch(/compendium/);
+    // The Pathfinder Fireball (different body) must NOT leak in.
+    expect(res.body.result).not.toContain('bead of fire');
+
+    // Flip the campaign to the Pathfinder pack — the same query now returns the PF entry.
+    await request(h.server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: pf.slug });
+    const pfRes = await h.lever(campaignId, 'rules-lookup', { query: 'fireball' }, player);
+    expect(pfRes.status).toBe(201);
+    expect(pfRes.body.result).toContain('bead of fire');
+    expect(pfRes.body.result).not.toContain('bright streak');
+
+    // cleanup so other tests start clean
+    await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);
+    await request(h.server).delete(`/api/v1/rules/packs/${pf.packId}`).set(dm);
+  });
+
+  it('distinguishes no-match from failure and suggests refinements', async () => {
+    const dnd = await uploadPack(dndPack);
+    const campaignId = await h.createCampaign('No Match Rules');
+    await h.configureSeat(campaignId, seat);
+    await request(h.server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ ruleSystem: dnd.slug });
+
+    const res = await h.lever(campaignId, 'rules-lookup', { query: 'totally-absent-nonsense-query' }, player);
+    expect(res.status).toBe(201);
+    // A no-match is a clean 201 with a human message — NOT a tool error / raw JSON failure.
+    expect(res.body.result).not.toContain('{');
+    expect(res.body.result).toMatch(/no entry/i);
+    expect(res.body.result).toMatch(/D&D Homebrew SRD/);
+    expect(res.body.result).toMatch(/broader term|exact name|spelling/i);
+
+    await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);
   });
 });

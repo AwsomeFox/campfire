@@ -5,7 +5,9 @@ import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
 import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp-tools';
-import type { AiDmSeat, Role } from '@campfire/schema';
+import { CampaignsService } from '../campaigns/campaigns.service';
+import { RulesService } from '../rules/rules.service';
+import type { AiDmSeat, Role, RuleEntry, RulePack } from '@campfire/schema';
 import type {
   AiProvider,
   AiMessage,
@@ -468,6 +470,8 @@ export class AiDriverService {
     private readonly notifications: NotificationsService,
     private readonly supportPreferences: SupportPreferencesService,
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
+    private readonly campaigns: CampaignsService,
+    private readonly rules: RulesService,
   ) {}
 
   getSession(campaignId: number): AiDmSessionState {
@@ -1186,22 +1190,45 @@ export class AiDriverService {
   }
 
   /**
-   * Rules lookup (#314): route a rules question to the compendium (retrieval) instead of the
-   * generative model — cheaper and authoritative. Reads through the SAME permission-checked
-   * tool layer (lookup_rule) the AI itself uses, so nothing the seat can't see leaks.
+   * Rules lookup (#314 / #717): route a rules question to the compendium (retrieval) instead
+   * of the generative model — cheaper and authoritative. The answer is bound to the
+   * campaign's active rule system (its `ruleSystem` slug) so a multi-pack server never
+   * answers a D&D 5e question from a Pathfinder pack, and rendered as a concise, human-
+   * readable Markdown answer (system, source, pack, compendium link) — never the raw
+   * serialized tool payload that used to be injected verbatim into the table transcript.
+   *
+   * The compendium is server-wide reference content (open to any authenticated user via
+   * GET /rules/search), so this reads `RulesService.search` directly for clean domain
+   * objects rather than round-tripping through the MCP tool's JSON serialization. A
+   * campaign with no rule system configured (homebrew / empty slug) gets a plain-language
+   * note that no authoritative source is available, instead of cross-system noise.
    */
   async rulesLookup(campaignId: number, user: RequestUser, query: string, role: Role = 'player'): Promise<{ query: string; result: string }> {
-    const toolset = this.mcpTools.buildToolset(this.seatPrincipal(campaignId));
-    const res = await toolset.call('lookup_rule', { query });
+    const campaign = await this.campaigns.getOrThrow(campaignId);
+    const slug = campaign.ruleSystem ?? '';
+    const pack = slug ? await this.rules.getPackBySlug(slug) : undefined;
+
+    const auditDetail = `rules lookup by ${user.id}: ${excerpt(query, 120)}` + (pack ? ` (pack ${pack.slug})` : ' (no rule system)');
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
       action: 'ai-dm.driver.rules_lookup',
       entityType: 'ai-dm',
       campaignId,
-      detail: `rules lookup by ${user.id}: ${excerpt(query, 120)}`,
+      detail: auditDetail,
     });
-    return { query, result: res.text };
+
+    // Homebrew / no rule system: say so plainly rather than searching every installed pack
+    // and answering from whichever happens to match first (#717).
+    if (!pack) {
+      return { query, result: renderNoRuleSystem(query) };
+    }
+
+    const results = await this.rules.search({ q: query, pack: pack.slug }, 5);
+    if (results.length === 0) {
+      return { query, result: renderNoMatch(query, pack) };
+    }
+    return { query, result: renderRulesAnswer(query, pack, results) };
   }
 
   /**
@@ -1661,4 +1688,62 @@ function describeStuck(reason: AiDmStuckReason): string {
     default:
       return 'The AI needs help.';
   }
+}
+
+/**
+ * Cap a block of rule text for inline display in the table transcript (#717). The
+ * compendium body can run long (multi-page spell descriptions); the transcript card is a
+ * concise answer, not the full SRD entry, so keep it to a readable excerpt and point at
+ * the compendium reader for the rest.
+ */
+const RULES_ANSWER_BODY_LIMIT = 600;
+
+function excerptRuleBody(body: string | undefined | null): string {
+  if (!body) return '';
+  const text = body.trim();
+  if (text.length <= RULES_ANSWER_BODY_LIMIT) return text;
+  return `${text.slice(0, RULES_ANSWER_BODY_LIMIT).trimEnd()}…`;
+}
+
+/**
+ * Render the top compendium match as a concise, human-readable Markdown answer for the AI
+ * table transcript (#717). Includes the entry type, the pack/system it came from, its
+ * source line, a trimmed body excerpt, and a compendium link so the table can read the
+ * full entry without the AI narrating raw JSON. Secondary matches are listed by name only.
+ */
+function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[]): string {
+  const [top, ...rest] = results;
+  const lines: string[] = [];
+  lines.push(`**${top.name}**${top.type ? ` *(${top.type})*` : ''}`);
+  const body = excerptRuleBody(top.body);
+  if (body) {
+    lines.push('');
+    lines.push(body);
+  }
+  lines.push('');
+  lines.push(`*Source: ${pack.name}${pack.license ? ` · ${pack.license}` : ''}*`);
+  lines.push(`[Open in compendium](/compendium/${top.id})`);
+  if (rest.length > 0) {
+    lines.push('');
+    lines.push(`Other matches: ${rest.map((r) => r.name).join(', ')}.`);
+  }
+  return lines.join('\n');
+}
+
+/** No matches in the campaign's rule system — distinguish from failure and suggest refinements (#717). */
+function renderNoMatch(query: string, pack: RulePack): string {
+  return [
+    `No entry in **${pack.name}** matches “${query.trim()}”.`,
+    '',
+    'Try a broader term, the exact name (e.g. a spell or condition), or check the spelling.',
+  ].join('\n');
+}
+
+/** No rule system configured for the campaign — no authoritative source to look up against (#717). */
+function renderNoRuleSystem(query: string): string {
+  return [
+    `This campaign has no rule system configured, so I can’t look up “${query.trim()}” in a compendium.`,
+    '',
+    'A DM can pick a rule system in **Campaign Settings → Rule system** to scope rules lookups to an installed pack (e.g. the D&D 5e SRD).',
+  ].join('\n');
 }
