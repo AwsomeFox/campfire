@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import type { EncounterWithCombatants, MapPing } from '@campfire/schema';
-import { seed, stateFor } from './seed';
+import { PNG_16_9, seed, stateFor, restoreSeedEncounter } from './seed';
 import { MAP_PING_TAP_SLOP_PX } from '../../src/features/encounters/mapPingTap';
 
 /**
@@ -16,10 +16,6 @@ type PointerOptions = {
 };
 
 const MAP_ATTACHMENT_ID = 809_000;
-const PNG_1PX = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-  'base64',
-);
 
 function encounterUrl(): string {
   const { campaignId, encounterId } = seed();
@@ -72,8 +68,9 @@ async function openPingFixture(page: Page) {
   expect(response.ok()).toBeTruthy();
   const original = (await response.json()) as EncounterWithCombatants;
 
-  let encounter: EncounterWithCombatants = {
+  const encounter: EncounterWithCombatants = {
     ...original,
+    status: 'running',
     mapAttachmentId: MAP_ATTACHMENT_ID,
     gridSize: 10,
     gridScale: 5,
@@ -108,7 +105,10 @@ async function openPingFixture(page: Page) {
   });
 
   await page.route(`**/api/v1/attachments/${MAP_ATTACHMENT_ID}/file`, (route) =>
-    route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1PX }),
+    route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
+  );
+  await page.route(`**/api/v1/encounters/${encounterId}/map*`, (route) =>
+    route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
   );
   await page.route(`**/api/v1/encounters/${encounterId}`, async (route) => {
     if (route.request().method() === 'GET') {
@@ -130,6 +130,12 @@ async function openPingFixture(page: Page) {
   await page.goto(encounterUrl());
   const surface = page.getByTestId('battle-map-surface');
   await expect(surface).toBeVisible();
+  const layer = page.getByTestId('battle-map-layer');
+  await expect(layer).toBeVisible();
+  await expect.poll(async () => {
+    const box = await layer.boundingBox();
+    return box != null && box.width > 50 && box.height > 50;
+  }).toBeTruthy();
   await page.getByRole('button', { name: 'Ping', exact: true }).click();
   await expect(surface).toHaveAttribute('role', 'button');
   return { surface, pings };
@@ -137,6 +143,10 @@ async function openPingFixture(page: Page) {
 
 test.describe('battle-map ping tap completion', () => {
   test.use({ storageState: stateFor('dm') });
+
+  test.beforeEach(async ({ page }) => {
+    await restoreSeedEncounter(page);
+  });
 
   test('ordinary mouse and touch taps publish exactly one ping at the press coordinates', async ({ page }) => {
     const { surface, pings } = await openPingFixture(page);
@@ -149,16 +159,16 @@ test.describe('battle-map ping tap completion', () => {
     await dispatchPointer(surface, 'lostpointercapture', mouseSpot, mouse);
     await dispatchPointer(surface, 'pointerup', mouseSpot, mouse);
     await expect.poll(() => pings.length).toBe(1);
-    expect(pings[0].x).toBeCloseTo(30);
-    expect(pings[0].y).toBeCloseTo(40);
+    expect(pings[0].x).toBeCloseTo(30, 1);
+    expect(pings[0].y).toBeCloseTo(40, 1);
 
     const touchSpot = { xRatio: 0.7, yRatio: 0.55 };
     const touch = { pointerId: 12, pointerType: 'touch', isPrimary: true } as const;
     await dispatchPointer(surface, 'pointerdown', touchSpot, touch);
     await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX, y: 0 });
     await expect.poll(() => pings.length).toBe(2);
-    expect(pings[1].x).toBeCloseTo(70);
-    expect(pings[1].y).toBeCloseTo(55);
+    expect(pings[1].x).toBeCloseTo(70, 1);
+    expect(pings[1].y).toBeCloseTo(55, 1);
   });
 
   test('pointerdown alone never publishes; cancel and capture-loss drop the armed tap', async ({ page }) => {

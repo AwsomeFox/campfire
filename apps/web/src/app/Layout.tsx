@@ -13,6 +13,8 @@ import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
 import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
+import { rememberCampaignRoute } from '../lib/campaignSwitcherRoute';
+import { confirmDiscardUnsavedWork } from '../lib/unsavedWork';
 
 import { useFormattingLocale } from '../lib/format';
 import { initials } from '../lib/avatarText';
@@ -369,6 +371,25 @@ function LayoutContent() {
   // changes over SSE (and fan out to other tabs). Keeps the current route.
   useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined);
 
+  // Issue #760: remember the last safe in-campaign route per user/campaign so
+  // the chooser can restore task context after a switch (namespaced by userId
+  // for shared devices). Push history (no replace) so browser Back still works.
+  useEffect(() => {
+    if (!me || campaignId === undefined) return;
+    rememberCampaignRoute(me.user.id, `${location.pathname}${location.search}`);
+  }, [me, campaignId, location.pathname, location.search]);
+
+  /** Switch-campaign leave: confirm dirty forms, then go to hub with source path. */
+  function onSwitchCampaignClick(event: { preventDefault(): void }): void {
+    if (!confirmDiscardUnsavedWork()) {
+      event.preventDefault();
+    }
+  }
+
+  const switchCampaignState = campaignId !== undefined
+    ? { switchFrom: location.pathname }
+    : undefined;
+
   // AI-DM seat mode drives the "Table" nav item (issue #339): the player-facing table
   // only exists when the AI holds the DM seat (Driver mode). The seat read stops on a
   // 4xx (feature off / not a member), so the item simply stays hidden then — no error.
@@ -624,8 +645,11 @@ function LayoutContent() {
           <div className="flex items-center gap-1 mb-2">
             <Link
               to="/"
+              state={switchCampaignState}
+              onClick={onSwitchCampaignClick}
               className="flex flex-1 min-w-0 items-center gap-2.5 px-2 py-1.5 rounded-md"
               style={{ borderRadius: 'var(--radius-md)' }}
+              aria-label={t('nav.switchCampaign')}
             >
               <FlameMark size={22} />
               <span className="min-w-0 leading-tight">
@@ -635,7 +659,7 @@ function LayoutContent() {
                 >
                   {campaign?.name ?? 'Campfire'}
                 </span>
-                <span className="block text-[11px] text-muted">Switch campaign</span>
+                <span className="block text-[11px] text-muted">{t('nav.switchCampaign')}</span>
               </span>
             </Link>
             {desktopLayout && <NotificationsBell />}
@@ -723,7 +747,13 @@ function LayoutContent() {
             background: 'color-mix(in srgb, var(--color-bg) 88%, transparent)',
           }}
         >
-          <Link to="/" className="flex items-center gap-2">
+          <Link
+            to="/"
+            state={switchCampaignState}
+            onClick={onSwitchCampaignClick}
+            className="flex items-center gap-2"
+            aria-label={campaignId !== undefined ? t('nav.switchCampaign') : t('nav.home')}
+          >
             <FlameMark />
           </Link>
           <div className="leading-tight min-w-0">
@@ -865,6 +895,8 @@ function LayoutContent() {
           mainNav={mainNav}
           dmNav={dmNav}
           isAdmin={isAdmin}
+          switchCampaignState={switchCampaignState}
+          onSwitchCampaignClick={onSwitchCampaignClick}
           onClose={() => setMoreOpen(false)}
           onChangePassword={() => {
             setMoreOpen(false);
@@ -887,6 +919,8 @@ function MoreSheet({
   mainNav,
   dmNav,
   isAdmin,
+  switchCampaignState,
+  onSwitchCampaignClick,
   onClose,
   onChangePassword,
   onLogout,
@@ -896,6 +930,8 @@ function MoreSheet({
   mainNav: NavItem[];
   dmNav: NavItem[];
   isAdmin: boolean;
+  switchCampaignState: { switchFrom: string } | undefined;
+  onSwitchCampaignClick: (event: { preventDefault(): void }) => void;
   onClose: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
@@ -959,7 +995,12 @@ function MoreSheet({
             <MoreSheetItem item={{ key: 'admin', label: 'Server admin', to: '/admin' }} onNavigate={onClose} />
           )}
           <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={onClose} />
-          <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={onClose} />
+          <MoreSheetItem
+            item={{ key: 'switch', label: 'Switch campaign', to: '/' }}
+            state={switchCampaignState}
+            onNavigate={onClose}
+            onClick={onSwitchCampaignClick}
+          />
           <MoreSheetItem item={{ key: 'preferences', label: 'Preferences', to: '/preferences' }} onNavigate={onClose} />
           <button
             className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
@@ -981,7 +1022,17 @@ function MoreSheet({
   );
 }
 
-function MoreSheetItem({ item, onNavigate }: { item: NavItem; onNavigate: () => void }) {
+function MoreSheetItem({
+  item,
+  onNavigate,
+  state,
+  onClick,
+}: {
+  item: NavItem;
+  onNavigate: () => void;
+  state?: { switchFrom: string };
+  onClick?: (event: { preventDefault(): void }) => void;
+}) {
   if (item.soon || !item.to) {
     return (
       <div
@@ -996,7 +1047,11 @@ function MoreSheetItem({ item, onNavigate }: { item: NavItem; onNavigate: () => 
   return (
     <Link
       to={item.to}
-      onClick={onNavigate}
+      state={state}
+      onClick={(event) => {
+        onClick?.(event);
+        if (!event.defaultPrevented) onNavigate();
+      }}
       className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md"
       style={{ fontSize: 14.5, color: 'var(--color-text)' }}
     >

@@ -26,6 +26,7 @@ import {
   MAP_IMPORT_PREFIX,
   MAP_TITLE_LABEL,
   NOTES_COMPOSE_PREFIX,
+  NOTES_EDIT_PREFIX,
   NOTES_FIELD,
   SESSION_ZERO_FIELD,
   SESSION_ZERO_LINES_HELP,
@@ -113,7 +114,10 @@ test.describe('form field vocabulary (issue #886)', () => {
 
   test('notes/comments/AI table prefixes stay distinct for composers', () => {
     expect(NOTES_COMPOSE_PREFIX).not.toBe(COMMENTS_COMPOSE_PREFIX);
+    expect(NOTES_EDIT_PREFIX).toBe('notes-edit');
+    expect(NOTES_EDIT_PREFIX).not.toBe(NOTES_COMPOSE_PREFIX);
     expect(NOTES_FIELD.body).toBe('body');
+    expect(NOTES_FIELD.whisperTo).toBe('whisperTo');
     expect(NOTE_BODY_LABEL).toBe('Note body');
     expect(COMMENT_BODY_LABEL).toBe('Comment');
     expect(AI_TABLE_PREFIX).toBe('ai-table');

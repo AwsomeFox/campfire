@@ -84,6 +84,7 @@ function buildService(entities: {
     { get: async () => null } as any, // sessionZero
     { getOwn: async () => null } as any, // supportPreferences
     { listForCampaign: noop as any, getTreasury: async () => null } as any, // inventory
+    { listForCampaign: noop as any } as any, // revisions
   );
 }
 
