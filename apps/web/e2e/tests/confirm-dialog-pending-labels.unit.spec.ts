@@ -80,5 +80,7 @@ test.describe('confirm dialog pending labels (issue #793)', () => {
     expect(resolveBusyConfirmLabel('End encounter', 'Wrapping up…')).toBe('Wrapping up…');
     expect(resolveBusyConfirmLabel('End encounter')).toBe('Ending encounter…');
     expect(resolveBusyConfirmLabel('End encounter', '')).toBe('Ending encounter…');
+    expect(resolveBusyConfirmLabel('End encounter', '   ')).toBe('Ending encounter…');
+    expect(resolveBusyConfirmLabel('End encounter', '  Wrapping up…  ')).toBe('Wrapping up…');
   });
 });

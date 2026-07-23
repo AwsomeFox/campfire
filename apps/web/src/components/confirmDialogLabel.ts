@@ -8,7 +8,7 @@
  * derivation from `confirmLabel`.
  */
 
-/** Preferred British-style gerunds used elsewhere in Campfire microcopy. */
+/** Irregular gerund spellings that do not follow the default -ing rules. */
 const SPECIAL_GERUNDS: Record<string, string> = {
   cancel: 'Cancelling',
 };
@@ -16,7 +16,8 @@ const SPECIAL_GERUNDS: Record<string, string> = {
 /**
  * Turn an imperative confirm label into a progressive busy label.
  * "End encounter" → "Ending encounter…"; "Remove" → "Removing…".
- * Labels that already end in an ellipsis are returned unchanged.
+ * Labels that already end in `…` are returned unchanged; a trailing `...`
+ * is normalized to `…`.
  */
 export function derivePendingLabel(confirmLabel: string): string {
   const label = confirmLabel.trim();
@@ -32,10 +33,12 @@ export function derivePendingLabel(confirmLabel: string): string {
 
 /**
  * Label shown on the confirm button while `busy` is true.
- * Explicit `pendingLabel` wins; otherwise derive from `confirmLabel`.
+ * Explicit non-empty `pendingLabel` (after trim) wins; otherwise derive from
+ * `confirmLabel`.
  */
 export function resolveBusyConfirmLabel(confirmLabel: string, pendingLabel?: string): string {
-  if (pendingLabel != null && pendingLabel !== '') return pendingLabel;
+  const explicit = pendingLabel?.trim();
+  if (explicit) return explicit;
   return derivePendingLabel(confirmLabel);
 }
 
