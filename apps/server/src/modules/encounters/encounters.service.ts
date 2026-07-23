@@ -132,6 +132,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     tokenX: row.tokenX,
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
+    tokenHiddenByFog: false,
   };
 }
 
@@ -180,10 +181,14 @@ function tokenInRevealedRegion(c: Combatant, fog: FogState): boolean {
  * on those combatants server-side (the client never receives the coordinates), the same
  * server-side-gate approach as the issue #43 monster-HP band. Tokens inside a revealed
  * rectangle, and unplaced combatants, are returned unchanged.
+ *
+ * Issue #418: also set `tokenHiddenByFog: true` so the client can show an owner-safe
+ * "placed outside the revealed area" state instead of falsely listing the token as
+ * Unplaced (and offering a no-op place-at-center action). Coordinates stay null.
  */
 function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
   if (tokenInRevealedRegion(c, fog)) return c;
-  return { ...c, tokenX: null, tokenY: null };
+  return { ...c, tokenX: null, tokenY: null, tokenHiddenByFog: true };
 }
 
 export type EncounterSearchEntry = {

@@ -4021,6 +4021,11 @@ export const Combatant = z.object({
   // Token footprint size category (issue #40, phase 2) — scales the rendered token on the
   // battle map (tiny→gargantuan). Defaults to 'medium' (a 1×1 cell). No effect on combat math.
   tokenSize: TokenSize.default('medium'),
+  // Ephemeral fog redaction flag (issue #418): when fog withholds tokenX/tokenY for a
+  // non-DM viewer, this is true so the client can distinguish "placed but outside the
+  // revealed area" from a truly unplaced token — without leaking coordinates. Always
+  // false for DMs and for tokens whose position is visible (or truly null in storage).
+  tokenHiddenByFog: z.boolean().default(false),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
