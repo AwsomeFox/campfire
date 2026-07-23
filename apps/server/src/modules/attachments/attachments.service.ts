@@ -24,6 +24,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, auditLog, campaigns, characters, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
+import { FsDeletionService, type FsDeletionOutcome } from './fs-deletion.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { persistedFogConcealsPixels } from '../../common/fog';
@@ -119,6 +120,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly fsDeletion: FsDeletionService,
   ) {}
 
   /**
@@ -876,11 +878,22 @@ export class AttachmentsService implements OnApplicationBootstrap {
    * Without this, deleting an attachment still in use left the campaign map / encounter
    * map / character portrait pointing at a now-404ing file.
    */
-  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role): Promise<FsDeletionOutcome> {
     const existing = await this.getRowOrThrow(id);
     if (role !== 'dm' && existing.uploaderUserId !== user.id) {
       throw new ForbiddenException('Only the uploader or dm may delete this attachment');
     }
+
+    const auditCtx = {
+      scope: 'attachment' as const,
+      auditPrefix: 'attachment.delete',
+      actor: auditActor(user),
+      actorRole: role,
+      campaignId: existing.campaignId,
+      entityType: 'attachment',
+      entityId: id,
+    };
+    await this.fsDeletion.auditRequested(auditCtx);
 
     const portraitSuffix = `%/attachments/${id}/file`;
     this.db.transaction((tx) => {
@@ -890,25 +903,14 @@ export class AttachmentsService implements OnApplicationBootstrap {
       tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
     });
 
+    await this.fsDeletion.auditMetadataComplete(auditCtx, existing.kind);
+
     const filePath = this.filePath(existing);
     const thumbPath = this.thumbPath(existing);
     this.etagCache.delete(filePath);
     this.etagCache.delete(thumbPath);
-    for (const p of [filePath, thumbPath]) {
-      fs.rm(p, { force: true }, () => {
-        /* best-effort — DB row is the source of truth; a stray orphan file is harmless */
-      });
-    }
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'attachment.delete',
-      entityType: 'attachment',
-      entityId: id,
-      campaignId: existing.campaignId,
-      detail: existing.kind,
-    });
+    return this.fsDeletion.removeUploadPaths([filePath, thumbPath], auditCtx);
   }
 
   // ---------- storage management (issue #24) ----------
@@ -1017,6 +1019,8 @@ export class AttachmentsService implements OnApplicationBootstrap {
       if (!fs.existsSync(this.filePath(r))) rowsWithoutFile += 1;
     }
 
+    const fsCleanup = await this.fsDeletion.listPendingSummary();
+
     return {
       totalBytes: committedBytes,
       committedBytes,
@@ -1030,6 +1034,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
         filesWithoutRow: disk.orphanFiles.length,
         orphanBytes: disk.orphanBytes,
       },
+      fsCleanup,
     };
   }
 

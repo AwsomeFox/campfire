@@ -68,6 +68,7 @@ import { InvitesService } from '../membership/invites.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
+import { FsDeletionService, type FsDeletionOutcome } from '../attachments/fs-deletion.service';
 import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { sanitizeAttachmentFilename } from '../attachments/filename';
@@ -264,6 +265,7 @@ export class CampaignsService {
     private readonly roleResolver: RoleResolver,
     private readonly members: MembersService,
     private readonly invites: InvitesService,
+    private readonly fsDeletion: FsDeletionService,
   ) {}
 
   /**
@@ -2245,8 +2247,19 @@ export class CampaignsService {
    * a rarer, heavier operation than a single attachment delete). Purge acts on live OR
    * trashed campaigns (includeDeleted) so the disk wipe can only ever run through here.
    */
-  async purge(id: number, user: RequestUser): Promise<void> {
+  async purge(id: number, user: RequestUser): Promise<FsDeletionOutcome> {
     await this.getOrThrow(id, { includeDeleted: true });
+
+    const auditCtx = {
+      scope: 'campaign_purge' as const,
+      auditPrefix: 'campaign.purge',
+      actor: auditActor(user),
+      actorRole: 'dm' as const,
+      campaignId: id,
+      entityType: 'campaign',
+      entityId: id,
+    };
+    await this.fsDeletion.auditRequested(auditCtx);
 
     // This hand-rolled cascade is the ONLY teardown mechanism on databases created
     // before FK enforcement shipped (issue #69) — SQLite cannot ALTER-ADD a foreign
@@ -2325,26 +2338,10 @@ export class CampaignsService {
       tx.delete(campaigns).where(eq(campaigns.id, id)).run();
     });
 
-    // Best-effort: remove the on-disk upload directory for this campaign. The DB rows
-    // are already gone (source of truth), so a failure here just leaves an orphaned
-    // directory — logged-free, matching AttachmentsService.remove()'s best-effort fs.rm.
-    // Synchronous wipe: the e2e purge assertion reads the directory immediately after
-    // the HTTP response returns. Async fs.rm raced that check on Node 22.x CI.
-    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
-    try {
-      fs.rmSync(campaignUploadsDir, { recursive: true, force: true });
-    } catch {
-      /* best-effort — DB rows are already gone; a stray directory is harmless */
-    }
+    await this.fsDeletion.auditMetadataComplete(auditCtx);
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: 'dm',
-      action: 'campaign.purge',
-      entityType: 'campaign',
-      entityId: id,
-      campaignId: id,
-    });
+    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
+    return this.fsDeletion.removeUploadPaths([campaignUploadsDir], auditCtx);
   }
 
   async summary(id: number, role: Role): Promise<CampaignSummary> {
