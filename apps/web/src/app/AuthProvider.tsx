@@ -49,6 +49,10 @@ export {
   type MeFetchOutcome,
 } from './authDecision';
 import { decideAuthOutcome, type MeFetchOutcome } from './authDecision';
+import {
+  isMembershipSyncMessage,
+  openMembershipSyncChannel,
+} from '../lib/membershipLiveSync';
 
 /**
  * Blends a #rrggbb hex color toward white by `ratio` (0-1). Used to derive a
@@ -217,6 +221,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Issue #437: when another tab of this origin learns about a role change for
+  // this user (via campaign SSE), it posts on the membership sync channel so
+  // tabs without that campaign's stream (home, /screen, /admin) still refresh
+  // /me. Listening here — above Layout — covers every authenticated surface.
+  useEffect(() => {
+    if (!me?.user.id) return;
+    const channel = openMembershipSyncChannel(me.user.id);
+    if (!channel) return;
+    const onMessage = (event: MessageEvent) => {
+      if (!isMembershipSyncMessage(event.data)) return;
+      void refresh();
+    };
+    channel.addEventListener('message', onMessage);
+    return () => {
+      channel.removeEventListener('message', onMessage);
+      channel.close();
+    };
+  }, [me?.user.id, refresh]);
 
   // #723 cross-tab purge: when ANOTHER tab of this origin clears the SW cache
   // (account switch, restore, logout — anything that calls clearApiCache), it
