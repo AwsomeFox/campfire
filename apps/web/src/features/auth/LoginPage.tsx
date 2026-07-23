@@ -263,9 +263,19 @@ export function LoginPage() {
   //
   // Assertive "Signed out" is announced here (not in Layout.onLogout) so it
   // survives AuthedLayout/Layout unmount clears from issue #434.
-  const cameFromSignOut = Boolean((location.state as { signedOut?: boolean } | null)?.signedOut);
+  //
+  // Issue #885: mid-session expiry arrives with `{ sessionExpired: true, from }`
+  // instead — show a distinct banner and announce, but keep username autofocus
+  // so the user can reauth quickly without an extra focus hop.
+  const loginState = location.state as {
+    signedOut?: boolean;
+    sessionExpired?: boolean;
+  } | null;
+  const cameFromSignOut = Boolean(loginState?.signedOut);
+  const cameFromSessionExpiry = Boolean(loginState?.sessionExpired) && !cameFromSignOut;
   const headingRef = useRef<HTMLHeadingElement>(null);
   const announcedSignOut = useRef(false);
+  const announcedSessionExpired = useRef(false);
   // useLayoutEffect so heading focus wins over a later paint; skip username
   // autoFocus when cameFromSignOut (see LocalLoginForm below).
   useLayoutEffect(() => {
@@ -277,6 +287,12 @@ export function LoginPage() {
     announcedSignOut.current = true;
     announce(t('nav.signedOutAnnouncement'), { assertive: true });
   }, [cameFromSignOut, announce, t]);
+
+  useEffect(() => {
+    if (!cameFromSessionExpiry || announcedSessionExpired.current) return;
+    announcedSessionExpired.current = true;
+    announce(t('nav.sessionExpiredAnnouncement'), { assertive: true });
+  }, [cameFromSessionExpiry, announce, t]);
 
   // Leaving /login (sign-in success, SSO bounce, etc.) must wipe the assertive
   // "Signed out" confirmation. AuthedLayout's scope hook also clears on first
@@ -375,6 +391,28 @@ export function LoginPage() {
             </p>
           </div>
         </div>
+
+        {cameFromSessionExpiry && (
+          <div
+            role="status"
+            data-testid="session-expired-banner"
+            style={{
+              width: '100%',
+              textAlign: 'left',
+              padding: '10px 12px',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-divider)',
+              background: 'var(--color-neutral-900)',
+              fontSize: 13,
+              lineHeight: 1.45,
+            }}
+          >
+            <p style={{ margin: 0, fontWeight: 700 }}>{t('nav.sessionExpiredTitle')}</p>
+            <p className="text-muted" style={{ margin: '4px 0 0' }}>
+              {t('nav.sessionExpiredBody')}
+            </p>
+          </div>
+        )}
 
         {loading ? (
           <p role="status" className="text-muted" style={{ margin: 0, fontSize: 13 }}>

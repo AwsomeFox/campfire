@@ -12,12 +12,19 @@
  * Reconnects automatically with capped exponential backoff; after a drop is
  * healed, onReconnect fires so pages can refetch whatever they missed while
  * offline. Parser buffer-overrun recovery is separate ({@link CampaignEventsHandlers.onStreamRecovery})
- * — the TCP/HTTP connection stayed up. A 401/403 stops the loop entirely
- * (no access — retrying won't help).
+ * — the TCP/HTTP connection stayed up. A proven 401 signals session expiry
+ * (issue #885) and stops until reauth bumps the resume epoch; a campaign-scoped
+ * 403 stops without clearing identity (retrying won't help).
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
 import { API } from './api';
+import {
+  classifyStreamConnectStatus,
+  getSessionResumeEpoch,
+  signalSessionExpired,
+  subscribeSessionResume,
+} from './sessionExpiry';
 import { SseParser, type SseParseSignal } from './sseParse';
 
 export interface CampaignEventsHandlers {
@@ -109,6 +116,9 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
   // Latest handlers in a ref so a re-render never tears down the connection.
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  // After a 401 stop, reauth bumps this epoch so the effect reopens the stream
+  // even when campaignId is unchanged (issue #885).
+  const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
 
   useEffect(() => {
     if (campaignId === undefined || !Number.isFinite(campaignId)) return;
@@ -173,7 +183,15 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
             headers,
             signal: activeRequest.signal,
           });
-          if (res.status === 401 || res.status === 403) {
+          const auth = classifyStreamConnectStatus(res.status);
+          if (auth === 'session-expired') {
+            // Proven 401 — not offline, not a campaign 403. Fan out so AuthProvider
+            // can show reauth; stop until resumeEpoch advances after login.
+            signalSessionExpired();
+            setStatus('stopped');
+            return;
+          }
+          if (auth === 'forbidden') {
             setStatus('stopped');
             return;
           }
@@ -237,5 +255,5 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
       wakeSleep?.();
       activeRequest?.abort();
     };
-  }, [campaignId]);
+  }, [campaignId, resumeEpoch]);
 }

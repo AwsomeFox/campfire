@@ -9,17 +9,23 @@
  * headers, which EventSource cannot send. Reconnects with capped exponential backoff;
  * after a transport heal, `onReconnect` fires so the page can refetch GET /ai-dm/session
  * to catch up on state it missed while offline. Parser buffer-overrun recovery is
- * separate (`onStreamRecovery`) — the connection stayed up. A 401/403 stops the loop
- * entirely (no access — retrying won't help), which is also how the server enforces
- * the role matrix: the client simply stops when told no.
+ * separate (`onStreamRecovery`) — the connection stayed up. A proven 401 signals
+ * session expiry (issue #885) and stops until reauth; a campaign/feature 403 stops
+ * without clearing identity (role matrix / seat off — retrying won't help).
  *
  * The transcript is NOT assembled here — this hook only decodes and validates the typed
  * event union and hands each event to `onEvent`. See features/ai-dm/transcript.ts (the
  * reducer that turns these events into a running transcript) and features/ai-dm/
  * toolActivity.ts (the tool-event → query-invalidation map).
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { API } from './api';
+import {
+  classifyStreamConnectStatus,
+  getSessionResumeEpoch,
+  signalSessionExpired,
+  subscribeSessionResume,
+} from './sessionExpiry';
 import { SseParser, type SseParseSignal } from './sseParse';
 
 /**
@@ -192,6 +198,8 @@ export function useAiDmStream(
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const enabled = options?.enabled ?? true;
+  // Reopen after session reauth even when campaignId/enabled are unchanged (#885).
+  const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
 
   useEffect(() => {
     if (!enabled || campaignId === undefined || !Number.isFinite(campaignId)) return;
@@ -223,8 +231,13 @@ export function useAiDmStream(
             headers,
             signal: controller.signal,
           });
-          // 401/403 = no access (feature off, not a member, seat disabled) — retrying won't heal it.
-          if (res.status === 401 || res.status === 403) return;
+          const auth = classifyStreamConnectStatus(res.status);
+          if (auth === 'session-expired') {
+            signalSessionExpired();
+            return;
+          }
+          // 403 = feature off / not a member / seat disabled — not session expiry.
+          if (auth === 'forbidden') return;
           if (!res.ok || !res.body) throw new Error(`AI-DM SSE connect failed (${res.status})`);
 
           if (attempt > 0) handlersRef.current.onReconnect?.();
@@ -274,5 +287,5 @@ export function useAiDmStream(
       disposed = true;
       controller.abort();
     };
-  }, [campaignId, enabled]);
+  }, [campaignId, enabled, resumeEpoch]);
 }

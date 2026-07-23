@@ -35,7 +35,7 @@ function ConnectionErrorScreen({ onRetry }: { onRetry: () => void }) {
 }
 
 export function AuthedLayout() {
-  const { me, ready, connectionError, refresh } = useAuth();
+  const { me, ready, connectionError, refresh, sessionExpired } = useAuth();
   const { status, loading: statusLoading } = useAuthStatus();
   const location = useLocation();
   const params = useParams<{ campaignId?: string }>();
@@ -53,7 +53,8 @@ export function AuthedLayout() {
   // A cold load with the API down would otherwise land here with me=null,
   // ready=true and bounce forever between Splash and /login on every refresh
   // attempt. Surface a retry instead of pretending the user is logged out.
-  if (connectionError && !me) {
+  // Mid-session expiry is a proven 401 (not unreachable) — don't mask it here.
+  if (connectionError && !me && !sessionExpired) {
     return <ConnectionErrorScreen onRetry={() => void refresh()} />;
   }
 
@@ -65,7 +66,15 @@ export function AuthedLayout() {
     // Carry the deep link we bounced from so LoginPage can return to it after
     // sign-in (issue #148). Without this a shared `/c/1/quests/5` link lands on
     // the campaign list. `from` is a same-origin Location, validated on read.
-    return <Navigate to="/login" replace state={{ from: location }} />;
+    // Issue #885: also forward `sessionExpired` so the login screen can explain
+    // the bounce without treating a cold signed-out visit the same way.
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: location, ...(sessionExpired ? { sessionExpired: true } : {}) }}
+      />
+    );
   }
 
   return (
