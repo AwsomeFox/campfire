@@ -5,7 +5,7 @@
  * writable only by the dm or the character's owning player (server-enforced,
  * mirrored here so read-only rows don't render controls).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useParams } from 'react-router-dom';
 import type { Character, InventoryItem, Treasury } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -29,6 +29,14 @@ const COINS = [
   { key: 'cp', label: 'Copper' },
 ] as const;
 type CoinKey = (typeof COINS)[number]['key'];
+
+/** Add-item quantity bounds (issue #459). Schema allows any non-negative int; the
+ *  form spinbutton exposes a practical max so AT gets min/max/step. */
+const ITEM_QTY_MIN = 0;
+const ITEM_QTY_MAX = 1_000_000;
+const ITEM_QTY_STEP = 1;
+const ITEM_QTY_HELP =
+  `Whole number from ${ITEM_QTY_MIN.toLocaleString('en-US')} to ${ITEM_QTY_MAX.toLocaleString('en-US')}, step ${ITEM_QTY_STEP}.`;
 
 export default function InventoryPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -786,6 +794,10 @@ function AddItemForm({
   // rather than silently defaulting to 1.
   const [qtyError, setQtyError] = useState<string | null>(null);
   const formatLocale = useFormattingLocale();
+  const qtyId = useId();
+  const qtyHelpId = `${qtyId}-help`;
+  const qtyErrorId = `${qtyId}-error`;
+  const qtyDescribedBy = qtyError ? `${qtyHelpId} ${qtyErrorId}` : qtyHelpId;
 
   // Live preview: the DM's explicit pick, else the name-derived default so they
   // see what the row will show before saving.
@@ -794,9 +806,12 @@ function AddItemForm({
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!name.trim()) return;
-    // Issue #633: parse qty in the viewer's locale. On failure, surface a
-    // field error and keep the current value — do NOT fall back to 1.
-    const qtyParsed = parseLocalizedInteger(qty, formatLocale, { min: 0 });
+    // Issue #633: parse qty without silently defaulting to 1. Issue #459: enforce
+    // the same min/max the spinbutton exposes so out-of-range values announce.
+    const qtyParsed = parseLocalizedInteger(qty, formatLocale, {
+      min: ITEM_QTY_MIN,
+      max: ITEM_QTY_MAX,
+    });
     if (!qtyParsed.ok) {
       setQtyError(qtyParsed.error);
       return;
@@ -825,27 +840,45 @@ function AddItemForm({
   }
 
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-3" data-testid="inventory-add-item">
       <h2 className="font-bold text-white text-sm">Add item</h2>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
-      <form onSubmit={submit} className="space-y-3">
-        <div className="grid grid-cols-[1fr_90px] gap-3">
+      {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
+      {/* noValidate: native number constraints stay for AT/min/max/step, but
+          submit uses parseLocalizedInteger so out-of-range values announce via
+          the Quantity field alert instead of a silent browser block (#459/#633). */}
+      <form onSubmit={submit} className="space-y-3" noValidate>
+        <div className="grid grid-cols-[1fr_7.5rem] gap-3 items-start">
           <TextInput placeholder="Item name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          {/* type="text" + inputMode="numeric" (issue #633): see TreasuryCard for
-              why a numeric text field beats type="number" for locale-aware input. */}
-          <TextInput
-            type="text"
-            inputMode="numeric"
-            placeholder="Qty"
-            value={qty}
-            aria-invalid={qtyError != null}
-            onChange={(e) => {
-              setQty(e.target.value);
-              setQtyError(null);
-            }}
-          />
+          {/* Labeled spinbutton (issue #459): associated Quantity label, native
+              min/max/step, validation help, and contextual error announcement.
+              type="number" matches the audited control; parseLocalizedInteger
+              still rejects invalid/out-of-range values without silent coercion (#633). */}
+          <div className="field">
+            <label htmlFor={qtyId}>Quantity</label>
+            <TextInput
+              id={qtyId}
+              type="number"
+              min={ITEM_QTY_MIN}
+              max={ITEM_QTY_MAX}
+              step={ITEM_QTY_STEP}
+              value={qty}
+              aria-invalid={qtyError != null}
+              aria-describedby={qtyDescribedBy}
+              onChange={(e) => {
+                setQty(e.target.value);
+                setQtyError(null);
+              }}
+            />
+            <p id={qtyHelpId} className="mt-1 text-[11px] text-slate-500 leading-snug">
+              {ITEM_QTY_HELP}
+            </p>
+            {qtyError && (
+              <p id={qtyErrorId} role="alert" className="mt-1 text-[11px] text-rose-400">
+                {qtyError}
+              </p>
+            )}
+          </div>
         </div>
-        {qtyError && <p className="text-xs text-rose-400 -mt-1">{qtyError}</p>}
         <div className="grid grid-cols-2 gap-3">
           <select className="cf-select" value={owner} onChange={(e) => setOwner(e.target.value)} aria-label="Owner">
             <option value="party">Party stash</option>
