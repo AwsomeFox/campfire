@@ -39,6 +39,10 @@ import {
 } from '../features/auth/useAuthStorageListener';
 import { applyReadingPreference } from './readingPreferences';
 import { clearLiveAnnouncements } from '../components/Announcer';
+import {
+  resetSessionExpiredSignal,
+  subscribeSessionExpired,
+} from '../lib/sessionExpiry';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
 // e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
 // can be unit-tested without JSX and without React.
@@ -95,6 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [connectionError, setConnectionError] = useState(false);
   const [staleIdentity, setStaleIdentity] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
   // Last authenticated user id we've seen this page-session. Lets us detect a
   // proven-live change of identity (first sign-in or an account switch) so we can
   // drop any cached campaign data belonging to a prior session before it renders.
@@ -109,6 +114,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // in-flight refresh() that resolves after sign-out discards its result instead
   // of resurrecting `me` from a cookie that hasn't been revoked yet.
   const logoutEpochRef = useRef(0);
+  // Latest `me` for the session-expiry subscriber (stable effect; no resubscribe).
+  const meRef = useRef<Me | null>(null);
+  meRef.current = me;
 
   const handleMultiTabSignOut = useCallback(() => {
     logoutEpochRef.current += 1;
@@ -122,6 +130,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
+    // Peer-tab intentional sign-out is not a mid-session expiry bounce.
+    setSessionExpired(false);
     // Issue #506: peer tabs must not keep assertive/polite combat/HP text after
     // another tab signs out (AnnounceProvider sits below us, so use the module
     // entrypoint rather than the React hook).
@@ -135,6 +145,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useAuthStorageListener(handleMultiTabSignOut);
+
+  // Issue #885: any provenance-safe 401 from the API/SSE clients (not offline,
+  // not a campaign 403) clears identity-scoped state while the tab was still
+  // showing protected UI. Only act when this tab had a confirmed-live identity
+  // — a cold `/me` 401 for a signed-out visitor must not look like "session expired".
+  useEffect(() => {
+    return subscribeSessionExpired(() => {
+      const hadIdentity = lastUserIdRef.current != null || meRef.current != null;
+      if (!hadIdentity) return;
+      logoutEpochRef.current += 1;
+      setMe(null);
+      lastUserIdRef.current = null;
+      lastInstanceRef.current = null;
+      applyAccentColor(null);
+      applyReadingPreference(document.documentElement, 'default');
+      // Clear the cross-tab sentinel (other tabs sign out) but do NOT POST
+      // /auth/logout — the server already rejected the cookie as expired.
+      clearAuthStorage();
+      clearMeSnapshot();
+      setStaleIdentity(false);
+      setLastSyncedAt(null);
+      setConnectionError(false);
+      setSessionExpired(true);
+      clearLiveAnnouncements();
+      // Identity-scoped query cache only — local draft keys / unrelated storage stay.
+      queryClient.clear();
+      setReady(true);
+      void clearApiCache();
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     const epoch = logoutEpochRef.current;
@@ -203,7 +243,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (decision.me) {
       applyAccentColor(decision.me.user.accentColor);
       applyReadingPreference(document.documentElement, decision.me.user.textSize);
-      if (outcome.kind === 'live') setAuthStorage(decision.me.user);
+      if (outcome.kind === 'live') {
+        setAuthStorage(decision.me.user);
+        // Successful reauth after a mid-session 401: clear the login banner and
+        // bump the SSE resume epoch so campaign/AI streams reopen (#885).
+        setSessionExpired(false);
+        resetSessionExpiredSignal();
+      }
     } else {
       applyAccentColor(null);
       applyReadingPreference(document.documentElement, 'default');
@@ -263,6 +309,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
+    setSessionExpired(false);
     applyAccentColor(null);
     applyReadingPreference(document.documentElement, 'default');
     // Clear React Query synchronously so a fast shared-device re-login cannot
@@ -287,8 +334,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<AuthState>(
-    () => ({ me, ready, connectionError, staleIdentity, lastSyncedAt, isAdmin, roleIn, refresh, logout }),
-    [me, ready, connectionError, staleIdentity, lastSyncedAt, isAdmin, roleIn, refresh, logout],
+    () => ({
+      me,
+      ready,
+      connectionError,
+      staleIdentity,
+      lastSyncedAt,
+      sessionExpired,
+      isAdmin,
+      roleIn,
+      refresh,
+      logout,
+    }),
+    [
+      me,
+      ready,
+      connectionError,
+      staleIdentity,
+      lastSyncedAt,
+      sessionExpired,
+      isAdmin,
+      roleIn,
+      refresh,
+      logout,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

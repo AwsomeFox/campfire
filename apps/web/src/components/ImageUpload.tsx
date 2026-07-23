@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState, type DragEvent } from 'react';
 import type { Attachment, AttachmentKind } from '@campfire/schema';
 import { API, ApiError } from '../lib/api';
+import { noteUnauthorizedResponse } from '../lib/sessionExpiry';
 import { Btn } from './ui';
 import { initialUploadState, isPreviewUncommitted, reduceUpload, visiblePreview } from './imageUploadState';
 
@@ -188,6 +189,8 @@ export async function uploadAttachment(campaignId: number, kind: AttachmentKind,
   });
 
   if (!res.ok) {
+    // Multipart bypasses lib/api.ts — still fan out proven 401s (issue #885).
+    noteUnauthorizedResponse(`${API}/campaigns/${campaignId}/attachments`, res.status);
     let message = res.statusText;
     try {
       const body = await res.json();
