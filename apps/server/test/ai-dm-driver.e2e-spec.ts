@@ -1,8 +1,14 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
-import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
+import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
+import {
+  AiDriverService,
+  setDriverStreamIdleTimeoutMsForTests,
+  DRIVER_STREAM_IDLE_TIMEOUT_MS,
+} from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import { DEFAULT_IDLE_TIMEOUT_MS } from '../src/modules/ai-dm/providers/http';
 
 /**
  * Driver AI-DM runtime (#312) — the KEYSTONE flow, tested end-to-end and OFFLINE via the
@@ -371,5 +377,132 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
     const resumed = await h.sendMessage(campaignId, { input: 'again' });
     expect(resumed.status).toBe(201);
     expect(resumed.body.narration).toBe('Clean seat after mid-turn teardown.');
+  });
+});
+
+/**
+ * Issue #1046 — a provider streaming failure must emit turn.end with provider_error so
+ * every SSE client's composer unlocks, and park the seat in awaiting_players for retry.
+ */
+describe('ai-dm driver — provider streaming failure unlocks composers (#1046)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-provider-error-model' });
+    await h.enableExperimental();
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it('emits turn.end with provider_error, audits, and parks awaiting_players', async () => {
+    const campaignId = await h.createCampaign('Driver Provider Error');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    // Mid-stream 500: yield one token, then throw (the repro in the issue).
+    h.script({
+      text: 'The mist thickens around you…',
+      streamChunks: 4,
+      throwAfterChunks: 1,
+      throwError: new AiProviderError('server', 'mock: upstream HTTP 500', {
+        provider: 'mock',
+        status: 500,
+      }),
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'We press on.' });
+    sub.unsubscribe();
+
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+
+    expect(events.some((e) => e.type === 'turn.start')).toBe(true);
+    const end = events.find((e) => e.type === 'turn.end');
+    expect(end).toBeDefined();
+    expect(end && end.type === 'turn.end' && end.stopReason).toBe('provider_error');
+    // Partial narration reached clients before the failure.
+    expect(events.some((e) => e.type === 'narration.delta')).toBe(true);
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('awaiting_players');
+    expect(session.body.stuck?.reason).toBe('provider_error');
+
+    const audit = await h.getAudit(campaignId);
+    const actions = audit.body.map((e: { action: string }) => e.action);
+    expect(actions).toContain('ai-dm.driver.provider_error');
+
+    // Composer unlocked + seat released: a follow-up turn must not 409.
+    h.script({ text: 'The mist clears. The table can retry.' });
+    const again = await h.sendMessage(campaignId, { input: 'retry' });
+    expect(again.status).not.toBe(409);
+    expect(again.status).toBe(201);
+    expect(again.body.stopReason).toBe('complete');
+  });
+});
+
+/**
+ * Issue #1063 — a provider stream that stalls mid-body must idle-timeout, emit turn.end,
+ * release the seat, and NOT permanently 409 every future turn.
+ */
+describe('ai-dm driver — stream idle timeout recovery (#1063)', () => {
+  let h: AiEvalHarness;
+  const prevIdle = DRIVER_STREAM_IDLE_TIMEOUT_MS;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-idle-model' });
+    await h.enableExperimental();
+    // Shrink the watchdog so the e2e does not wait the production 30s.
+    setDriverStreamIdleTimeoutMsForTests(50);
+  });
+
+  afterAll(async () => {
+    setDriverStreamIdleTimeoutMsForTests(prevIdle || DEFAULT_IDLE_TIMEOUT_MS);
+    await h.close();
+  });
+
+  it('a stream that stalls mid-body aborts, emits turn.end, and does not permanently 409', async () => {
+    const campaignId = await h.createCampaign('Driver Idle Stall');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    // Yield one chunk, then hang until the driver's AbortSignal fires.
+    h.script({
+      text: 'The corridor stretches into darkness…',
+      streamChunks: 4,
+      stallAfterChunks: 1,
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'We advance carefully.' });
+    sub.unsubscribe();
+
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+
+    const end = events.find((e) => e.type === 'turn.end');
+    expect(end).toBeDefined();
+    expect(end && end.type === 'turn.end' && end.stopReason).toBe('provider_error');
+    expect(events.some((e) => e.type === 'turn.start')).toBe(true);
+
+    // Seat released — a follow-up turn must NOT 409 (the wedge the issue describes).
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('awaiting_players');
+    expect(session.body.stuck?.reason).toBe('provider_error');
+
+    // Recovery: nudge/retry after scripting a clean reply.
+    h.script({ text: 'The darkness parts. Play continues.' });
+    const again = await h.sendMessage(campaignId, { input: 'try again' });
+    expect(again.status).not.toBe(409);
+    expect(again.status).toBe(201);
+    expect(again.body.stopReason).toBe('complete');
   });
 });

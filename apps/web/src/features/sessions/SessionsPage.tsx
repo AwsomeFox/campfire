@@ -32,6 +32,12 @@ import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
 import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
+import {
+  assertMutationTarget,
+  decideRouteBoundCommit,
+  mutationsEnabledForRoute,
+  RouteBoundLoadSequencer,
+} from '../../lib/routeBoundRecord';
 
 export default function SessionsPage() {
   useFormattingLocale();
@@ -470,6 +476,7 @@ export default function SessionsPage() {
         <main className={`min-w-0 lg:col-span-2 space-y-4 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
           {selected ? (
             <SessionDetail
+              key={selected.id}
               session={selected}
               campaignId={cid}
               isDm={isDm}
@@ -567,6 +574,7 @@ function SessionDetail({
   const [recap, setRecap] = useState('');
   const [recapLoading, setRecapLoading] = useState(true);
   const [recapDraft, setRecapDraft] = useState('');
+  const [loadedSessionId, setLoadedSessionId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -578,32 +586,58 @@ function SessionDetail({
   const [conflict, setConflict] = useState(false);
   // Bumped after a save/restore to tell the history panel to refetch.
   const [historyNonce, setHistoryNonce] = useState(0);
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
 
   useEffect(() => {
     setEditing(isDm && startEditing);
     setTitleDraft(session.title);
     setDateDraft(toDateInputValue(session.playedAt));
+    // Issue #853: clear prior recap/draft immediately so a slow A fetch cannot leave
+    // A's prose editable against B (key= remounts help; sequencer covers races).
+    setRecap('');
+    setRecapDraft('');
+    setLoadedSessionId(null);
+    setLoadedUpdatedAt(null);
+    setConflict(false);
+    setConfirmingDelete(false);
+    setError(null);
     setRecapLoading(true);
-    let cancelled = false;
+    const { generation, signal } = loadSequencerRef.current.begin(session.id);
     api
-      .get<Session>(`${API}/sessions/${session.id}`)
+      .get<Session>(`${API}/sessions/${session.id}`, { signal })
       .then((full) => {
-        if (cancelled) return;
-        setRecap(full.recap);
-        setRecapDraft(full.recap);
-        setLoadedUpdatedAt(full.updatedAt);
+        const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, session.id, full);
+        if (decision.kind !== 'commit') return;
+        setRecap(decision.record.recap);
+        setRecapDraft(decision.record.recap);
+        setLoadedUpdatedAt(decision.record.updatedAt);
+        setLoadedSessionId(decision.record.id);
         setConflict(false);
       })
-      .catch(() => undefined)
+      .catch((err) => {
+        if (!loadSequencerRef.current.isCurrent(generation, session.id)) return;
+        setRecap('');
+        setRecapDraft('');
+        setLoadedUpdatedAt(null);
+        setLoadedSessionId(null);
+        if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
+        setError(err instanceof ApiError ? err.message : "Couldn't load this recap.");
+      })
       .finally(() => {
-        if (!cancelled) setRecapLoading(false);
+        if (loadSequencerRef.current.isCurrent(generation, session.id)) setRecapLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
   }, [session, isDm, startEditing]);
 
+  const detailReady = mutationsEnabledForRoute(
+    loadedSessionId != null ? { id: loadedSessionId } : null,
+    session.id,
+    recapLoading,
+  );
+
   async function save() {
+    if (!assertMutationTarget(loadedSessionId, session.id).ok) return;
     setSaving(true);
     setError(null);
     setConflict(false);
@@ -618,6 +652,7 @@ function SessionDetail({
       });
       setRecap(updated.recap);
       setLoadedUpdatedAt(updated.updatedAt);
+      setLoadedSessionId(updated.id);
       setEditing(false);
       onEditActionHandled();
       setHistoryNonce((n) => n + 1);
@@ -656,6 +691,7 @@ function SessionDetail({
   }
 
   async function remove() {
+    if (!assertMutationTarget(loadedSessionId, session.id).ok) return;
     setDeleting(true);
     setError(null);
     try {
@@ -737,7 +773,7 @@ function SessionDetail({
             >
               Cancel
             </Btn>
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
+            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving || !detailReady}>
               {saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>
@@ -830,24 +866,50 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadedForSessionId, setLoadedForSessionId] = useState<number | null>(null);
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
 
   const load = useCallback(async () => {
+    const { generation, signal } = loadSequencerRef.current.begin(sessionId);
     setLoading(true);
+    // Issue #853: drop the prior session's roster immediately so a save cannot
+    // PUT A's attendance into B while B's fetch is still in flight.
+    setAttendees([]);
+    setSelected(new Set());
+    setLoadedForSessionId(null);
+    setEditing(false);
+    setError(null);
     try {
-      setAttendees(await api.get<SessionAttendee[]>(`${API}/sessions/${sessionId}/attendance`));
-    } catch {
-      // Attendance is a non-critical embellishment on the recap — stay quiet on read failure.
+      const next = await api.get<SessionAttendee[]>(`${API}/sessions/${sessionId}/attendance`, { signal });
+      if (!loadSequencerRef.current.isCurrent(generation, sessionId)) return;
+      setAttendees(next);
+      setLoadedForSessionId(sessionId);
+    } catch (err) {
+      if (!loadSequencerRef.current.isCurrent(generation, sessionId)) return;
+      setAttendees([]);
+      setLoadedForSessionId(null);
+      if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
+      // Attendance is a non-critical embellishment — surface retry via the empty state.
+      setError("Couldn't load attendance.");
     } finally {
-      setLoading(false);
+      if (loadSequencerRef.current.isCurrent(generation, sessionId)) setLoading(false);
     }
   }, [sessionId]);
 
   useEffect(() => {
-    setEditing(false);
     void load();
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
   }, [load]);
 
+  const attendanceReady = mutationsEnabledForRoute(
+    loadedForSessionId != null ? { id: loadedForSessionId } : null,
+    sessionId,
+    loading,
+  );
+
   async function startEditing() {
+    if (!attendanceReady) return;
     setError(null);
     if (!rosterLoaded) {
       try {
@@ -872,6 +934,7 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
   }
 
   async function save() {
+    if (!assertMutationTarget(loadedForSessionId, sessionId).ok) return;
     setSaving(true);
     setError(null);
     try {
@@ -887,7 +950,7 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
     }
   }
 
-  if (loading) return null;
+  if (loading || !attendanceReady) return null;
 
   return (
     <Card className="space-y-2">
@@ -931,7 +994,7 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
             <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)} disabled={saving}>
               Cancel
             </Btn>
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
+            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving || !attendanceReady}>
               {saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>
