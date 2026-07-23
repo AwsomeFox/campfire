@@ -20,7 +20,7 @@ import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
 import { firstGrapheme } from '../../lib/avatarText';
 import { ENTITY_ICON } from '../../lib/uiIcons';
-import { entityHref as targetHref } from '../../lib/entityLinks';
+import { entityHref as targetHref, entityTargetProps } from '../../lib/entityLinks';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 type ViewValue = 'open' | 'history';
@@ -321,7 +321,7 @@ function InboxItem({
   }
 
   return (
-    <Card className={`!p-4 space-y-2.5 ${expanded ? 'border-amber-500/40' : ''}`}>
+    <Card className={`!p-4 space-y-2.5 ${expanded ? 'border-amber-500/40' : ''}`} {...entityTargetProps('inbox', item.id)}>
       <div className="flex gap-2.5 items-start">
         <span className="h-[30px] w-[30px] shrink-0 rounded-full bg-[var(--color-neutral-900)] flex items-center justify-center text-[11px] text-[var(--color-neutral-400)]">
           {firstGrapheme(item.authorName || '?')}

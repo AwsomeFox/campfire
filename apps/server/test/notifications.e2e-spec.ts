@@ -647,3 +647,114 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(resolved[0].body).toContain('not this time');
   });
 });
+
+/**
+ * Issue #832: posting to the DM scribe inbox notifies every current DM except the
+ * author. Real cookie sessions — notifications hang off users.id.
+ */
+describe('inbox submission notifies DMs (issue #832, e2e)', () => {
+  let ctx: TestAppContext;
+  let creatorDm: ReturnType<typeof request.agent>;
+  let coDm: ReturnType<typeof request.agent>;
+  let coDmId: number;
+  let player: ReturnType<typeof request.agent>;
+  let campaignId: number;
+
+  type Notification = {
+    id: number;
+    type: string;
+    title: string;
+    body: string;
+    entityType: string | null;
+    entityId: number | null;
+    actorName: string;
+    readAt: string | null;
+  };
+
+  async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
+    const res = await agent.get('/api/v1/notifications');
+    expect(res.status).toBe(200);
+    return res.body as Notification[];
+  }
+
+  const ofType = (rows: Notification[], type: string) => rows.filter((n) => n.type === type);
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'inbox832-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'inbox832-dm', password: 'password-dm-1', displayName: 'Creator DM' });
+    const coCreate = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'inbox832-co-dm', password: 'password-co-1', displayName: 'Co DM' });
+    coDmId = coCreate.body.id;
+    await adminAgent.post('/api/v1/users').send({ username: 'inbox832-player', password: 'password-pl-1', displayName: 'Pat Player' });
+
+    creatorDm = request.agent(server);
+    await creatorDm.post('/api/v1/auth/login').send({ username: 'inbox832-dm', password: 'password-dm-1' });
+    coDm = request.agent(server);
+    await coDm.post('/api/v1/auth/login').send({ username: 'inbox832-co-dm', password: 'password-co-1' });
+    player = request.agent(server);
+    await player.post('/api/v1/auth/login').send({ username: 'inbox832-player', password: 'password-pl-1' });
+
+    const campaign = await creatorDm.post('/api/v1/campaigns').send({ name: 'Inbox Notify Keep' });
+    campaignId = campaign.body.id;
+    const playerMe = await player.get('/api/v1/me');
+    await creatorDm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerMe.body.user.id, role: 'player' });
+    await creatorDm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: coDmId, role: 'dm' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a player inbox post notifies every DM with a deep-link id; the player gets nothing', async () => {
+    const inbox = await player
+      .post(`/api/v1/campaigns/${campaignId}/inbox`)
+      .send({ body: 'Can we explore the catacombs next session?' });
+    expect(inbox.status).toBe(201);
+    const inboxId = inbox.body.id as number;
+
+    const creatorNotifs = ofType(await listFor(creatorDm), 'inbox_submitted');
+    expect(creatorNotifs).toHaveLength(1);
+    expect(creatorNotifs[0].title).toContain('Pat Player');
+    expect(creatorNotifs[0].body).toContain('catacombs');
+    expect(creatorNotifs[0].entityId).toBe(inboxId);
+    expect(creatorNotifs[0].actorName).toBe('Pat Player');
+    expect(creatorNotifs[0].readAt).toBeNull();
+
+    const coNotifs = ofType(await listFor(coDm), 'inbox_submitted');
+    expect(coNotifs).toHaveLength(1);
+    expect(coNotifs[0].entityId).toBe(inboxId);
+
+    expect(ofType(await listFor(player), 'inbox_submitted')).toHaveLength(0);
+  });
+
+  it('a DM author posting to their own inbox does not notify themselves', async () => {
+    const beforeCreator = ofType(await listFor(creatorDm), 'inbox_submitted').length;
+    const beforeCo = ofType(await listFor(coDm), 'inbox_submitted').length;
+
+    const inbox = await creatorDm.post(`/api/v1/campaigns/${campaignId}/inbox`).send({ body: 'DM self-capture' });
+    expect(inbox.status).toBe(201);
+
+    expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(beforeCreator);
+    expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo + 1);
+    const coNotifs = ofType(await listFor(coDm), 'inbox_submitted');
+    const selfCapture = coNotifs.find((n) => n.body.includes('DM self-capture'));
+    expect(selfCapture).toBeDefined();
+    expect(selfCapture!.title).toContain('Creator DM');
+  });
+
+  it('a campaign with no other DMs still succeeds without notifying anyone when the sole DM is the author', async () => {
+    const lone = await creatorDm.post('/api/v1/campaigns').send({ name: 'Solo DM Inbox' });
+    expect(lone.status).toBe(201);
+    const loneId = lone.body.id as number;
+
+    const before = ofType(await listFor(creatorDm), 'inbox_submitted').length;
+    const post = await creatorDm.post(`/api/v1/campaigns/${loneId}/inbox`).send({ body: 'Solo note' });
+    expect(post.status).toBe(201);
+    expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(before);
+  });
+});

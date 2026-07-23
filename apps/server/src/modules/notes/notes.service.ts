@@ -212,6 +212,27 @@ export class NotesService {
   }
 
   /**
+   * A member posted to the DM scribe inbox (issue #832) — every current dm-role member
+   * except the author should get a bell item. entityId is the inbox note row for a
+   * deep-link; the UI routes inbox_submitted to /inbox?inbox=:id. Best-effort.
+   */
+  private async notifyDmsOfInboxSubmission(row: typeof notes.$inferSelect, user: RequestUser): Promise<void> {
+    if (row.kind !== 'inbox') return;
+    const roles = await this.notifications.memberRoles(row.campaignId);
+    for (const [memberId, memberRole] of roles) {
+      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+      await this.notifications.notifyUser(memberId, row.campaignId, user, {
+        type: 'inbox_submitted',
+        title: `${user.name || 'A member'} sent a note to your inbox`,
+        body: excerpt(row.body),
+        entityType: null,
+        entityId: row.id,
+        actorName: user.name,
+      });
+    }
+  }
+
+  /**
    * Validate + normalize the (visibility, recipientUserId) pair for a create/update.
    * Returns the recipient id to persist: the validated target for a `whisper`, or null
    * for every other visibility (a stray recipient on a non-whisper note is dropped, not
@@ -655,6 +676,7 @@ export class NotesService {
       entityId: row.id,
       campaignId,
     });
+    await this.notifyDmsOfInboxSubmission(row, user);
     return toDomain(row);
   }
 
