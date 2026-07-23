@@ -234,9 +234,11 @@ function findPrimaryAttachmentFilesOnDisk(
     try {
       entries = fs.readdirSync(dirPath, { withFileTypes: true });
     } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      // Directory removed between root listing and this read — skip and continue.
+      if (code === 'ENOENT') continue;
       // Fail closed like runDiagnostics: skipping an unreadable campaign dir can
       // produce a false "file not found" for relink/quarantine-by-attachmentId.
-      const code = (err as NodeJS.ErrnoException)?.code;
       throw new ServiceUnavailableException(
         `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} at ${dirPath}); cannot locate attachment files.`,
       );
