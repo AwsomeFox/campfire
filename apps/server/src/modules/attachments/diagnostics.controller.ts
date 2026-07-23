@@ -3,7 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
-import { auditActor } from '../../common/user.types';
+import { auditActor, auditActorRole } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { DiagnosticsService } from './diagnostics.service';
 import { DiagnosticFixRequestDto } from './diagnostics.dto';
@@ -41,7 +41,7 @@ export class DiagnosticsController {
 
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'admin',
+      actorRole: auditActorRole(actor),
       action: 'attachments.diagnostics.scan',
       entityType: 'storage',
       detail: `issues=${report.issues.length} dbRows=${report.totalDbRows} diskFiles=${report.totalDiskFiles}`,
@@ -64,7 +64,15 @@ export class DiagnosticsController {
   @ApiResponse({ status: 400, description: 'Invalid request (missing attachmentId or diskPath).' })
   async fix(@Body() body: DiagnosticFixRequestDto, @CurrentUser() actor: RequestUser) {
     const diskPath = body.diskPath?.trim();
-    if (body.attachmentId === undefined && !diskPath) {
+    // Relink resolves the file from its DB row, so it strictly requires an
+    // attachmentId. Reject `{ action: 'relink', diskPath }` (or an empty body)
+    // up front with a 400 instead of returning 201 with `success: false` for an
+    // invalid request shape.
+    if (body.action === 'relink') {
+      if (body.attachmentId === undefined) {
+        throw new BadRequestException('attachmentId is required for the relink action');
+      }
+    } else if (body.attachmentId === undefined && !diskPath) {
       throw new BadRequestException('Either attachmentId or diskPath must be provided');
     }
 
@@ -76,7 +84,7 @@ export class DiagnosticsController {
 
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'admin',
+      actorRole: auditActorRole(actor),
       action: `attachments.diagnostics.fix.${body.action}`,
       entityType: 'attachment',
       entityId: body.attachmentId,

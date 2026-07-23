@@ -81,6 +81,23 @@ function quarantineRoot(): string {
   return path.join(dataDir, 'quarantine');
 }
 
+/**
+ * Parse a campaign upload directory name into its numeric id, but ONLY when the
+ * name is an exact canonical decimal (no leading zeros, no trailing characters).
+ *
+ * `Number.parseInt` is too permissive here: it maps `1extra` -> 1 and `010` ->
+ * 10, so a stray directory could be treated as a real campaign id. That would
+ * let a scan mark files "canonical" (and relink report success) while the bytes
+ * live under a path `AttachmentsService` — which reads strictly from
+ * `<campaignId>/<id>.<ext>` — never looks at. Returning NaN for any
+ * non-canonical name makes callers treat such directories as unknown, so the
+ * owning row is honestly reported as `missing` rather than falsely healthy.
+ */
+function parseCampaignDirId(name: string): number {
+  if (!/^(0|[1-9]\d*)$/.test(name)) return NaN;
+  return Number.parseInt(name, 10);
+}
+
 /** Compute sha256 hex of a file, or empty string if unreadable. */
 function checksumFile(filePath: string): string {
   const hash = crypto.createHash('sha256');
@@ -191,7 +208,7 @@ export class DiagnosticsService {
       }
       for (const dir of campaignDirs) {
         if (!dir.isDirectory()) continue;
-        const dirCampaignId = Number.parseInt(dir.name, 10);
+        const dirCampaignId = parseCampaignDirId(dir.name);
         const dirPath = path.join(root, dir.name);
         let entries: fs.Dirent[];
         try {
@@ -410,7 +427,7 @@ export class DiagnosticsService {
     }
 
     const actualDir = located.campaignDir;
-    const actualCampaignId = Number.parseInt(actualDir, 10);
+    const actualCampaignId = parseCampaignDirId(actualDir);
     if (Number.isNaN(actualCampaignId)) {
       return { success: false, action: 'relink', attachmentId: req.attachmentId, detail: `Non-numeric campaign directory: ${actualDir}` };
     }
@@ -499,8 +516,19 @@ export class DiagnosticsService {
       throw new BadRequestException('diskPath must stay within quarantine root');
     }
 
-    fs.mkdirSync(path.dirname(destPath), { recursive: true });
-    fs.renameSync(srcPath, destPath);
+    // The move can fail for storage-health reasons (EACCES/EIO/ENOSPC/EXDEV,
+    // etc.). Since these endpoints exist to diagnose storage health, surface an
+    // actionable 503 with the underlying errno instead of letting an unmapped
+    // exception bubble up as a bare 500.
+    try {
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      fs.renameSync(srcPath, destPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      throw new ServiceUnavailableException(
+        `Failed to move ${srcRelative} to quarantine (${code ?? 'unknown error'}); attachment storage may be unavailable.`,
+      );
+    }
 
     return {
       success: true,

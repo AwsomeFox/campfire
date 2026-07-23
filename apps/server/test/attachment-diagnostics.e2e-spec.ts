@@ -483,12 +483,115 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
     });
   });
 
+  describe('non-canonical campaign directory (parseInt hardening)', () => {
+    it('does not treat a directory whose name only starts with the campaign id as canonical', async () => {
+      // Regression: `Number.parseInt('<id>extra')` used to return `<id>`, so a
+      // stray directory like `3extra` was mistaken for campaign 3. That marked
+      // the file "canonical" (seenOnDisk) and masked the row's real "missing"
+      // state, even though AttachmentsService only reads `<id>/<file>`.
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'non-canonical-dir.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      const srcFile = path.join(ctx.dataDir, 'uploads', String(campaignId), `${attachId}.png`);
+      const bogusDir = path.join(ctx.dataDir, 'uploads', `${campaignId}extra`);
+      fs.mkdirSync(bogusDir, { recursive: true });
+      const bogusFile = path.join(bogusDir, `${attachId}.png`);
+      fs.renameSync(srcFile, bogusFile);
+
+      const res = await adminAgent.post('/api/v1/admin/attachments/diagnostics');
+      expect(res.status).toBe(201);
+
+      // The row's canonical file is absent, so it must be flagged "missing"
+      // rather than silently considered healthy.
+      const missing = res.body.issues.find(
+        (i: { type: string; attachmentId: number }) => i.type === 'missing' && i.attachmentId === attachId,
+      );
+      expect(missing).toBeDefined();
+
+      // Clean up.
+      fs.renameSync(bogusFile, srcFile);
+      fs.rmSync(bogusDir, { recursive: true, force: true });
+    });
+
+    it('relink refuses to "succeed" for a file living under a non-canonical directory name', async () => {
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'non-canonical-relink.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      const srcFile = path.join(ctx.dataDir, 'uploads', String(campaignId), `${attachId}.png`);
+      const bogusDir = path.join(ctx.dataDir, 'uploads', `${campaignId}extra`);
+      fs.mkdirSync(bogusDir, { recursive: true });
+      const bogusFile = path.join(bogusDir, `${attachId}.png`);
+      fs.renameSync(srcFile, bogusFile);
+
+      const fixRes = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ attachmentId: attachId, action: 'relink' });
+      expect(fixRes.status).toBe(201);
+      expect(fixRes.body.success).toBe(false);
+      expect(fixRes.body.detail).toContain('Non-numeric campaign directory');
+
+      // Clean up.
+      fs.renameSync(bogusFile, srcFile);
+      fs.rmSync(bogusDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('quarantine move failure -> 503', () => {
+    it('maps an unwritable quarantine destination to 503 instead of 500', async () => {
+      // Create an orphan file to quarantine under a made-up campaign dir.
+      const uploadsDir = path.join(ctx.dataDir, 'uploads', '9091');
+      fs.mkdirSync(uploadsDir, { recursive: true });
+      const orphanPath = path.join(uploadsDir, '5550001.png');
+      fs.writeFileSync(orphanPath, TINY_PNG);
+
+      // Pre-create the quarantine campaign path as a *file* so mkdirSync of the
+      // destination directory fails with ENOTDIR/EEXIST — a stand-in for any
+      // storage-level move failure.
+      const quarantineDir = path.join(ctx.dataDir, 'quarantine');
+      fs.mkdirSync(quarantineDir, { recursive: true });
+      const blocker = path.join(quarantineDir, '9091');
+      fs.rmSync(blocker, { recursive: true, force: true });
+      fs.writeFileSync(blocker, 'not a directory');
+
+      const res = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ diskPath: '9091/5550001.png', action: 'quarantine' });
+      expect(res.status).toBe(503);
+
+      // The source file should still be present (move did not partially apply).
+      expect(fs.existsSync(orphanPath)).toBe(true);
+
+      // Clean up.
+      fs.rmSync(blocker, { recursive: true, force: true });
+      fs.rmSync(uploadsDir, { recursive: true, force: true });
+    });
+  });
+
   describe('fix: validation', () => {
     it('400 when neither attachmentId nor diskPath is provided', async () => {
       const res = await adminAgent
         .post('/api/v1/admin/attachments/diagnostics/fix')
         .send({ action: 'relink' });
       expect(res.status).toBe(400);
+    });
+
+    it('400 when relink is requested with only a diskPath (no attachmentId)', async () => {
+      // relink resolves the target from its DB row, so a diskPath-only relink is
+      // an invalid request shape and must be rejected up front rather than
+      // returning 201 with success:false.
+      const res = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ action: 'relink', diskPath: `${campaignId}/1.png` });
+      expect(res.status).toBe(400);
+      expect(String(res.body.message)).toContain('attachmentId');
     });
 
     it('400 when diskPath is blank/whitespace and attachmentId is missing', async () => {
