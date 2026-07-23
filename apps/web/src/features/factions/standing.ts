@@ -1,66 +1,86 @@
 /**
- * Faction party-standing labels (issue #753).
+ * Shared faction standing labels (issue #753).
  *
- * Cards/chips used to render the raw lowercase enum (`hostile`, `allied`, …)
- * while the Party standing detail row title-cased via CSS — so the same value
- * looked different on adjacent surfaces. This module is the single,
- * localization-ready source of truth for human standing copy: keep the raw
- * enum on the wire / in form values, and route every user-facing surface
- * (cards, chips, selects/filters, detail facts) through these helpers.
+ * Cards, chips, forms, filters, and detail views must render these humanized
+ * labels — never the raw lowercase enum. English copy lives once in
+ * `i18n/locales/en/factions.json` (merged into the default `translation`
+ * catalog as `factions.standing.*`); this module re-exports that map as the
+ * runtime fallback when `t` is omitted.
  */
-import type { FactionStanding } from '@campfire/schema';
+import { FACTION_STANDINGS, type FactionStanding } from '@campfire/schema';
+import type { ChipVariant } from '../../components/chipVariants';
+import factionsEn from '../../i18n/locales/en/factions.json';
 
-/** Stable hostile→allied order used by selects/filters. */
-export const FACTION_STANDINGS: readonly FactionStanding[] = [
-  'hostile',
-  'unfriendly',
-  'neutral',
-  'friendly',
-  'allied',
-];
+export { FACTION_STANDINGS };
+export type { FactionStanding };
+
+/** Localization-ready English display labels for every standing enum. */
+export const FACTION_STANDING_LABELS: Readonly<Record<FactionStanding, string>> = Object.freeze({
+  ...factionsEn.factions.standing,
+});
 
 /**
- * Default English display labels per standing enum.
- * Localization-ready: swap values (or wrap lookups) when a factions catalog lands;
- * keys stay the raw schema enums so form/filter values never change.
+ * i18n key in the merged default catalog (`locales/en/*.json` are unioned into
+ * one `translation` resource — not per-file namespaces).
  */
-export const FACTION_STANDING_LABEL: Record<FactionStanding, string> = {
-  hostile: 'Hostile',
-  unfriendly: 'Unfriendly',
-  neutral: 'Neutral',
-  friendly: 'Friendly',
-  allied: 'Allied',
-};
-
-/** Human label for a standing enum. Unknown runtime values fall back to the raw string. */
-export function standingLabel(standing: FactionStanding | string): string {
-  if (Object.prototype.hasOwnProperty.call(FACTION_STANDING_LABEL, standing)) {
-    return FACTION_STANDING_LABEL[standing as FactionStanding];
-  }
-  return standing;
+export function factionStandingLabelKey(standing: FactionStanding): `factions.standing.${FactionStanding}` {
+  return `factions.standing.${standing}`;
 }
 
-/** Select/filter options: raw enum as `value`, human label as display text. */
-export function standingOptions(): ReadonlyArray<{ value: FactionStanding; label: string }> {
-  return FACTION_STANDINGS.map((value) => ({ value, label: FACTION_STANDING_LABEL[value] }));
+/**
+ * Minimal `t` shape for react-i18next call sites without coupling this module.
+ * Only `defaultValue` is used today — keep the options bag intentional.
+ */
+type Translate = (key: string, options?: { defaultValue?: string }) => string | undefined;
+
+/** Humanized standing label. Pass `t` to resolve through the i18n catalog. */
+export function factionStandingLabel(standing: FactionStanding, t?: Translate): string {
+  const fallback = FACTION_STANDING_LABELS[standing] ?? standing;
+  if (!t) return fallback;
+  // Nullish-aware: an intentional empty translation (`""`) must not be replaced.
+  return t(factionStandingLabelKey(standing), { defaultValue: fallback }) ?? fallback;
 }
 
-/** Chip text: human standing + signed reputation, e.g. `Friendly · +10`. */
-export function formatStandingChip(standing: FactionStanding, reputation: number): string {
+/**
+ * Chip / badge copy: "Friendly · +12". Raw enums stay on the wire, not here.
+ *
+ * i18n scope: only the standing label is localization-ready (via `t`). The
+ * middle-dot separator and signed reputation formatting remain fixed English
+ * punctuation/order for now — not a full chip-format catalog key.
+ */
+export function formatStandingChip(
+  standing: FactionStanding,
+  reputation: number,
+  t?: Translate,
+): string {
   const rep = reputation > 0 ? `+${reputation}` : String(reputation);
-  return `${standingLabel(standing)} · ${rep}`;
+  return `${factionStandingLabel(standing, t)} · ${rep}`;
 }
 
-/** Chip color ramp for the hostile→allied scale. */
-export function standingVariant(standing: FactionStanding) {
+/** Chip color treatment for party standing (hostile→allied scale). */
+export function standingVariant(standing: FactionStanding): ChipVariant {
   switch (standing) {
     case 'allied':
     case 'friendly':
-      return 'completed' as const;
+      return 'completed';
     case 'hostile':
     case 'unfriendly':
-      return 'failed' as const;
-    default:
-      return 'active' as const;
+      return 'failed';
+    case 'neutral':
+      return 'active';
+    default: {
+      const _exhaustive: never = standing;
+      void _exhaustive;
+      // Safe fallback if an unexpected value slips through at runtime.
+      return 'active';
+    }
   }
+}
+
+/** Select / filter options: raw enum as `value`, humanized label as display. */
+export function factionStandingOptions(t?: Translate): ReadonlyArray<{ value: FactionStanding; label: string }> {
+  return FACTION_STANDINGS.map((standing) => ({
+    value: standing,
+    label: factionStandingLabel(standing, t),
+  }));
 }

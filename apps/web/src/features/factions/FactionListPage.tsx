@@ -5,6 +5,7 @@
  * browse & open a detail page.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import type { Faction } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -15,6 +16,7 @@ import { initials } from '../../lib/avatarText';
 import { formatStandingChip, standingVariant } from './standing';
 
 export default function FactionListPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
@@ -151,7 +153,7 @@ export default function FactionListPage() {
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Chip variant={standingVariant(faction.standing)}>
-                    {formatStandingChip(faction.standing, faction.reputation)}
+                    {formatStandingChip(faction.standing, faction.reputation, t)}
                   </Chip>
                   {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
                   {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}

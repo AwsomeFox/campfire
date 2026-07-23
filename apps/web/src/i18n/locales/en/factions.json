@@ -1,0 +1,11 @@
+{
+  "factions": {
+    "standing": {
+      "hostile": "Hostile",
+      "unfriendly": "Unfriendly",
+      "neutral": "Neutral",
+      "friendly": "Friendly",
+      "allied": "Allied"
+    }
+  }
+}

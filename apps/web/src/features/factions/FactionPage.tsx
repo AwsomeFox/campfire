@@ -5,6 +5,7 @@
  * everything, bump reputation, reveal/hide, delete. Everyone: read the visible parts.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -17,9 +18,15 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { initials } from '../../lib/avatarText';
-import { formatStandingChip, standingLabel, standingOptions, standingVariant } from './standing';
+import {
+  factionStandingLabel,
+  factionStandingOptions,
+  formatStandingChip,
+  standingVariant,
+} from './standing';
 
 export default function FactionPage() {
+  const { t } = useTranslation();
   const { campaignId, factionId } = useParams<{ campaignId: string; factionId: string }>();
   const cid = Number(campaignId);
   const id = Number(factionId);
@@ -27,6 +34,7 @@ export default function FactionPage() {
   const { roleIn } = useAuth();
   const role = roleIn(cid);
   const isDm = role === 'dm';
+  const standingOptions = factionStandingOptions(t);
 
   const [faction, setFaction] = useState<FactionWithMembers | null>(null);
   const [loading, setLoading] = useState(true);
@@ -200,7 +208,7 @@ export default function FactionPage() {
               {faction.kind && <p className="text-sm text-slate-400 break-words">{faction.kind}</p>}
             </div>
             <Chip variant={standingVariant(faction.standing)}>
-              {formatStandingChip(faction.standing, faction.reputation)}
+              {formatStandingChip(faction.standing, faction.reputation, t)}
             </Chip>
             {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {isDm && (
@@ -266,7 +274,7 @@ export default function FactionPage() {
                 <p className="card-kicker">Party standing</p>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Standing</span>
-                  <span>{standingLabel(faction.standing)}</span>
+                  <span>{factionStandingLabel(faction.standing, t)}</span>
                 </div>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Reputation</span>
@@ -282,19 +290,22 @@ export default function FactionPage() {
                         +10
                       </Btn>
                     </div>
-                    <select
-                      className="cf-select"
-                      value={faction.standing}
-                      disabled={bumping}
-                      onChange={(e) => adjustReputation({ standing: e.target.value as FactionStanding })}
-                      aria-label="Party standing"
-                    >
-                      {standingOptions().map(({ value, label }) => (
-                        <option key={value} value={value}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
+                    <label className="block space-y-1" htmlFor="faction-party-standing">
+                      <span className="text-muted">Party standing</span>
+                      <select
+                        id="faction-party-standing"
+                        className="cf-select"
+                        value={faction.standing}
+                        disabled={bumping}
+                        onChange={(e) => adjustReputation({ standing: e.target.value as FactionStanding })}
+                      >
+                        {standingOptions.map(({ value, label }) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
                 )}
               </Card>
@@ -318,14 +329,16 @@ export default function FactionPage() {
               <TextInput value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} placeholder="guild, cult, government…" />
             </div>
             <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Standing</label>
+              <label htmlFor="faction-standing" className="text-[10px] text-slate-500 font-bold uppercase">
+                Standing
+              </label>
               <select
+                id="faction-standing"
                 className="cf-select"
                 value={form.standing}
                 onChange={(e) => setForm({ ...form, standing: e.target.value as FactionStanding })}
-                aria-label="Standing"
               >
-                {standingOptions().map(({ value, label }) => (
+                {standingOptions.map(({ value, label }) => (
                   <option key={value} value={value}>
                     {label}
                   </option>
