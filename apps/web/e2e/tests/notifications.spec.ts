@@ -61,7 +61,7 @@ test.describe('shared notification controller', () => {
     await expect(dialog).toBeVisible();
     await expect(dialog).toHaveAttribute('aria-modal', 'true');
     await expect(dialog).toHaveAccessibleDescription('2 items.');
-    await expect(dialog.getByRole('status')).toHaveText('2 items.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('2 items.');
     await expect(markAllRead).toBeFocused();
     await expect(bell).toHaveAttribute('aria-expanded', 'true');
     const controlledId = await bell.getAttribute('aria-controls');
@@ -108,7 +108,7 @@ test.describe('shared notification controller', () => {
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
     await expect(dialog).toBeVisible();
     await expect(dialog).toHaveAccessibleDescription('0 items.');
-    await expect(dialog.getByRole('status')).toHaveText('0 items.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('0 items.');
     await expect(dialog.getByText('Nothing yet')).toBeVisible();
 
     // Issue #664: the panel is a bottom sheet on narrow viewports, so it hugs
@@ -178,7 +178,7 @@ test.describe('shared notification controller', () => {
     await expect(dialog.getByRole('alert')).toBeVisible();
     await dialog.getByRole('button', { name: 'Retry' }).click();
     await expect(dialog.getByRole('button', { name: 'Recovered notification' })).toBeVisible();
-    await expect(dialog.getByRole('status')).toHaveText('1 item.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('1 item.');
     expect(listRequests).toBe(2);
   });
 
@@ -199,9 +199,9 @@ test.describe('shared notification controller', () => {
     await page.getByRole('button', { name: 'Notifications (2 unread)' }).click();
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
-    await expect(dialog.getByRole('status')).toHaveText('2 items.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('2 items.');
     await dialog.getByRole('button', { name: 'Mark all read' }).click();
-    await expect(dialog.getByRole('status')).toHaveText('All notifications marked as read.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('All notifications marked as read.');
     // Trigger sits under inert background while the dialog is open.
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
@@ -225,9 +225,9 @@ test.describe('shared notification controller', () => {
     await page.getByRole('button', { name: 'Notifications (2 unread)' }).click();
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
-    await expect(dialog.getByRole('status')).toHaveText('2 items.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('2 items.');
     await dialog.getByRole('button', { name: 'Mark all read' }).click();
-    await expect(dialog.getByRole('status')).toHaveText("Couldn't mark all notifications as read.");
+    await expect(dialog.locator('span[role="status"]')).toHaveText("Couldn't mark all notifications as read.");
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
@@ -249,9 +249,9 @@ test.describe('shared notification controller', () => {
     await page.getByRole('button', { name: 'Notifications', exact: true }).click();
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
-    await expect(dialog.getByRole('status')).toHaveText('Loading items.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('Loading items.');
     releaseList();
-    await expect(dialog.getByRole('status')).toHaveText('0 items.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('0 items.');
   });
 
   test('reflows and scrolls at the 200% zoom equivalent on desktop', async ({ page }) => {
