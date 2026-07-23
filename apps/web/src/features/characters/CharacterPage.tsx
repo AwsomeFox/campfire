@@ -61,6 +61,7 @@ import { resolveRollMode, rollModeSummary, type RollMode } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { RollResultBanner } from '../../components/RollResultBanner';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { CopyControl } from '../../components/CopyControl';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import {
@@ -1930,8 +1931,6 @@ const DDB_CHARACTER_URL = (id: string) => `https://www.dndbeyond.com/characters/
  * label so they know where the sheet came from, but not the copy affordance.
  */
 function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: boolean }) {
-  const [copied, setCopied] = useState(false);
-
   // Manual character (no ddbId) — honest guidance, no "soon" hand-wave.
   if (!ddbId) {
     return (
@@ -1949,19 +1948,11 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
     );
   }
 
-  // Capture the narrowed non-null id so the closure below keeps the `string` type
-  // (TS does not carry early-return narrowing into nested function declarations).
+  // Capture the narrowed non-null id so nested JSX keeps the `string` type
+  // (TS does not carry early-return narrowing into nested scopes reliably).
   const sourceId = ddbId;
   const isBareId = /^\d+$/.test(sourceId);
-  async function copyId() {
-    try {
-      await navigator.clipboard.writeText(sourceId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard unavailable — id is still selectable above */
-    }
-  }
+  const sourceIdEl = `ddb-source-id-${sourceId}`;
 
   return (
     <div className="flex justify-between gap-2">
@@ -1970,6 +1961,10 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
         <span className="block">Imported from D&amp;D Beyond</span>
         <span className="block text-[11px] text-slate-500">
           One-time import — not synced.{' '}
+          {/* Hidden selectable target so a clipboard failure can still highlight the id. */}
+          <span id={sourceIdEl} className="sr-only">
+            {sourceId}
+          </span>
           {isBareId ? (
             <a
               href={DDB_CHARACTER_URL(sourceId)}
@@ -1983,15 +1978,18 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
             <span title="D&D Beyond character id">id {sourceId}</span>
           )}
           {canEdit && (
-            <button
-              type="button"
-              onClick={copyId}
+            <CopyControl
+              text={sourceId}
+              selectTargetId={sourceIdEl}
+              label="Copy id"
               title="Copy D&D Beyond character id"
+              showFailureMessage={false}
+              unstyled
               className="underline hover:text-slate-300 ml-1"
               style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: 'pointer' }}
-            >
-              {copied ? 'Copied!' : 'Copy id'}
-            </button>
+              successAnnouncement="D&D Beyond character id copied to clipboard."
+              failureAnnouncement="Copy failed. Clipboard blocked — copy the id manually."
+            />
           )}
         </span>
       </span>

@@ -17,7 +17,7 @@
  *
  * All reads already exist; this is orchestration UI only (no new endpoints).
  */
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
@@ -25,6 +25,7 @@ import type { AiConsoleOverview, AiProviderEffectiveView } from '@campfire/schem
 import { api, API } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
+import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 
 /** One computed checklist step. `done: null` = state is unknown (e.g. flag, for a non-admin). */
@@ -214,22 +215,20 @@ function StepRow({ step }: { step: Step }) {
 /** A copy-to-clipboard chip carrying the exact ask a DM can send their server admin. */
 function CopyRequest({ text }: { text: string }) {
   const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard?.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard blocked — the text is visible below regardless */
-    }
-  }
+  const textId = useId();
   return (
     <div className="cf-inset p-2 mt-1.5 space-y-1">
-      <p className="text-[11px] text-[var(--color-neutral-400)] italic">“{text}”</p>
-      <button type="button" onClick={copy} className="cf-btn cf-btn-ghost !min-h-0 !py-1 text-[11px]">
-        {copied ? t('aiOnboarding.checklist.steps.flag.copied') : t('aiOnboarding.checklist.steps.flag.copy')}
-      </button>
+      <p id={textId} className="text-[11px] text-[var(--color-neutral-400)] italic">
+        “{text}”
+      </p>
+      <CopyControl
+        text={text}
+        selectTargetId={textId}
+        label={t('aiOnboarding.checklist.steps.flag.copy')}
+        copiedLabel={t('aiOnboarding.checklist.steps.flag.copied')}
+        ghost
+        className="!min-h-0 !py-1 text-[11px]"
+      />
     </div>
   );
 }

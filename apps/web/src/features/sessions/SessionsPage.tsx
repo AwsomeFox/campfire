@@ -24,6 +24,7 @@ import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
+import { CopyControl } from '../../components/CopyControl';
 import { SchedulePanel } from './SchedulePanel';
 import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
@@ -1026,9 +1027,9 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
   const [lifetime, setLifetime] = useState<ShareLifetime>('7');
   const [acknowledgedNever, setAcknowledgedNever] = useState(false);
   const [newLink, setNewLink] = useState<{ shareId: number; url: string } | null>(null);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const policyEnabled = campaign?.publicRecapSharingEnabled !== false;
+  const newLinkId = `recap-share-url-${sessionId}`;
 
   const load = useCallback(async () => {
     setError(null);
@@ -1044,7 +1045,6 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
 
   useEffect(() => {
     setNewLink(null);
-    setCopied(false);
     void load();
   }, [load]);
 
@@ -1052,7 +1052,6 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
     if (lifetime === 'never' && !acknowledgedNever) return;
     setCreating(true);
     setError(null);
-    setCopied(false);
     try {
       const expiresAt = lifetime === 'never'
         ? null
@@ -1067,16 +1066,6 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
       setError("Couldn't create a share link.");
     } finally {
       setCreating(false);
-    }
-  }
-
-  async function copy() {
-    if (!newLink) return;
-    try {
-      await navigator.clipboard.writeText(newLink.url);
-      setCopied(true);
-    } catch {
-      /* clipboard unavailable — the link is selectable below */
     }
   }
 
@@ -1148,13 +1137,24 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
       )}
 
       {newLink && (
-        <div className="flex items-center gap-2 flex-wrap" aria-live="polite">
-          <code className="text-xs break-all flex-1 min-w-0" style={{ color: 'var(--color-accent)' }}>
+        <div className="flex items-center gap-2 flex-wrap">
+          <code
+            id={newLinkId}
+            className="text-xs break-all flex-1 min-w-0"
+            style={{ color: 'var(--color-accent)' }}
+          >
             {newLink.url}
           </code>
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs shrink-0" onClick={copy}>
-            {copied ? 'Copied ✓' : 'Copy link'}
-          </Btn>
+          <CopyControl
+            text={newLink.url}
+            selectTargetId={newLinkId}
+            label="Copy link"
+            copiedLabel="Copied ✓"
+            ghost
+            className="!min-h-0 !py-1.5 text-xs shrink-0"
+            successAnnouncement="Share link copied to clipboard."
+            failureAnnouncement="Copy failed. Clipboard blocked — select the link and copy it manually."
+          />
         </div>
       )}
 
