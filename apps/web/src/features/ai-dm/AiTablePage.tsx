@@ -352,7 +352,15 @@ export default function AiTablePage() {
           )
         ) {
           node.scrollTop = node.scrollHeight - node.clientHeight;
+          followLatestRef.current = true;
+          setFollowLatest(true);
+          return;
         }
+      }
+      // Content growth must not look like a user scroll away from the tail.
+      if (followLatestRef.current) {
+        node.scrollTop = node.scrollHeight - node.clientHeight;
+        return;
       }
       handleTranscriptScroll();
     };
@@ -391,16 +399,20 @@ export default function AiTablePage() {
 
     if (el.scrollHeight <= el.clientHeight && transcript.entries.length > 1) return;
 
+    // Prefer previous follow intent over post-growth distance: a tall append can
+    // push "near bottom" false even when the reader was pinned (orchestrator / #590).
+    if (followLatestRef.current) {
+      setUnreadBelow(0);
+      bottomRef.current?.scrollIntoView({ block: 'end' });
+      return;
+    }
     const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
     if (near) {
       followLatestRef.current = true;
       setFollowLatest(true);
       setUnreadBelow(0);
       bottomRef.current?.scrollIntoView({ block: 'end' });
-      return;
     }
-    followLatestRef.current = false;
-    setFollowLatest(false);
   }, [transcriptRevision, isDriver, transcript.entries.length]);
 
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.

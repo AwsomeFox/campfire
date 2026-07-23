@@ -67,6 +67,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   useEffect(() => {
     rollAnnouncementRef.current = null;
     rollsCampaignIdRef.current = null;
+    clearLocalDiceAnnouncements(campaignId);
     setRolls([]);
     setRetention(undefined);
     setJustRolledId(null);
@@ -82,7 +83,13 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
     if (cursor === null && rolls.length === 0) return;
 
-    const advanced = advanceDiceRollAnnouncements(rolls, cursor);
+    // Seed cursor with ids already spoken by useRoller / submitExpr so poll
+    // refetches do not double-announce local rolls (orchestrator / #590).
+    const seeded =
+      cursor === null
+        ? { seenIds: new Set(takeLocalDiceAnnouncements(campaignId)) }
+        : { seenIds: new Set([...cursor.seenIds, ...takeLocalDiceAnnouncements(campaignId)]) };
+    const advanced = advanceDiceRollAnnouncements(rolls, seeded);
     rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
 
     const message = formatDiceRollAnnouncementBatch(advanced.appendedRolls, t);
@@ -142,6 +149,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: cleaned });
         const batch = formatDiceRollAnnouncementBatch([result], t);
         if (batch) {
+          rememberLocalDiceAnnouncement(campaignId, result.id);
           announce(batch, {
             dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
           });
