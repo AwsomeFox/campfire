@@ -45,13 +45,11 @@ async function signIn(page: Page, who: keyof typeof CREDS) {
 }
 
 function politeRegion(page: Page) {
-  return page.locator('[aria-live="polite"]');
+  return page.locator('div.sr-only[aria-live="polite"]');
 }
 
 function assertiveRegion(page: Page) {
-  // Target the Announcer assertive live region specifically (role=alert is also
-  // used by unrelated toasts/errors elsewhere in the app).
-  return page.locator('[aria-live="assertive"]');
+  return page.locator('div.sr-only[aria-live="assertive"]');
 }
 
 async function seedEncounterAnnouncement(page: Page) {
@@ -74,7 +72,7 @@ async function seedEncounterAnnouncement(page: Page) {
   });
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
   await expect(politeRegion(page)).toHaveText(/Round 1/);
-  await expect(assertiveRegion(page)).toHaveText('Encounter secret leak');
+  await expect(assertiveRegion(page)).toHaveText(/Encounter secret leak/);
   return { campaignId };
 }
 

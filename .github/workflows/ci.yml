@@ -202,8 +202,13 @@ jobs:
   # rebuild — the previous job rebuilt schema explicitly AND again inside the
   # `test:e2e` script (a double build in one job).
   e2e-web:
+    name: e2e-web (${{ matrix.shard }}/4)
     needs: build
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -239,12 +244,16 @@ jobs:
       # Always run install so the OS deps (--with-deps) are present; on a browser
       # cache hit the Chromium binary download itself is skipped.
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e:nobuild
+      - name: Run Playwright tests (shard ${{ matrix.shard }}/4)
+        working-directory: apps/web
+        run: |
+          if [ "${{ matrix.shard }}" = "1" ]; then npx playwright test --config playwright.first-run.config.ts; fi
+          npx playwright test --shard=${{ matrix.shard }}/4
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-shard-${{ matrix.shard }}
           path: apps/web/playwright-report/
           if-no-files-found: ignore
 

@@ -1,5 +1,5 @@
 import { test, expect, request, type Locator, type Page } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
@@ -40,7 +40,7 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
   for (const viewport of VIEWPORTS) {
     test(`primary combat + map controls are ≥44×44 at ${viewport.name}px`, async ({ page }) => {
       const { baseURL, campaignId } = seed();
-      const dm = await request.newContext({ baseURL });
+      const dm = await request.newContext({ baseURL, storageState: stateFor('dm') });
       let characterId: number | null = null;
       let encounterId: number | null = null;
 
@@ -95,6 +95,7 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
           data: { hpSet: 0, deathSaveSuccesses: 1, deathSaveFailures: 1 },
         });
         expect(hpRes.ok(), `drop HP: ${await hpRes.text()}`).toBeTruthy();
+        await dm.post(`/api/v1/encounters/${enc.id}/start`).catch(() => undefined);
 
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
@@ -126,10 +127,14 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         await assertMinTarget(page.getByTestId('map-tool-ping'), 'map Ping tool');
         await assertMinTarget(page.getByTestId('map-tool-reveal'), 'map Reveal tool');
       } finally {
-        if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
+        // End before delete so a failed DELETE cannot leave a RUNNING fight that
+        // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
+        if (encounterId != null) {
+          await dm.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+          await dm.delete(`/api/v1/encounters/${encounterId}`);
+        }
         if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
-        const seedEncounterId = seed().encounterId;
-        await dm.post(`/api/v1/encounters/${seedEncounterId}/reopen`).catch(() => undefined);
+        await restoreSeedEncounter(page);
         await dm.dispose();
       }
     });
