@@ -302,12 +302,9 @@ export function Layout() {
 function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
-<<<<<<< HEAD
   const formattingLocale = useFormattingLocale();
-=======
   const announce = useAnnounce();
   const clearAnnouncements = useClearAnnouncements();
->>>>>>> 6f891b5 (fix(auth): sign out clears state immediately and announces/focuses on redirect (#506))
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
   const campaign = useCampaign(campaignId);
