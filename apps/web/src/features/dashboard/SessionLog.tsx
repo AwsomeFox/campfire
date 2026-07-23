@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import type { Role, ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
-import { isScheduleInProgress } from '@campfire/schema';
+import { isScheduleInProgress, scheduleEndsAtMs } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { dashboardRsvpCue, findViewerRsvp, viewerRsvpIds } from '../../lib/dashboardRsvp';
 import { formatDate, formatDateTime, useFormattingLocale } from '../../lib/format';
@@ -217,13 +217,38 @@ export function SessionLog({
       ? 'Live updates interrupted — showing last-known next-session details.'
       : null;
 
+  // Re-check the duration window on a local clock so "Happening now" clears at the
+  // phase boundary even if the ~5s summary poll is late (parity with SchedulePanel).
+  const [scheduleNowMs, setScheduleNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const candidates = [inProgressSession, nextSession].filter(
+      (s): s is ScheduledSessionWithRsvps => s != null,
+    );
+    const boundaries: number[] = [];
+    for (const s of candidates) {
+      const startMs = Date.parse(s.scheduledAt);
+      const endMs = scheduleEndsAtMs(s.scheduledAt, s.durationMinutes);
+      if (Number.isFinite(startMs) && startMs > scheduleNowMs) boundaries.push(startMs);
+      if (Number.isFinite(endMs) && endMs > scheduleNowMs) boundaries.push(endMs);
+    }
+    if (boundaries.length === 0) return;
+    const delay = Math.min(...boundaries) - scheduleNowMs + 25;
+    const timer = window.setTimeout(() => setScheduleNowMs(Date.now()), Math.max(25, delay));
+    return () => window.clearTimeout(timer);
+  }, [inProgressSession, nextSession, scheduleNowMs]);
+
   // Prefer the summary's in-progress projection; fall back to classifying nextSession
   // so older cached payloads still surface "Happening now" during the duration window.
-  const happening =
+  const happeningCandidate =
     inProgressSession
-    ?? (nextSession && isScheduleInProgress(nextSession.scheduledAt, nextSession.durationMinutes)
+    ?? (nextSession && isScheduleInProgress(nextSession.scheduledAt, nextSession.durationMinutes, scheduleNowMs)
       ? nextSession
       : null);
+  const happening =
+    happeningCandidate &&
+    isScheduleInProgress(happeningCandidate.scheduledAt, happeningCandidate.durationMinutes, scheduleNowMs)
+      ? happeningCandidate
+      : null;
   const upcoming =
     nextSession && (!happening || nextSession.id !== happening.id) ? nextSession : null;
 

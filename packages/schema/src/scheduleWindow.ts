@@ -59,7 +59,7 @@ export function isScheduleNotEnded(
  * Split schedules into in-progress / upcoming / past.
  * In-progress and upcoming keep soonest-first order; past is most-recent first.
  * Invalid `scheduledAt` values sort last in ascending lists / first in past
- * (finite sentinel), so comparators never return NaN.
+ * (`Number.POSITIVE_INFINITY` sentinel), so comparators never return NaN.
  */
 export function partitionSchedules<T extends ScheduleWindowFields>(
   schedules: readonly T[],
@@ -68,10 +68,20 @@ export function partitionSchedules<T extends ScheduleWindowFields>(
   type Row = { row: T; startMs: number; phase: SchedulePhase };
   const classified: Row[] = schedules.map((row) => {
     const startMs = Date.parse(row.scheduledAt);
-    const phase = schedulePhase(row.scheduledAt, row.durationMinutes, nowMs);
+    const finiteStart = Number.isFinite(startMs);
+    // Reuse parsed start for phase classification (avoid re-parsing in schedulePhase).
+    let phase: SchedulePhase;
+    if (!finiteStart) {
+      phase = 'past';
+    } else {
+      const end = scheduleEndsAtMs(row.scheduledAt, row.durationMinutes);
+      if (nowMs < startMs) phase = 'upcoming';
+      else if (nowMs < end) phase = 'in_progress';
+      else phase = 'past';
+    }
     return {
       row,
-      startMs: Number.isFinite(startMs) ? startMs : Number.POSITIVE_INFINITY,
+      startMs: finiteStart ? startMs : Number.POSITIVE_INFINITY,
       phase,
     };
   });

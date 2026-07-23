@@ -68,14 +68,17 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   // Wake at the next phase boundary (soonest upcoming start or in-progress end) so
   // "Next session" ↔ "Happening now" flips without a reload.
   const [scheduleNowMs, setScheduleNowMs] = useState(() => Date.now());
+  const { inProgress, upcoming, past } = useMemo(
+    () => partitionSchedules(schedules, scheduleNowMs),
+    [schedules, scheduleNowMs],
+  );
   useEffect(() => {
-    const { inProgress: live, upcoming: nextUp } = partitionSchedules(schedules, scheduleNowMs);
     const boundaries: number[] = [];
-    for (const s of live) {
+    for (const s of inProgress) {
       const endMs = scheduleEndsAtMs(s.scheduledAt, s.durationMinutes);
       if (Number.isFinite(endMs) && endMs > scheduleNowMs) boundaries.push(endMs);
     }
-    for (const s of nextUp) {
+    for (const s of upcoming) {
       const startMs = Date.parse(s.scheduledAt);
       if (Number.isFinite(startMs) && startMs > scheduleNowMs) boundaries.push(startMs);
     }
@@ -83,8 +86,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
     const delay = Math.min(...boundaries) - scheduleNowMs + 25;
     const timer = window.setTimeout(() => setScheduleNowMs(Date.now()), Math.max(25, delay));
     return () => window.clearTimeout(timer);
-  }, [schedules, scheduleNowMs]);
-  const { inProgress, upcoming, past } = partitionSchedules(schedules, scheduleNowMs);
+  }, [inProgress, upcoming, scheduleNowMs]);
   const [next, ...later] = upcoming;
   const hasLive = inProgress.length > 0 || Boolean(next);
 
@@ -424,7 +426,12 @@ function ScheduleForm({
     try {
       await onSubmit({
         scheduledAt: new Date(parsed).toISOString(),
-        durationMinutes: Number.isFinite(minutes) && minutes >= 15 ? Math.min(minutes, 1440) : 240,
+        durationMinutes: (() => {
+          if (!Number.isFinite(minutes)) return initial ? initial.durationMinutes : 240;
+          // Edits may keep end-session values in 0..14; create still requires >=15.
+          if (initial) return Math.min(1440, Math.max(0, minutes));
+          return minutes >= 15 ? Math.min(minutes, 1440) : 240;
+        })(),
         title: title.trim(),
         location: location.trim(),
         notes,
@@ -446,7 +453,7 @@ function ScheduleForm({
         </div>
         <div className="space-y-1">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Duration (minutes)</label>
-          <TextInput type="number" min={15} max={1440} step={15} value={duration} onChange={(e) => setDuration(e.target.value)} />
+          <TextInput type="number" min={initial ? 0 : 15} max={1440} step={15} value={duration} onChange={(e) => setDuration(e.target.value)} />
         </div>
       </div>
       <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder='Title (optional), e.g. "Session 12 — the heist"' />
