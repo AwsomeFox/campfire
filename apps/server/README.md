@@ -1309,11 +1309,12 @@ SQLite file — safe to parallelize later if it becomes a bottleneck.
   Open5e importer produces `spell`/`monster`/`item`/`condition`/`class`/`race`/
   `feat`.** `section` and `other` remain available to uploads and other systems.
 - **MCP's `update_campaign_status` does not accept a `sessionNumber` field.**
-  `campaigns.sessionCount` is a denormalized `COUNT(*)` that
-  `SessionsService` recomputes on every session create/delete (see
-  `recomputeSessionCount`); it was never part of `CampaignUpdate` and letting
-  an agent set it directly would let it drift from the real session count.
-  The tool instead documents this in its description; `status`,
+  `campaigns.sessionCount` / `latestSessionNumber` are denormalized stats
+  (`COUNT(*)` and `MAX(number)` of live recaps) that `SessionsService`
+  recomputes on every session create/delete/restore/renumber (see
+  `recomputeSessionStats`); they were never part of `CampaignUpdate` and
+  letting an agent set them directly would let them drift from the real
+  rows. The tool instead documents this in its description; `status`,
   `currentLocationId`, and `dangerLevel` are all settable as intended.
 - **Monster combatants added via `add_combatant`'s `ruleEntryId` now get a
   DEX-derived `initMod` instead of always defaulting to 0.** This was a real
