@@ -2746,9 +2746,82 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
       // Monster at (10,10) is outside the revealed rectangle — position withheld server-side.
       expect(monster.tokenX).toBeNull();
       expect(monster.tokenY).toBeNull();
+      // Issue #418: fog-hidden (not truly unplaced) so the client can avoid a false Unplaced tray.
+      expect(monster.tokenHiddenByFog).toBe(true);
       // PC at (80,80) is inside the revealed rectangle — position visible.
       expect(pc.tokenX).toBe(80);
       expect(pc.tokenY).toBe(80);
+      expect(pc.tokenHiddenByFog).toBe(false);
+    });
+
+    it('issue #418: owned / allied / enemy tokens crossing fog get tokenHiddenByFog without leaking coords', async () => {
+      const server = ctx.app.getHttpServer();
+      // Second PC (allied) owned by another player — place it in the dark with the monster.
+      const allyCharacterId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Borin', hpCurrent: 18, hpMax: 18, ownerUserId: 'dev:p-2' })
+      ).body.id;
+      const allyCombatantId = (
+        await request(server)
+          .post(`/api/v1/encounters/${encounterId}/combatants`)
+          .set(dm)
+          .send({ kind: 'character', characterId: allyCharacterId })
+      ).body.id;
+      // Reveal only a small corner that covers none of the tokens; place owned PC in fog too.
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 5, h: 5 }] } });
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${charCombatantId}`)
+        .set(dm)
+        .send({ tokenX: 80, tokenY: 80 });
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${allyCombatantId}`)
+        .set(dm)
+        .send({ tokenX: 40, tokenY: 40 });
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+        .set(dm)
+        .send({ tokenX: 10, tokenY: 10 });
+
+      const playerView = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      expect(playerView.status).toBe(200);
+      const owned = playerView.body.combatants.find((c: CombatantShape) => c.id === charCombatantId);
+      const allied = playerView.body.combatants.find((c: CombatantShape) => c.id === allyCombatantId);
+      const enemy = playerView.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+
+      for (const c of [owned, allied, enemy]) {
+        expect(c.tokenX).toBeNull();
+        expect(c.tokenY).toBeNull();
+        expect(c.tokenHiddenByFog).toBe(true);
+      }
+
+      // Reveal the owned PC's corner — it transitions to real coords; others stay fog-hidden.
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] } });
+      const afterReveal = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      const ownedAfter = afterReveal.body.combatants.find((c: CombatantShape) => c.id === charCombatantId);
+      const alliedAfter = afterReveal.body.combatants.find((c: CombatantShape) => c.id === allyCombatantId);
+      const enemyAfter = afterReveal.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+
+      expect(ownedAfter.tokenX).toBe(80);
+      expect(ownedAfter.tokenY).toBe(80);
+      expect(ownedAfter.tokenHiddenByFog).toBe(false);
+      expect(alliedAfter.tokenHiddenByFog).toBe(true);
+      expect(alliedAfter.tokenX).toBeNull();
+      expect(enemyAfter.tokenHiddenByFog).toBe(true);
+      expect(enemyAfter.tokenX).toBeNull();
+
+      // DM still sees every real coordinate (no false Unplaced on the DM client either).
+      const dmView = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const dmOwned = dmView.body.combatants.find((c: CombatantShape) => c.id === charCombatantId);
+      expect(dmOwned.tokenX).toBe(80);
+      expect(dmOwned.tokenHiddenByFog).toBe(false);
     });
 
     it('reveal_map_region-style reveal (via PATCH) lights the monster corner for players', async () => {
