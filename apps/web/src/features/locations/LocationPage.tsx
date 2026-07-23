@@ -13,7 +13,19 @@ import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  LOCATION_BODY_HELP,
+  LOCATION_BODY_LABEL,
+  LOCATION_DM_SECRET_HELP,
+  LOCATION_DM_SECRET_LABEL,
+  LOCATION_EDIT_PREFIX,
+  LOCATION_FIELD,
+  LOCATION_KIND_LABEL,
+  LOCATION_NAME_LABEL,
+  LOCATION_PARENT_LABEL,
+} from '../../components/formFieldLabels';
 import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/LocationStatusLabel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
@@ -758,7 +770,7 @@ export default function LocationPage() {
       )}
 
       {editing && (
-        <Card className="space-y-3">
+        <Card className="space-y-3" data-testid="location-editor-fields">
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
               <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
@@ -766,40 +778,72 @@ export default function LocationPage() {
           )}
           {saveError && <ErrorNote message={saveError} />}
           <div className="grid sm:grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Name</label>
-              <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Kind</label>
-              <TextInput value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} />
-            </div>
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.name}
+              label={LOCATION_NAME_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              required
+            />
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.kind}
+              label={LOCATION_KIND_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              value={form.kind}
+              onChange={(e) => setForm({ ...form, kind: e.target.value })}
+              optional
+            />
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Parent location</label>
-            <select
-              aria-label="Parent location"
-              className="cf-input text-sm w-full"
-              value={form.parentId}
-              onChange={(e) => setForm({ ...form, parentId: e.target.value })}
-            >
-              <option value="">No parent (top level)</option>
-              {parentOptions.map((loc) => (
-                <option key={loc.id} value={loc.id}>
-                  Inside: {loc.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
-            <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
-          </div>
+          <Field
+            idPrefix={LOCATION_EDIT_PREFIX}
+            name={LOCATION_FIELD.parentId}
+            as="select"
+            label={LOCATION_PARENT_LABEL}
+            labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+            selectClassName="cf-input text-sm w-full"
+            value={form.parentId}
+            onChange={(e) => setForm({ ...form, parentId: e.target.value })}
+            optional
+          >
+            <option value="">No parent (top level)</option>
+            {parentOptions.map((loc) => (
+              <option key={loc.id} value={loc.id}>
+                Inside: {loc.name}
+              </option>
+            ))}
+          </Field>
+          <Field
+            idPrefix={LOCATION_EDIT_PREFIX}
+            name={LOCATION_FIELD.body}
+            as="textarea"
+            label={LOCATION_BODY_LABEL}
+            labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+            value={form.body}
+            onChange={(e) => setForm({ ...form, body: e.target.value })}
+            help={LOCATION_BODY_HELP}
+            minHeight={140}
+            optional
+          />
           {!proposeMode && (
-            <div className="space-y-1">
-              <label className="flex items-center gap-1 text-[10px] text-amber-500 font-bold uppercase"><GameIcon slug="padlock" size={11} /> DM secret</label>
-              <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
-            </div>
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.dmSecret}
+              as="textarea"
+              label={
+                <span className="inline-flex items-center gap-1">
+                  <GameIcon slug="padlock" size={11} /> {LOCATION_DM_SECRET_LABEL}
+                </span>
+              }
+              labelClassName="text-[10px] text-amber-400 font-bold uppercase tracking-wide"
+              value={form.dmSecret}
+              onChange={(e) => setForm({ ...form, dmSecret: e.target.value })}
+              help={LOCATION_DM_SECRET_HELP}
+              minHeight={90}
+              optional
+            />
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (

@@ -21,7 +21,24 @@ import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibi
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
-import { Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  SESSION_ZERO_FIELD,
+  SESSION_ZERO_HOUSE_RULES_HELP,
+  SESSION_ZERO_HOUSE_RULES_LABEL,
+  SESSION_ZERO_LINES_HELP,
+  SESSION_ZERO_LINES_LABEL,
+  SESSION_ZERO_PREFIX,
+  SESSION_ZERO_SUPPORT_HELP,
+  SESSION_ZERO_SUPPORT_LABEL,
+  SESSION_ZERO_TONE_HELP,
+  SESSION_ZERO_TONE_LABEL,
+  SESSION_ZERO_TOOLS_HELP,
+  SESSION_ZERO_TOOLS_LABEL,
+  SESSION_ZERO_VEILS_HELP,
+  SESSION_ZERO_VEILS_LABEL,
+} from '../../components/formFieldLabels';
+import { Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
 
 interface Draft {
   lines: string[];
@@ -270,20 +287,21 @@ export default function SessionZeroPage() {
             hint="Examples include extra processing time, explicit turn cues, breaks, reading support, motion limits, or avoiding timers."
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div>
-                <label htmlFor="support-preference-text" style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>
-                  What would help you participate comfortably?
-                </label>
-                <TextArea
-                  id="support-preference-text"
-                  rows={4}
-                  maxLength={2000}
-                  value={supportDraft.supportText}
-                  placeholder="For example: Give me a moment to answer after asking what my character does."
-                  onChange={(e) => setSupportDraft({ ...supportDraft, supportText: e.target.value })}
-                  style={{ marginTop: 6 }}
-                />
-              </div>
+              <Field
+                idPrefix={SESSION_ZERO_PREFIX}
+                name={SESSION_ZERO_FIELD.supportText}
+                as="textarea"
+                label={SESSION_ZERO_SUPPORT_LABEL}
+                labelClassName=""
+                value={supportDraft.supportText}
+                onChange={(e) => setSupportDraft({ ...supportDraft, supportText: e.target.value })}
+                help={SESSION_ZERO_SUPPORT_HELP}
+                placeholder="For example: Give me a moment to answer after asking what my character does."
+                rows={4}
+                maxLength={2000}
+                minHeight={96}
+                optional
+              />
 
               <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
                 <legend style={{ fontSize: 13, fontWeight: 600 }}>Who can read this?</legend>
@@ -434,74 +452,94 @@ function CharterView({ charter }: { charter: SessionZero }) {
 
 // A simple newline-per-entry editor for a string list — one line/veil/tool per row.
 function ListEditor({
+  name,
   label,
-  hint,
+  help,
   placeholder,
   items,
   onChange,
 }: {
+  name: string;
   label: string;
-  hint: string;
+  help: string;
   placeholder: string;
   items: string[];
   onChange: (items: string[]) => void;
 }) {
   return (
-    <div>
-      <label className="text-muted" style={{ fontSize: 11 }}>{label}</label>
-      <div className="text-muted" style={{ fontSize: 11, marginBottom: 4 }}>{hint} One per line.</div>
-      <TextArea
-        rows={4}
-        value={items.join('\n')}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value.split('\n'))}
-      />
-    </div>
+    <Field
+      idPrefix={SESSION_ZERO_PREFIX}
+      name={name}
+      as="textarea"
+      label={label}
+      help={help}
+      value={items.join('\n')}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value.split('\n'))}
+      rows={4}
+      minHeight={96}
+      optional
+    />
   );
 }
 
 function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | null) => void }) {
   return (
-    <div className="card elev-sm" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div
+      className="card elev-sm"
+      style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
+      data-testid="session-zero-charter-form"
+    >
       <ListEditor
-        label="Lines (hard limits)"
-        hint="Content that never appears at the table."
+        name={SESSION_ZERO_FIELD.lines}
+        label={SESSION_ZERO_LINES_LABEL}
+        help={SESSION_ZERO_LINES_HELP}
         placeholder={'Harm to children\nSexual violence\nSpiders'}
         items={draft.lines}
         onChange={(lines) => setDraft({ ...draft, lines })}
       />
       <ListEditor
-        label="Veils (soft limits)"
-        hint="Content that may exist but stays off-screen."
+        name={SESSION_ZERO_FIELD.veils}
+        label={SESSION_ZERO_VEILS_LABEL}
+        help={SESSION_ZERO_VEILS_HELP}
         placeholder={'On-screen torture\nGraphic gore'}
         items={draft.veils}
         onChange={(veils) => setDraft({ ...draft, veils })}
       />
       <ListEditor
-        label="Safety tools"
-        hint="Tools the table agreed to use."
+        name={SESSION_ZERO_FIELD.safetyTools}
+        label={SESSION_ZERO_TOOLS_LABEL}
+        help={SESSION_ZERO_TOOLS_HELP}
         placeholder={'X-Card\nOpen Door\nScript Change'}
         items={draft.safetyTools}
         onChange={(safetyTools) => setDraft({ ...draft, safetyTools })}
       />
-      <div>
-        <label className="text-muted" style={{ fontSize: 11 }}>House rules (markdown, optional)</label>
-        <TextArea
-          rows={4}
-          value={draft.houseRules}
-          placeholder="Table conventions, rules-as-written deviations…"
-          onChange={(e) => setDraft({ ...draft, houseRules: e.target.value })}
-        />
-      </div>
-      <div>
-        <label className="text-muted" style={{ fontSize: 11 }}>Tone & content expectations (markdown, optional)</label>
-        <TextArea
-          rows={4}
-          value={draft.toneAndExpectations}
-          placeholder="Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
-          onChange={(e) => setDraft({ ...draft, toneAndExpectations: e.target.value })}
-        />
-      </div>
+      <Field
+        idPrefix={SESSION_ZERO_PREFIX}
+        name={SESSION_ZERO_FIELD.houseRules}
+        as="textarea"
+        label={SESSION_ZERO_HOUSE_RULES_LABEL}
+        help={SESSION_ZERO_HOUSE_RULES_HELP}
+        value={draft.houseRules}
+        placeholder="Table conventions, rules-as-written deviations…"
+        onChange={(e) => setDraft({ ...draft, houseRules: e.target.value })}
+        rows={4}
+        minHeight={96}
+        optional
+      />
+      <Field
+        idPrefix={SESSION_ZERO_PREFIX}
+        name={SESSION_ZERO_FIELD.tone}
+        as="textarea"
+        label={SESSION_ZERO_TONE_LABEL}
+        help={SESSION_ZERO_TONE_HELP}
+        value={draft.toneAndExpectations}
+        placeholder="Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
+        onChange={(e) => setDraft({ ...draft, toneAndExpectations: e.target.value })}
+        rows={4}
+        minHeight={96}
+        optional
+      />
     </div>
   );
 }

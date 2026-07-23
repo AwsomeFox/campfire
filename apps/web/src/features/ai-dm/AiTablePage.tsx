@@ -70,7 +70,9 @@ import {
 import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
 import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
-import { Btn, Card, Chip, EmptyState, Skeleton, TextArea, TextInput, type ChipVariant } from '../../components/ui';
+import { Field } from '../../components/Field';
+import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
+import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 
 /** game-icons slug for a tool chip's resource family — the shared map returns lucide
  * names, which this app doesn't bundle, so we render an equivalent <GameIcon> glyph. */
@@ -594,17 +596,27 @@ export default function AiTablePage() {
 
       {/* Composer */}
       {canCompose ? (
-        <form onSubmit={onSubmit} className="flex flex-col gap-2">
+        <form onSubmit={onSubmit} className="flex flex-col gap-2" data-testid="ai-table-composer">
           {isDm && (
-            <TextInput
+            <Field
+              idPrefix={AI_TABLE_PREFIX}
+              name={AI_TABLE_FIELD.scene}
+              label={t('table.sceneFieldLabel')}
               value={sceneField}
               onChange={(e) => setSceneField(e.target.value)}
               placeholder={t('table.sceneFieldPlaceholder')}
+              help={t('table.sceneFieldHelp')}
               disabled={submitting}
+              optional
             />
           )}
           <div className="flex items-end gap-2">
-            <TextArea
+            <Field
+              idPrefix={AI_TABLE_PREFIX}
+              name={AI_TABLE_FIELD.action}
+              as="textarea"
+              label={t('table.composerLabel')}
+              className="field flex-1 min-w-0"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -613,17 +625,18 @@ export default function AiTablePage() {
                   void onSubmit(e as unknown as FormEvent);
                 }
               }}
+              help={locked && lockReason ? lockReason : t('table.composerHelp')}
               placeholder={locked && lockReason ? lockReason : placeholder}
               disabled={locked || submitting}
               rows={2}
-              className="flex-1 resize-none"
+              minHeight={56}
+              error={submitError}
+              style={{ resize: 'none' }}
             />
             <Btn type="submit" disabled={locked || submitting || !input.trim()}>
               {submitting ? t('table.sending') : t('table.send')}
             </Btn>
           </div>
-          {lockReason && <p className="text-xs text-[var(--color-neutral-600)]">{lockReason}</p>}
-          {submitError && <p className="text-xs text-rose-400">{submitError}</p>}
         </form>
       ) : (
         <p className="text-xs text-center text-[var(--color-neutral-600)] py-2">{t('table.viewerHint')}</p>

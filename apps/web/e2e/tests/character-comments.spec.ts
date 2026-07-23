@@ -42,7 +42,7 @@ test('posts as an owned character from the keyboard and renders mobile-safe acce
   await page.keyboard.press('Space');
   await expect(inCharacter).toBeChecked();
 
-  const characterSelect = discussion.getByRole('combobox', { name: 'Speaking character' }).last();
+  const characterSelect = discussion.getByRole('combobox', { name: /Speaking as/ }).last();
   await expect(characterSelect).toBeVisible();
   await characterSelect.focus();
   // Native-select typeahead is keyboard-only and behaves consistently across
@@ -96,7 +96,7 @@ test('disables in-character posting when the selected character leaves the owned
 
   const inCharacter = discussion.getByRole('checkbox', { name: 'In character' }).last();
   await inCharacter.check();
-  await expect(discussion.getByRole('combobox', { name: 'Speaking character' }).last()).toHaveValue(String(character.id));
+  await expect(discussion.getByRole('combobox', { name: /Speaking as/ }).last()).toHaveValue(String(character.id));
   await discussion.getByPlaceholder('Add to the discussion…').fill('Should not post with a stale speaker.');
   await expect(discussion.getByRole('button', { name: 'Post' }).last()).toBeEnabled();
 

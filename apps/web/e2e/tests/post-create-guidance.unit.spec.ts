@@ -82,8 +82,8 @@ test.describe('post-create encounter guidance (issue #431)', () => {
 
     const list = readFileSync(LIST_PAGE, 'utf8');
     expect(list).toMatch(/ENCOUNTER_NAME_LABEL/);
-    expect(list).toMatch(/htmlFor=\{ENCOUNTER_NAME_ID\}/);
-    expect(list).toMatch(/aria-describedby/);
+    expect(list).toMatch(/ENCOUNTER_CREATE_PREFIX/);
+    expect(list).toMatch(/<Field[\s\S]*name=\{ENCOUNTER_FIELD\.name\}/);
     expect(list).toMatch(/ENCOUNTER_NAME_HELP/);
   });
 });
