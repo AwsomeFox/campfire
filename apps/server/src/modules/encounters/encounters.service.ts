@@ -1092,7 +1092,9 @@ export class EncountersService {
       const adapter = await this.adapterForCampaign(campaignId);
       const combatantValues = partyRows.map((character, index) => {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        const initMod = adapter.initiativeModifier(stats);
+        // Pass character level so PF2e (and similar) can include the proficiency/level
+        // term on the Perception/WIS initiative fallback (issue #491). 5e ignores it.
+        const initMod = adapter.initiativeModifier(stats, 'score', character.level);
         // Issue #711: seed the combatant's death/temp-HP slice from the persistent
         // sheet so a stable-but-unconscious PC (carried over from a prior fight via
         // /end reconciliation) re-enters the next encounter still down, not silently
@@ -1528,7 +1530,8 @@ export class EncountersService {
       characterSheetUpdatedAt = character.updatedAt;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        initMod = adapter.initiativeModifier(stats);
+        // Character level feeds PF2e trained-Perception proficiency (issue #491).
+        initMod = adapter.initiativeModifier(stats, 'score', character.level);
       }
     } else if (input.ruleEntryId !== undefined) {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
