@@ -2,8 +2,18 @@ import AxeBuilder from '@axe-core/playwright';
 import { test, expect } from '@playwright/test';
 import { stateFor } from './seed';
 
+import { CREDS } from '../global-setup';
+
 test.describe('admin user creation accessibility', () => {
   test.use({ storageState: stateFor('admin') });
+
+  test.beforeEach(async ({ page }) => {
+    await page.request
+      .post('/api/v1/auth/login', {
+        data: { username: CREDS.admin.username, password: CREDS.admin.password },
+      })
+      .catch(() => undefined);
+  });
 
   test('supports a labeled, keyboard-complete user creation journey', async ({ page }) => {
     await page.goto('/admin/users');
@@ -100,8 +110,8 @@ test.describe('admin user creation accessibility', () => {
     await expect(dialog).toBeHidden();
     expect(uniqueCreateRequests).toBe(1);
     await expect(trigger).toBeFocused();
-    await expect(page.getByRole('cell', { name: uniqueUsername })).toBeVisible();
-    await expect(page.getByRole('cell', { name: 'Keyboard User' })).toBeVisible();
+    await expect(page.getByRole('cell', { name: uniqueUsername, exact: true })).toBeVisible();
+    await expect(page.getByRole('cell', { name: 'Keyboard User', exact: true })).toBeVisible();
   });
 
   test('repairs an orphaned campaign without exposing campaign content', async ({ page }) => {

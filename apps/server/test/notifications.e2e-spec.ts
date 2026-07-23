@@ -368,6 +368,113 @@ describe('note_shared notifications (issue #105, e2e)', () => {
 });
 
 /**
+ * Issue #784: author edits must notify only when audience/recipient expands or
+ * changes — typo/body fixes on an already-shared note must not re-ping.
+ */
+describe('note edit audience notifications (issue #784, e2e)', () => {
+  let ctx: TestAppContext;
+  let dm: ReturnType<typeof request.agent>;
+  let author: ReturnType<typeof request.agent>;
+  let alice: ReturnType<typeof request.agent>;
+  let bob: ReturnType<typeof request.agent>;
+  let authorId: number;
+  let aliceId: number;
+  let bobId: number;
+  let campaignId: number;
+
+  type Notification = { id: number; type: string; title: string; body: string };
+
+  async function sharedFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
+    const res = await agent.get('/api/v1/notifications');
+    expect(res.status).toBe(200);
+    return (res.body as Notification[]).filter((n) => n.type === 'note_shared');
+  }
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'ne-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'ne-dm', password: 'password-dm-1', displayName: 'Dana DM' });
+    authorId = (
+      await adminAgent.post('/api/v1/users').send({ username: 'ne-author', password: 'password-au-1', displayName: 'Ada Author' })
+    ).body.id;
+    aliceId = (
+      await adminAgent.post('/api/v1/users').send({ username: 'ne-alice', password: 'password-al-1', displayName: 'Alice' })
+    ).body.id;
+    bobId = (
+      await adminAgent.post('/api/v1/users').send({ username: 'ne-bob', password: 'password-bo-1', displayName: 'Bob' })
+    ).body.id;
+
+    dm = request.agent(server);
+    await dm.post('/api/v1/auth/login').send({ username: 'ne-dm', password: 'password-dm-1' });
+    author = request.agent(server);
+    await author.post('/api/v1/auth/login').send({ username: 'ne-author', password: 'password-au-1' });
+    alice = request.agent(server);
+    await alice.post('/api/v1/auth/login').send({ username: 'ne-alice', password: 'password-al-1' });
+    bob = request.agent(server);
+    await bob.post('/api/v1/auth/login').send({ username: 'ne-bob', password: 'password-bo-1' });
+
+    const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Edit Notify Keep' });
+    campaignId = campaign.body.id;
+    await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: authorId, role: 'player' });
+    await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: aliceId, role: 'player' });
+    await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: bobId, role: 'player' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('party_shared body typo fix does not re-notify the party', async () => {
+    const created = await author
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Party tip about the bridge.', visibility: 'party_shared' });
+    expect(created.status).toBe(201);
+    const beforeAlice = (await sharedFor(alice)).length;
+    const beforeDm = (await sharedFor(dm)).length;
+
+    const edit = await author
+      .patch(`/api/v1/notes/${created.body.id}`)
+      .send({ body: 'Party tip about the bridge (typo fixed).', expectedUpdatedAt: created.body.updatedAt });
+    expect(edit.status).toBe(200);
+    expect((await sharedFor(alice)).length).toBe(beforeAlice);
+    expect((await sharedFor(dm)).length).toBe(beforeDm);
+  });
+
+  it('whisper retarget notifies the new recipient; body edit of the same whisper does not', async () => {
+    const created = await author.post(`/api/v1/campaigns/${campaignId}/notes`).send({
+      body: 'Only you notice the trap door',
+      visibility: 'whisper',
+      recipientUserId: String(aliceId),
+    });
+    expect(created.status).toBe(201);
+    expect((await sharedFor(alice)).some((n) => n.body.includes('trap door'))).toBe(true);
+
+    const beforeBob = (await sharedFor(bob)).length;
+    const beforeAlice = (await sharedFor(alice)).length;
+
+    const retarget = await author.patch(`/api/v1/notes/${created.body.id}`).send({
+      recipientUserId: String(bobId),
+      expectedUpdatedAt: created.body.updatedAt,
+    });
+    expect(retarget.status).toBe(200);
+    expect((await sharedFor(bob)).length).toBe(beforeBob + 1);
+    // Alice is not re-pinged on retarget away from her.
+    expect((await sharedFor(alice)).length).toBe(beforeAlice);
+
+    const beforeBobAfter = (await sharedFor(bob)).length;
+    const typo = await author.patch(`/api/v1/notes/${created.body.id}`).send({
+      body: 'Only you notice the trap door.',
+      expectedUpdatedAt: retarget.body.updatedAt,
+    });
+    expect(typo.status).toBe(200);
+    expect((await sharedFor(bob)).length).toBe(beforeBobAfter);
+  });
+});
+
+/**
  * Issue #263: notification coverage was incomplete — scheduling, quest changes,
  * party-shared notes and proposals never notified anyone. Each of those now emits
  * a best-effort in-app notification to the right recipient. Real cookie sessions
@@ -426,6 +533,9 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(scheduled).toHaveLength(1);
     expect(scheduled[0].title).toContain('Game night');
     expect(scheduled[0].actorName).toBe('Dana DM');
+    // Issue #446: schedule row id is stamped so the UI can open the exact card.
+    expect(scheduled[0].entityId).toBe(res.body.id);
+    expect(scheduled[0].entityType).toBeNull();
     // The scheduling DM does not notify themselves.
     expect(ofType(await listFor(dm), 'session_scheduled')).toHaveLength(0);
   });
@@ -442,6 +552,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(dmRsvps).toHaveLength(1);
     expect(dmRsvps[0].title).toContain('Pat Player');
     expect(dmRsvps[0].title).toContain('yes');
+    expect(dmRsvps[0].entityId).toBe(sched.body.id);
     // The RSVPing player is not notified about their own availability.
     expect(ofType(await listFor(player), 'session_rsvp')).toHaveLength(0);
   });

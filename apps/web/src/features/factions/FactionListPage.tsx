@@ -5,28 +5,18 @@
  * browse & open a detail page.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, Link } from 'react-router-dom';
-import type { Faction, FactionStanding } from '@campfire/schema';
+import type { Faction } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { initials } from '../../lib/avatarText';
-
-export function standingVariant(standing: FactionStanding) {
-  switch (standing) {
-    case 'allied':
-    case 'friendly':
-      return 'completed' as const;
-    case 'hostile':
-    case 'unfriendly':
-      return 'failed' as const;
-    default:
-      return 'active' as const;
-  }
-}
+import { formatStandingChip, standingVariant } from './standing';
 
 export default function FactionListPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
@@ -163,7 +153,7 @@ export default function FactionListPage() {
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Chip variant={standingVariant(faction.standing)}>
-                    {faction.standing} · {faction.reputation > 0 ? `+${faction.reputation}` : faction.reputation}
+                    {formatStandingChip(faction.standing, faction.reputation, t)}
                   </Chip>
                   {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
                   {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}

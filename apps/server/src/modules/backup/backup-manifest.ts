@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { APP_VERSION } from '../../common/build-metadata';
 import { MIGRATION_NAMES } from '../../db/db.module';
 
 /** Marks an archive as a Campfire whole-server backup. */
@@ -15,14 +16,11 @@ export const BACKUP_FORMAT_VERSION = 1;
 /** @deprecated Use {@link BACKUP_FORMAT_VERSION}. Kept for existing imports/tests. */
 export const BACKUP_VERSION = BACKUP_FORMAT_VERSION;
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const SERVER_APP_VERSION: string = require('../../../package.json').version;
-
 /** DB migration count at backup time — a coarse schema revision for operators. */
 export const CURRENT_SCHEMA_REVISION = MIGRATION_NAMES.length;
 
 export function serverAppVersion(): string {
-  return SERVER_APP_VERSION;
+  return APP_VERSION;
 }
 
 export interface BackupManifest {
@@ -50,6 +48,8 @@ export interface BackupInspectResult {
   app: string;
   kind: string;
   formatVersion: number;
+  /** The raw format version from the source archive before normalization (issue #997). */
+  sourceFormatVersion: number;
   appVersion: string | null;
   schemaVersion: number | null;
   createdAt: string | null;
@@ -65,6 +65,9 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/** Expected db entry path for format version 1 archives (issue #997 fix 2). */
+export const DB_ENTRY_V1 = 'db/campfire.db';
+
 function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
   const createdAt = asNonEmptyString(raw.createdAt);
   const db = asNonEmptyString(raw.db);
@@ -72,6 +75,14 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
   const uploadCount = raw.uploadCount;
   if (!createdAt || !db) {
     throw new BadRequestException('Invalid backup archive — manifest is missing required fields');
+  }
+  // Validate that db points to the canonical entry for this format (issue #997 fix 2).
+  if (db !== DB_ENTRY_V1) {
+    // Truncate user-controlled value to avoid log/response inflation.
+    const truncated = db.length > 60 ? db.slice(0, 60) + '…' : db;
+    throw new BadRequestException(
+      `Invalid backup archive — manifest.db must be "${DB_ENTRY_V1}" for format version 1, got "${truncated}"`,
+    );
   }
   if (typeof dbBytes !== 'number' || !Number.isFinite(dbBytes) || dbBytes < 0) {
     throw new BadRequestException('Invalid backup archive — manifest dbBytes is invalid');
@@ -143,11 +154,12 @@ export function parseBackupManifest(raw: unknown): BackupManifest {
   );
 }
 
-export function manifestToInspectView(manifest: BackupManifest, uploads: string[]): BackupInspectResult {
+export function manifestToInspectView(manifest: BackupManifest, uploads: string[], sourceFormatVersion: number): BackupInspectResult {
   return {
     app: manifest.app,
     kind: manifest.kind,
     formatVersion: manifest.version,
+    sourceFormatVersion,
     appVersion: manifest.appVersion ?? null,
     schemaVersion: manifest.schemaVersion ?? null,
     createdAt: manifest.createdAt ?? null,

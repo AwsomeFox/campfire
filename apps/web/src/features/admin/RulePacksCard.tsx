@@ -285,7 +285,7 @@ function PackRow({
                 )}
               </div>
             }
-            confirmLabel={uninstalling ? 'Uninstalling…' : 'Uninstall'}
+            confirmLabel="Uninstall"
             busy={uninstalling}
             confirmDisabled={usageCount > 0 && !acknowledged}
             onConfirm={uninstall}

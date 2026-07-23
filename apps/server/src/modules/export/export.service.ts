@@ -8,6 +8,7 @@ import { LocationsService } from '../locations/locations.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
 import { NotesService } from '../notes/notes.service';
+import { CommentsService } from '../comments/comments.service';
 import { MembersService } from '../membership/members.service';
 import { AuditService } from '../audit/audit.service';
 import { ProposalsService } from '../proposals/proposals.service';
@@ -19,6 +20,7 @@ import { TimelineService } from '../timeline/timeline.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import type { RequestUser } from '../../common/user.types';
 
 /** Filesystem/URL-safe slug for filenames — lowercase, alnum + hyphens. */
@@ -104,6 +106,7 @@ export class ExportService {
     private readonly sessions: SessionsService,
     private readonly characters: CharactersService,
     private readonly notes: NotesService,
+    private readonly comments: CommentsService,
     private readonly members: MembersService,
     private readonly audit: AuditService,
     private readonly proposals: ProposalsService,
@@ -115,6 +118,7 @@ export class ExportService {
     private readonly sessionZero: SessionZeroService,
     private readonly supportPreferences: SupportPreferencesService,
     private readonly inventory: InventoryService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /** Archive-relative path an attachment's bytes live at inside a zip export. */
@@ -140,6 +144,7 @@ export class ExportService {
       sessionList,
       characterList,
       noteList,
+      commentList,
       memberList,
       auditList,
       proposalList,
@@ -155,6 +160,7 @@ export class ExportService {
       sessionZero,
       inventoryList,
       treasury,
+      revisionList,
     ] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.quests.listForCampaignWithObjectives(campaignId, role),
@@ -165,9 +171,10 @@ export class ExportService {
       this.sessions.listRecapsForCampaign(campaignId, role),
       this.characters.listForCampaign(campaignId, role),
       this.notes.listForCampaign(campaignId, user, role, {}),
+      this.comments.listForCampaign(campaignId, role),
       this.members.listForCampaign(campaignId),
       this.audit.listForCampaign(campaignId, 500),
-      this.proposals.listForCampaign(campaignId, undefined),
+      this.proposals.listForCampaign(campaignId, undefined, role),
       this.encounters.listForCampaign(campaignId),
       this.attachments.listRowsForCampaign(campaignId),
       this.factions.listForCampaign(campaignId, role),
@@ -179,6 +186,8 @@ export class ExportService {
       this.sessionZero.get(campaignId),
       this.inventory.listForCampaign(campaignId),
       this.inventory.getTreasury(campaignId),
+      // Issue #813: immutable prose versions (author + replacer provenance), including tips.
+      this.revisions.listForCampaign(campaignId),
     ]);
 
     // Attachment manifest (issue #87): the export used to reference attachment ids
@@ -232,6 +241,7 @@ export class ExportService {
       sessions: sessionList,
       characters: characterList,
       notes: noteList,
+      comments: commentList,
       members,
       audit: auditList,
       proposals: proposalList,
@@ -247,6 +257,8 @@ export class ExportService {
       sessionZero,
       inventory: inventoryList,
       treasury,
+      // Issue #813: version authorship + replacer metadata round-trips with remapped ids.
+      revisions: revisionList,
       attachments,
       attachmentsNote:
         'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl ' +
@@ -277,27 +289,31 @@ export class ExportService {
    * a dm calling their own member export sees the same owner-scoped slice.
    */
   async buildMemberExport(campaignId: number, user: RequestUser, role: 'dm' | 'player' | 'viewer') {
-    const [campaign, characterList, noteList, proposalList, supportPreference] = await Promise.all([
+    const [campaign, characterList, noteList, commentList, proposalList, supportPreference] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.characters.listForCampaign(campaignId, role),
       this.notes.listForCampaign(campaignId, user, role, { mine: true }),
-      this.proposals.listForCampaign(campaignId, undefined),
+      this.comments.listForCampaign(campaignId, role, { authorUserId: user.id }),
+      this.proposals.listForCampaign(campaignId, undefined, role, { proposerUserId: user.id }),
       this.supportPreferences.getOwn(campaignId, user.id),
     ]);
 
     const ownCharacters = characterList.filter((c) => c.ownerUserId === user.id);
-    const ownProposals = proposalList.filter((p) => p.proposer === user.id);
+    // Already scoped + projected for the caller's role (#817); keep the list as-is.
+    const ownProposals = proposalList;
+    const ownComments = commentList;
 
     return {
       campaign: { id: campaign.id, name: campaign.name, description: campaign.description, status: campaign.status },
       exportedFor: { userId: user.id, name: user.name, role },
       characters: ownCharacters,
       notes: noteList,
+      comments: ownComments,
       proposals: ownProposals,
       supportPreference,
       note:
-        'This is a MEMBER-scoped export — only the characters and support preference you own, the notes you authored, ' +
-        'and the proposals you submitted in this campaign. It intentionally excludes DM secrets, other members’ ' +
+        'This is a MEMBER-scoped export — only the characters and support preference you own, the notes and comments ' +
+        'you authored, and the proposals you submitted in this campaign. It intentionally excludes DM secrets, other members’ ' +
         'private data, and the campaign-wide bundle (that export is DM-only).',
     };
   }

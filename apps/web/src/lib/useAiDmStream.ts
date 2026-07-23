@@ -7,18 +7,26 @@
  * than native EventSource, so the request carries the exact same auth surface as
  * lib/api.ts — the session cookie (credentials: include) plus the dev-role override
  * headers, which EventSource cannot send. Reconnects with capped exponential backoff;
- * after a heal, `onReconnect` fires so the page can refetch GET /ai-dm/session to catch
- * up on state it missed while offline. A 401/403 stops the loop entirely (no access —
- * retrying won't help), which is also how the server enforces the role matrix: the
- * client simply stops when told no.
+ * after a transport heal, `onReconnect` fires so the page can refetch GET /ai-dm/session
+ * to catch up on state it missed while offline. Parser buffer-overrun recovery is
+ * separate (`onStreamRecovery`) — the connection stayed up. A proven 401 signals
+ * session expiry (issue #885) and stops until reauth; a campaign/feature 403 stops
+ * without clearing identity (role matrix / seat off — retrying won't help).
  *
  * The transcript is NOT assembled here — this hook only decodes and validates the typed
  * event union and hands each event to `onEvent`. See features/ai-dm/transcript.ts (the
  * reducer that turns these events into a running transcript) and features/ai-dm/
  * toolActivity.ts (the tool-event → query-invalidation map).
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { API } from './api';
+import {
+  classifyStreamConnectStatus,
+  getSessionResumeEpoch,
+  signalSessionExpired,
+  subscribeSessionResume,
+} from './sessionExpiry';
+import { SseParser, type SseParseSignal } from './sseParse';
 
 /**
  * One AI-DM stream event, mirroring the server union in
@@ -61,8 +69,14 @@ export type AiDmStreamEventType = AiDmStreamEvent['type'];
 
 export interface AiDmStreamHandlers {
   onEvent: (event: AiDmStreamEvent) => void;
-  /** Fires after the stream reconnects following a drop — refetch session state to catch up. */
+  /** Fires after the stream reconnects following a transport drop — refetch session state. */
   onReconnect?: () => void;
+  /**
+   * Fires when the SSE parser discards mid-stream bytes while the connection
+   * stays up. Distinct from {@link onReconnect}; wire the same catch-up refetch
+   * when transcript/session state may have skipped events.
+   */
+  onStreamRecovery?: () => void;
 }
 
 const RECONNECT_BASE_MS = 1000;
@@ -170,15 +184,6 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
   }
 }
 
-/** Extracts the concatenated `data:` payload of one SSE event block. */
-export function sseBlockData(block: string): string {
-  return block
-    .split('\n')
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice('data:'.length).trimStart())
-    .join('\n');
-}
-
 /**
  * Subscribe to a campaign's AI-DM narration stream for the lifetime of the mount (or until
  * `campaignId`/`enabled` changes). Handlers are read from a ref so a re-render never tears
@@ -193,6 +198,8 @@ export function useAiDmStream(
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const enabled = options?.enabled ?? true;
+  // Reopen after session reauth even when campaignId/enabled are unchanged (#885).
+  const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
 
   useEffect(() => {
     if (!enabled || campaignId === undefined || !Number.isFinite(campaignId)) return;
@@ -224,32 +231,47 @@ export function useAiDmStream(
             headers,
             signal: controller.signal,
           });
-          // 401/403 = no access (feature off, not a member, seat disabled) — retrying won't heal it.
-          if (res.status === 401 || res.status === 403) return;
+          const auth = classifyStreamConnectStatus(res.status);
+          if (auth === 'session-expired') {
+            signalSessionExpired();
+            return;
+          }
+          // 403 = feature off / not a member / seat disabled — not session expiry.
+          if (auth === 'forbidden') return;
           if (!res.ok || !res.body) throw new Error(`AI-DM SSE connect failed (${res.status})`);
 
           if (attempt > 0) handlersRef.current.onReconnect?.();
           attempt = 0;
 
           const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let sep: number;
-            while ((sep = buffer.indexOf('\n\n')) !== -1) {
-              const data = sseBlockData(buffer.slice(0, sep));
-              buffer = buffer.slice(sep + 2);
+          // Shared incremental SSE parser (#748) — same framing rules as campaign events.
+          const parser = new SseParser();
+          const consume = (signals: SseParseSignal[]) => {
+            for (const signal of signals) {
+              if (signal.kind === 'recovered') {
+                // Parser discarded mid-stream bytes — stay connected; not a
+                // transport reconnect. Callers refetch via onStreamRecovery.
+                if (!disposed) handlersRef.current.onStreamRecovery?.();
+                continue;
+              }
+              if (signal.kind !== 'message') continue;
+              const data = signal.message.data;
               if (!data) continue;
               try {
                 const parsed = parseAiDmStreamEvent(JSON.parse(data));
                 if (parsed && !disposed) handlersRef.current.onEvent(parsed);
               } catch {
-                /* malformed frame — skip */
+                /* malformed JSON payload — skip */
               }
             }
+          };
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) {
+              consume(parser.flush());
+              break;
+            }
+            consume(parser.push(value));
           }
           // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
           throw new Error('AI-DM SSE stream ended');
@@ -265,5 +287,5 @@ export function useAiDmStream(
       disposed = true;
       controller.abort();
     };
-  }, [campaignId, enabled]);
+  }, [campaignId, enabled, resumeEpoch]);
 }

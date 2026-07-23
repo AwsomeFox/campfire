@@ -1,6 +1,6 @@
 import { Injectable, type CanActivate, type ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { Role } from '@campfire/schema';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import type { RequestUser, TokenContext } from '../user.types';
@@ -8,6 +8,7 @@ import { looksLikeApiToken, looksLikeOAuthAccessToken } from '../crypto';
 import { isDevAuthActive } from '../security-config';
 import { AuthService } from '../../modules/auth/auth.service';
 import { SESSION_COOKIE_NAME } from '../../modules/auth/auth.constants';
+import { sessionCookieOptions } from '../../modules/auth/session-cookie';
 import { TokensService } from '../../modules/tokens/tokens.service';
 import { OAuthService } from '../../modules/oauth/oauth.service';
 
@@ -71,9 +72,26 @@ export class SessionAuthGuard implements CanActivate {
 
     const token = req.cookies?.[SESSION_COOKIE_NAME] as string | undefined;
     if (token) {
-      const user = await this.authService.resolveSessionUser(token);
-      if (user) {
-        req.user = user;
+      const resolved = await this.authService.resolveSessionUser(token);
+      if (resolved) {
+        req.user = resolved.user;
+        // Re-issue the cookie when the DB session slides so browser maxAge tracks
+        // idle extension (otherwise the cookie dies at login+30d while expiresAt moved).
+        // Use remaining time until the (possibly absolute-capped) server expiresAt —
+        // a fixed 30d Max-Age can outlive absoluteDeadline and leave the browser
+        // sending a cookie the server already rejects.
+        if (resolved.slid) {
+          const res = context.switchToHttp().getResponse<Response>();
+          const remainingMs =
+            resolved.expiresAtMs !== undefined
+              ? Math.max(0, resolved.expiresAtMs - Date.now())
+              : undefined;
+          res.cookie(
+            SESSION_COOKIE_NAME,
+            token,
+            remainingMs !== undefined ? sessionCookieOptions(remainingMs) : sessionCookieOptions(),
+          );
+        }
         return true;
       }
       // Invalid/expired cookie: fall through to dev-auth (if enabled) or 401.

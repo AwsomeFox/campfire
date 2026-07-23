@@ -10,6 +10,7 @@ import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -97,7 +98,14 @@ export class CharactersService {
     // headline failure: a stale full-snapshot save can no longer silently clobber a
     // fresher edit (a live HP/level change, a DM-secret edit) from another tab/device.
     private readonly revisions: RevisionsService,
+    // Thin SSE invalidation for run-session inline character cards (issue #421).
+    private readonly events: CampaignEventsService,
   ) {}
+
+  /** Issue #421: id-only sheet invalidation so encounter clients refetch without an encounterId. */
+  private emitCharacterUpdated(campaignId: number, characterId: number, userId: string): void {
+    this.events.emit({ type: 'character.updated', campaignId, characterId, userId });
+  }
 
   async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
     const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
@@ -167,20 +175,93 @@ export class CharactersService {
    * untouched (their combatant rows are a historical snapshot). hpCurrent is clamped
    * to the combatant's (possibly just-raised) hpMax, matching every other HP path.
    */
-  private async syncActiveCombatants(characterId: number, hpCurrent: number, hpMax?: number): Promise<void> {
+  private async syncActiveCombatants(
+    characterId: number,
+    hpCurrent: number,
+    hpMax?: number,
+    opts?: { campaignId?: number },
+  ): Promise<void> {
     const rows = await this.db
-      .select({ combatant: combatants })
+      .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
       .from(combatants)
       .innerJoin(encounters, eq(combatants.encounterId, encounters.id))
       .where(and(eq(combatants.characterId, characterId), ne(encounters.status, 'ended')));
 
-    for (const { combatant } of rows) {
+    const touchedEncounterIds = new Set<number>();
+    let campaignId = opts?.campaignId;
+    // Issue #466: when the sheet mirrors into a live combatant, stamp the sheet's
+    // current updatedAt as the CAS token so a later re-end knows this sync.
+    const [sheetMeta] = await this.db
+      .select({ updatedAt: characters.updatedAt })
+      .from(characters)
+      .where(eq(characters.id, characterId))
+      .limit(1);
+    const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
+    for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
       const nextMax = hpMax ?? combatant.hpMax;
       const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
       await this.db
         .update(combatants)
-        .set({ hpCurrent: nextCurrent, hpMax: nextMax })
+        .set({
+          hpCurrent: nextCurrent,
+          hpMax: nextMax,
+          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+        })
         .where(eq(combatants.id, combatant.id));
+      touchedEncounterIds.add(encounterId);
+      campaignId ??= encCampaignId;
+    }
+    // Sheet HP mirrored into a live fight — push encounter.updated so trackers refresh
+    // without waiting for the poll (pairs with character.updated for the inline card).
+    if (campaignId != null) {
+      for (const encounterId of touchedEncounterIds) {
+        this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
+      }
+    }
+  }
+
+  /**
+   * Mirror a character's conditions into linked combatants in still-live encounters
+   * (issue #486). Pair of EncountersService's combatant→sheet write-through: a sheet
+   * `set_character_conditions` / patchConditions / PATCH conditions must show up on
+   * the run-session tracker. Ended encounters keep their historical snapshot.
+   * Overwrites the combatant's conditions array wholesale (last sheet write wins);
+   * see EncountersService.updateCombatant for the full overlap-window contract.
+   */
+  private async syncActiveCombatantConditions(
+    characterId: number,
+    conditionsJson: string,
+    opts?: { campaignId?: number },
+  ): Promise<void> {
+    const rows = await this.db
+      .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
+      .from(combatants)
+      .innerJoin(encounters, eq(combatants.encounterId, encounters.id))
+      .where(and(eq(combatants.characterId, characterId), ne(encounters.status, 'ended')));
+
+    const touchedEncounterIds = new Set<number>();
+    let campaignId = opts?.campaignId;
+    const [sheetMeta] = await this.db
+      .select({ updatedAt: characters.updatedAt })
+      .from(characters)
+      .where(eq(characters.id, characterId))
+      .limit(1);
+    const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
+    for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
+      await this.db
+        .update(combatants)
+        .set({
+          conditions: conditionsJson,
+          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+        })
+        .where(eq(combatants.id, combatant.id));
+      touchedEncounterIds.add(encounterId);
+      campaignId ??= encCampaignId;
+    }
+    if (campaignId != null) {
+      for (const encounterId of touchedEncounterIds) {
+        this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
+      }
     }
   }
 
@@ -287,6 +368,7 @@ export class CharactersService {
       entityId: row.id,
       campaignId,
     });
+    this.emitCharacterUpdated(campaignId, row.id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -373,7 +455,11 @@ export class CharactersService {
     // Mirror HP/hpMax edits (e.g. a mid-session level-up) into any live encounter's
     // combatant row (issue #50).
     if (input.hpCurrent !== undefined || input.hpMax !== undefined) {
-      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax);
+      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax, { campaignId: existing.campaignId });
+    }
+    // Issue #486: PATCH conditions must also land on the live tracker.
+    if (input.conditions !== undefined) {
+      await this.syncActiveCombatantConditions(id, row.conditions, { campaignId: existing.campaignId });
     }
 
     await this.audit.log({
@@ -384,6 +470,7 @@ export class CharactersService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -407,6 +494,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: 'soft-delete (trashed)',
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
   }
 
   /** Restore a trashed character (issue #116) — clears `deleted_at`. dm/owner gate; 404 if not trashed. */
@@ -427,6 +515,7 @@ export class CharactersService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -476,7 +565,7 @@ export class CharactersService {
 
     // The transaction has committed before linked combatants are synchronized. Use the
     // exact row returned by that commit so the mirror and response agree.
-    await this.syncActiveCombatants(id, row.hpCurrent);
+    await this.syncActiveCombatants(id, row.hpCurrent, undefined, { campaignId: row.campaignId });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -487,6 +576,7 @@ export class CharactersService {
       campaignId: row.campaignId,
       detail: JSON.stringify(patch),
     });
+    this.emitCharacterUpdated(row.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -531,6 +621,7 @@ export class CharactersService {
       campaignId: row.campaignId,
       detail: JSON.stringify(patch),
     });
+    this.emitCharacterUpdated(row.campaignId, id, user.id);
     return toDomain(row);
   }
 
@@ -615,6 +706,9 @@ export class CharactersService {
 
       return changed.map(toDomain);
     });
+    for (const character of updated) {
+      this.emitCharacterUpdated(campaignId, character.id, user.id);
+    }
     return updated;
   }
 
@@ -655,7 +749,7 @@ export class CharactersService {
 
     // A mid-session level-up that raises hpMax should reflect on the combat tracker too (issue #50).
     if (input.hpMax !== undefined) {
-      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax);
+      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax, { campaignId: existing.campaignId });
     }
 
     await this.audit.log({
@@ -667,6 +761,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify({ level: row.level, ...(input.hpMax !== undefined ? { hpMax: input.hpMax } : {}) }),
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return toDomain(row);
   }
 
@@ -684,6 +779,10 @@ export class CharactersService {
       .where(eq(characters.id, id))
       .returning();
 
+    // Issue #486: sheet → live combatant so the run-session tracker shows Poisoned
+    // the moment it is applied on the sheet (or via MCP set_character_conditions).
+    await this.syncActiveCombatantConditions(id, row.conditions, { campaignId: existing.campaignId });
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -693,6 +792,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -724,6 +824,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return toDomain(row);
   }
 }

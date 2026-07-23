@@ -46,7 +46,6 @@ import {
   StoryArcUpdate,
   StoryBeatCreate,
   StoryBeatUpdate,
-  Role,
   RollRequest,
   RulePackInstall,
   RuleEntryType,
@@ -107,7 +106,9 @@ import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 import { UsersService } from '../users/users.service';
 
-const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
+import { APP_VERSION } from '../../common/build-metadata';
+
+const SERVER_INFO = { name: 'campfire', version: APP_VERSION };
 
 interface ToolResult {
   [x: string]: unknown;
@@ -896,7 +897,7 @@ export class McpToolsService {
         // Any member may list; the DM sees all, a non-DM member sees only their own.
         const role = await this.access.requireMember(user, campaignId as number);
         const opts = role === 'dm' ? undefined : { proposerUserId: user.id };
-        return this.proposals.listForCampaign(campaignId as number, status as string | undefined, opts);
+        return this.proposals.listForCampaign(campaignId as number, status as string | undefined, role, opts);
       },
     );
 
@@ -2848,6 +2849,8 @@ export class McpToolsService {
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
         'successes = stable), deathSaveRoll (a d20 death-save result; 5e crit/fumble rules: nat 1 = two failures, ' +
         'nat 20 = revive at 1 HP, 10–19 = one success, 2–9 = one failure), addConditions/removeConditions. ' +
+        'addConditions for a non-DM must use the active rule system\'s condition vocabulary (400 otherwise); ' +
+        'the DM may mint custom condition labels. ' +
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
@@ -3159,7 +3162,9 @@ export class McpToolsService {
       user,
       'post_comment',
       'Any member: post a discussion comment anchored to an entity (entityType/entityId). Optional parentId for a ' +
-        'threaded reply (must reference a comment on the same entity), and inCharacter for a play-by-post scene. ' +
+        'threaded reply (must reference a comment on the same entity). For a play-by-post scene set inCharacter=true ' +
+        'and characterId to a live character owned by the authenticated account; the response retains immutable ' +
+        'character name/avatar snapshots plus account provenance. ' +
         'Requires visibility of the anchored entity — posting on a hidden/secret entity 404s for non-DM (issue #230).',
       { campaignId: CampaignIdArg, ...CommentCreate.shape },
       async ({ campaignId, ...fields }) => {
@@ -3173,7 +3178,7 @@ export class McpToolsService {
       server,
       user,
       'update_comment',
-      'Edit a discussion comment\'s body and/or inCharacter flag. Author or DM only.',
+      'Edit a discussion comment body. Author or DM only. Character attribution is immutable after posting; changing inCharacter is rejected.',
       { commentId: Id.describe('Comment id — from list_comments'), ...CommentUpdate.shape },
       async ({ commentId, ...fields }) => {
         const row = await this.comments.getRowOrThrow(commentId as number);

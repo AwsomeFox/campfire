@@ -9,7 +9,9 @@
     "start": "node dist/main.js",
     "test": "nest build && NODE_OPTIONS=--experimental-vm-modules jest",
     "test:cov": "nest build && NODE_OPTIONS=\"--experimental-vm-modules --max-old-space-size=4096\" jest --coverage --maxWorkers=1 --workerIdleMemoryLimit=1024MB",
-    "test:watch": "NODE_OPTIONS=--experimental-vm-modules jest --watch"
+    "test:watch": "NODE_OPTIONS=--experimental-vm-modules jest --watch",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@campfire/schema": "*",
@@ -32,6 +34,7 @@
     "openid-client": "^6.8.4",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "sharp": "^0.34.5",
     "swagger-ui-express": "^5.0.1",
     "zod": "^3.24.1"
   },

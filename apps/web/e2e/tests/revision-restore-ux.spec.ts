@@ -32,7 +32,16 @@ function revisionFixtures(currentBody: string): EntityRevision[] {
       },
       authorUserId: 'fixture-editor',
       authorName: 'Morgan Vale',
+      authorSource: 'human',
+      authorSourceDetail: '',
       createdAt: '2026-07-21T15:04:00.000Z',
+      replacedByUserId: 'fixture-later',
+      replacedByName: 'Riley Quinn',
+      replacedBySource: 'human',
+      replacedBySourceDetail: '',
+      replacedAt: '2026-07-22T09:00:00.000Z',
+      restoredFromRevisionId: null,
+      authorshipKnown: true,
     },
     {
       id: 8843,
@@ -42,7 +51,16 @@ function revisionFixtures(currentBody: string): EntityRevision[] {
       snapshot: { body: currentBody },
       authorUserId: 'fixture-editor',
       authorName: 'Morgan Vale',
+      authorSource: 'human',
+      authorSourceDetail: '',
       createdAt: '2026-07-20T12:00:00.000Z',
+      replacedByUserId: 'fixture-editor',
+      replacedByName: 'Morgan Vale',
+      replacedBySource: 'human',
+      replacedBySourceDetail: '',
+      replacedAt: '2026-07-21T15:04:00.000Z',
+      restoredFromRevisionId: null,
+      authorshipKnown: true,
     },
     {
       id: 8842,
@@ -50,9 +68,18 @@ function revisionFixtures(currentBody: string): EntityRevision[] {
       entityType: 'quest',
       entityId: navigation.questId,
       snapshot: { legacy_note: 'Legacy-only readable preview.' },
-      authorUserId: 'fixture-editor',
-      authorName: 'Morgan Vale',
-      createdAt: '2026-07-19T12:00:00.000Z',
+      authorUserId: '',
+      authorName: '',
+      authorSource: 'human',
+      authorSourceDetail: '',
+      createdAt: '',
+      replacedByUserId: 'fixture-editor',
+      replacedByName: 'Morgan Vale',
+      replacedBySource: 'human',
+      replacedBySourceDetail: '',
+      replacedAt: '2026-07-19T12:00:00.000Z',
+      restoredFromRevisionId: null,
+      authorshipKnown: false,
     },
   ];
 }
@@ -97,7 +124,8 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(page.getByText('Quest description was not recorded in this version')).toBeVisible();
     await expect(page.getByText('Legacy-only readable preview.')).toBeVisible();
 
-    const legacyOnlyPreview = page.getByRole('button', { name: /Preview version .* by Morgan Vale/ }).last();
+    await expect(page.getByText(/Replaced by Morgan Vale at/)).toBeVisible();
+    const legacyOnlyPreview = page.getByRole('button', { name: /Preview version by unknown author \(replaced by Morgan Vale\)/ });
     await legacyOnlyPreview.click();
     const legacyOnlyDialog = page.getByRole('dialog');
     await expect(
@@ -106,14 +134,14 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(legacyOnlyDialog.getByRole('button', { name: 'Restore this version' })).toBeDisabled();
     await legacyOnlyDialog.getByRole('button', { name: 'Close preview' }).click();
 
-    const previewTrigger = page.getByRole('button', { name: /Preview version .* by Morgan Vale/ }).first();
+    const previewTrigger = page.getByRole('button', { name: /Preview version by Morgan Vale/ }).first();
     await previewTrigger.focus();
     await page.keyboard.press('Enter');
 
     const dialog = page.getByRole('dialog');
     await expect(dialog).toHaveAccessibleName('Inspect historical version');
     await expect(dialog).toHaveAttribute('aria-modal', 'true');
-    await expect(dialog).toHaveAccessibleDescription(/Saved .* by Morgan Vale/);
+    await expect(dialog).toHaveAccessibleDescription(/Version by Morgan Vale/);
     await expect(dialog.getByText('FULL-SNAPSHOT-END')).toBeVisible();
     expect(await page.locator('[inert]').count()).toBeGreaterThan(0);
     expect(await dialog.evaluate((element) => element.closest('[inert]'))).toBeNull();
@@ -203,7 +231,7 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(page.getByText('Quest description differs from current content').first()).toBeVisible();
     expect(historyAttempts()).toBe(2);
 
-    await page.getByRole('button', { name: /Preview version .* by Morgan Vale/ }).first().click();
+    await page.getByRole('button', { name: /Preview version by Morgan Vale/ }).first().click();
     await page.getByRole('button', { name: 'Restore this version' }).click();
     await page.getByRole('button', { name: 'Restore version' }).click();
 

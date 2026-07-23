@@ -34,8 +34,12 @@ export class CampaignScheduleController {
   }
 
   @Get('next')
-  @ApiOperation({ summary: 'Next session', description: 'Requires campaign membership. The earliest not-yet-past scheduled session (with RSVPs), or null when nothing is planned.' })
-  @ApiResponse({ status: 200, description: 'Next scheduled session, or null.' })
+  @ApiOperation({
+    summary: 'Next session',
+    description:
+      'Requires campaign membership. The earliest in-progress scheduled session (still inside its duration window), else the soonest not-yet-started one (with RSVPs), or null when nothing is planned. Issue #818: a game night remains current from scheduledAt through scheduledAt+durationMinutes.',
+  })
+  @ApiResponse({ status: 200, description: 'Current or next scheduled session, or null.' })
   async next(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<ScheduledSessionWithRsvps | null> {
     await this.access.requireMember(user, campaignId);
     return this.scheduling.nextForCampaign(campaignId);
@@ -158,7 +162,8 @@ export class CalendarFeedController {
       .set({
         'Content-Type': 'text/calendar; charset=utf-8',
         'Content-Disposition': 'inline; filename="campfire.ics"',
-        'Cache-Control': 'no-store',
+        // Issue #730: capability-token ICS feeds must never be stored by caches.
+        'Cache-Control': 'private, no-store',
       })
       .send(ics);
   }

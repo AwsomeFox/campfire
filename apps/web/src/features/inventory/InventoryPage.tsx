@@ -12,6 +12,17 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  INVENTORY_ADD_PREFIX,
+  INVENTORY_FIELD,
+  INVENTORY_NAME_HELP,
+  INVENTORY_NAME_LABEL,
+  INVENTORY_NOTES_HELP,
+  INVENTORY_NOTES_LABEL,
+  INVENTORY_OWNER_HELP,
+  INVENTORY_OWNER_LABEL,
+} from '../../components/formFieldLabels';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { IconPicker } from '../../components/IconPicker';
@@ -29,6 +40,14 @@ const COINS = [
   { key: 'cp', label: 'Copper' },
 ] as const;
 type CoinKey = (typeof COINS)[number]['key'];
+
+/** Add-item quantity bounds (issue #459). Schema allows any non-negative int; the
+ *  form exposes a practical max via help text + parseLocalizedInteger. */
+const ITEM_QTY_MIN = 0;
+const ITEM_QTY_MAX = 1_000_000;
+const ITEM_QTY_STEP = 1;
+const ITEM_QTY_HELP =
+  `Whole number from ${ITEM_QTY_MIN.toLocaleString('en-US')} to ${ITEM_QTY_MAX.toLocaleString('en-US')}, step ${ITEM_QTY_STEP}.`;
 
 export default function InventoryPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -101,6 +120,7 @@ export default function InventoryPage() {
       [refreshTreasury],
     ),
     onReconnect: useCallback(() => void refreshTreasury(), [refreshTreasury]),
+    onStreamRecovery: useCallback(() => void refreshTreasury(), [refreshTreasury]),
   });
 
   const ownsCharacter = useCallback(
@@ -793,9 +813,12 @@ function AddItemForm({
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!name.trim()) return;
-    // Issue #633: parse qty in the viewer's locale. On failure, surface a
-    // field error and keep the current value — do NOT fall back to 1.
-    const qtyParsed = parseLocalizedInteger(qty, formatLocale, { min: 0 });
+    // Issue #633: parse qty without silently defaulting to 1. Issue #459: enforce
+    // the same min/max the field help exposes so out-of-range values announce.
+    const qtyParsed = parseLocalizedInteger(qty, formatLocale, {
+      min: ITEM_QTY_MIN,
+      max: ITEM_QTY_MAX,
+    });
     if (!qtyParsed.ok) {
       setQtyError(qtyParsed.error);
       return;
@@ -824,37 +847,72 @@ function AddItemForm({
   }
 
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-3" data-testid="inventory-add-item">
       <h2 className="font-bold text-white text-sm">Add item</h2>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
       <form onSubmit={submit} className="space-y-3">
-        <div className="grid grid-cols-[1fr_90px] gap-3">
-          <TextInput placeholder="Item name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          {/* type="text" + inputMode="numeric" (issue #633): see TreasuryCard for
-              why a numeric text field beats type="number" for locale-aware input. */}
-          <TextInput
+        <div className="grid grid-cols-[1fr_7.5rem] gap-3 items-start">
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.name}
+            label={INVENTORY_NAME_LABEL}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+            required
+            help={INVENTORY_NAME_HELP}
+            placeholder="Torch, rope, healing potion…"
+          />
+          {/* Labeled quantity (issue #459/#886): Field primitive, constraint
+              help, and contextual error announcement. type="text" +
+              inputMode="numeric" (issue #633) keeps locale grouping / non-ASCII
+              digits intact for parseLocalizedInteger — type="number" would strip
+              or mis-handle them before submit parsing (same pattern as treasury). */}
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.qty}
+            label="Quantity"
             type="text"
             inputMode="numeric"
-            placeholder="Qty"
+            min={ITEM_QTY_MIN}
+            max={ITEM_QTY_MAX}
+            step={ITEM_QTY_STEP}
             value={qty}
-            aria-invalid={qtyError != null}
+            error={qtyError}
+            help={ITEM_QTY_HELP}
             onChange={(e) => {
               setQty(e.target.value);
               setQtyError(null);
             }}
           />
         </div>
-        {qtyError && <p className="text-xs text-rose-400 -mt-1">{qtyError}</p>}
         <div className="grid grid-cols-2 gap-3">
-          <select className="cf-select" value={owner} onChange={(e) => setOwner(e.target.value)} aria-label="Owner">
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.owner}
+            as="select"
+            label={INVENTORY_OWNER_LABEL}
+            value={owner}
+            onChange={(e) => setOwner(e.target.value)}
+            help={INVENTORY_OWNER_HELP}
+          >
             <option value="party">Party stash</option>
             {owners.map((c) => (
               <option key={c.id} value={String(c.id)}>
                 {c.name}
               </option>
             ))}
-          </select>
-          <TextInput placeholder="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </Field>
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.notes}
+            label={INVENTORY_NOTES_LABEL}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            help={INVENTORY_NOTES_HELP}
+            placeholder="Notes"
+            optional
+          />
         </div>
         <div className="flex items-center gap-3">
           <span className="inline-flex h-10 w-10 items-center justify-center rounded-md text-[var(--color-accent)] shrink-0" style={{ background: 'var(--color-neutral-800)' }}>

@@ -82,13 +82,30 @@ describe('campaign import (e2e, real cookie sessions)', () => {
 
     // Play state: session, character, encounter+combatant, a shared note linked to the quest.
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The crew assembled.' });
-    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Rogue', className: 'Thief', level: 3 });
+    const charRes = await playerAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+      name: 'Rogue',
+      className: 'Thief',
+      level: 3,
+      portraitUrl: 'https://images.example.test/rogue.png',
+    });
     characterId = charRes.body.id;
     const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Vault Guards' });
     await dmAgent.post(`/api/v1/encounters/${encRes.body.id}/combatants`).send({ kind: 'monster', name: 'Guard', hpMax: 11 });
     await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/notes`)
       .send({ body: 'Quest intel for the party', visibility: 'party_shared', entityType: 'quest', entityId: questId });
+    const rootComment = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({
+        entityType: 'quest',
+        entityId: questId,
+        body: 'Rogue takes point.',
+        inCharacter: true,
+        characterId,
+      });
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({ entityType: 'quest', entityId: questId, parentId: rootComment.body.id, body: 'The corridor is trapped.' });
 
     // Policy is portable configuration; capability rows/tokens are not.
     await dmAgent.put(`/api/v1/campaigns/${campaignId}/session-shares/policy`).send({ enabled: false });
@@ -181,6 +198,24 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(shared).toBeDefined();
     expect(shared.entityType).toBe('quest');
     expect(shared.entityId).toBe(q.id);
+
+    // Comments round-trip with anchor/parent/character ids remapped and immutable
+    // character display history preserved. Import ownership moves to the importer
+    // so source account ids cannot alias unrelated users on this install.
+    const importedComments = await dmAgent
+      .get(`/api/v1/campaigns/${imported.id}/comments`)
+      .query({ entityType: 'quest', entityId: q.id });
+    expect(importedComments.status).toBe(200);
+    expect(importedComments.body).toHaveLength(2);
+    const spoken = importedComments.body.find((c: { body: string }) => c.body === 'Rogue takes point.');
+    const reply = importedComments.body.find((c: { body: string }) => c.body === 'The corridor is trapped.');
+    expect(spoken).toMatchObject({
+      characterId: chars.body[0].id,
+      characterName: 'Rogue',
+      characterAvatarUrl: 'https://images.example.test/rogue.png',
+      authorName: 'import-player',
+    });
+    expect(reply.parentId).toBe(spoken.id);
 
     // The source campaign is untouched — import never mutates it.
     const sourceLocs = await dmAgent.get(`/api/v1/campaigns/${campaignId}/locations`);
@@ -341,6 +376,42 @@ describe('campaign ZIP import — attachments round-trip (e2e)', () => {
     // The source campaign is untouched — its map still points at its own attachment.
     const sourceCamp = await dmAgent.get(`/api/v1/campaigns/${campaignId}`);
     expect(sourceCamp.body.mapAttachmentId).toBe(mapAttachmentId);
+  });
+
+  // Issue #630: Unicode attachment filenames must survive export → import and
+  // still emit RFC 5987 Content-Disposition on the restored file.
+  it('preserves Unicode attachment filenames across export/restore', async () => {
+    const unicodeName = '地図🎉.png';
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Unicode Filename Source' });
+    expect(campRes.status).toBe(201);
+    const srcId = campRes.body.id as number;
+
+    const up = await dmAgent
+      .post(`/api/v1/campaigns/${srcId}/attachments`)
+      .field('kind', 'image')
+      .attach('file', TINY_PNG, { filename: unicodeName, contentType: 'image/png' });
+    expect(up.status).toBe(201);
+    expect(up.body.filename).toBe(unicodeName);
+
+    const zipRes = await getBuffer(dmAgent, `/api/v1/campaigns/${srcId}/export?format=mdzip`);
+    expect(zipRes.status).toBe(200);
+
+    const importRes = await dmAgent
+      .post('/api/v1/campaigns/import/archive')
+      .attach('file', zipRes.body as Buffer, { filename: 'export.zip', contentType: 'application/zip' });
+    expect(importRes.status).toBe(201);
+
+    const atts = await dmAgent.get(`/api/v1/campaigns/${importRes.body.id}/attachments`);
+    expect(atts.status).toBe(200);
+    const restored = atts.body.find((a: { filename: string }) => a.filename === unicodeName);
+    expect(restored).toBeDefined();
+
+    const fileRes = await getBuffer(dmAgent, `/api/v1/attachments/${restored.id}/file`);
+    expect(fileRes.status).toBe(200);
+    const disposition = String(fileRes.headers['content-disposition']);
+    expect(disposition).toContain("filename*=UTF-8''");
+    expect(disposition).toContain(encodeURIComponent(unicodeName));
+    expect(disposition).not.toMatch(/filename="%/);
   });
 
   it('rejects a non-zip upload with 400', async () => {
@@ -607,9 +678,9 @@ describe('campaign import — atomic staged commit (issue #725)', () => {
       expect(idsAfter.sort()).toEqual(idsBefore.sort());
 
       // No audit row for a rolled-back import (the audit insert shared the tx).
-      const audit = await dmAgent.get('/api/v1/campaigns/999999/audit');
-      // 404 is fine — we only care that no 'campaign.import' row leaked; check by
-      // confirming the campaigns table itself gained no row named "Should Roll Back".
+      // There's no campaign to fetch /audit for (the row never committed), so we
+      // check indirectly: confirm the campaigns table itself gained no row named
+      // "Should Roll Back" — a leaked audit row would imply a leaked campaign too.
       const all = await dmAgent.get('/api/v1/campaigns');
       const leaked = (all.body as { name: string }[]).find((c) => c.name === 'Should Roll Back');
       expect(leaked).toBeUndefined();

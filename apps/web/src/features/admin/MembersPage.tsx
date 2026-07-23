@@ -10,16 +10,18 @@
  *
  * Audit log kept (existing functionality, not in this design block).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useAnnounce } from '../../components/Announcer';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
-import { useCampaigns } from '../../app/CampaignContext';
+import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { useDialog } from '../../components/useDialog';
+import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { firstGrapheme } from '../../lib/avatarText';
 import {
@@ -29,6 +31,25 @@ import {
   inviteLinkFieldLabel,
   inviteRoleOptions,
 } from './inviteRoleOptions';
+import {
+  ADD_MEMBER_CANCEL_LABEL,
+  ADD_MEMBER_DIALOG_TITLE,
+  ADD_MEMBER_ROLE_HELP,
+  ADD_MEMBER_ROLE_LABEL,
+  ADD_MEMBER_SEARCH_LABEL,
+  MEMBER_CHARACTER_LINK_HELP,
+  MEMBER_CHARACTER_TRANSFER_BODY,
+  MEMBER_CHARACTER_TRANSFER_CONFIRM_LABEL,
+  memberAddedAnnouncement,
+  memberCharacterControlLabel,
+  memberCharacterOptionLabel,
+  memberCharacterSavedAnnouncement,
+  memberCharacterTransferTitle,
+  memberDisplayName,
+  memberRemoveLabel,
+  memberRoleControlLabel,
+  memberRoleSavedAnnouncement,
+} from './memberControlsA11y';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -150,7 +171,10 @@ export default function MembersPage() {
         charactersLoading={charactersPanel.loading}
         charactersError={charactersPanel.error}
         onRetryCharacters={charactersPanel.retry}
-        onChange={load}
+        onChange={() => {
+          void load();
+          charactersPanel.retry();
+        }}
       />
 
       <Card className="space-y-3">
@@ -288,6 +312,8 @@ function isEventPreset(expiryPreset: ExpiryPreset, maxUsesPreset: MaxUsesPreset)
 const INVITE_ROLE_SELECT_ID = 'invite-join-role';
 
 function InviteCard({ campaignId }: { campaignId: number }) {
+  const campaign = useCampaign(campaignId);
+  const { refresh: refreshCampaigns } = useCampaigns();
   const [invites, setInvites] = useState<CampaignInvite[]>([]);
   const [role, setRole] = useState<InviteRole>('player');
   const [expiryPreset, setExpiryPreset] = useState<ExpiryPreset>('7d');
@@ -295,9 +321,11 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   const [maxUsesPreset, setMaxUsesPreset] = useState<MaxUsesPreset>('unlimited');
   const [customMaxUses, setCustomMaxUses] = useState('');
   const [creating, setCreating] = useState(false);
+  const [reactivating, setReactivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<number | null>(null);
   const announce = useAnnounce();
+  const invitesEnabled = campaign?.publicInvitesEnabled !== false;
+  const canCreate = invitesEnabled && campaign?.status === 'active';
 
   const load = useCallback(async () => {
     try {
@@ -330,6 +358,20 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     }
   }
 
+  async function reactivate() {
+    setReactivating(true);
+    setError(null);
+    try {
+      await api.put(`${API}/campaigns/${campaignId}/invites/policy`, { enabled: true });
+      await refreshCampaigns();
+      announce('Public invites re-enabled.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't re-enable invites.");
+    } finally {
+      setReactivating(false);
+    }
+  }
+
   async function revoke(inviteId: number) {
     setError(null);
     try {
@@ -337,24 +379,6 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't revoke the invite.");
-    }
-  }
-
-  async function copy(invite: CampaignInvite) {
-    try {
-      await navigator.clipboard.writeText(inviteLinkFor(invite.code));
-      setCopiedId(invite.id);
-      // `error` is shared across create/revoke/copy for this card, so only
-      // clear it here if it's the copy-failure message we set below —
-      // otherwise a successful copy could silently dismiss an unrelated
-      // create/revoke failure that's still unresolved.
-      setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
-      announce(INVITE_COPY_SUCCESS);
-      setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
-    } catch {
-      setCopiedId((current) => (current === invite.id ? null : current));
-      announce(INVITE_COPY_FAILURE);
-      setError(INVITE_COPY_FAILURE);
     }
   }
 
@@ -367,6 +391,30 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     <Card className="space-y-2.5" data-testid="invite-card">
       <p className="card-kicker mb-0">Invite</p>
 
+      {!invitesEnabled && (
+        <div
+          data-testid="invites-suspended-banner"
+          className="cf-inset border-amber-600/40 rounded px-3 py-2.5 space-y-1.5"
+        >
+          <p className="text-[12px] text-amber-200 m-0">
+            Public invites are suspended — outstanding join links return as invalid until you re-enable them.
+            Archiving or trashing a campaign suspends invites automatically; restore does not revive them.
+          </p>
+          <button
+            className="btn btn-primary"
+            style={{ minHeight: 32, fontSize: 12.5 }}
+            disabled={reactivating || campaign?.status !== 'active'}
+            aria-busy={reactivating || undefined}
+            onClick={() => void reactivate()}
+          >
+            {reactivating ? 'Re-enabling…' : 'Re-enable invites'}
+          </button>
+          {campaign?.status !== 'active' && (
+            <p className="text-muted text-[11px] m-0">Unarchive the campaign before re-enabling invites.</p>
+          )}
+        </div>
+      )}
+
       {/* Role */}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ minWidth: 110 }}>
@@ -376,6 +424,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
             className="input"
             value={role}
             onChange={(e) => setRole(e.target.value as InviteRole)}
+            disabled={!canCreate}
           >
             {inviteRoleOptions().map((opt) => (
               <option key={opt.role} value={opt.role}>
@@ -475,15 +524,15 @@ function InviteCard({ campaignId }: { campaignId: number }) {
         </p>
       </div>
 
-      <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={create} disabled={creating}>
+      <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={create} disabled={creating || !canCreate}>
         {creating ? 'Generating…' : 'Generate invite link'}
       </button>
 
       {/* Copy failures are already announced via the polite live region
-          (`announce(INVITE_COPY_FAILURE)` in `copy()`); giving this paragraph
-          role="alert" too would announce the same message a second time,
-          assertively. Create/revoke failures have no other announcement path,
-          so they keep role="alert" here. */}
+          (CopyControl → useAnnounce); giving this paragraph role="alert" too
+          would announce the same message a second time, assertively.
+          Create/revoke failures have no other announcement path, so they keep
+          role="alert" here. */}
       {error && (
         <p
           className="text-xs text-rose-400 m-0"
@@ -519,15 +568,31 @@ function InviteCard({ campaignId }: { campaignId: number }) {
               ? ` · ${invite.maxUses - invite.useCount} of ${invite.maxUses} remaining`
               : ` · used ${invite.useCount}×`}
           </span>
-          <button
-            type="button"
+          <CopyControl
+            text={inviteLinkFor(invite.code)}
+            selectTargetId={linkFieldId}
+            label="Copy link"
+            aria-label={inviteCopyButtonLabel(invite.role, invite.id)}
+            successAnnouncement={INVITE_COPY_SUCCESS}
+            failureAnnouncement={INVITE_COPY_FAILURE}
+            // Card-level error paragraph owns the visible failure copy (and the
+            // #516 e2e assertion); skip the control's inline failure line.
+            showFailureMessage={false}
+            unstyled
             className="btn btn-primary"
             style={{ minHeight: 36 }}
-            aria-label={inviteCopyButtonLabel(invite.role, invite.id)}
-            onClick={() => copy(invite)}
-          >
-            {copiedId === invite.id ? 'Copied!' : 'Copy link'}
-          </button>
+            onResult={(outcome) => {
+              // `error` is shared across create/revoke/copy for this card, so
+              // only clear it on success if it's the copy-failure message —
+              // otherwise a successful copy could silently dismiss an unrelated
+              // create/revoke failure that's still unresolved.
+              if (outcome.ok) {
+                setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
+              } else {
+                setError(INVITE_COPY_FAILURE);
+              }
+            }}
+          />
           <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
             Revoke
           </button>
@@ -644,7 +709,7 @@ function YourMembershipCard({
         <ConfirmDialog
           title="Leave this campaign?"
           body="You'll lose access to it. Export your data first if you want a copy."
-          confirmLabel={leaving ? 'Leaving…' : 'Leave'}
+          confirmLabel="Leave"
           busy={leaving}
           onConfirm={leave}
           onCancel={() => setConfirming(false)}
@@ -679,17 +744,29 @@ function MembersCard({
   const charactersUnavailable = !!charactersError;
   const [showAdd, setShowAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const linkHelpId = useId();
 
   return (
-    <Card className="space-y-2.5">
+    <Card className="space-y-2.5" data-testid="members-card">
       <div className="flex items-center gap-2">
         <p className="card-kicker mb-0">Members</p>
-        <Btn className="!min-h-0 !py-1.5 text-xs ml-auto" onClick={() => setShowAdd((v) => !v)}>
-          {showAdd ? 'Cancel' : '+ Add member'}
+        <Btn
+          className="!min-h-0 !py-1.5 text-xs ml-auto"
+          aria-expanded={showAdd}
+          aria-controls={showAdd ? 'add-member-dialog' : undefined}
+          // Keep a stable "+ Add member" name when open — Cancel lives in the
+          // dialog (issue #451) so AT is not left on an ambiguous header Cancel.
+          onClick={() => setShowAdd((v) => !v)}
+        >
+          + Add member
         </Btn>
       </div>
 
-      {error && <p className="text-xs text-rose-400">{error}</p>}
+      {error && (
+        <p className="text-xs text-rose-400" role="alert">
+          {error}
+        </p>
+      )}
 
       {showAdd && (
         <AddMemberForm
@@ -713,24 +790,25 @@ function MembersCard({
       {members.length === 0 ? (
         <EmptyState icon="shield" title="No members yet" hint="Add one above." />
       ) : (
-        <div className="flex flex-col">
+        <div className="flex flex-col" data-testid="members-rows">
           {members.map((m) => (
             <MemberRow
               key={m.id}
               campaignId={campaignId}
               member={m}
+              members={members}
               characters={characters}
               charactersLoading={charactersLoading}
               charactersUnavailable={charactersUnavailable}
+              characterLinkHelpId={linkHelpId}
               onChange={onChange}
               onError={setError}
             />
           ))}
         </div>
       )}
-      <p className="text-[11px] text-slate-500">
-        Linking a character makes that player its owner, so they can edit its sheet. Removing someone keeps
-        their character and notes — the seat just closes.
+      <p id={linkHelpId} className="text-[11px] text-slate-500">
+        {MEMBER_CHARACTER_LINK_HELP}
       </p>
     </Card>
   );
@@ -739,49 +817,113 @@ function MembersCard({
 function MemberRow({
   campaignId,
   member,
+  members,
   characters,
   charactersLoading,
   charactersUnavailable,
+  characterLinkHelpId,
   onChange,
   onError,
 }: {
   campaignId: number;
   member: CampaignMember;
+  members: CampaignMember[];
   characters: Character[];
   charactersLoading: boolean;
   charactersUnavailable: boolean;
+  characterLinkHelpId: string;
   onChange: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const announce = useAnnounce();
   const [savingRole, setSavingRole] = useState(false);
   const [savingChar, setSavingChar] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [pendingTransfer, setPendingTransfer] = useState<{
+    characterId: number;
+    characterName: string;
+    fromName: string;
+  } | null>(null);
+  const name = memberDisplayName(member);
 
   async function changeRole(role: Role) {
     setSavingRole(true);
     onError(null);
     try {
       await api.patch(`${API}/campaigns/${campaignId}/members/${member.id}`, { role });
+      announce(memberRoleSavedAnnouncement(name, ROLE_LABEL[role]));
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't update role.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't update role.";
+      onError(msg);
+      announce(msg, { assertive: true });
     } finally {
       setSavingRole(false);
     }
   }
 
-  async function changeCharacter(characterId: number | null) {
+  async function changeCharacter(characterId: number | null, confirmTransfer = false) {
     setSavingChar(true);
     onError(null);
     try {
-      await api.patch(`${API}/campaigns/${campaignId}/members/${member.id}`, { characterId });
+      await api.patch(`${API}/campaigns/${campaignId}/members/${member.id}`, {
+        characterId,
+        ...(confirmTransfer ? { confirmTransfer: true } : {}),
+      });
+      const linkedName = characterId != null ? characters.find((c) => c.id === characterId)?.name ?? null : null;
+      announce(memberCharacterSavedAnnouncement(name, linkedName));
+      setPendingTransfer(null);
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't link character.");
+      // Server-enforced exclusive seat (issue #819): open the transfer confirm when
+      // the DM skipped the local check (stale roster) or raced another assignment.
+      if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        err.code === 'CHARACTER_SEAT_TAKEN' &&
+        characterId != null &&
+        !confirmTransfer
+      ) {
+        const char = characters.find((c) => c.id === characterId);
+        const holder = members.find((m) => m.id !== member.id && m.characterId === characterId);
+        setPendingTransfer({
+          characterId,
+          characterName: char?.name ?? `Character ${characterId}`,
+          fromName: holder ? memberDisplayName(holder) : 'another member',
+        });
+        return;
+      }
+      const msg = err instanceof ApiError ? err.message : "Couldn't link character.";
+      onError(msg);
+      announce(msg, { assertive: true });
+      setPendingTransfer(null);
     } finally {
       setSavingChar(false);
     }
+  }
+
+  function requestCharacterChange(nextCharacterId: number | null) {
+    if (nextCharacterId == null) {
+      void changeCharacter(null);
+      return;
+    }
+    const seatHolder = members.find((m) => m.id !== member.id && m.characterId === nextCharacterId);
+    const char = characters.find((c) => c.id === nextCharacterId);
+    const ownerHolder =
+      !seatHolder && char?.ownerUserId != null && char.ownerUserId !== String(member.userId)
+        ? members.find((m) => String(m.userId) === char.ownerUserId) ?? null
+        : null;
+    const from = seatHolder ?? ownerHolder;
+    if (from || (char?.ownerUserId != null && char.ownerUserId !== String(member.userId) && !seatHolder)) {
+      setPendingTransfer({
+        characterId: nextCharacterId,
+        characterName: char?.name ?? `Character ${nextCharacterId}`,
+        fromName: from ? memberDisplayName(from) : 'another member',
+      });
+      return;
+    }
+    void changeCharacter(nextCharacterId);
   }
 
   async function remove() {
@@ -792,7 +934,9 @@ function MemberRow({
       setConfirmingRemove(false);
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't remove member.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't remove member.";
+      onError(msg);
+      announce(msg, { assertive: true });
     } finally {
       setRemoving(false);
     }
@@ -805,7 +949,8 @@ function MemberRow({
   // membership pointer is normally kept in sync, but a direct DM ownerUserId change
   // (PATCH /characters/:id) leaves it stale, which read as a contradiction (issue
   // #274): sheet says "played by Pete" while Members said "— unlinked —". Fall back
-  // to the owned character so both surfaces agree.
+  // to the owned character so both surfaces agree. Exclusive-seat assignment (#819)
+  // prevents two membership rows from claiming the same characterId.
   const linkedCharacter = characters.find((c) => c.id === member.characterId);
   const ownedCharacter = characters.find(
     (c) => c.ownerUserId != null && c.ownerUserId === String(member.userId),
@@ -813,7 +958,11 @@ function MemberRow({
   const character = linkedCharacter ?? ownedCharacter;
 
   return (
-    <div className="flex items-center gap-2.5 py-2.5 flex-wrap" style={{ borderTop: '1px solid var(--color-divider)' }}>
+    <div
+      className="flex items-center gap-2.5 py-2.5 flex-wrap"
+      style={{ borderTop: '1px solid var(--color-divider)' }}
+      data-testid={`member-row-${member.id}`}
+    >
       <span className="h-8 w-8 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[12px] text-[var(--color-neutral-300)]">
         {firstGrapheme(member.displayName || member.username || '?')}
       </span>
@@ -830,6 +979,7 @@ function MemberRow({
         style={{ width: 96 }}
         value={member.role}
         disabled={savingRole}
+        aria-label={memberRoleControlLabel(name)}
         onChange={(e) => changeRole(e.target.value as Role)}
       >
         <option value="dm" disabled={member.disabled}>dm</option>
@@ -840,31 +990,51 @@ function MemberRow({
         className="cf-select !min-h-0 !py-1 text-xs"
         style={{ width: 130 }}
         value={character?.id ?? ''}
-        disabled={savingChar || charactersLoading || charactersUnavailable}
+        disabled={savingChar || charactersLoading || charactersUnavailable || !!pendingTransfer}
+        aria-label={memberCharacterControlLabel(name)}
+        aria-describedby={characterLinkHelpId}
         title={
           charactersUnavailable
             ? "Character roster didn't load — retry above before changing links."
-            : undefined
+            : MEMBER_CHARACTER_LINK_HELP
         }
-        onChange={(e) => changeCharacter(e.target.value ? Number(e.target.value) : null)}
+        onChange={(e) => requestCharacterChange(e.target.value ? Number(e.target.value) : null)}
       >
         <option value="">— unlinked —</option>
-        {characters.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.name}
-          </option>
-        ))}
+        {characters.map((c) => {
+          const holder = members.find((m) => m.id !== member.id && m.characterId === c.id);
+          return (
+            <option key={c.id} value={c.id}>
+              {memberCharacterOptionLabel(c.name, holder ? memberDisplayName(holder) : null)}
+            </option>
+          );
+        })}
       </select>
-      <button type="button" className="text-[12px] text-slate-500 hover:text-rose-400" onClick={() => setConfirmingRemove(true)}>
+      <button
+        type="button"
+        className="text-[12px] text-slate-500 hover:text-rose-400"
+        aria-label={memberRemoveLabel(name)}
+        onClick={() => setConfirmingRemove(true)}
+      >
         Remove
       </button>
       {confirmingRemove && (
         <ConfirmDialog
           title={`Remove ${member.displayName || member.username} from this campaign?`}
-          confirmLabel={removing ? 'Removing…' : 'Remove'}
+          confirmLabel="Remove"
           busy={removing}
           onConfirm={remove}
           onCancel={() => setConfirmingRemove(false)}
+        />
+      )}
+      {pendingTransfer && (
+        <ConfirmDialog
+          title={memberCharacterTransferTitle(pendingTransfer.characterName, pendingTransfer.fromName, name)}
+          body={MEMBER_CHARACTER_TRANSFER_BODY}
+          confirmLabel={MEMBER_CHARACTER_TRANSFER_CONFIRM_LABEL}
+          busy={savingChar}
+          onConfirm={() => void changeCharacter(pendingTransfer.characterId, true)}
+          onCancel={() => setPendingTransfer(null)}
         />
       )}
     </div>
@@ -890,12 +1060,26 @@ function AddMemberForm({
   onAdded: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const announce = useAnnounce();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<LookupUser[]>([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<LookupUser | null>(null);
   const [role, setRole] = useState<Role>('player');
   const [saving, setSaving] = useState(false);
+  const idPrefix = useId();
+  const titleId = `${idPrefix}-title`;
+  const descriptionId = `${idPrefix}-description`;
+  const searchId = `${idPrefix}-search`;
+  const roleId = `${idPrefix}-role`;
+  const roleHelpId = `${idPrefix}-role-help`;
+  // Safe default: initial focus on Cancel (issue #451 — ambiguous Cancel focus).
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose: onCancel,
+    disabled: saving,
+    initialFocusRef: cancelRef,
+  });
 
   useEffect(() => {
     if (selected) return; // don't re-search after picking
@@ -924,18 +1108,32 @@ function AddMemberForm({
     onError(null);
     try {
       await api.post(`${API}/campaigns/${campaignId}/members`, { userId: selected.id, role });
+      announce(memberAddedAnnouncement(memberDisplayName(selected), ROLE_LABEL[role]));
       onAdded();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't add member.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't add member.";
+      onError(msg);
+      announce(msg, { assertive: true });
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
-      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Add member</p>
-      <p className="text-[12px] text-amber-200/90 cf-inset !border-amber-500/20 px-2.5 py-2">
+    <div
+      ref={dialogRef}
+      id="add-member-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      data-testid="add-member-dialog"
+      className="cf-inset border-amber-500/30 p-3.5 space-y-2"
+    >
+      <p id={titleId} className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
+        {ADD_MEMBER_DIALOG_TITLE}
+      </p>
+      <p id={descriptionId} className="text-[12px] text-amber-200/90 cf-inset !border-amber-500/20 px-2.5 py-2">
         Add someone who already has an account on this server by username. To bring in someone new, send them
         an invite link from the Invite card above instead.
       </p>
@@ -957,7 +1155,11 @@ function AddMemberForm({
         </div>
       ) : (
         <div className="space-y-1">
+          <label htmlFor={searchId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+            {ADD_MEMBER_SEARCH_LABEL}
+          </label>
           <TextInput
+            id={searchId}
             className="!min-h-0 !py-2 text-sm"
             placeholder="Search by username or display name…"
             value={query}
@@ -968,9 +1170,9 @@ function AddMemberForm({
             <p className="text-[11px] text-slate-500">No matching users.</p>
           )}
           {results.length > 0 && (
-            <ul className="cf-inset divide-y divide-slate-800">
+            <ul className="cf-inset divide-y divide-slate-800" role="listbox" aria-label="Matching users">
               {results.map((u) => (
-                <li key={u.id}>
+                <li key={u.id} role="option">
                   <button
                     type="button"
                     className="w-full text-left px-3 py-2 text-sm text-slate-200 hover:bg-slate-800/60"
@@ -985,14 +1187,35 @@ function AddMemberForm({
         </div>
       )}
       <div className="grid sm:grid-cols-3 gap-2">
-        <select className="cf-select !min-h-0 !py-2 text-sm" value={role} onChange={(e) => setRole(e.target.value as Role)}>
-          <option value="dm">Role: DM</option>
-          <option value="player">Role: Player</option>
-          <option value="viewer">Role: Viewer</option>
-        </select>
+        <div className="space-y-1">
+          <label htmlFor={roleId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+            {ADD_MEMBER_ROLE_LABEL}
+          </label>
+          <select
+            id={roleId}
+            className="cf-select !min-h-0 !py-2 text-sm"
+            value={role}
+            aria-describedby={roleHelpId}
+            onChange={(e) => setRole(e.target.value as Role)}
+          >
+            <option value="dm">DM</option>
+            <option value="player">Player</option>
+            <option value="viewer">Viewer</option>
+          </select>
+          <p id={roleHelpId} className="text-[11px] text-slate-500 m-0">
+            {ADD_MEMBER_ROLE_HELP}
+          </p>
+        </div>
       </div>
       <div className="flex gap-2 justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
+        <Btn
+          ref={cancelRef}
+          ghost
+          className="!min-h-0 !py-1.5 text-xs"
+          onClick={onCancel}
+          disabled={saving}
+          aria-label={ADD_MEMBER_CANCEL_LABEL}
+        >
           Cancel
         </Btn>
         <Btn className="!min-h-0 !py-1.5 text-xs" onClick={add} disabled={saving || !selected}>

@@ -111,14 +111,221 @@ describe('comments / threaded discussion (e2e)', () => {
     expect(badReply.status).toBe(400);
   });
 
-  it('inCharacter flag round-trips', async () => {
+  it('snapshots an owned speaking character and preserves account + character history after rename/deletion', async () => {
     const server = ctx.app.getHttpServer();
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(authorPlayer)
+      .send({ name: 'Seraphine Vale', portraitUrl: 'https://images.example.test/seraphine.png' });
+    expect(character.status).toBe(201);
+
     const ic = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/comments`)
       .set(authorPlayer)
-      .send({ ...anchor(), body: 'I draw my sword and step forward.', inCharacter: true });
+      .send({
+        ...anchor(),
+        body: 'I draw my sword and step forward.',
+        inCharacter: true,
+        characterId: character.body.id,
+      });
     expect(ic.status).toBe(201);
-    expect(ic.body.inCharacter).toBe(true);
+    expect(ic.body).toMatchObject({
+      inCharacter: true,
+      characterId: character.body.id,
+      characterName: 'Seraphine Vale',
+      characterAvatarUrl: 'https://images.example.test/seraphine.png',
+      authorUserId: 'dev:author-1',
+      authorName: 'author-1',
+    });
+
+    await request(server)
+      .patch(`/api/v1/characters/${character.body.id}`)
+      .set(authorPlayer)
+      .send({ name: 'Seraphine the Renamed', portraitUrl: 'https://images.example.test/new.png' })
+      .expect(200);
+    await request(server).delete(`/api/v1/characters/${character.body.id}`).set(authorPlayer).expect(200);
+
+    const historical = await request(server).get(`/api/v1/comments/${ic.body.id}`).set(otherPlayer);
+    expect(historical.status).toBe(200);
+    expect(historical.body).toMatchObject({
+      characterId: character.body.id,
+      characterName: 'Seraphine Vale',
+      characterAvatarUrl: 'https://images.example.test/seraphine.png',
+      authorUserId: 'dev:author-1',
+      authorName: 'author-1',
+    });
+
+    // Body edits may not revise the immutable persona attribution.
+    const changedPersona = await request(server)
+      .patch(`/api/v1/comments/${ic.body.id}`)
+      .set(authorPlayer)
+      .send({ inCharacter: false });
+    expect(changedPersona.status).toBe(400);
+    const bodyEdit = await request(server)
+      .patch(`/api/v1/comments/${ic.body.id}`)
+      .set(authorPlayer)
+      .send({ body: 'I lower my sword, but keep watch.' });
+    expect(bodyEdit.status).toBe(200);
+    expect(bodyEdit.body).toMatchObject({
+      characterName: 'Seraphine Vale',
+      characterAvatarUrl: 'https://images.example.test/seraphine.png',
+    });
+  });
+
+  it('rejects missing, foreign-owned, cross-campaign, removed, and misplaced character ids', async () => {
+    const server = ctx.app.getHttpServer();
+    const foreignOwned = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(otherPlayer)
+      .send({ name: 'Not Your Voice' });
+    expect(foreignOwned.status).toBe(201);
+
+    const otherCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Voices' });
+    const crossCampaign = await request(server)
+      .post(`/api/v1/campaigns/${otherCampaign.body.id}/characters`)
+      .set(authorPlayer)
+      .send({ name: 'Elsewhere' });
+    const removed = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(authorPlayer)
+      .send({ name: 'Gone Voice' });
+    await request(server).delete(`/api/v1/characters/${removed.body.id}`).set(authorPlayer).expect(200);
+
+    const post = (payload: Record<string, unknown>) =>
+      request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...anchor(), body: 'Persona validation', ...payload });
+
+    expect((await post({ inCharacter: true })).status).toBe(400);
+    expect((await post({ inCharacter: true, characterId: foreignOwned.body.id })).status).toBe(403);
+    expect((await post({ inCharacter: true, characterId: crossCampaign.body.id })).status).toBe(404);
+    expect((await post({ inCharacter: true, characterId: removed.body.id })).status).toBe(404);
+    expect((await post({ characterId: foreignOwned.body.id })).status).toBe(400);
+
+    // Snapshot fields are response-only: DTO strictness prevents attribution forgery.
+    const forged = await post({
+      inCharacter: true,
+      characterId: foreignOwned.body.id,
+      characterName: 'Forged label',
+      characterAvatarUrl: 'https://evil.example/forged.png',
+    });
+    expect(forged.status).toBe(400);
+  });
+
+  it('drops an unsafe portrait URL from the immutable snapshot', async () => {
+    const server = ctx.app.getHttpServer();
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(authorPlayer)
+      .send({ name: 'Safe Label', portraitUrl: 'javascript:alert(1)' });
+    const result = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .set(authorPlayer)
+      .send({ ...anchor(), body: 'No active content avatar.', inCharacter: true, characterId: character.body.id });
+    expect(result.status).toBe(201);
+    expect(result.body.characterName).toBe('Safe Label');
+    expect(result.body.characterAvatarUrl).toBeNull();
+  });
+
+  it('validates absolute attachment portrait URLs instead of treating them as remote HTTPS', async () => {
+    const server = ctx.app.getHttpServer();
+    const tinyPng = Buffer.from(
+      '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+        '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+      'hex',
+    );
+    const portrait = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(authorPlayer)
+      .field('kind', 'portrait')
+      .attach('file', tinyPng, { filename: 'ic.png', contentType: 'image/png' });
+    expect(portrait.status).toBe(201);
+    const absolutePortrait = `https://cdn.example.test/api/v1/attachments/${portrait.body.id}/file`;
+
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(authorPlayer)
+      .send({ name: 'Absolute Portrait', portraitUrl: absolutePortrait });
+    expect(character.status).toBe(201);
+
+    const ok = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .set(authorPlayer)
+      .send({
+        ...anchor(),
+        body: 'Absolute attachment avatar must normalize and validate.',
+        inCharacter: true,
+        characterId: character.body.id,
+      });
+    expect(ok.status).toBe(201);
+    // Stored as the canonical relative route after campaign/kind/visibility checks.
+    expect(ok.body.characterAvatarUrl).toBe(`/api/v1/attachments/${portrait.body.id}/file`);
+
+    // A hidden map attachment must not sneak through as a "remote" HTTPS URL.
+    const hiddenMap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(dm)
+      .field('kind', 'map')
+      .attach('file', tinyPng, { filename: 'map.png', contentType: 'image/png' });
+    expect(hiddenMap.status).toBe(201);
+    const badCharacter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(authorPlayer)
+      .send({
+        name: 'Hidden Map Voice',
+        portraitUrl: `https://cdn.example.test/api/v1/attachments/${hiddenMap.body.id}/file`,
+      });
+    const dropped = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .set(authorPlayer)
+      .send({
+        ...anchor(),
+        body: 'Unsafe absolute attachment avatar dropped.',
+        inCharacter: true,
+        characterId: badCharacter.body.id,
+      });
+    expect(dropped.status).toBe(201);
+    expect(dropped.body.characterAvatarUrl).toBeNull();
+  });
+
+  it('rejects no-op comment updates that would only bump updatedAt/editedAt', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .set(authorPlayer)
+      .send({ ...anchor(), body: 'Leave me alone', inCharacter: false });
+    expect(created.status).toBe(201);
+    const id = created.body.id;
+    const before = await request(server).get(`/api/v1/comments/${id}`).set(authorPlayer);
+    expect(before.status).toBe(200);
+
+    const empty = await request(server).patch(`/api/v1/comments/${id}`).set(authorPlayer).send({});
+    expect(empty.status).toBe(400);
+    const echoFlag = await request(server)
+      .patch(`/api/v1/comments/${id}`)
+      .set(authorPlayer)
+      .send({ inCharacter: false });
+    expect(echoFlag.status).toBe(400);
+    const sameBody = await request(server)
+      .patch(`/api/v1/comments/${id}`)
+      .set(authorPlayer)
+      .send({ body: 'Leave me alone' });
+    expect(sameBody.status).toBe(400);
+
+    // Moderator no-ops must not stamp editedAt either.
+    const dmNoop = await request(server)
+      .patch(`/api/v1/comments/${id}`)
+      .set(dm)
+      .send({ inCharacter: false });
+    expect(dmNoop.status).toBe(400);
+
+    const after = await request(server).get(`/api/v1/comments/${id}`).set(authorPlayer);
+    expect(after.status).toBe(200);
+    expect(after.body.updatedAt).toBe(before.body.updatedAt);
+    expect(after.body.editedAt).toBeNull();
+    expect(after.body.editedBy).toBeNull();
+    expect(after.body.body).toBe('Leave me alone');
   });
 
   it('author-or-DM edit permission', async () => {

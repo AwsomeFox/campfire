@@ -307,7 +307,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // Every property of every tool must advertise SOME concrete type — no bare `{}`.
     for (const tool of tools) {
       const props = (tool.inputSchema.properties ?? {}) as Record<string, Record<string, unknown>>;
-      for (const [name, schema] of Object.entries(props)) {
+      for (const [, schema] of Object.entries(props)) {
         const typed =
           'type' in schema || 'enum' in schema || 'const' in schema || 'anyOf' in schema || 'oneOf' in schema || 'allOf' in schema || '$ref' in schema;
         expect(typed).toBe(true);
@@ -622,6 +622,67 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const denied = await viewerClient.callTool({ name: 'get_timeline_event', arguments: { eventId: hidden.id } });
     expect(denied.isError).toBe(true);
     expect((denied.content as TextContent[])[0].text).toContain('404');
+  });
+
+  it('comments keep REST/MCP parity for owned character attribution (issue #787)', async () => {
+    const client = await mcpClient(dmToken);
+    const me = await dmAgent.get('/api/v1/me');
+    const characterResult = await client.callTool({
+      name: 'upsert_character',
+      arguments: {
+        campaignId,
+        name: 'MCP Speaker',
+        ownerUserId: me.body.user.id,
+        portraitUrl: 'https://images.example.test/mcp-speaker.png',
+      },
+    });
+    expect(characterResult.isError).toBeFalsy();
+    const character = parseResult(characterResult) as { id: number };
+    const sessionResult = await client.callTool({
+      name: 'add_session_recap',
+      arguments: { campaignId, title: 'MCP Persona Scene', recap: 'A scene for attributed dialogue.' },
+    });
+    const session = parseResult(sessionResult) as { id: number };
+
+    const postResult = await client.callTool({
+      name: 'post_comment',
+      arguments: {
+        campaignId,
+        entityType: 'session',
+        entityId: session.id,
+        body: 'I speak through MCP.',
+        inCharacter: true,
+        characterId: character.id,
+      },
+    });
+    expect(postResult.isError).toBeFalsy();
+    expect(parseResult(postResult)).toMatchObject({
+      characterId: character.id,
+      characterName: 'MCP Speaker',
+      characterAvatarUrl: 'https://images.example.test/mcp-speaker.png',
+      authorName: 'mcp-dm',
+    });
+
+    const listed = parseResult(
+      await client.callTool({
+        name: 'list_comments',
+        arguments: { campaignId, entityType: 'session', entityId: session.id },
+      }),
+    ) as Array<{ body: string; characterName: string }>;
+    expect(listed).toEqual(expect.arrayContaining([expect.objectContaining({ body: 'I speak through MCP.', characterName: 'MCP Speaker' })]));
+
+    const missingCharacter = await client.callTool({
+      name: 'post_comment',
+      arguments: {
+        campaignId,
+        entityType: 'session',
+        entityId: session.id,
+        body: 'No speaker selected.',
+        inCharacter: true,
+      },
+    });
+    expect(missingCharacter.isError).toBe(true);
+    expect(parseResult(missingCharacter)).toMatchObject({ error: { status: 400, code: 'bad_request' } });
   });
 
   it('scheduling (issue #257): dm schedules a session, viewer RSVPs, viewer cannot cancel', async () => {
@@ -1764,6 +1825,77 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(false);
   });
 
+  // Issue #495: update_combatant addConditions is vocabulary-gated for non-DMs (same
+  // EncountersService path as REST). Players cannot inject arbitrary free-text labels.
+  it('update_combatant rejects unknown conditions from a player; DM may mint custom (issue #495)', async () => {
+    const createPlayer = await dmAgent
+      .post('/api/v1/users')
+      .send({ username: 'mcp-495-player', password: 'player-password-1', serverRole: 'user' });
+    expect(createPlayer.status).toBe(201);
+    const playerId = createPlayer.body.id as number;
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+      name: 'MCP Vocab Hero',
+      hpMax: 20,
+      hpCurrent: 20,
+      ownerUserId: String(playerId),
+    });
+    expect(charRes.status).toBe(201);
+
+    const playerAgent = request.agent(ctx.app.getHttpServer());
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-495-player', password: 'player-password-1' });
+    const mint = await playerAgent
+      .post('/api/v1/tokens')
+      .send({ name: 'mcp-495-player', scope: 'player', writeScope: 'direct', campaignId });
+    expect(mint.status).toBe(201);
+    const playerClient = await mcpClient(mint.body.token);
+
+    const dmClient = await mcpClient(dmToken);
+    const createResult = await dmClient.callTool({
+      name: 'create_encounter',
+      arguments: { campaignId, name: 'MCP Vocab Fight' },
+    });
+    const encounter = parseResult(createResult) as {
+      id: number;
+      combatants: Array<{ id: number; characterId: number | null }>;
+    };
+    let heroCombatant = encounter.combatants.find((c) => c.characterId === charRes.body.id);
+    if (!heroCombatant) {
+      const add = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: { encounterId: encounter.id, kind: 'character', characterId: charRes.body.id },
+      });
+      expect(add.isError).toBeFalsy();
+      heroCombatant = parseResult(add) as { id: number; characterId: number | null };
+    }
+
+    const rejected = await playerClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: heroCombatant!.id, addConditions: ['god_mode'] },
+    });
+    expect(rejected.isError).toBe(true);
+    const rejectedBody = parseResult(rejected) as { error?: { status?: number; message?: string } };
+    expect(rejectedBody.error?.status).toBe(400);
+    expect(String(rejectedBody.error?.message ?? JSON.stringify(rejectedBody))).toMatch(
+      /god_mode|vocabulary|Unknown condition/i,
+    );
+
+    const allowed = await playerClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: heroCombatant!.id, addConditions: ['Prone'] },
+    });
+    expect(allowed.isError).toBeFalsy();
+    expect((parseResult(allowed) as { conditions: string[] }).conditions).toContain('Prone');
+
+    const custom = await dmClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: heroCombatant!.id, addConditions: ['hexed_by_patron'] },
+    });
+    expect(custom.isError).toBeFalsy();
+    expect((parseResult(custom) as { conditions: string[] }).conditions).toContain('hexed_by_patron');
+  });
+
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {
     const client = await mcpClient(dmToken);
 
@@ -2229,6 +2361,74 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       const client = await mcpClient(noneToken);
       const res = await client.callTool({ name: 'list_campaigns', arguments: {} });
       expect(res.isError).toBeFalsy();
+    });
+  });
+
+  // Issue #817 — MCP propose path must not disclose hidden targets / dmSecret via
+  // create responses or list_proposals self-view.
+  describe('issue #817 — MCP proposal snapshot secrecy', () => {
+    let playerProposeToken: string;
+
+    beforeAll(async () => {
+      const createPlayer = await dmAgent
+        .post('/api/v1/users')
+        .send({ username: 'mcp-817-player', password: 'player-password-1', serverRole: 'user' });
+      const playerId = createPlayer.body.id as number;
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+
+      const playerAgent = request.agent(ctx.app.getHttpServer());
+      await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-817-player', password: 'player-password-1' });
+      const mint = await playerAgent
+        .post('/api/v1/tokens')
+        .send({ name: 'mcp-817-propose', scope: 'player', writeScope: 'propose', campaignId });
+      expect(mint.status).toBe(201);
+      playerProposeToken = mint.body.token;
+    });
+
+    it('update_quest on a hidden quest fails (no proposal / no secret leak)', async () => {
+      const hidden = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({
+        title: 'MCP Hidden Quest 817',
+        dmSecret: 'MCP_HIDDEN_QUEST_817',
+        hidden: true,
+      });
+      const client = await mcpClient(playerProposeToken);
+      const res = await client.callTool({
+        name: 'update_quest',
+        arguments: { questId: hidden.body.id, title: 'leak?', propose: true },
+      });
+      expect(res.isError).toBeTruthy();
+      expect(JSON.stringify(res)).not.toContain('MCP_HIDDEN_QUEST_817');
+    });
+
+    it('update_quest on a visible secret-bearing quest returns a redacted snapshot; list_proposals stays redacted', async () => {
+      const visible = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({
+        title: 'MCP Visible Quest 817',
+        dmSecret: 'MCP_VISIBLE_QUEST_817',
+        hidden: false,
+      });
+      const client = await mcpClient(playerProposeToken);
+      const res = await client.callTool({
+        name: 'update_quest',
+        arguments: { questId: visible.body.id, title: 'mcp tweak', propose: true },
+      });
+      expect(res.isError).toBeFalsy();
+      const { proposal } = parseResult(res) as {
+        proposal: { id: number; snapshot: { title: string; dmSecret?: string } };
+      };
+      expect(proposal.snapshot.title).toBe('MCP Visible Quest 817');
+      expect(proposal.snapshot.dmSecret ?? '').toBe('');
+      expect(JSON.stringify(proposal)).not.toContain('MCP_VISIBLE_QUEST_817');
+
+      const listRes = await client.callTool({
+        name: 'list_proposals',
+        arguments: { campaignId, status: 'pending' },
+      });
+      expect(listRes.isError).toBeFalsy();
+      const list = parseResult(listRes) as Array<{ id: number; snapshot: { dmSecret?: string } }>;
+      const row = list.find((p) => p.id === proposal.id);
+      expect(row).toBeDefined();
+      expect(row!.snapshot.dmSecret ?? '').toBe('');
+      expect(JSON.stringify(list)).not.toContain('MCP_VISIBLE_QUEST_817');
     });
   });
 });

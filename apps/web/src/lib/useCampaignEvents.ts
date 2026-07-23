@@ -11,16 +11,32 @@
  *
  * Reconnects automatically with capped exponential backoff; after a drop is
  * healed, onReconnect fires so pages can refetch whatever they missed while
- * offline. A 401/403 stops the loop entirely (no access — retrying won't help).
+ * offline. Parser buffer-overrun recovery is separate ({@link CampaignEventsHandlers.onStreamRecovery})
+ * — the TCP/HTTP connection stayed up. A proven 401 signals session expiry
+ * (issue #885) and stops until reauth bumps the resume epoch; a campaign-scoped
+ * 403 stops without clearing identity (retrying won't help).
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
 import { API } from './api';
+import {
+  classifyStreamConnectStatus,
+  getSessionResumeEpoch,
+  signalSessionExpired,
+  subscribeSessionResume,
+} from './sessionExpiry';
+import { SseParser, type SseParseSignal } from './sseParse';
 
 export interface CampaignEventsHandlers {
   onEvent: (event: CampaignEvent) => void;
-  /** Fires after the stream reconnects following a drop — refetch to catch up. */
+  /** Fires after the stream reconnects following a transport drop — refetch to catch up. */
   onReconnect?: () => void;
+  /**
+   * Fires when the SSE parser discards mid-stream bytes (buffer overrun) while
+   * the connection stays up. Distinct from {@link onReconnect}; wire the same
+   * catch-up refetch when UI state may have skipped events.
+   */
+  onStreamRecovery?: () => void;
   /** Lets last-known-data surfaces distinguish a healthy stream from a dropped/offline one. */
   onStatusChange?: (status: CampaignEventsStatus) => void;
 }
@@ -32,18 +48,22 @@ const RECONNECT_MAX_MS = 15_000;
 
 /**
  * Runtime guard for the CampaignEvent union (issue #527 widened it to a
- * discriminated union; #582 added treasury.updated; #790 added schedule.updated).
+ * discriminated union; #582 added treasury.updated; #790 added schedule.updated;
+ * #421 added character.updated; #437 added membership.updated).
  * Accepts every variant: the
  * encounter.* signals carry an encounterId; membership.revoked carries
- * userId/memberId; treasury.updated carries userId (the actor); schedule.updated
- * carries scheduleId. Consumers narrow by `type` before reading variant-specific
- * fields (see RunSessionPage and DashboardPage).
+ * userId/memberId; membership.updated carries userId/memberId/role;
+ * treasury.updated carries userId (the actor); schedule.updated
+ * carries scheduleId; character.updated carries characterId + userId. Consumers
+ * narrow by `type` before reading variant-specific fields (see RunSessionPage
+ * and DashboardPage).
  *
  * Note: the server filters membership.revoked out of the data path as an internal
  * control signal, so in practice this client sees encounter.*, treasury.updated,
- * and schedule.updated frames — but validating the full union here keeps the guard
- * correct if that filtering ever changes, and lets the type system prove that
- * `onEvent` callbacks handle every variant (or explicitly narrow).
+ * schedule.updated, character.updated, and membership.updated frames — but validating
+ * the full union here keeps the guard correct if that filtering ever changes, and
+ * lets the type system prove that `onEvent` callbacks handle every variant (or
+ * explicitly narrow).
  */
 const ENCOUNTER_EVENT_TYPES = new Set(['encounter.updated', 'encounter.deleted', 'encounter.ping']);
 function isCampaignEvent(value: unknown): value is CampaignEvent {
@@ -66,6 +86,14 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
     // membership.revoked: userId + memberId instead of encounterId.
     return typeof v.userId === 'string' && typeof v.memberId === 'number';
   }
+  if (v.type === 'membership.updated') {
+    // membership.updated (#437): role change invalidation for the affected member.
+    return (
+      typeof v.userId === 'string'
+      && typeof v.memberId === 'number'
+      && (v.role === 'dm' || v.role === 'player' || v.role === 'viewer')
+    );
+  }
   if (v.type === 'treasury.updated') {
     // treasury.updated (#582): the actor's userId so the editor can attribute the
     // change and ignore the echo of its own write. No coin payload — the client
@@ -77,22 +105,20 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
     // the authoritative projection rather than accepting schedule details over SSE.
     return typeof v.scheduleId === 'number';
   }
+  if (v.type === 'character.updated') {
+    // Issue #421: sheet invalidation — characterId + actor userId, no encounterId.
+    return typeof v.characterId === 'number' && typeof v.userId === 'string';
+  }
   return false;
-}
-
-/** Extracts the concatenated `data:` payload of one SSE event block. */
-function sseBlockData(block: string): string {
-  return block
-    .split('\n')
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice('data:'.length).trimStart())
-    .join('\n');
 }
 
 export function useCampaignEvents(campaignId: number | undefined, handlers: CampaignEventsHandlers): void {
   // Latest handlers in a ref so a re-render never tears down the connection.
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  // After a 401 stop, reauth bumps this epoch so the effect reopens the stream
+  // even when campaignId is unchanged (issue #885).
+  const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
 
   useEffect(() => {
     if (campaignId === undefined || !Number.isFinite(campaignId)) return;
@@ -157,7 +183,15 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
             headers,
             signal: activeRequest.signal,
           });
-          if (res.status === 401 || res.status === 403) {
+          const auth = classifyStreamConnectStatus(res.status);
+          if (auth === 'session-expired') {
+            // Proven 401 — not offline, not a campaign 403. Fan out so AuthProvider
+            // can show reauth; stop until resumeEpoch advances after login.
+            signalSessionExpired();
+            setStatus('stopped');
+            return;
+          }
+          if (auth === 'forbidden') {
             setStatus('stopped');
             return;
           }
@@ -170,25 +204,36 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
           if (reconnected) handlersRef.current.onReconnect?.();
 
           const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let sep: number;
-            while ((sep = buffer.indexOf('\n\n')) !== -1) {
-              const data = sseBlockData(buffer.slice(0, sep));
-              buffer = buffer.slice(sep + 2);
+          // Incremental SSE parser (#748): CRLF/CR/LF frames, heartbeats, multiline
+          // data, UTF-8 chunk splits, and bounded recovery for malformed streams.
+          const parser = new SseParser();
+          const consume = (signals: SseParseSignal[]) => {
+            for (const signal of signals) {
+              if (signal.kind === 'recovered') {
+                // Parser discarded mid-stream bytes — connection stays up, but
+                // UI may have missed events. Not a transport reconnect.
+                needsCatchUp = true;
+                if (!disposed) handlersRef.current.onStreamRecovery?.();
+                continue;
+              }
+              const data = signal.message.data;
               if (!data) continue;
               try {
                 const parsed: unknown = JSON.parse(data);
                 // Keepalive pings and unknown future event types are ignored here.
                 if (isCampaignEvent(parsed) && !disposed) handlersRef.current.onEvent(parsed);
               } catch {
-                /* malformed frame — skip */
+                /* malformed JSON payload — skip */
               }
             }
+          };
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) {
+              consume(parser.flush());
+              break;
+            }
+            consume(parser.push(value));
           }
           // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
           throw new Error('SSE stream ended');
@@ -210,5 +255,5 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
       wakeSleep?.();
       activeRequest?.abort();
     };
-  }, [campaignId]);
+  }, [campaignId, resumeEpoch]);
 }

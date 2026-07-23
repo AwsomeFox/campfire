@@ -5,17 +5,25 @@
  * Campaign-scoped nav only renders inside /c/:campaignId routes.
  */
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { flushSync } from 'react-dom';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
+import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
+import { rememberCampaignRoute } from '../lib/campaignSwitcherRoute';
+import { confirmDiscardUnsavedWork } from '../lib/unsavedWork';
+
 import { useFormattingLocale } from '../lib/format';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
-import { Btn, Card, TextInput } from '../components/ui';
+import { Btn, Card } from '../components/ui';
+import { PasswordInput } from '../components/PasswordInput';
 import { useDialog } from '../components/useDialog';
+import { useClearAnnouncements } from '../components/Announcer';
+import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncementsOnScope';
 import {
   NotificationsBell,
   NotificationsPanel,
@@ -24,6 +32,7 @@ import {
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
+import { useMembershipLiveSync } from '../features/auth/useMembershipLiveSync';
 
 function FlameMark({ size = 20 }: { size?: number }) {
   return (
@@ -92,32 +101,35 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
           <form className="space-y-3" onSubmit={onSubmit}>
             <div className="field">
               <label htmlFor="currentPassword">{t('nav.currentPassword')}</label>
-              <TextInput
+              <PasswordInput
                 id="currentPassword"
-                type="password"
+                className="input"
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 autoComplete="current-password"
+                revealNoun="current password"
               />
             </div>
             <div className="field">
               <label htmlFor="newPassword">{t('nav.newPassword')}</label>
-              <TextInput
+              <PasswordInput
                 id="newPassword"
-                type="password"
+                className="input"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 autoComplete="new-password"
+                revealNoun="new password"
               />
             </div>
             <div className="field">
               <label htmlFor="confirmPassword">{t('nav.confirmNewPassword')}</label>
-              <TextInput
+              <PasswordInput
                 id="confirmPassword"
-                type="password"
+                className="input"
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
                 autoComplete="new-password"
+                revealNoun="confirm password"
               />
             </div>
             {error && <p className="text-sm text-rose-400">{error}</p>}
@@ -301,8 +313,12 @@ function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
   const formattingLocale = useFormattingLocale();
+  const clearAnnouncements = useClearAnnouncements();
   const params = useParams<{ campaignId: string }>();
-  const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
+  // Non-numeric `:campaignId` must not become NaN — that would trip scope clears
+  // and confuse campaign lookups. Treat invalid params as "outside campaign".
+  // Base-10 positive integers only — reject "1.5", "0x10", whitespace, etc.
+  const campaignId = parseCampaignIdParam(params.campaignId);
   const campaign = useCampaign(campaignId);
   const { campaigns, loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const navigate = useNavigate();
@@ -313,10 +329,15 @@ function LayoutContent() {
   const [lostAccess, setLostAccess] = useState(false);
   const [inboxCount, setInboxCount] = useState(0);
   const [pendingProposals, setPendingProposals] = useState(0);
+  const [trashCount, setTrashCount] = useState(0);
   const [desktopLayout, setDesktopLayout] = useState(
     () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches,
   );
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Issue #434: clear encounter/dice live-region text when the signed-in user or
+  // active campaign changes, and again when this chrome unmounts (→ /login).
+  useClearAnnouncementsOnScope(me?.user.id ?? null, campaignId);
   // Track WHICH campaign we've stale-checked, not a bare boolean — so navigating
   // to a different campaign re-checks (and clears a prior lock screen) instead of
   // trusting a once-per-session flag.
@@ -345,6 +366,29 @@ function LayoutContent() {
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
+
+  // Issue #437: live promote/demote — refresh /me when this user's campaign role
+  // changes over SSE (and fan out to other tabs). Keeps the current route.
+  useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined);
+
+  // Issue #760: remember the last safe in-campaign route per user/campaign so
+  // the chooser can restore task context after a switch (namespaced by userId
+  // for shared devices). Push history (no replace) so browser Back still works.
+  useEffect(() => {
+    if (!me || campaignId === undefined) return;
+    rememberCampaignRoute(me.user.id, `${location.pathname}${location.search}`);
+  }, [me, campaignId, location.pathname, location.search]);
+
+  /** Switch-campaign leave: confirm dirty forms, then go to hub with source path. */
+  function onSwitchCampaignClick(event: { preventDefault(): void }): void {
+    if (!confirmDiscardUnsavedWork()) {
+      event.preventDefault();
+    }
+  }
+
+  const switchCampaignState = campaignId !== undefined
+    ? { switchFrom: location.pathname }
+    : undefined;
 
   // AI-DM seat mode drives the "Table" nav item (issue #339): the player-facing table
   // only exists when the AI holds the DM seat (Driver mode). The seat read stops on a
@@ -397,6 +441,28 @@ function LayoutContent() {
         if (!cancelled) setPendingProposals(items.length);
       } catch {
         if (!cancelled) setPendingProposals(0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, isDm, location.pathname]);
+
+  // Campaign Trash badge (issue #638) — dm-only recovery surface. Same best-effort
+  // pattern as inbox/proposals: empty or failed fetch means no badge. Re-checks on
+  // campaign switch and route change so restoring an item clears the count.
+  useEffect(() => {
+    if (campaignId === undefined || !isDm) {
+      setTrashCount(0);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const items = await api.get<unknown[]>(`${API}/campaigns/${campaignId}/trash`);
+        if (!cancelled) setTrashCount(items.length);
+      } catch {
+        if (!cancelled) setTrashCount(0);
       }
     })();
     return () => {
@@ -464,11 +530,28 @@ function LayoutContent() {
     return () => document.removeEventListener('keydown', onKey);
   }, [moreOpen]);
 
-  async function onLogout() {
+  function onLogout() {
     setMenuOpen(false);
     setMoreOpen(false);
-    await logout();
-    navigate('/login');
+    // Issues #434 / #506: drop stale live-region text before this account's
+    // session ends. AuthedLayout/Layout unmount (#434) also clears, so the
+    // "Signed out" confirmation is announced from LoginPage after that wipe —
+    // announcing here would be cancelled by the unmount clear.
+    clearAnnouncements();
+    // Commit `me = null` before navigate. logout() no longer awaits cache/network,
+    // but without flushSync a same-turn navigate('/login') can re-render LoginPage
+    // while `me` is still set — LoginPage then bounces away and drops
+    // `{ signedOut: true }`. flushSync also means we do not await logout (Copilot):
+    // replace-navigate is not gated on cache/POST timing.
+    flushSync(() => {
+      void logout();
+    });
+    // `replace` so the protected route this tab was just on is gone from history
+    // — Back must not be able to return to it (the AuthedLayout guard would bounce
+    // it to /login anyway once `me` is null, but `replace` here avoids that extra
+    // hop and the momentary flash of a guarded redirect). Overwrites any
+    // AuthedLayout `{ from }` redirect that flushSync may have triggered.
+    navigate('/login', { replace: true, state: { signedOut: true } });
   }
 
   const displayName = me?.user.displayName || me?.user.username || '';
@@ -504,6 +587,7 @@ function LayoutContent() {
         { key: 'settings', label: t('nav.settings'), to: `/c/${campaignId}/settings` },
         { key: 'inbox', label: t('nav.scribeInbox'), to: `/c/${campaignId}/inbox`, badge: inboxCount },
         { key: 'proposals', label: t('nav.proposals'), to: `/c/${campaignId}/proposals`, badge: pendingProposals },
+        { key: 'trash', label: t('nav.trash'), to: `/c/${campaignId}/trash`, badge: trashCount },
         { key: 'members', label: t('nav.members'), to: `/c/${campaignId}/members` },
       ]
     : [];
@@ -561,8 +645,11 @@ function LayoutContent() {
           <div className="flex items-center gap-1 mb-2">
             <Link
               to="/"
+              state={switchCampaignState}
+              onClick={onSwitchCampaignClick}
               className="flex flex-1 min-w-0 items-center gap-2.5 px-2 py-1.5 rounded-md"
               style={{ borderRadius: 'var(--radius-md)' }}
+              aria-label={t('nav.switchCampaign')}
             >
               <FlameMark size={22} />
               <span className="min-w-0 leading-tight">
@@ -572,7 +659,7 @@ function LayoutContent() {
                 >
                   {campaign?.name ?? 'Campfire'}
                 </span>
-                <span className="block text-[11px] text-muted">Switch campaign</span>
+                <span className="block text-[11px] text-muted">{t('nav.switchCampaign')}</span>
               </span>
             </Link>
             {desktopLayout && <NotificationsBell />}
@@ -660,7 +747,13 @@ function LayoutContent() {
             background: 'color-mix(in srgb, var(--color-bg) 88%, transparent)',
           }}
         >
-          <Link to="/" className="flex items-center gap-2">
+          <Link
+            to="/"
+            state={switchCampaignState}
+            onClick={onSwitchCampaignClick}
+            className="flex items-center gap-2"
+            aria-label={campaignId !== undefined ? t('nav.switchCampaign') : t('nav.home')}
+          >
             <FlameMark />
           </Link>
           <div className="leading-tight min-w-0">
@@ -802,6 +895,8 @@ function LayoutContent() {
           mainNav={mainNav}
           dmNav={dmNav}
           isAdmin={isAdmin}
+          switchCampaignState={switchCampaignState}
+          onSwitchCampaignClick={onSwitchCampaignClick}
           onClose={() => setMoreOpen(false)}
           onChangePassword={() => {
             setMoreOpen(false);
@@ -824,6 +919,8 @@ function MoreSheet({
   mainNav,
   dmNav,
   isAdmin,
+  switchCampaignState,
+  onSwitchCampaignClick,
   onClose,
   onChangePassword,
   onLogout,
@@ -833,6 +930,8 @@ function MoreSheet({
   mainNav: NavItem[];
   dmNav: NavItem[];
   isAdmin: boolean;
+  switchCampaignState: { switchFrom: string } | undefined;
+  onSwitchCampaignClick: (event: { preventDefault(): void }) => void;
   onClose: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
@@ -843,8 +942,12 @@ function MoreSheet({
   const sheetRef = useDialog<HTMLDivElement>({ onClose });
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center"
-      style={{ background: 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)' }}
+      className="fixed inset-0 flex items-end justify-center"
+      style={{
+        // Same dialog tier as ConfirmDialog / notifications (issue #794).
+        zIndex: 'var(--cf-layer-dialog)',
+        background: 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)',
+      }}
       onClick={onClose}
     >
       <div
@@ -892,7 +995,12 @@ function MoreSheet({
             <MoreSheetItem item={{ key: 'admin', label: 'Server admin', to: '/admin' }} onNavigate={onClose} />
           )}
           <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={onClose} />
-          <MoreSheetItem item={{ key: 'switch', label: 'Switch campaign', to: '/' }} onNavigate={onClose} />
+          <MoreSheetItem
+            item={{ key: 'switch', label: 'Switch campaign', to: '/' }}
+            state={switchCampaignState}
+            onNavigate={onClose}
+            onClick={onSwitchCampaignClick}
+          />
           <MoreSheetItem item={{ key: 'preferences', label: 'Preferences', to: '/preferences' }} onNavigate={onClose} />
           <button
             className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
@@ -914,7 +1022,17 @@ function MoreSheet({
   );
 }
 
-function MoreSheetItem({ item, onNavigate }: { item: NavItem; onNavigate: () => void }) {
+function MoreSheetItem({
+  item,
+  onNavigate,
+  state,
+  onClick,
+}: {
+  item: NavItem;
+  onNavigate: () => void;
+  state?: { switchFrom: string };
+  onClick?: (event: { preventDefault(): void }) => void;
+}) {
   if (item.soon || !item.to) {
     return (
       <div
@@ -929,7 +1047,11 @@ function MoreSheetItem({ item, onNavigate }: { item: NavItem; onNavigate: () => 
   return (
     <Link
       to={item.to}
-      onClick={onNavigate}
+      state={state}
+      onClick={(event) => {
+        onClick?.(event);
+        if (!event.defaultPrevented) onNavigate();
+      }}
       className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md"
       style={{ fontSize: 14.5, color: 'var(--color-text)' }}
     >

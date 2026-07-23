@@ -21,15 +21,50 @@
  * show "Imported from D&D Beyond" + a copyable source id (no "sync" overclaim),
  * while manually-created sheets get honest guidance instead of "soon".
  */
-import { useCallback, useEffect, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpForLevel, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
+import {
+  compositionSafeEscapeHandler,
+  compositionSafeFormSubmit,
+  createCompositionSubmitGate,
+} from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, HpBar } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  CHARACTER_AC_LABEL,
+  CHARACTER_ACTION_DAMAGE_HELP,
+  CHARACTER_ACTION_DAMAGE_LABEL,
+  CHARACTER_ACTION_FIELD,
+  CHARACTER_ACTION_KIND_LABEL,
+  CHARACTER_ACTION_NAME_LABEL,
+  CHARACTER_ACTION_NOTES_LABEL,
+  CHARACTER_ACTION_PREFIX,
+  CHARACTER_ACTION_TO_HIT_HELP,
+  CHARACTER_ACTION_TO_HIT_LABEL,
+  CHARACTER_BACKGROUND_LABEL,
+  CHARACTER_CLASS_LABEL,
+  CHARACTER_CONDITION_HELP,
+  CHARACTER_CONDITION_LABEL,
+  CHARACTER_CONDITION_PREFIX,
+  CHARACTER_EDIT_PREFIX,
+  CHARACTER_FIELD,
+  CHARACTER_HP_MAX_HELP,
+  CHARACTER_HP_MAX_LABEL,
+  CHARACTER_LEVEL_LABEL,
+  CHARACTER_NAME_LABEL,
+  CHARACTER_SPECIES_LABEL,
+  CHARACTER_STATUS_HELP,
+  CHARACTER_STATUS_LABEL,
+  CHARACTER_STORY_HELP,
+  CHARACTER_STORY_LABEL,
+  CHARACTER_STORY_PREFIX,
+} from '../../components/formFieldLabels';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
@@ -56,8 +91,17 @@ import { resolveRollMode, rollModeSummary, type RollMode } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { RollResultBanner } from '../../components/RollResultBanner';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { CopyControl } from '../../components/CopyControl';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
+import {
+  XP_AWARD_HELP,
+  XP_AWARD_LABEL,
+  hpDeltaLabel,
+  hpFullHealLabel,
+  saveProficiencyLabel,
+  skillProficiencyLabel,
+} from './characterSheetA11y';
 import { useFormattingLocale } from '../../lib/format';
 
 export default function CharacterPage() {
@@ -477,99 +521,143 @@ function SheetEditForm({
     }
   }
 
+  const cardLabel = 'text-[10px] text-slate-300 font-bold uppercase tracking-wide';
+
   return (
-    <div className="space-y-3">
-      <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" />
+    <div className="space-y-3" data-testid="character-sheet-edit">
+      <Field
+        idPrefix={CHARACTER_EDIT_PREFIX}
+        name={CHARACTER_FIELD.name}
+        label={CHARACTER_NAME_LABEL}
+        labelClassName={cardLabel}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Name"
+        required
+      />
       <div className="grid grid-cols-2 gap-2.5">
-        <TextInput value={species} onChange={(e) => setSpecies(e.target.value)} placeholder="Species" />
-        <TextInput value={className} onChange={(e) => setClassName(e.target.value)} placeholder="Class" />
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.species}
+          label={CHARACTER_SPECIES_LABEL}
+          labelClassName={cardLabel}
+          value={species}
+          onChange={(e) => setSpecies(e.target.value)}
+          placeholder="Species"
+          optional
+        />
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.className}
+          label={CHARACTER_CLASS_LABEL}
+          labelClassName={cardLabel}
+          value={className}
+          onChange={(e) => setClassName(e.target.value)}
+          placeholder="Class"
+          optional
+        />
       </div>
       <div className="grid grid-cols-3 gap-2.5">
-        <TextInput value={background} onChange={(e) => setBackground(e.target.value)} placeholder="Background" />
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.background}
+          label={CHARACTER_BACKGROUND_LABEL}
+          labelClassName={cardLabel}
+          value={background}
+          onChange={(e) => setBackground(e.target.value)}
+          placeholder="Background"
+          optional
+        />
         {/* type="text" + inputMode="numeric" (issue #633): a type="number" field
             silently strips locale grouping (en "1,000" → "", de "1.000" → "1")
             before the parser sees it, so the localized path is bypassed. */}
-        <div className="space-y-1">
-          <TextInput
-            type="text"
-            inputMode="numeric"
-            min={1}
-            max={20}
-            value={level}
-            aria-invalid={fieldErrors.level != null}
-            onChange={(e) => {
-              setLevel(e.target.value);
-              setFieldErrors((fe) => ({ ...fe, level: '' }));
-            }}
-            placeholder="Level"
-          />
-          {fieldErrors.level && <span className="block text-[11px] text-rose-400">{fieldErrors.level}</span>}
-        </div>
-        <div className="space-y-1">
-          <TextInput
-            type="text"
-            inputMode="numeric"
-            value={ac}
-            aria-invalid={fieldErrors.ac != null}
-            onChange={(e) => {
-              setAc(e.target.value);
-              setFieldErrors((fe) => ({ ...fe, ac: '' }));
-            }}
-            placeholder="AC"
-          />
-          {fieldErrors.ac && <span className="block text-[11px] text-rose-400">{fieldErrors.ac}</span>}
-        </div>
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.level}
+          label={CHARACTER_LEVEL_LABEL}
+          labelClassName={cardLabel}
+          type="text"
+          inputMode="numeric"
+          min={1}
+          max={20}
+          value={level}
+          error={fieldErrors.level || null}
+          onChange={(e) => {
+            setLevel(e.target.value);
+            setFieldErrors((fe) => ({ ...fe, level: '' }));
+          }}
+          placeholder="Level"
+        />
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.ac}
+          label={CHARACTER_AC_LABEL}
+          labelClassName={cardLabel}
+          type="text"
+          inputMode="numeric"
+          value={ac}
+          error={fieldErrors.ac || null}
+          onChange={(e) => {
+            setAc(e.target.value);
+            setFieldErrors((fe) => ({ ...fe, ac: '' }));
+          }}
+          placeholder="AC"
+          optional
+        />
       </div>
       <div className="grid grid-cols-3 gap-2.5">
-        <div className="space-y-1">
-          <TextInput
-            type="text"
-            inputMode="numeric"
-            min={1}
-            value={hpMax}
-            aria-invalid={fieldErrors.hpMax != null}
-            onChange={(e) => {
-              setHpMax(e.target.value);
-              setFieldErrors((fe) => ({ ...fe, hpMax: '' }));
-            }}
-            placeholder="Max HP"
-            title="Current HP is clamped to the new max automatically."
-          />
-          {fieldErrors.hpMax && <span className="block text-[11px] text-rose-400">{fieldErrors.hpMax}</span>}
-        </div>
-        <label className="space-y-1 col-span-2">
-          <span className="text-[10px] text-slate-500 font-bold uppercase">Status</span>
-          <select
-            className="cf-select w-full"
-            aria-label="Character status"
-            value={status}
-            onChange={(e) => setStatus(e.target.value as CharacterStatus)}
-            title="Only active characters are auto-added to new encounters. Dead/retired/inactive PCs stay on the roster."
-          >
-            {CHARACTER_STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {STATUS_LABEL[s]}
-              </option>
-            ))}
-          </select>
-        </label>
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.hpMax}
+          label={CHARACTER_HP_MAX_LABEL}
+          labelClassName={cardLabel}
+          type="text"
+          inputMode="numeric"
+          min={1}
+          value={hpMax}
+          error={fieldErrors.hpMax || null}
+          help={CHARACTER_HP_MAX_HELP}
+          onChange={(e) => {
+            setHpMax(e.target.value);
+            setFieldErrors((fe) => ({ ...fe, hpMax: '' }));
+          }}
+          placeholder="Max HP"
+        />
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.status}
+          as="select"
+          label={CHARACTER_STATUS_LABEL}
+          labelClassName={cardLabel}
+          className="field col-span-2"
+          value={status}
+          onChange={(e) => setStatus(e.target.value as CharacterStatus)}
+          help={CHARACTER_STATUS_HELP}
+        >
+          {CHARACTER_STATUSES.map((s) => (
+            <option key={s} value={s}>
+              {STATUS_LABEL[s]}
+            </option>
+          ))}
+        </Field>
       </div>
       <div className="grid grid-cols-3 gap-2.5">
         {ABILITY_KEYS.map((k) => (
-          <div key={k} className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">{k}</label>
-            <TextInput
-              type="text"
-              inputMode="numeric"
-              value={stats[k]}
-              aria-invalid={fieldErrors[k] != null}
-              onChange={(e) => {
-                setStats((s) => ({ ...s, [k]: e.target.value }));
-                setFieldErrors((fe) => ({ ...fe, [k]: '' }));
-              }}
-            />
-            {fieldErrors[k] && <span className="block text-[11px] text-rose-400">{fieldErrors[k]}</span>}
-          </div>
+          <Field
+            key={k}
+            idPrefix={CHARACTER_EDIT_PREFIX}
+            name={k}
+            label={k}
+            labelClassName={cardLabel}
+            type="text"
+            inputMode="numeric"
+            value={stats[k]}
+            error={fieldErrors[k] || null}
+            onChange={(e) => {
+              setStats((s) => ({ ...s, [k]: e.target.value }));
+              setFieldErrors((fe) => ({ ...fe, [k]: '' }));
+            }}
+          />
         ))}
       </div>
       <div className="flex gap-2 justify-end">
@@ -611,6 +699,11 @@ function XpCard({
   const [amountError, setAmountError] = useState<string | null>(null);
   const [hpMaxError, setHpMaxError] = useState<string | null>(null);
   const formatLocale = useFormattingLocale();
+  // XP award field a11y (issue #448): persistent label + help/error association.
+  const xpFieldId = useId();
+  const xpHelpId = `${xpFieldId}-help`;
+  const xpErrorId = `${xpFieldId}-error`;
+  const xpDescribedBy = amountError ? `${xpHelpId} ${xpErrorId}` : xpHelpId;
   // Level-up celebration (issue #67): the level a confirm just reached; the
   // banner clears itself after a beat (timeout, not animationEnd, so it also
   // clears under prefers-reduced-motion where no animation fires).
@@ -685,7 +778,7 @@ function XpCard({
   }
 
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-3" data-testid="character-xp">
       <div className="flex items-baseline gap-2.5 flex-wrap">
         <p className="card-kicker mb-0">Experience</p>
         {ready && (
@@ -731,29 +824,44 @@ function XpCard({
             : `${(nextThreshold! - character.xp).toLocaleString()} XP to level ${character.level + 1}.`}
       </p>
       {canEdit && (
-        <div className="flex gap-2 flex-wrap items-center">
-          {/* type="text" + inputMode="numeric" (issue #633): preserves locale
-              grouping/Arabic digits for the localized parser. */}
-          <input
-            type="text"
-            inputMode="numeric"
-            value={amount}
-            aria-invalid={amountError != null}
-            onChange={(e) => {
-              setAmount(e.target.value);
-              setAmountError(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void addXp();
-            }}
-            placeholder="XP…"
-            className="cf-input !min-h-0 !w-24 text-sm"
-            style={{ minHeight: 44, padding: '4px 10px' }}
-          />
+        <div className="flex gap-2 flex-wrap items-end">
+          {/* Labeled XP award (issue #448): associated label/help/error so the
+              control is not an unnamed spinbutton/textbox. type="text" +
+              inputMode="numeric" (issue #633) preserves locale digits. */}
+          <div className="space-y-1">
+            <label htmlFor={xpFieldId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+              {XP_AWARD_LABEL}
+            </label>
+            <input
+              id={xpFieldId}
+              type="text"
+              inputMode="numeric"
+              value={amount}
+              aria-invalid={amountError != null}
+              aria-describedby={xpDescribedBy}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                setAmountError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void addXp();
+              }}
+              placeholder="XP…"
+              className="cf-input !min-h-0 !w-24 text-sm"
+              style={{ minHeight: 44, padding: '4px 10px' }}
+            />
+            <p id={xpHelpId} className="text-[11px] text-slate-500 m-0 max-w-[16rem]">
+              {XP_AWARD_HELP}
+            </p>
+            {amountError && (
+              <p id={xpErrorId} role="alert" className="text-xs text-rose-400 m-0">
+                {amountError}
+              </p>
+            )}
+          </div>
           <Btn className="!min-h-0" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
             + Award XP
           </Btn>
-          {amountError && <span className="text-xs text-rose-400">{amountError}</span>}
           {!atCap && !levellingUp && (
             <Btn
               ghost={!ready}
@@ -866,7 +974,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
   }
 
   return (
-    <Card className="space-y-2">
+    <Card className="space-y-2" data-testid="character-saving-throws">
       <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Saving throws</p>
         <span className="text-[11px] text-slate-500">proficiency {signed(pb)}</span>
@@ -904,11 +1012,12 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                   onClick={() => void toggle(k)}
                   disabled={busy}
                   aria-pressed={proficient}
+                  aria-label={saveProficiencyLabel(k, proficient)}
                   className="absolute top-1 right-1"
                   style={{ background: 'transparent', border: 0, padding: 2, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
                   title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
                 >
-                  {proficient ? '●' : '○'}
+                  <span aria-hidden="true">{proficient ? '●' : '○'}</span>
                 </button>
               ) : (
                 proficient && (
@@ -955,7 +1064,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
   }
 
   return (
-    <Card className="space-y-2">
+    <Card className="space-y-2" data-testid="character-skills">
       <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Skills</p>
         <span className="text-[11px] text-slate-500">
@@ -983,11 +1092,13 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                   type="button"
                   onClick={() => void cycle(name)}
                   disabled={busy}
+                  aria-label={skillProficiencyLabel(name, rank ?? 'none')}
+                  aria-pressed={rank != null}
                   className="w-4 shrink-0 text-center"
                   style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: rank ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
                   title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
                 >
-                  {marker}
+                  <span aria-hidden="true">{marker}</span>
                 </button>
               ) : (
                 <span
@@ -1315,27 +1426,71 @@ function ActionForm({
   autoFocusName?: boolean;
 }) {
   const preview = rollPreview(toHit, damage);
+  const cardLabel = 'text-[10px] text-slate-300 font-bold uppercase tracking-wide';
+  const toHitError =
+    toHit.trim() !== '' && preview.hit == null
+      ? 'No rollable dice recognized in this expression.'
+      : null;
   return (
-    <div className="cf-inset px-3 py-2.5 space-y-2">
+    <div className="cf-inset px-3 py-2.5 space-y-2" data-testid="character-action-edit">
       <div className="grid grid-cols-2 gap-2.5">
-        <TextInput autoFocus={autoFocusName} value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (Longsword, Fire Bolt…)" />
-        <TextInput value={kind} onChange={(e) => setKind(e.target.value)} placeholder="Kind (melee, ranged, spell…)" />
+        <Field
+          idPrefix={CHARACTER_ACTION_PREFIX}
+          name={CHARACTER_ACTION_FIELD.name}
+          label={CHARACTER_ACTION_NAME_LABEL}
+          labelClassName={cardLabel}
+          autoFocus={autoFocusName}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Longsword, Fire Bolt…"
+          required
+        />
+        <Field
+          idPrefix={CHARACTER_ACTION_PREFIX}
+          name={CHARACTER_ACTION_FIELD.kind}
+          label={CHARACTER_ACTION_KIND_LABEL}
+          labelClassName={cardLabel}
+          value={kind}
+          onChange={(e) => setKind(e.target.value)}
+          placeholder="melee, ranged, spell…"
+          optional
+        />
       </div>
       <div className="grid grid-cols-2 gap-2.5">
-        <TextInput
+        <Field
+          idPrefix={CHARACTER_ACTION_PREFIX}
+          name={CHARACTER_ACTION_FIELD.toHit}
+          label={CHARACTER_ACTION_TO_HIT_LABEL}
+          labelClassName={cardLabel}
           value={toHit}
           onChange={(e) => setToHit(e.target.value)}
-          placeholder="To hit (+5 or 1d20+5)"
-          aria-invalid={toHit.trim() !== '' && preview.hit == null}
+          placeholder="+5 or 1d20+5"
+          help={CHARACTER_ACTION_TO_HIT_HELP}
+          error={toHitError}
+          optional
         />
-        <TextInput
+        <Field
+          idPrefix={CHARACTER_ACTION_PREFIX}
+          name={CHARACTER_ACTION_FIELD.damage}
+          label={CHARACTER_ACTION_DAMAGE_LABEL}
+          labelClassName={cardLabel}
           value={damage}
           onChange={(e) => setDamage(e.target.value)}
-          placeholder="Damage (1d8+3 slashing, 5 fire)"
-          aria-invalid={false}
+          placeholder="1d8+3 slashing, 5 fire"
+          help={CHARACTER_ACTION_DAMAGE_HELP}
+          optional
         />
       </div>
-      <TextInput value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (versatile, 60 ft range…)" />
+      <Field
+        idPrefix={CHARACTER_ACTION_PREFIX}
+        name={CHARACTER_ACTION_FIELD.notes}
+        label={CHARACTER_ACTION_NOTES_LABEL}
+        labelClassName={cardLabel}
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder="versatile, 60 ft range…"
+        optional
+      />
       {(toHit.trim() || damage.trim()) && (
         <p className="text-[11px] text-slate-400">
           {preview.hit == null && preview.dmg == null ? (
@@ -1556,21 +1711,33 @@ function HpEditor({
     void applyDelta(e.shiftKey ? delta * 5 : delta);
   }
 
+  // Contextual HP labels (issue #448): announce character + current/max, not bare deltas.
+  const { name, hpCurrent, hpMax } = character;
   return (
-    <div className="flex gap-2 flex-wrap">
-      <Btn className="!min-h-0" style={{ minWidth: 52, minHeight: 44 }} disabled={busy} onClick={(e) => click(-5, e)}>
-        −5
-      </Btn>
-      <Btn className="!min-h-0" style={{ minWidth: 52, minHeight: 44 }} disabled={busy} onClick={(e) => click(-1, e)}>
-        −1
-      </Btn>
-      <Btn className="!min-h-0" style={{ minWidth: 52, minHeight: 44 }} disabled={busy} onClick={(e) => click(1, e)}>
-        +1
-      </Btn>
-      <Btn className="!min-h-0" style={{ minWidth: 52, minHeight: 44 }} disabled={busy} onClick={(e) => click(5, e)}>
-        +5
-      </Btn>
-      <Btn style={{ minHeight: 44 }} disabled={busy} onClick={fullHeal}>
+    <div
+      className="flex gap-2 flex-wrap"
+      role="group"
+      aria-label={`${name} hit points`}
+      data-testid="character-hp-editor"
+    >
+      {([-5, -1, 1, 5] as const).map((step) => (
+        <Btn
+          key={step}
+          className="!min-h-0"
+          style={{ minWidth: 52, minHeight: 44 }}
+          disabled={busy}
+          aria-label={hpDeltaLabel(name, step, hpCurrent, hpMax)}
+          onClick={(e) => click(step, e)}
+        >
+          {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
+        </Btn>
+      ))}
+      <Btn
+        style={{ minHeight: 44 }}
+        disabled={busy}
+        aria-label={hpFullHealLabel(name, hpMax)}
+        onClick={fullHeal}
+      >
         Full heal
       </Btn>
     </div>
@@ -1593,6 +1760,12 @@ function ConditionsRow({
   const [adding, setAdding] = useState(false);
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
+  // Issue #854: IME confirm Enter must not add; Escape must not dismiss mid-composition.
+  const compositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (compositionGateRef.current === null) {
+    compositionGateRef.current = createCompositionSubmitGate();
+  }
+  const compositionGate = compositionGateRef.current;
 
   async function addCondition() {
     const v = value.trim();
@@ -1654,32 +1827,40 @@ function ConditionsRow({
       {character.conditions.length === 0 && <span className="text-muted text-xs">None — feeling fine.</span>}
       {canEdit &&
         (adding ? (
-          <span className="inline-flex items-center gap-1">
-            <input
+          <form
+            className="inline-flex items-end gap-1"
+            onSubmit={compositionSafeFormSubmit(compositionGate, () => {
+              void addCondition();
+            })}
+          >
+            <Field
+              idPrefix={CHARACTER_CONDITION_PREFIX}
+              name="name"
+              label={CHARACTER_CONDITION_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              className="field !mb-0"
               autoFocus
               list="cf-condition-vocab"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void addCondition();
-                if (e.key === 'Escape') {
-                  setAdding(false);
-                  setValue('');
-                }
-              }}
+              onKeyDown={compositionSafeEscapeHandler(compositionGate, () => {
+                setAdding(false);
+                setValue('');
+              })}
+              {...compositionGate.inputProps}
+              help={CHARACTER_CONDITION_HELP}
               placeholder="Condition…"
-              className="cf-input !min-h-0 !py-1 !w-28 text-xs"
-              style={{ minHeight: 0, padding: '4px 8px' }}
+              style={{ minHeight: 0, padding: '4px 8px', width: '7rem', fontSize: 12 }}
             />
             <datalist id="cf-condition-vocab">
               {adapter.conditions.map((c) => (
                 <option key={c} value={c} />
               ))}
             </datalist>
-            <button type="button" onClick={addCondition} disabled={busy || !value.trim()} className="cf-chip cf-chip-available">
+            <button type="submit" disabled={busy || !value.trim()} className="cf-chip cf-chip-available">
               Add
             </button>
-          </span>
+          </form>
         ) : (
           <button
             type="button"
@@ -1725,8 +1906,20 @@ function StoryBody({
 
   if (editing) {
     return (
-      <div className="space-y-2">
-        <TextArea style={{ minHeight: 140 }} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Markdown supported…" />
+      <div className="space-y-2" data-testid="character-story-edit">
+        <Field
+          idPrefix={CHARACTER_STORY_PREFIX}
+          name="notes"
+          as="textarea"
+          label={CHARACTER_STORY_LABEL}
+          labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Markdown supported…"
+          help={CHARACTER_STORY_HELP}
+          minHeight={140}
+          optional
+        />
         <div className="flex gap-2 justify-end">
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)} disabled={saving}>
             Cancel
@@ -1873,7 +2066,8 @@ const DDB_CHARACTER_URL = (id: string) => `https://www.dndbeyond.com/characters/
  * label so they know where the sheet came from, but not the copy affordance.
  */
 function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: boolean }) {
-  const [copied, setCopied] = useState(false);
+  // Stable DOM id for failure-recovery selection (must be above early return).
+  const sourceIdEl = useId();
 
   // Manual character (no ddbId) — honest guidance, no "soon" hand-wave.
   if (!ddbId) {
@@ -1892,19 +2086,10 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
     );
   }
 
-  // Capture the narrowed non-null id so the closure below keeps the `string` type
-  // (TS does not carry early-return narrowing into nested function declarations).
+  // Capture the narrowed non-null id so nested JSX keeps the `string` type
+  // (TS does not carry early-return narrowing into nested scopes reliably).
   const sourceId = ddbId;
   const isBareId = /^\d+$/.test(sourceId);
-  async function copyId() {
-    try {
-      await navigator.clipboard.writeText(sourceId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard unavailable — id is still selectable above */
-    }
-  }
 
   return (
     <div className="flex justify-between gap-2">
@@ -1913,28 +2098,38 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
         <span className="block">Imported from D&amp;D Beyond</span>
         <span className="block text-[11px] text-slate-500">
           One-time import — not synced.{' '}
-          {isBareId ? (
-            <a
-              href={DDB_CHARACTER_URL(sourceId)}
-              target="_blank"
-              rel="noopener noreferrer nofollow"
-              className="underline hover:text-slate-300"
-            >
-              Source sheet ↗
-            </a>
-          ) : (
-            <span title="D&D Beyond character id">id {sourceId}</span>
+          {/* Selectable target must contain exactly `text` (raw id) — not a
+              prefixed label — so manual recovery after a clipboard failure
+              copies the same payload as writeText. */}
+          <span title="D&D Beyond character id">
+            id <span id={sourceIdEl}>{sourceId}</span>
+          </span>
+          {isBareId && (
+            <>
+              {' '}
+              <a
+                href={DDB_CHARACTER_URL(sourceId)}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                className="underline hover:text-slate-300"
+              >
+                Source sheet ↗
+              </a>
+            </>
           )}
           {canEdit && (
-            <button
-              type="button"
-              onClick={copyId}
+            <CopyControl
+              text={sourceId}
+              selectTargetId={sourceIdEl}
+              label="Copy id"
               title="Copy D&D Beyond character id"
+              showFailureMessage={false}
+              unstyled
               className="underline hover:text-slate-300 ml-1"
               style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: 'pointer' }}
-            >
-              {copied ? 'Copied!' : 'Copy id'}
-            </button>
+              successAnnouncement="D&D Beyond character id copied to clipboard."
+              failureAnnouncement="Copy failed. Clipboard blocked — copy the id manually."
+            />
           )}
         </span>
       </span>

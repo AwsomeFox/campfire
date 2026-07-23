@@ -6,14 +6,26 @@
  * move pin (numeric X/Y -> PATCH), dmSecret panel, delete.
  * Everyone: header, mini pin map, markdown body, here & connected, notes.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  LOCATION_BODY_HELP,
+  LOCATION_BODY_LABEL,
+  LOCATION_DM_SECRET_HELP,
+  LOCATION_DM_SECRET_LABEL,
+  LOCATION_EDIT_PREFIX,
+  LOCATION_FIELD,
+  LOCATION_KIND_LABEL,
+  LOCATION_NAME_LABEL,
+  LOCATION_PARENT_LABEL,
+} from '../../components/formFieldLabels';
 import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/LocationStatusLabel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
@@ -27,6 +39,12 @@ import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { StatusMenuButton } from '../../components/StatusMenuButton';
 import { useAnnounce } from '../../components/Announcer';
 import { entityTargetProps } from '../../lib/entityLinks';
+import {
+  assertMutationTarget,
+  decideRouteBoundCommit,
+  mutationsEnabledForRoute,
+  RouteBoundLoadSequencer,
+} from '../../lib/routeBoundRecord';
 
 
 /** Design's primary "discover" action advances one step: unexplored -> explored -> current. */
@@ -59,6 +77,9 @@ export default function LocationPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  // Issue #853: generation-token loads so a slow A response cannot paint (or leave
+  // mutation controls armed) after the route has moved to B.
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
 
   // Auxiliary panels (issue #697): the full location list (breadcrumb/children/
   // parent-picker), the NPC roster (the "Here" card), the quest list (connected
@@ -114,29 +135,66 @@ export default function LocationPage() {
   const [pinY, setPinY] = useState('50');
   const [pinSaving, setPinSaving] = useState(false);
 
+  // Reset editor chrome tied to the prior record whenever the route identity changes
+  // (issue #853) — parent/child links reuse this component instance.
+  function resetEditorChrome() {
+    setEditing(false);
+    setProposeMode(false);
+    setProposeDone(false);
+    setForm({ name: '', kind: '', body: '', dmSecret: '', parentId: '' });
+    setSaving(false);
+    setSaveError(null);
+    setDeleting(false);
+    setConfirmingDelete(false);
+    setPendingUndo(false);
+    setConflict(false);
+    setMovingPin(false);
+    setPinX('50');
+    setPinY('50');
+    setPinSaving(false);
+    setStatusSaving(false);
+  }
+
   // Core fetch: ONLY the location can set the page-level error/not-found state.
   // The auxiliary panels above own their own error/retry and never reach here (#697).
   const load = useCallback(async () => {
+    const { generation, signal } = loadSequencerRef.current.begin(id);
     setLoading(true);
     setError(null);
     setNotFound(false);
+    // Clear immediately so A's canon/dmSecret never stays painted on B's URL while
+    // B loads — and so mutation controls unmount until the new record matches.
+    setLocation(null);
+    resetEditorChrome();
     try {
-      const locData = await api.get<Location>(`${API}/locations/${id}`);
-      setLocation(locData);
+      const locData = await api.get<Location>(`${API}/locations/${id}`, { signal });
+      const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, id, locData);
+      if (decision.kind !== 'commit') return;
+      setLocation(decision.record);
     } catch (err) {
+      if (!loadSequencerRef.current.isCurrent(generation, id)) return;
+      setLocation(null);
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true);
+      } else if ((err as { name?: string } | undefined)?.name === 'AbortError') {
+        // Superseded by a newer navigation — ignore.
       } else {
         setError(err instanceof ApiError ? err.message : "Couldn't load this location.");
       }
     } finally {
-      setLoading(false);
+      if (loadSequencerRef.current.isCurrent(generation, id)) setLoading(false);
     }
   }, [id]);
 
   useEffect(() => {
-    if (Number.isFinite(cid) && Number.isFinite(id)) void load();
+    if (!Number.isFinite(cid) || !Number.isFinite(id)) return;
+    void load();
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
   }, [cid, id, load]);
+
+  // Block every mutation until the painted record is the route's record (#853).
+  const recordReady = mutationsEnabledForRoute(location, id, loading);
 
   const hereNpcs = useMemo(() => npcs.filter((n) => n.locationId === id), [npcs, id]);
   const hereNpcIds = useMemo(() => new Set(hereNpcs.map((n) => n.id)), [hereNpcs]);
@@ -227,6 +285,9 @@ export default function LocationPage() {
 
   async function save() {
     if (!form.name.trim()) return;
+    // Issue #853: never write form values loaded for A into B's route id.
+    const gate = assertMutationTarget(location?.id, id);
+    if (!gate.ok) return;
     setSaving(true);
     setSaveError(null);
     setConflict(false);
@@ -288,6 +349,7 @@ export default function LocationPage() {
   }
 
   async function remove() {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     setDeleting(true);
     try {
       // Soft-delete (issue #116) — reversible; offer an Undo instead of navigating away.
@@ -308,6 +370,7 @@ export default function LocationPage() {
   }
 
   async function setStatus(status: Location['status']) {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     setStatusSaving(true);
     try {
       const updated = await api.post<Location>(`${API}/locations/${id}/discover`, { status });
@@ -333,6 +396,7 @@ export default function LocationPage() {
   }
 
   async function savePin() {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     const x = Number(pinX);
     const y = Number(pinY);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
@@ -390,7 +454,20 @@ export default function LocationPage() {
     );
   }
 
-  if (!location) return null;
+  // After a route change we clear `location` immediately; until the new record
+  // matches the route, never paint prior content or arm mutation controls (#853).
+  if (!location || !recordReady) {
+    if (loading) {
+      return (
+        <div className="max-w-5xl mx-auto px-4 mt-5">
+          <Card>
+            <Skeleton lines={6} />
+          </Card>
+        </div>
+      );
+    }
+    return null;
+  }
 
   const px = location.mapX ?? 50;
   const py = location.mapY ?? 50;
@@ -693,7 +770,7 @@ export default function LocationPage() {
       )}
 
       {editing && (
-        <Card className="space-y-3">
+        <Card className="space-y-3" data-testid="location-editor-fields">
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
               <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
@@ -701,40 +778,72 @@ export default function LocationPage() {
           )}
           {saveError && <ErrorNote message={saveError} />}
           <div className="grid sm:grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Name</label>
-              <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Kind</label>
-              <TextInput value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} />
-            </div>
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.name}
+              label={LOCATION_NAME_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              required
+            />
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.kind}
+              label={LOCATION_KIND_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              value={form.kind}
+              onChange={(e) => setForm({ ...form, kind: e.target.value })}
+              optional
+            />
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Parent location</label>
-            <select
-              aria-label="Parent location"
-              className="cf-input text-sm w-full"
-              value={form.parentId}
-              onChange={(e) => setForm({ ...form, parentId: e.target.value })}
-            >
-              <option value="">No parent (top level)</option>
-              {parentOptions.map((loc) => (
-                <option key={loc.id} value={loc.id}>
-                  Inside: {loc.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
-            <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
-          </div>
+          <Field
+            idPrefix={LOCATION_EDIT_PREFIX}
+            name={LOCATION_FIELD.parentId}
+            as="select"
+            label={LOCATION_PARENT_LABEL}
+            labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+            selectClassName="cf-input text-sm w-full"
+            value={form.parentId}
+            onChange={(e) => setForm({ ...form, parentId: e.target.value })}
+            optional
+          >
+            <option value="">No parent (top level)</option>
+            {parentOptions.map((loc) => (
+              <option key={loc.id} value={loc.id}>
+                Inside: {loc.name}
+              </option>
+            ))}
+          </Field>
+          <Field
+            idPrefix={LOCATION_EDIT_PREFIX}
+            name={LOCATION_FIELD.body}
+            as="textarea"
+            label={LOCATION_BODY_LABEL}
+            labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+            value={form.body}
+            onChange={(e) => setForm({ ...form, body: e.target.value })}
+            help={LOCATION_BODY_HELP}
+            minHeight={140}
+            optional
+          />
           {!proposeMode && (
-            <div className="space-y-1">
-              <label className="flex items-center gap-1 text-[10px] text-amber-500 font-bold uppercase"><GameIcon slug="padlock" size={11} /> DM secret</label>
-              <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
-            </div>
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.dmSecret}
+              as="textarea"
+              label={
+                <span className="inline-flex items-center gap-1">
+                  <GameIcon slug="padlock" size={11} /> {LOCATION_DM_SECRET_LABEL}
+                </span>
+              }
+              labelClassName="text-[10px] text-amber-400 font-bold uppercase tracking-wide"
+              value={form.dmSecret}
+              onChange={(e) => setForm({ ...form, dmSecret: e.target.value })}
+              help={LOCATION_DM_SECRET_HELP}
+              minHeight={90}
+              optional
+            />
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (
@@ -764,7 +873,7 @@ export default function LocationPage() {
         <ConfirmDialog
           title={`Delete ${location?.name}?`}
           body="This moves the location to the Trash — you can undo it, or restore it from the campaign Trash."
-          confirmLabel={deleting ? 'Deleting…' : 'Delete location'}
+          confirmLabel="Delete location"
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}

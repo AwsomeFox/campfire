@@ -1,7 +1,14 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
+import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
+import {
+  AiDriverService,
+  setDriverStreamIdleTimeoutMsForTests,
+  DRIVER_STREAM_IDLE_TIMEOUT_MS,
+} from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import { DEFAULT_IDLE_TIMEOUT_MS } from '../src/modules/ai-dm/providers/http';
 
 /**
  * Driver AI-DM runtime (#312) — the KEYSTONE flow, tested end-to-end and OFFLINE via the
@@ -217,5 +224,285 @@ describe('ai-dm driver runtime — gating + access (e2e)', () => {
       .send({ input: 'I look around the tavern' });
     expect(res.status).toBe(201);
     expect(res.body.narration).toBe('the player speaks and the world answers');
+  });
+});
+
+/**
+ * Issue #1071 — leaving Driver mode must tear down the live in-memory driver session.
+ * Without this, a driver→off/co_dm→driver cycle can strand the seat behind human_control
+ * (or stuck/vote/paused state) with no obvious handback for the DM to perform.
+ */
+describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-teardown-model' });
+    await h.enableExperimental();
+  });
+  afterAll(async () => {
+    await h.close();
+  });
+
+  async function armDriverWithHumanControl(name: string): Promise<number> {
+    const campaignId = await h.createCampaign(name);
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+    const grant = await h.lever(campaignId, 'grant-takeover', { note: 'table freeze' }, dm);
+    expect(grant.status).toBe(201);
+    expect(grant.body.state).toBe('human_control');
+    expect(grant.body.actingDm).not.toBeNull();
+    // Confirm the stranded-session failure mode the teardown closes.
+    const frozen = await h.sendMessage(campaignId, { input: 'AI, narrate' });
+    expect(frozen.status).toBe(503);
+    expect(frozen.text).toContain('human');
+    return campaignId;
+  }
+
+  it('switching to off resets the driver session to fresh idle and emits a lifecycle state SSE', async () => {
+    const campaignId = await armDriverWithHumanControl('Teardown Off');
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    const off = await h.configureSeat(campaignId, { mode: 'off' });
+    sub.unsubscribe();
+    expect(off.status).toBe(200);
+    expect(off.body.mode).toBe('off');
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('running');
+    expect(session.body.actingDm).toBeNull();
+    expect(session.body.vote).toBeNull();
+    expect(session.body.stuck).toBeNull();
+
+    const stateEv = events.find((e) => e.type === 'state');
+    expect(stateEv).toBeDefined();
+    expect(stateEv && stateEv.type === 'state' && stateEv.state).toBe('running');
+  });
+
+  it('switching to co_dm clears stuck/vote/status and re-selecting Driver starts clean', async () => {
+    const campaignId = await h.createCampaign('Teardown CoDM');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    // Park the seat with stuck + an open vote so teardown has more than actingDm to clear.
+    h.script({
+      text: 'I reach for the dice…',
+      toolCalls: [{ id: 'boom', name: 'no_such_tool', arguments: {} }],
+    });
+    const stuckTurn = await h.sendMessage(campaignId, { input: 'I pick the lock.' });
+    expect(stuckTurn.status).toBe(201);
+    expect((await h.getDriverSession(campaignId)).body.state).toBe('awaiting_players');
+
+    const opened = await h.lever(campaignId, 'vote', { action: 'open', kind: 'pause' }, player);
+    expect(opened.status).toBe(201);
+    expect(opened.body.vote).not.toBeNull();
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    const coDm = await h.configureSeat(campaignId, { mode: 'co_dm' });
+    sub.unsubscribe();
+    expect(coDm.status).toBe(200);
+    expect(coDm.body.mode).toBe('co_dm');
+
+    const cleared = await h.getDriverSession(campaignId);
+    expect(cleared.body.status).toBe('idle');
+    expect(cleared.body.state).toBe('running');
+    expect(cleared.body.stuck).toBeNull();
+    expect(cleared.body.vote).toBeNull();
+    expect(cleared.body.actingDm).toBeNull();
+    expect(events.some((e) => e.type === 'state' && e.state === 'running')).toBe(true);
+
+    // Re-select Driver — must run turns without a handback.
+    const back = await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+    expect(back.status).toBe(200);
+    expect(back.body.mode).toBe('driver');
+
+    h.script({ text: 'A clean table. The story continues.' });
+    const resumed = await h.sendMessage(campaignId, { input: 'onward' });
+    expect(resumed.status).toBe(201);
+    expect(resumed.body.narration).toBe('A clean table. The story continues.');
+  });
+
+  it('driver→off→driver after human_control does not require handback', async () => {
+    const campaignId = await armDriverWithHumanControl('Teardown Cycle');
+
+    await h.configureSeat(campaignId, { mode: 'off' });
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script({ text: 'Fresh seat, no stranded handback.' });
+    const res = await h.sendMessage(campaignId, { input: 'begin' });
+    expect(res.status).toBe(201);
+    expect(res.body.narration).toBe('Fresh seat, no stranded handback.');
+  });
+
+  it('teardown mid-turn detaches the orphaned turn so a replacement session can run cleanly', async () => {
+    const campaignId = await h.createCampaign('Teardown Mid-Turn Race');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const driver = h.ctx.app.get(AiDriverService);
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const user = { id: 'dev:ai-eval-dm', name: 'ai-eval-dm', serverRole: 'user' as const, devRole: 'dm' as const };
+
+    // On the first streamed token, tear down — same shape as a driver→off mid-narration.
+    let toreDown = false;
+    const deltas: string[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e: AiDmStreamEvent) => {
+      if (e.type === 'narration.delta') {
+        deltas.push(e.text);
+        if (!toreDown) {
+          toreDown = true;
+          driver.teardownSession(campaignId);
+        }
+      }
+    });
+
+    h.script({ text: 'ABCDEFGH', streamChunks: 8 });
+    const orphaned = await driver.runTurn(campaignId, user, 'go');
+    sub.unsubscribe();
+
+    expect(toreDown).toBe(true);
+    expect(orphaned.stopReason).toBe('aborted');
+    // Detached after the first delta — remaining chunks must not reach the SSE channel.
+    expect(deltas.length).toBe(1);
+
+    // Map holds a fresh idle session; a follow-up turn must not 409 against the orphan.
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('running');
+
+    h.script({ text: 'Clean seat after mid-turn teardown.' });
+    const resumed = await h.sendMessage(campaignId, { input: 'again' });
+    expect(resumed.status).toBe(201);
+    expect(resumed.body.narration).toBe('Clean seat after mid-turn teardown.');
+  });
+});
+
+/**
+ * Issue #1046 — a provider streaming failure must emit turn.end with provider_error so
+ * every SSE client's composer unlocks, and park the seat in awaiting_players for retry.
+ */
+describe('ai-dm driver — provider streaming failure unlocks composers (#1046)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-provider-error-model' });
+    await h.enableExperimental();
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it('emits turn.end with provider_error, audits, and parks awaiting_players', async () => {
+    const campaignId = await h.createCampaign('Driver Provider Error');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    // Mid-stream 500: yield one token, then throw (the repro in the issue).
+    h.script({
+      text: 'The mist thickens around you…',
+      streamChunks: 4,
+      throwAfterChunks: 1,
+      throwError: new AiProviderError('server', 'mock: upstream HTTP 500', {
+        provider: 'mock',
+        status: 500,
+      }),
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'We press on.' });
+    sub.unsubscribe();
+
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+
+    expect(events.some((e) => e.type === 'turn.start')).toBe(true);
+    const end = events.find((e) => e.type === 'turn.end');
+    expect(end).toBeDefined();
+    expect(end && end.type === 'turn.end' && end.stopReason).toBe('provider_error');
+    // Partial narration reached clients before the failure.
+    expect(events.some((e) => e.type === 'narration.delta')).toBe(true);
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('awaiting_players');
+    expect(session.body.stuck?.reason).toBe('provider_error');
+
+    const audit = await h.getAudit(campaignId);
+    const actions = audit.body.map((e: { action: string }) => e.action);
+    expect(actions).toContain('ai-dm.driver.provider_error');
+
+    // Composer unlocked + seat released: a follow-up turn must not 409.
+    h.script({ text: 'The mist clears. The table can retry.' });
+    const again = await h.sendMessage(campaignId, { input: 'retry' });
+    expect(again.status).not.toBe(409);
+    expect(again.status).toBe(201);
+    expect(again.body.stopReason).toBe('complete');
+  });
+});
+
+/**
+ * Issue #1063 — a provider stream that stalls mid-body must idle-timeout, emit turn.end,
+ * release the seat, and NOT permanently 409 every future turn.
+ */
+describe('ai-dm driver — stream idle timeout recovery (#1063)', () => {
+  let h: AiEvalHarness;
+  const prevIdle = DRIVER_STREAM_IDLE_TIMEOUT_MS;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-idle-model' });
+    await h.enableExperimental();
+    // Shrink the watchdog so the e2e does not wait the production 30s.
+    setDriverStreamIdleTimeoutMsForTests(50);
+  });
+
+  afterAll(async () => {
+    setDriverStreamIdleTimeoutMsForTests(prevIdle || DEFAULT_IDLE_TIMEOUT_MS);
+    await h.close();
+  });
+
+  it('a stream that stalls mid-body aborts, emits turn.end, and does not permanently 409', async () => {
+    const campaignId = await h.createCampaign('Driver Idle Stall');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    // Yield one chunk, then hang until the driver's AbortSignal fires.
+    h.script({
+      text: 'The corridor stretches into darkness…',
+      streamChunks: 4,
+      stallAfterChunks: 1,
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'We advance carefully.' });
+    sub.unsubscribe();
+
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+
+    const end = events.find((e) => e.type === 'turn.end');
+    expect(end).toBeDefined();
+    expect(end && end.type === 'turn.end' && end.stopReason).toBe('provider_error');
+    expect(events.some((e) => e.type === 'turn.start')).toBe(true);
+
+    // Seat released — a follow-up turn must NOT 409 (the wedge the issue describes).
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('awaiting_players');
+    expect(session.body.stuck?.reason).toBe('provider_error');
+
+    // Recovery: nudge/retry after scripting a clean reply.
+    h.script({ text: 'The darkness parts. Play continues.' });
+    const again = await h.sendMessage(campaignId, { input: 'try again' });
+    expect(again.status).not.toBe(409);
+    expect(again.status).toBe(201);
+    expect(again.body.stopReason).toBe('complete');
   });
 });

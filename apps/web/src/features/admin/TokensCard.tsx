@@ -4,11 +4,16 @@
  * create/revoke their own tokens regardless of server role.
  * Per design/10-admin.html "API tokens" section.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { ApiToken, Campaign } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import {
+  compositionSafeFormSubmit,
+  createCompositionSubmitGate,
+} from '../../lib/compositionSafeSubmit';
+import { Card, Btn, TextInput, Skeleton, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 
 type TokenScope = ApiToken['scope'];
@@ -60,24 +65,6 @@ function mcpConnectCommand(origin: string, token?: string): string {
   return `claude mcp add --transport http campfire ${origin}/mcp --header "Authorization: ${authHeader}"`;
 }
 
-function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard unavailable — user can still select the text */
-    }
-  }
-  return (
-    <Btn className="!min-h-0 !py-1.5 text-xs" onClick={copy}>
-      {copied ? 'Copied!' : label}
-    </Btn>
-  );
-}
-
 /**
  * "Connect your AI" block — always-visible tokenless version (persistent on /tokens)
  * unless `token` is supplied, in which case it shows the real command with the
@@ -87,19 +74,21 @@ function ConnectAiBlock({ token }: { token?: string }) {
   const origin = window.location.origin;
   const mcpUrl = `${origin}/mcp`;
   const command = mcpConnectCommand(origin, token);
+  const mcpId = useId();
+  const commandId = useId();
   return (
     <div className="cf-inset p-3.5 space-y-2">
       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Connect your AI</p>
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] text-slate-500">MCP endpoint</span>
-        <code className="text-xs text-slate-300 font-mono break-all flex-1 min-w-0">{mcpUrl}</code>
-        <CopyButton text={mcpUrl} />
+        <code id={mcpId} className="text-xs text-slate-300 font-mono break-all flex-1 min-w-0">{mcpUrl}</code>
+        <CopyControl text={mcpUrl} selectTargetId={mcpId} className="!min-h-0 !py-1.5 text-xs" />
       </div>
       <div className="flex items-center gap-2 flex-wrap">
-        <code className="cf-inset px-3 py-2 text-xs text-slate-300 font-mono break-all flex-1 min-w-0">
+        <code id={commandId} className="cf-inset px-3 py-2 text-xs text-slate-300 font-mono break-all flex-1 min-w-0">
           {command}
         </code>
-        <CopyButton text={command} />
+        <CopyControl text={command} selectTargetId={commandId} className="!min-h-0 !py-1.5 text-xs" />
       </div>
       <p className="text-[11px] text-slate-500">
         {token
@@ -205,7 +194,7 @@ export function TokensCard() {
         <ConfirmDialog
           title={`Revoke token "${confirmRevoke.name}"?`}
           body="Anything using it will stop working immediately."
-          confirmLabel={revoking ? 'Revoking…' : 'Revoke'}
+          confirmLabel="Revoke"
           busy={revoking}
           onConfirm={() => revoke(confirmRevoke)}
           onCancel={() => setConfirmRevoke(null)}
@@ -257,6 +246,12 @@ function NewTokenForm({
   const [writeScope, setWriteScope] = useState<WriteScope>('propose');
   const [campaignId, setCampaignId] = useState<string>('');
   const [saving, setSaving] = useState(false);
+  // Issue #854: Enter confirming IME composition must not mint a token.
+  const compositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (compositionGateRef.current === null) {
+    compositionGateRef.current = createCompositionSubmitGate();
+  }
+  const compositionGate = compositionGateRef.current;
 
   async function create() {
     if (saving || !name.trim()) return;
@@ -278,7 +273,12 @@ function NewTokenForm({
   }
 
   return (
-    <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
+    <form
+      className="cf-inset border-amber-500/30 p-3.5 space-y-2"
+      onSubmit={compositionSafeFormSubmit(compositionGate, () => {
+        void create();
+      })}
+    >
       <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">New token</p>
       <p className="text-[11px] text-slate-400">
         Two independent controls decide what an AI (or REST/MCP caller) can do
@@ -295,9 +295,7 @@ function NewTokenForm({
           aria-label="Token name (required)"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void create();
-          }}
+          {...compositionGate.inputProps}
           autoFocus
         />
         <select
@@ -344,34 +342,26 @@ function NewTokenForm({
       )}
       <div className="flex items-center gap-2 justify-end">
         {!name.trim() && <p className="text-[11px] text-slate-500 mr-auto">Name your token to enable Create.</p>}
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
+        <Btn type="button" ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
         <Btn
+          type="submit"
           className="!min-h-0 !py-1.5 text-xs"
-          onClick={create}
           disabled={saving || !name.trim()}
           title={!name.trim() ? 'Enter a token name first' : undefined}
         >
           Create
         </Btn>
       </div>
-    </div>
+    </form>
   );
 }
 
 function NewTokenReveal({ created, onClose }: { created: ApiTokenCreated; onClose: () => void }) {
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(created.token);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard unavailable — user can still select the text */
-    }
-  }
+  // One-time secret: on clipboard failure CopyControl selects this node so the
+  // token stays available for a manual copy instead of a false "Copied!".
+  const tokenId = useId();
 
   return (
     <div className="cf-dm-panel p-4 space-y-2">
@@ -384,12 +374,16 @@ function NewTokenReveal({ created, onClose }: { created: ApiTokenCreated; onClos
         </button>
       </div>
       <div className="flex items-center gap-2 flex-wrap">
-        <code className="cf-inset px-3 py-2 text-sm text-amber-300 font-mono break-all flex-1 min-w-0">
+        <code id={tokenId} className="cf-inset px-3 py-2 text-sm text-amber-300 font-mono break-all flex-1 min-w-0">
           {created.token}
         </code>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={copy}>
-          {copied ? 'Copied!' : 'Copy'}
-        </Btn>
+        <CopyControl
+          text={created.token}
+          selectTargetId={tokenId}
+          className="!min-h-0 !py-1.5 text-xs"
+          successAnnouncement="Token copied to clipboard."
+          failureAnnouncement="Copy failed. Clipboard blocked — select the token and copy it manually."
+        />
       </div>
       <p className="text-[11px] text-slate-400">
         Shown once — save it somewhere safe, or use the ready-to-run command below.

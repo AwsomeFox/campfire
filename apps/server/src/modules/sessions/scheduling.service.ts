@@ -1,7 +1,12 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { ScheduledSessionCreate, ScheduledSessionUpdate, RsvpSet } from '@campfire/schema';
+import {
+  ScheduledSessionCreate,
+  ScheduledSessionUpdate,
+  RsvpSet,
+  partitionSchedules,
+} from '@campfire/schema';
 import type { ScheduledSession, ScheduledSessionWithRsvps, SessionRsvp, CalendarFeed, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
@@ -135,13 +140,33 @@ export class SchedulingService {
     return rows.map(toDomain);
   }
 
-  /** The campaign's "next session": earliest schedule not yet in the past, or null. */
+  /**
+   * The campaign's active schedule card: earliest in-progress game night, else the
+   * soonest not-yet-started one. A session stays "current" from scheduledAt through
+   * scheduledAt+durationMinutes (issue #818) so /schedule/next does not go blank at
+   * the start of play.
+   */
   async nextForCampaign(campaignId: number): Promise<ScheduledSessionWithRsvps | null> {
+    const { inProgressSession, nextSession } = await this.currentAndNextForCampaign(campaignId);
+    return inProgressSession ?? nextSession;
+  }
+
+  /**
+   * Split the live schedule projection into the in-progress game (if any) and the
+   * next not-yet-started night. Overlapping in-progress rows prefer the earliest
+   * start; list order from listForCampaign is soonest-first.
+   */
+  async currentAndNextForCampaign(campaignId: number): Promise<{
+    inProgressSession: ScheduledSessionWithRsvps | null;
+    nextSession: ScheduledSessionWithRsvps | null;
+  }> {
     const all = await this.listForCampaign(campaignId);
     const now = Date.now();
-    // scheduledAt is normalized ISO UTC (see normalizeScheduledAt), but compare
-    // via Date.parse rather than string order to be robust to legacy rows.
-    return all.find((s) => Date.parse(s.scheduledAt) >= now) ?? null;
+    const { inProgress, upcoming } = partitionSchedules(all, now);
+    return {
+      inProgressSession: inProgress[0] ?? null,
+      nextSession: upcoming[0] ?? null,
+    };
   }
 
   async getRowOrThrow(id: number) {
@@ -187,11 +212,13 @@ export class SchedulingService {
     });
     this.emitScheduleUpdated(campaignId, row.id);
     // Tell the party a game night was put on the calendar (issue #263). Best-effort;
-    // no entity deep-link (scheduled sessions aren't an EntityType — the bell routes
-    // session_scheduled to the sessions page, which hosts the schedule panel).
+    // stamp entityId so the bell opens the Schedule tab on this exact card (#446).
     await this.notifications.notifyCampaign(campaignId, user, {
       type: 'session_scheduled',
       title: `${this.scheduleLabel(row)} scheduled for ${row.scheduledAt.slice(0, 10)}`,
+      // entityId alone (no EntityType for scheduled_session) — the bell routes
+      // session_scheduled to the Schedule tab and focuses this card (#446).
+      entityId: row.id,
       actorName: user.name,
     });
     return { ...toDomain(row), rsvps: [] };
@@ -222,6 +249,7 @@ export class SchedulingService {
       await this.notifications.notifyCampaign(existing.campaignId, user, {
         type: 'session_scheduled',
         title: `${this.scheduleLabel(existing)} rescheduled for ${patch.scheduledAt.slice(0, 10)}`,
+        entityId: id,
         actorName: user.name,
       });
     }
@@ -291,6 +319,7 @@ export class SchedulingService {
       await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
         type: 'session_rsvp',
         title: `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`,
+        entityId: scheduleId,
         actorName: user.name,
       });
     }

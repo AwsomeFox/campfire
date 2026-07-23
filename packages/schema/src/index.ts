@@ -11,6 +11,35 @@
  *  - Create/Update input schemas are derived from the entity schema
  */
 import { z } from 'zod';
+import {
+  DifficultyBand,
+  EncounterDifficulty,
+  EncounterDifficultyStatus,
+  DIFFICULTY_BAND_LABELS,
+  UNKNOWN_DIFFICULTY_LABEL,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeDnd5eEncounterDifficulty,
+  unsupportedEncounterDifficulty,
+  type EncounterDifficultyInput,
+} from './encounter-difficulty';
+
+export {
+  DifficultyBand,
+  EncounterDifficultyStatus,
+  EncounterDifficulty,
+  DIFFICULTY_BAND_LABELS,
+  UNKNOWN_DIFFICULTY_LABEL,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeDnd5eEncounterDifficulty,
+  unsupportedEncounterDifficulty,
+};
+export type { EncounterDifficultyInput };
 
 // ---------- shared ----------
 export const Role = z.enum(['dm', 'player', 'viewer']);
@@ -73,6 +102,13 @@ export const Campaign = z.object({
   // can atomically revoke every active capability rather than leaving old URLs
   // ready to spring back to life when the setting is re-enabled.
   publicRecapSharingEnabled: z.boolean().default(true),
+  // Campaign-level join-link kill switch (issue #857). Archive/trash auto-clears
+  // this so paused/completed/trashed campaigns stop disclosing via bearer invite
+  // links; restoring the campaign does NOT flip it back — the DM must deliberately
+  // re-enable via PUT /campaigns/:id/invites/policy. Distinct from revoke-all
+  // (row delete): suspension keeps invite rows so a deliberate reactivation can
+  // restore the same codes.
+  publicInvitesEnabled: z.boolean().default(true),
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
@@ -88,7 +124,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // Clone/template input — POST /campaigns/:id/clone.
@@ -122,6 +158,7 @@ export const CampaignImport = z
     characters: z.array(ImportedEntity).optional(),
     sessions: z.array(ImportedEntity).optional(),
     notes: z.array(ImportedEntity).optional(),
+    comments: z.array(ImportedEntity).optional(),
     encounters: z.array(ImportedEntity).optional(),
     // Issue #266: entity types the export previously dropped and now round-trips.
     // Arrays are loose objects (remapped defensively in the service); the two
@@ -133,6 +170,9 @@ export const CampaignImport = z
     sessionZero: ImportedEntity.optional(),
     inventory: z.array(ImportedEntity).optional(),
     treasury: ImportedEntity.optional(),
+    // Issue #813: immutable prose versions (author + replacer provenance) round-trip
+    // with remapped entity / restoredFrom ids. Loose objects — the importer is defensive.
+    revisions: z.array(ImportedEntity).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
@@ -319,9 +359,10 @@ export const ConditionsPatch = z.object({
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
  * the character sheet, the encounter tracker, and the compendium (issue #111).
- * Conditions stay free-text on the wire (homebrew is allowed), but these are the
- * standard names surfaced as suggestions so the three surfaces speak the same
- * vocabulary instead of each hardcoding its own list.
+ * The wire schema stays `string` (DM homebrew is allowed), but non-DM combatant
+ * adds are validated against the active adapter's list (issue #495). These are
+ * also the standard names surfaced as suggestions so the three surfaces speak
+ * the same vocabulary instead of each hardcoding its own list.
  */
 export const CONDITIONS = [
   'Blinded',
@@ -341,6 +382,16 @@ export const CONDITIONS = [
   'Unconscious',
 ] as const;
 export type ConditionName = (typeof CONDITIONS)[number];
+
+/**
+ * Case-insensitive membership check against a rule-system condition vocabulary
+ * (issue #495). Trims the candidate; empty strings never match.
+ */
+export function isKnownCondition(vocab: readonly string[], name: string): boolean {
+  const needle = name.trim().toLowerCase();
+  if (!needle) return false;
+  return vocab.some((c) => c.toLowerCase() === needle);
+}
 /** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
@@ -595,7 +646,8 @@ export const NpcUpdate = NpcCreate.partial();
 // wholesale `hidden` gating) and adds a party-reputation model: a numeric
 // `reputation` score the DM (or the AI scribe) can bump, plus a human `standing`
 // label on the hostile→allied scale. NPCs link to a faction via npcs.factionId.
-export const FactionStanding = z.enum(['hostile', 'unfriendly', 'neutral', 'friendly', 'allied']);
+export const FACTION_STANDINGS = Object.freeze(['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'] as const);
+export const FactionStanding = z.enum(FACTION_STANDINGS);
 export type FactionStanding = z.infer<typeof FactionStanding>;
 
 export const Faction = z.object({
@@ -777,15 +829,32 @@ export const ScheduledSession = z.object({
   id: Id,
   campaignId: Id,
   scheduledAt: IsoDateTime, // when the session starts (stored as ISO UTC)
-  durationMinutes: z.number().int().min(15).max(24 * 60).default(240), // drives DTEND in the ICS feed
+  // min 0 allows mid-session "End session" to shrink the window immediately
+  // (issue #818). Create still requires ≥15 via ScheduledSessionCreate.
+  durationMinutes: z.number().int().min(0).max(24 * 60).default(240), // drives DTEND in the ICS feed
   title: z.string().max(200).default(''),
   location: z.string().max(200).default(''), // "Sam's place", a VTT link…
   notes: z.string().max(5000).default(''),
   ...timestamps,
 });
 export type ScheduledSession = z.infer<typeof ScheduledSession>;
-export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ scheduledAt: true });
-export const ScheduledSessionUpdate = ScheduledSessionCreate.partial();
+export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ scheduledAt: true })
+  .extend({
+    // Planned game nights stay at least 15 minutes; keep the 240-minute default when
+    // callers omit the field (updates may shrink to 0 via ScheduledSessionUpdate).
+    durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
+  });
+// Explicit optional fields without `.default()` so PATCH bodies that omit a key
+// do not materialize create-time defaults (Zod applies defaults on undefined).
+export const ScheduledSessionUpdate = z.object({
+  scheduledAt: IsoDateTime.optional(),
+  durationMinutes: z.number().int().min(0).max(24 * 60).optional(),
+  title: z.string().max(200).optional(),
+  location: z.string().max(200).optional(),
+  notes: z.string().max(5000).optional(),
+});
 
 export const RsvpStatus = z.enum(['yes', 'no', 'maybe']);
 export type RsvpStatus = z.infer<typeof RsvpStatus>;
@@ -805,6 +874,9 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+// Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
+export * from './scheduleWindow';
 
 // Per-campaign ICS calendar feed. `token` is an unguessable capability secret
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
@@ -1025,32 +1097,56 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
-// ---------- entity revisions (issue #157) ----------
-// A revision-history layer for the prose entities most at risk of a blind
-// last-write-wins clobber (a co-DM polishing a recap while a connected AI saves its
-// own edit). On every committed prose update the server snapshots the PRIOR content
-// here; the history can then be listed and any prior snapshot RESTORED (re-applied as
-// a new update, itself recorded). Covers the DM-authored world-building prose whose
-// edit path is uniformly dm-gated — sessions (recap), quests/npcs/locations/factions
-// (body) — AND notes (body), which #157 cited by line as the destroyed prose. Notes
-// carry their own per-note visibility/author-only-edit model, so their revision reads
-// are gated on the note's OWN visibility (not a blanket dm-gate) and restore is
-// author-only — see RevisionsController — so history is never a redaction back-door.
+// ---------- entity revisions (issue #157 / #813) ----------
+// Immutable prose versions for the entities most at risk of a blind last-write-wins
+// clobber (a co-DM polishing a recap while a connected AI saves its own edit). Each
+// row is a version of the prose itself (not merely "content being overwritten"):
+// `author*` + `createdAt` are who/when that version became authoritative, while
+// `replacedBy*` + `replacedAt` record who later superseded it. A null `replacedAt`
+// marks the current tip (live content); history listings omit tips. Restoring a
+// prior version opens a NEW tip attributed to the restorer and linked via
+// `restoredFromRevisionId`. Legacy rows migrated from the pre-#813 shape (where
+// author/time were the replacing editor) set `authorshipKnown=false` so the UI can
+// label them honestly as "Replaced by …" instead of inventing an author.
+// Covers DM-authored world-building prose — sessions (recap), quests/npcs/locations/
+// factions (body) — AND notes (body). Notes carry their own per-note visibility/
+// author-only-edit model, so revision reads are gated on the note's OWN visibility
+// and restore is author-only — see RevisionsController.
 export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location', 'faction', 'note']);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
+
+/** How the version's prose was produced — human editor, AI seat, or tool/PAT. */
+export const RevisionAuthorSource = z.enum(['human', 'ai', 'tool']);
+export type RevisionAuthorSource = z.infer<typeof RevisionAuthorSource>;
 
 export const EntityRevision = z.object({
   id: Id,
   campaignId: Id,
   entityType: RevisionEntityType,
   entityId: Id,
-  // The snapshotted PRIOR prose, keyed by the entity's prose field ('recap' for a
+  // The prose OF THIS VERSION, keyed by the entity's prose field ('recap' for a
   // session, 'body' for quest/npc/location/faction/note). A plain string map so the
   // shape is uniform across entity types and the web can render whichever key is present.
   snapshot: z.record(z.string(), z.string()).default({}),
+  // Version author (who wrote this snapshot). Empty when authorshipKnown is false.
   authorUserId: z.string().max(120).default(''),
   authorName: z.string().max(120).default(''),
+  authorSource: RevisionAuthorSource.default('human'),
+  // Token name / AI seat id / provider hint — empty for ordinary human cookie sessions.
+  authorSourceDetail: z.string().max(200).default(''),
+  // When this version became authoritative. Empty string for legacy rows whose
+  // original authored-at is unknowable (authorshipKnown=false).
   createdAt: IsoDate,
+  // Who/when superseded this version. Null replacedAt = current tip (still live).
+  replacedByUserId: z.string().max(120).default(''),
+  replacedByName: z.string().max(120).default(''),
+  replacedBySource: RevisionAuthorSource.default('human'),
+  replacedBySourceDetail: z.string().max(200).default(''),
+  replacedAt: z.string().nullable().default(null),
+  // Set when this version was created by restoring another revision.
+  restoredFromRevisionId: Id.nullable().default(null),
+  // false for pre-#813 rows: author fields must not be presented as provenance.
+  authorshipKnown: z.boolean().default(true),
 });
 export type EntityRevision = z.infer<typeof EntityRevision>;
 
@@ -1085,6 +1181,13 @@ export const Comment = z.object({
   authorName: z.string().max(120).default(''),
   body: z.string().min(1).max(20_000), // markdown (redacted to a placeholder when tombstoned)
   inCharacter: z.boolean().default(false),
+  // Immutable creation-time persona attribution (issue #787). characterId is a
+  // soft reference to the selected owned character; the name/avatar snapshots are
+  // authoritative for display so a later rename or character deletion cannot
+  // rewrite old dialogue. Legacy/OOC comments carry nulls.
+  characterId: Id.nullable().default(null),
+  characterName: z.string().max(120).nullable().default(null),
+  characterAvatarUrl: z.string().max(500).nullable().default(null),
   // Tombstone (issue #503). null = live; an ISO timestamp means the comment was
   // deleted by its author / a DM and its body has been redacted. The row remains so
   // replies keep their parent. Cleared on restore.
@@ -1112,6 +1215,8 @@ export const CommentCreate = Comment.omit({
   campaignId: true,
   authorUserId: true,
   authorName: true,
+  characterName: true,
+  characterAvatarUrl: true,
   deletedAt: true,
   deletedBy: true,
   editedAt: true,
@@ -1123,6 +1228,8 @@ export const CommentCreate = Comment.omit({
   .required({ entityType: true, entityId: true, body: true });
 export const CommentUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
+  // Kept for wire compatibility, but changing it after creation is rejected by
+  // the service because persona attribution is immutable historical provenance.
   inCharacter: z.boolean().optional(),
 });
 
@@ -1146,6 +1253,8 @@ export const NotificationType = z.enum([
   'note_shared',
   'comment_reply',
   'added_to_campaign',
+  // Issue #819: exclusive character seat transferred away from (or onto) this member.
+  'character_reassigned',
   'session_scheduled',
   'session_rsvp',
   'quest_updated',
@@ -1166,6 +1275,11 @@ export const Notification = z.object({
   body: z.string().max(1000).default(''), // short excerpt/context, plain text
   entityType: EntityType.nullable().default(null), // deep-link target (e.g. session), if any
   entityId: Id.nullable().default(null),
+  /**
+   * Issue #446: when set (typically `comment_reply`), the UI focuses this comment
+   * inside the parent entity's discussion thread (`entityType`/`entityId`).
+   */
+  commentId: Id.nullable().default(null),
   actorName: z.string().max(120).default(''), // display name of who triggered it
   readAt: IsoDate.nullable().default(null), // null = unread
   createdAt: IsoDate,
@@ -1485,6 +1599,15 @@ export function listRulePackSources(): RulePackSourceMeta[] {
 // rule-pack slug — resolves to the exact same behavior it has today. A future system is
 // one adapter object registered in ADAPTERS, not a sweep across the combat code.
 
+/**
+ * How values in a monster `abilityScores` map (or a character ability map) should be
+ * interpreted before rolling or rendering (issue #767):
+ * - `score` — classic 3–18 ability scores; convert with `abilityModifier` (5e/PF1e/…).
+ * - `modifier` — already signed modifiers as listed on PF2e creature statblocks; use as-is.
+ * - `native` — system-native values used directly (Open Legend attributes).
+ */
+export type AbilityRepresentation = 'score' | 'modifier' | 'native';
+
 /** Raw statblock fields picked out of a monster rule-entry's `dataJson` (pre-formatting). */
 export interface MonsterStatblockData {
   size: unknown;
@@ -1495,6 +1618,11 @@ export interface MonsterStatblockData {
   speed: unknown;
   /** The ability-score sub-object (5e: `{ strength, dexterity, … }`), or undefined. */
   abilityScores: Record<string, unknown> | undefined;
+  /**
+   * How to interpret `abilityScores` for this mapped monster. Defaults are applied by each
+   * adapter's `mapStatblock` (5e → score, PF2e creatures → modifier, Open Legend → native).
+   */
+  abilityRepresentation: AbilityRepresentation;
   specialAbilities: unknown;
   actions: unknown;
   /** Optional action categories used by systems that distinguish them in a statblock. */
@@ -1507,7 +1635,7 @@ export interface RuleSystemAdapter {
   readonly id: string;
   /** Human-readable label. */
   readonly label: string;
-  /** Ability-score → modifier (5e: floor((score - 10) / 2)). */
+  /** Ability-score → modifier (5e: floor((score - 10) / 2)). Character sheets always use this. */
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
   readonly initiativeDie: number;
@@ -1520,12 +1648,20 @@ export interface RuleSystemAdapter {
    */
   readonly maxLevel: number;
   /**
-   * Derive a combatant's initiative modifier from an ability-score map (5e: the DEX
-   * modifier). Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster
-   * `abilityScores` object (`{ dexterity: 14 }`); returns 0 when the governing score is
-   * absent or non-numeric.
+   * Derive a combatant's initiative modifier from an ability map (5e: the DEX modifier).
+   * Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster `abilityScores`
+   * object (`{ dexterity: 14 }`); returns 0 when the governing value is absent or non-numeric.
+   * Pass `representation` from `mapStatblock().abilityRepresentation` for monsters so
+   * already-modifier / native values are not converted a second time (issue #767).
+   * Optional `level` is for systems whose initiative check includes a level/proficiency
+   * term (PF2e Perception = WIS mod + proficiency; issue #491). Callers pass the
+   * character's level on the character-sheet path; monster/statblock paths omit it.
    */
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number;
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation?: AbilityRepresentation,
+    level?: number,
+  ): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
@@ -1554,6 +1690,17 @@ export interface RuleSystemAdapter {
    * affordance and the server checks to REJECT a direct-API request that bypasses the UI.
    */
   readonly supportsDdbImport?: boolean;
+  /**
+   * Whether this adapter owns encounter-difficulty math (issue #429). Only D&D 5e opts in;
+   * other systems omit it so `encounterDifficultySupported()` / getDifficulty return an
+   * explicit unsupported result instead of a misleading 5e "Trivial" band.
+   */
+  readonly supportsEncounterDifficulty?: boolean;
+  /**
+   * Estimate encounter difficulty for this ruleset. Required when
+   * `supportsEncounterDifficulty` is true; unsupported adapters omit it.
+   */
+  estimateEncounterDifficulty?(input: EncounterDifficultyInput): EncounterDifficulty;
 }
 
 /**
@@ -1566,6 +1713,22 @@ export interface AttributeDicePool {
   score: number;
   dice: number[];
   disadvantage: boolean;
+}
+
+/**
+ * Convert a stored ability value into the modifier used for rolls/display (issue #767).
+ * Character sheets always pass `score` (or omit representation) so PF2e/5e keep
+ * `floor((score-10)/2)`. Monster statblocks pass the representation from `mapStatblock`
+ * so PF2e creature modifiers and Open Legend attributes are consumed exactly once.
+ */
+export function resolveAbilityModifier(
+  adapter: Pick<RuleSystemAdapter, 'abilityModifier'>,
+  value: number,
+  representation: AbilityRepresentation = 'score',
+): number {
+  if (!Number.isFinite(value)) return 0;
+  if (representation === 'score') return adapter.abilityModifier(value);
+  return Math.trunc(value);
 }
 
 /** Read the governing (DEX) score from either a canonical or raw ability map, if numeric. */
@@ -1595,9 +1758,12 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
   // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
   maxLevel: 20,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = dnd5eDexScore(abilities);
-    return dex === null ? 0 : this.abilityModifier(dex);
+    return dex === null ? 0 : resolveAbilityModifier(this, dex, representation);
   },
   // The combat-UI condition vocabulary is the canonical 5e list (issue #111's single
   // source of truth), not a separate hand-maintained subset. This is what every 5e
@@ -1613,6 +1779,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
       hitPoints: d.hitPoints ?? d.hit_points ?? d.hp,
       speed: d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
       legendaryActions: d.legendaryActions ?? d.legendary_actions,
@@ -1626,6 +1793,11 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // The D&D Beyond importer produces a 5e-shaped character (5e abilities/AC/HP/conditions),
   // so 5e is the one system that is field-compatible with it (issue #714).
   supportsDdbImport: true,
+  // 5e owns the DMG XP-budget difficulty estimate (issues #58 + #429).
+  supportsEncounterDifficulty: true,
+  estimateEncounterDifficulty(input: EncounterDifficultyInput): EncounterDifficulty {
+    return computeDnd5eEncounterDifficulty(input);
+  },
 };
 
 // ---------- Open Legend adapter (issue #299) ----------
@@ -1780,7 +1952,11 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   // adapter reports Infinity — `levelUp` never rejects on the cap (issue #535). A campaign that
   // models "level" as a loose progression tier is free to advance without a synthetic 5e ceiling.
   maxLevel: Infinity,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    _representation: AbilityRepresentation = 'native',
+  ): number {
+    // Agility is already the native attribute value (no score→mod conversion).
     return openLegendAgility(abilities);
   },
   conditions: OPEN_LEGEND_BANES_BOONS,
@@ -1799,6 +1975,7 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
       speed: d.speed,
       abilityScores: attributes && typeof attributes === 'object' ? attributes : undefined,
+      abilityRepresentation: 'native',
       specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.actions,
       actions: d.actions,
     };
@@ -2027,7 +2204,8 @@ export interface Pf2eRuleSystemAdapter extends RuleSystemAdapter {
 export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   id: PF2E_ADAPTER_ID,
   label: 'Pathfinder 2e',
-  // PF2e ability modifiers use the same floor((score-10)/2) mapping as 5e.
+  // Character ability SCORES still use the same floor((score-10)/2) mapping as 5e.
+  // Creature statblocks store modifiers separately (`abilityRepresentation: 'modifier'`).
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -2035,23 +2213,43 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
-  // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
-  // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
-  // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
-  // back to the WIS modifier. Returns 0 when neither is present/numeric.
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  // DEX modifier (the 5e assumption). A numeric `perception` is already the full
+  // Perception modifier and is LEVEL-INCLUSIVE (monster statblocks publish Perception
+  // with level baked in; a character sheet that stores a computed Perception number is
+  // the same). Otherwise (a character sheet of ability SCORES) Perception is
+  // Wisdom-based and at least trained for every PC (Player Core), so the fallback is
+  // `WIS mod + pf2eProficiencyBonus(level, 'trained')` — never the bare 5e-style WIS
+  // mod alone (issue #491). When `representation` is `modifier` (mapped creatures),
+  // WIS is already a modifier and must not be converted again (issue #767); that path
+  // does not add proficiency (creatures expose Perception instead).
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+    level?: number,
+  ): number {
     if (!abilities) return 0;
     const perception = abilities.perception ?? abilities.Perception;
+    // Level-inclusive: return as-is (do not add proficiency a second time).
     if (typeof perception === 'number') return perception;
     const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
-    if (typeof wisScore === 'number') return this.abilityModifier(wisScore);
-    return 0;
+    if (typeof wisScore !== 'number') return 0;
+    const wisMod = resolveAbilityModifier(this, wisScore, representation);
+    // Character-sheet fallback only: ability scores + known level → trained Perception.
+    if (
+      representation === 'score' &&
+      typeof level === 'number' &&
+      Number.isFinite(level)
+    ) {
+      return wisMod + pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+    }
+    return wisMod;
   },
   conditions: PF2E_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     // PF2e statblocks list ability MODIFIERS (Str +4), not scores; the importer stores them
-    // under `abilityMods`. Surface those under the seam's `abilityScores` field, and fold in
-    // the flat Perception modifier so initiativeModifier (above) can read it back out.
+    // under `abilityMods`. Surface those under the seam's `abilityScores` field with
+    // `abilityRepresentation: 'modifier'`, and fold in the flat Perception modifier so
+    // initiativeModifier (above) can read it back out without a second conversion.
     const mods = (d.abilityMods ?? d.ability_mods ?? d.abilityScores ?? d.abilities) as
       | Record<string, unknown>
       | undefined;
@@ -2074,6 +2272,7 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
       speed: d.speed ?? d.speeds,
       abilityScores,
+      abilityRepresentation: 'modifier',
       specialAbilities: d.specialAbilities ?? d.special ?? d.abilities_special,
       actions: d.actions ?? d.attacks,
     };
@@ -2171,6 +2370,40 @@ export function ddbImportSupported(ruleSystem?: string | null): boolean {
   const adapter = ADAPTERS[ruleSystem];
   if (!adapter) return false; // unrecognized slug — don't trust an unknown pack
   return adapter.supportsDdbImport === true;
+}
+
+/**
+ * Whether encounter-difficulty estimation should run for a campaign whose `ruleSystem`
+ * is the given slug (issue #429).
+ *
+ * - Empty / unrecognized slugs fall back to the 5e estimator (same default as combat math)
+ *   so homebrew tables still get XP guidance — zero-data fights surface as `unknown`, not
+ *   a fake Trivial band.
+ * - A registered non-5e adapter (PF2e, OSR, …) that does not opt in returns unsupported.
+ */
+export function encounterDifficultySupported(ruleSystem?: string | null): boolean {
+  if (!ruleSystem) return true; // homebrew → 5e fallback
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter) return true; // unrecognized → 5e fallback
+  return adapter.supportsEncounterDifficulty === true;
+}
+
+/**
+ * Resolve difficulty for a campaign rule-system slug (issue #429). Supported adapters own
+ * the math/labels; registered non-supporting systems return an explicit unsupported result.
+ */
+export function estimateEncounterDifficultyForRuleSystem(
+  ruleSystem: string | null | undefined,
+  input: EncounterDifficultyInput,
+): EncounterDifficulty {
+  if (!ruleSystem || !ADAPTERS[ruleSystem]) {
+    return Dnd5eAdapter.estimateEncounterDifficulty!(input);
+  }
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter.supportsEncounterDifficulty || !adapter.estimateEncounterDifficulty) {
+    return unsupportedEncounterDifficulty(adapter.label, input);
+  }
+  return adapter.estimateEncounterDifficulty(input);
 }
 
 // ---------- generic uploaded rule packs (issue #19) ----------
@@ -2346,7 +2579,12 @@ export const CampaignSummary = z.object({
   }),
   inventoryCount: z.number().int().nonnegative(), // number of loot/inventory items tracked
   commentCount: z.number().int().nonnegative(), // discussion comments the caller may see (anchor-visibility redacted)
-  nextSession: ScheduledSessionWithRsvps.nullable(), // the soonest not-yet-past game night (with RSVPs), or null
+  // Issue #818: split "happening now" from "next" so an in-progress game night stays
+  // visible without hiding the later upcoming event. `nextSession` is the soonest
+  // not-yet-started night (scheduledAt >= now); `inProgressSession` is the soonest
+  // still inside its [scheduledAt, scheduledAt+duration) window.
+  inProgressSession: ScheduledSessionWithRsvps.nullable(),
+  nextSession: ScheduledSessionWithRsvps.nullable(),
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;
@@ -2442,6 +2680,8 @@ export const AuthStatus = z.object({
   // the UI must use neutral "SSO" copy; no issuer/client/group details belong here.
   oidcProviderName: z.string().max(80).nullable(),
   version: z.string(),
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
 
@@ -2490,6 +2730,18 @@ export const SettingsUpdate = ServerSettings.partial();
 const OidcField = z.string().trim().max(2048);
 const OidcProviderNameField = z.string().trim().max(80);
 
+/** Non-secret origin of a single OIDC field value used during a diagnostic probe (issue #848). */
+export const OidcConfigValueSource = z.enum(['draft', 'stored', 'environment', 'default']);
+export type OidcConfigValueSource = z.infer<typeof OidcConfigValueSource>;
+
+/** Last successful (or attempted) admin end-to-end OIDC diagnostic — never includes secrets. */
+export const OidcLastE2eTest = z.object({
+  testedAt: IsoDate,
+  fingerprint: z.string(), // non-secret fingerprint of the config that was tested
+  ok: z.boolean(),
+});
+export type OidcLastE2eTest = z.infer<typeof OidcLastE2eTest>;
+
 /** OIDC settings as returned to admins (GET). Never includes the client secret. */
 export const OidcSettings = z.object({
   providerName: z.string(),
@@ -2505,6 +2757,10 @@ export const OidcSettings = z.object({
   enabled: z.boolean(), // effective config is complete (issuer + clientId + clientSecret all resolve)
   envKeys: z.array(z.string()), // OIDC_* env vars currently set — these override the stored values
   effectiveRedirectUri: z.string(), // the callback URL the flow will actually use
+  /** Non-secret fingerprint of the effective (env-over-stored) config — compare to lastE2eTest.fingerprint. */
+  configFingerprint: z.string(),
+  /** Most recent admin end-to-end diagnostic result, if any. */
+  lastE2eTest: OidcLastE2eTest.nullable().default(null),
 });
 export type OidcSettings = z.infer<typeof OidcSettings>;
 
@@ -2522,19 +2778,83 @@ export const OidcSettingsUpdate = z.object({
 });
 export type OidcSettingsUpdate = z.infer<typeof OidcSettingsUpdate>;
 
-/** Test-connection request. Optional issuer lets an admin validate before saving; omitted = test the effective issuer. */
-export const OidcTestRequest = z.object({ issuer: OidcField.optional() });
+/**
+ * Diagnostic probe request (issue #848). Optional draft fields let an admin
+ * validate before saving; omitted fields resolve from env-over-stored effective
+ * config. `clientSecret` is write-only: omit/blank reuses the effective secret.
+ */
+export const OidcTestRequest = z.object({
+  issuer: OidcField.optional(),
+  clientId: OidcField.optional(),
+  clientSecret: z.string().max(2048).optional(),
+  redirectUri: OidcField.optional(),
+  adminGroup: OidcField.optional(),
+  allowedGroup: OidcField.optional(),
+  groupsClaim: OidcField.optional(),
+  scope: OidcField.optional(),
+});
 export type OidcTestRequest = z.infer<typeof OidcTestRequest>;
 
-/** Result of fetching + validating the issuer's OIDC discovery document. */
+/** Per-check status for OIDC diagnostics. `skip` = not exercised by this probe kind. */
+export const OidcCheckStatus = z.enum(['pass', 'fail', 'skip']);
+export type OidcCheckStatus = z.infer<typeof OidcCheckStatus>;
+
+export const OidcCheckResult = z.object({
+  status: OidcCheckStatus,
+  message: z.string(),
+});
+export type OidcCheckResult = z.infer<typeof OidcCheckResult>;
+
+export const OidcDiagnosticChecks = z.object({
+  discovery: OidcCheckResult,
+  redirectClient: OidcCheckResult,
+  tokenExchange: OidcCheckResult,
+  requiredClaims: OidcCheckResult,
+  groupPolicy: OidcCheckResult,
+});
+export type OidcDiagnosticChecks = z.infer<typeof OidcDiagnosticChecks>;
+
+/** Which diagnostic probe produced the result. */
+export const OidcDiagnosticKind = z.enum(['discovery', 'e2e']);
+export type OidcDiagnosticKind = z.infer<typeof OidcDiagnosticKind>;
+
+/**
+ * Result of an OIDC diagnostic probe (discovery-only or end-to-end test login).
+ * Never echoes secrets. `message` for a successful discovery probe is
+ * "Discovery reachable." (issue #848) — not a claim that login works.
+ */
 export const OidcTestResult = z.object({
   ok: z.boolean(),
+  kind: OidcDiagnosticKind,
   issuer: z.string(),
   message: z.string(),
   authorizationEndpoint: z.string().nullable().default(null),
   tokenEndpoint: z.string().nullable().default(null),
+  testedAt: IsoDate,
+  /** Non-secret fingerprint of the config values that were tested. */
+  fingerprint: z.string(),
+  /** Per-field non-secret origin of each value used in the probe. */
+  fieldSources: z.object({
+    issuer: OidcConfigValueSource,
+    clientId: OidcConfigValueSource,
+    clientSecret: OidcConfigValueSource,
+    redirectUri: OidcConfigValueSource,
+    adminGroup: OidcConfigValueSource,
+    allowedGroup: OidcConfigValueSource,
+    groupsClaim: OidcConfigValueSource,
+    scope: OidcConfigValueSource,
+  }),
+  checks: OidcDiagnosticChecks,
 });
 export type OidcTestResult = z.infer<typeof OidcTestResult>;
+
+/** Response from starting an admin-only end-to-end OIDC test login (issue #848). */
+export const OidcTestLoginStart = z.object({
+  authorizationUrl: z.string(),
+  fingerprint: z.string(),
+  fieldSources: OidcTestResult.shape.fieldSources,
+});
+export type OidcTestLoginStart = z.infer<typeof OidcTestLoginStart>;
 
 export const CampaignMember = z.object({
   id: Id,
@@ -2548,8 +2868,24 @@ export const CampaignMember = z.object({
   ...timestamps,
 });
 export type CampaignMember = z.infer<typeof CampaignMember>;
-export const MemberCreate = z.object({ userId: Id, role: Role, characterId: Id.nullable().optional() });
-export const MemberUpdate = z.object({ role: Role.optional(), characterId: Id.nullable().optional() });
+/**
+ * Issue #819 — exclusive character seat model: at most one campaign_members row may
+ * link a given characterId. Reassigning a seated (or otherwise owned) character to
+ * another member requires an explicit `confirmTransfer: true` so the server can
+ * atomically unlink the previous seat and move ownership; without it the write is
+ * rejected with 409 CHARACTER_SEAT_TAKEN instead of silently stealing controls.
+ */
+export const MemberCreate = z.object({
+  userId: Id,
+  role: Role,
+  characterId: Id.nullable().optional(),
+  confirmTransfer: z.boolean().optional(),
+});
+export const MemberUpdate = z.object({
+  role: Role.optional(),
+  characterId: Id.nullable().optional(),
+  confirmTransfer: z.boolean().optional(),
+});
 
 // Server-admin-only membership integrity diagnostics/recovery (#849). These
 // shapes expose operational metadata only: campaign identity/name, account ids,
@@ -2622,6 +2958,14 @@ export const InviteCreate = z.object({
   maxUses: z.number().int().min(1).max(1000).nullable().optional(),
 });
 export type InviteCreate = z.infer<typeof InviteCreate>;
+
+// DM kill-switch for public invite links (issue #857) — mirrors SessionSharePolicyUpdate.
+// Disabling suspends every outstanding code without deleting rows; re-enabling is a
+// deliberate act and is refused while the campaign is archived or trashed.
+export const InvitePolicyUpdate = z.object({ enabled: z.boolean() });
+export type InvitePolicyUpdate = z.infer<typeof InvitePolicyUpdate>;
+export const InviteMutationResult = z.object({ revoked: z.number().int().nonnegative() });
+export type InviteMutationResult = z.infer<typeof InviteMutationResult>;
 
 // Public preview of a valid invite (GET /invites/:code) — just enough for the
 // join page to say what you're joining and as what. campaignId is included so
@@ -2838,9 +3182,12 @@ export const Proposal = z.object({
   entityId: Id.nullable().default(null),
   action: ProposalAction,
   payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
-  // The target entity's state captured at propose time (update proposals only; null for
+  // The target entity's state captured at propose time (update/delete proposals; null for
   // creates) — lets the DM review UI render a real before/after diff even if the entity
-  // changes between propose and review.
+  // changes between propose and review. Persisted as the full DM-review snapshot
+  // (dmSecret included). Non-DM proposer egress (create response, self-view list, MCP,
+  // member export) projects a redacted/omitted view so dmSecret and unrevealed entities
+  // never leak through the approval queue (issue #817).
   snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
   // Human-readable attribution: the display name of the USER who submitted, even when
   // the write came in over a PAT (resolved to the token's owning user — issue #124).
@@ -3099,7 +3446,10 @@ export type AiProviderParams = z.infer<typeof AiProviderParams>;
 // The primary exfiltration fix binds the API key to its own scope's endpoint (see
 // AiProviderConfigService.resolveEffectiveConfig); this guard additionally constrains
 // what an override endpoint may even look like. `http` is permitted so self-hosted
-// local model servers (e.g. http://localhost:11434) keep working.
+// local model servers (e.g. http://localhost:11434) can be expressed — but the server
+// applies a separate SSRF host policy (issue #1064): cloud metadata / link-local are
+// always blocked, and private/loopback hosts require an operator opt-in
+// (`AI_PROVIDER_ALLOW_PRIVATE_HOSTS`) or an explicit host allowlist.
 const AiProviderBaseUrl = z
   .string()
   .trim()
@@ -3723,29 +4073,7 @@ export const ImportMapAttribution = z.object({
 });
 export type ImportMapAttribution = z.infer<typeof ImportMapAttribution>;
 
-// ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
-// Computed (read-only) difficulty band for an encounter: the party's summed 5e XP
-// thresholds vs the total adjusted monster XP (monster CR->XP with the standard
-// number-of-monsters multiplier). `trivial` is below the party's Easy threshold.
-export const DifficultyBand = z.enum(['trivial', 'easy', 'medium', 'hard', 'deadly']);
-export type DifficultyBand = z.infer<typeof DifficultyBand>;
-export const EncounterDifficulty = z.object({
-  band: DifficultyBand,
-  // Party XP thresholds (sum across the PC combatants' per-level thresholds).
-  thresholds: z.object({
-    easy: z.number().int().nonnegative(),
-    medium: z.number().int().nonnegative(),
-    hard: z.number().int().nonnegative(),
-    deadly: z.number().int().nonnegative(),
-  }),
-  partySize: z.number().int().nonnegative(), // number of PC (character) combatants counted
-  partyLevels: z.array(z.number().int()), // the PC levels that fed the thresholds
-  monsterCount: z.number().int().nonnegative(), // number of monster combatants counted
-  totalMonsterXp: z.number().int().nonnegative(), // raw summed monster XP (pre-multiplier)
-  multiplier: z.number(), // 5e encounter multiplier for the monster count
-  adjustedXp: z.number().int().nonnegative(), // totalMonsterXp * multiplier, compared to thresholds
-});
-export type EncounterDifficulty = z.infer<typeof EncounterDifficulty>;
+// Encounter difficulty schemas + 5e math live in ./encounter-difficulty (issues #58 + #429).
 
 // ---------- encounter generator (issue #304) ----------
 // First-party, offline & deterministic encounter builder. There is no open dataset of
@@ -3893,6 +4221,11 @@ export const Combatant = z.object({
   // Token footprint size category (issue #40, phase 2) — scales the rendered token on the
   // battle map (tiny→gargantuan). Defaults to 'medium' (a 1×1 cell). No effect on combat math.
   tokenSize: TokenSize.default('medium'),
+  // Ephemeral fog redaction flag (issue #418): when fog withholds tokenX/tokenY for a
+  // non-DM viewer, this is true so the client can distinguish "placed but outside the
+  // revealed area" from a truly unplaced token — without leaking coordinates. Always
+  // false for DMs and for tokens whose position is visible (or truly null in storage).
+  tokenHiddenByFog: z.boolean().default(false),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -3960,7 +4293,50 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
 });
 
-export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
+/**
+ * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
+ * When the sheet advanced after /end, the DM must choose a resync direction before
+ * reopening — never silently overwrite intervening healing/rest.
+ */
+export const HpSyncSlice = z.object({
+  hpCurrent: z.number().int(),
+  hpTemp: z.number().int().min(0),
+  deathState: DeathState,
+  deathSaveSuccesses: z.number().int().min(0).max(3),
+  deathSaveFailures: z.number().int().min(0).max(3),
+});
+export type HpSyncSlice = z.infer<typeof HpSyncSlice>;
+
+export const HpSyncConflict = z.object({
+  combatantId: Id,
+  characterId: Id,
+  name: z.string(),
+  combatant: HpSyncSlice,
+  sheet: HpSyncSlice.extend({ updatedAt: IsoDate }),
+});
+export type HpSyncConflict = z.infer<typeof HpSyncConflict>;
+
+export const HpResyncDirection = z.enum(['keep_combatant', 'pull_sheet']);
+export type HpResyncDirection = z.infer<typeof HpResyncDirection>;
+
+/** Body for POST /encounters/:id/reopen — required when hpSyncConflicts is non-empty. */
+export const EncounterReopen = z.object({
+  hpResync: z
+    .array(
+      z.object({
+        combatantId: Id,
+        direction: HpResyncDirection,
+      }),
+    )
+    .optional(),
+});
+export type EncounterReopen = z.infer<typeof EncounterReopen>;
+
+export const EncounterWithCombatants = Encounter.extend({
+  combatants: z.array(Combatant),
+  /** Present for DM reads of an ended encounter when sheet HP diverged from the snapshot (#466). */
+  hpSyncConflicts: z.array(HpSyncConflict).optional(),
+});
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
 // roll-initiative response (issue #702). The encounter (with combatants) is returned as
@@ -3990,11 +4366,20 @@ export const EncounterEvent = z.object({
   // Free-text names, denormalized so the log renders without joining combatants
   // (which may since have been removed). `actor` is who acted (turn events, or a
   // heal source when known); `target` is who it happened to. Either may be null.
+  // Issue #869: for non-DMs these are projected from current hidden-NPC visibility
+  // (names appear after reveal); prefer `actorId`/`targetId` for stable identity.
   actor: z.string().max(200).nullable().default(null),
   target: z.string().max(200).nullable().default(null),
-  // Human phrasing of the event, deliberately kept free of exact monster HP totals
-  // so listing the log to a non-DM viewer can't leak what issue #43 redacts on the
-  // combatant rows (only the damage/heal delta is recorded, never the resulting HP).
+  // Stable combatant ids for role-aware projection (issue #869). Nullable when the
+  // event has no actor/target, or for rows written before the columns existed.
+  // Survives rename; listing re-derives display names from current combatant/NPC
+  // secrecy so a later reveal unmasks historical log lines.
+  actorId: Id.nullable().default(null),
+  targetId: Id.nullable().default(null),
+  // Human phrasing of the event. Must stay free of exact monster HP totals (issue
+  // #43) AND of combatant names that could bypass actor/target redaction (issue
+  // #869) — store deltas/outcomes only ("took 8 damage", "Combat started"); the
+  // UI composes names from actor/target.
   detail: z.string().max(500).default(''),
   createdAt: IsoDate,
 });
@@ -4146,7 +4531,13 @@ export const CampaignEventType = z.enum([
   'encounter.ping',
   'schedule.updated',
   'membership.revoked',
+  // Issue #437: a member's role changed (promote/demote). Thin invalidation so the
+  // affected client's open UI can refetch /me and drop or reveal role-gated chrome
+  // without a full reload. Forwarded on the data path (unlike membership.revoked).
+  'membership.updated',
   'treasury.updated',
+  // Issue #421: character sheet / member-resource writes (stats, actions, slots, …).
+  'character.updated',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -4195,6 +4586,18 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     at: IsoDate,
   }),
   z.object({
+    // Issue #437: a member's campaign role changed. `role` is the NEW effective role so
+    // the affected client can refresh /me (and other tabs via BroadcastChannel) and
+    // immediately show or hide DM chrome without waiting for a reload. `userId` matches
+    // RequestUser.id / String(campaignMembers.userId).
+    type: z.literal('membership.updated'),
+    campaignId: Id,
+    userId: z.string().max(120),
+    memberId: Id,
+    role: Role,
+    at: IsoDate,
+  }),
+  z.object({
     // Issue #582: the party treasury changed. A thin invalidation signal like the
     // encounter.* ticks: no coin payload (permission-checked REST read is authoritative),
     // so an open editor that snapshotted stale balances can mark itself stale and refetch
@@ -4205,6 +4608,18 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     // (the client compares userId against the local session and ignores its own echo).
     type: z.literal('treasury.updated'),
     campaignId: Id,
+    userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #421: a character sheet (or member-linked resource on that sheet) changed.
+    // Thin invalidation only — no stats/actions payload — so run-session inline cards
+    // refetch the permission-checked character list without requiring an encounterId
+    // (the old SSE filter dropped these as non-encounter frames). `userId` is the actor
+    // (String(users.id)); `characterId` identifies which sheet went stale.
+    type: z.literal('character.updated'),
+    campaignId: Id,
+    characterId: Id,
     userId: z.string().max(120),
     at: IsoDate,
   }),
@@ -4320,6 +4735,8 @@ export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
 
 export const AdminMetrics = z.object({
   version: z.string(), // server package.json version (same source as /healthz)
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
   now: IsoDate, // server clock when this snapshot was taken
   startedAt: IsoDate, // process start (now - uptime)
   uptimeSeconds: z.number().nonnegative(),
@@ -4339,10 +4756,13 @@ export type AdminMetrics = z.infer<typeof AdminMetrics>;
 export const StorageCampaignUsage = z.object({
   campaignId: Id,
   name: z.string(),
-  fileCount: z.number().int().nonnegative(), // attachment rows for this campaign
-  totalBytes: z.number().int().nonnegative(), // sum of attachment.size for this campaign
+  fileCount: z.number().int().nonnegative(), // committed attachment rows for this campaign
+  reservedFileCount: z.number().int().nonnegative(), // in-flight quota reservations
+  totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
+  committedBytes: z.number().int().nonnegative(), // publicly readable attachment bytes
+  reservedBytes: z.number().int().nonnegative(), // quota held by in-flight publications
   quotaBytes: z.number().int().nonnegative().nullable(), // per-campaign cap, or null for unlimited
-  overQuota: z.boolean(), // totalBytes > quotaBytes (always false when unlimited)
+  overQuota: z.boolean(), // committed + reserved > quotaBytes (always false when unlimited)
 });
 export type StorageCampaignUsage = z.infer<typeof StorageCampaignUsage>;
 
@@ -4355,8 +4775,11 @@ export const StorageOrphans = z.object({
 export type StorageOrphans = z.infer<typeof StorageOrphans>;
 
 export const StorageStats = z.object({
-  totalBytes: z.number().int().nonnegative(), // sum of attachment.size across all campaigns (DB view)
-  fileCount: z.number().int().nonnegative(), // total attachment rows
+  totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
+  committedBytes: z.number().int().nonnegative(), // publicly readable bytes across all campaigns
+  reservedBytes: z.number().int().nonnegative(), // quota held by in-flight publications
+  fileCount: z.number().int().nonnegative(), // total committed attachment rows
+  reservedFileCount: z.number().int().nonnegative(), // total reservation rows
   diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
   campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
   orphans: StorageOrphans,

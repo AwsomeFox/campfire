@@ -1,4 +1,4 @@
-import type { Combatant, EncounterStatus } from '@campfire/schema';
+import type { Combatant, EncounterEvent, EncounterStatus } from '@campfire/schema';
 import {
   abilityMod,
   sortCombatants,
@@ -13,6 +13,8 @@ import {
   computeEncounterDifficulty,
   mulberry32,
   generateEncounterGroup,
+  redactEncounterEventsForViewer,
+  UNKNOWN_COMBATANT_LABEL,
 } from '../../src/modules/encounters/encounters.logic';
 import type { GeneratorCandidate } from '../../src/modules/encounters/encounters.logic';
 import type { CombatantHpState } from '../../src/modules/encounters/encounters.logic';
@@ -457,34 +459,53 @@ describe('encounter difficulty (issue #58)', () => {
   describe('computeEncounterDifficulty', () => {
     it('bands a CR-10 solo vs four level-5 PCs as deadly', () => {
       const d = computeEncounterDifficulty([5, 5, 5, 5], [10]);
+      expect(d.status).toBe('ok');
+      expect(d.label).toBe('Deadly');
       expect(d.thresholds).toEqual({ easy: 1000, medium: 2000, hard: 3000, deadly: 4400 });
       expect(d.totalMonsterXp).toBe(5900);
       expect(d.multiplier).toBe(1);
       expect(d.adjustedXp).toBe(5900);
       expect(d.band).toBe('deadly');
+      expect(d.assumptions.length).toBeGreaterThan(0);
     });
     it('applies the multiplier for several monsters (3 x CR2 vs 4 L5 = medium)', () => {
       const d = computeEncounterDifficulty([5, 5, 5, 5], [2, 2, 2]);
+      expect(d.status).toBe('ok');
       expect(d.totalMonsterXp).toBe(1350); // 3 * 450
       expect(d.multiplier).toBe(2); // 3–6 monsters
       expect(d.adjustedXp).toBe(2700);
       expect(d.band).toBe('medium'); // >= medium 2000, < hard 3000
+      expect(d.warnings.some((w) => /action economy/i.test(w))).toBe(true);
     });
     it('a lone weak monster is trivial (below the easy threshold)', () => {
       const d = computeEncounterDifficulty([5, 5, 5, 5], [0.25]);
+      expect(d.status).toBe('ok');
       expect(d.adjustedXp).toBe(50);
       expect(d.band).toBe('trivial');
+      expect(d.label).toBe('Trivial');
     });
-    it('no party -> trivial with zeroed thresholds', () => {
+    it('no party -> trivial with zeroed thresholds and a party-data warning', () => {
       const d = computeEncounterDifficulty([], [5]);
       expect(d.thresholds).toEqual({ easy: 0, medium: 0, hard: 0, deadly: 0 });
+      expect(d.status).toBe('ok');
       expect(d.band).toBe('trivial');
+      expect(d.warnings.some((w) => /No PC levels/i.test(w))).toBe(true);
     });
     it('no monsters -> trivial', () => {
       const d = computeEncounterDifficulty([5, 5], []);
       expect(d.monsterCount).toBe(0);
       expect(d.adjustedXp).toBe(0);
+      expect(d.status).toBe('ok');
       expect(d.band).toBe('trivial');
+    });
+    it('manual enemies with no CR/XP are unknown — never Trivial (issue #429)', () => {
+      const d = computeEncounterDifficulty([5, 5, 5, 5], [null, null]);
+      expect(d.status).toBe('unknown');
+      expect(d.band).toBeNull();
+      expect(d.label).toBe('Unknown—add XP/CR');
+      expect(d.adjustedXp).toBe(0);
+      expect(d.monstersMissingRating).toBe(2);
+      expect(d.warnings.some((w) => /no CR\/XP/i.test(w))).toBe(true);
     });
   });
 });
@@ -573,5 +594,83 @@ describe('encounter generator (issue #304)', () => {
       const r = generateEncounterGroup({ partyLevels: party, targetBand: 'medium', candidates, maxCount: 12, seed: 2 });
       expect(r.picks).toHaveLength(0);
     });
+  });
+});
+
+describe('encounters — redactEncounterEventsForViewer (issue #869)', () => {
+  function ev(over: Partial<EncounterEvent> & { id: number; type: EncounterEvent['type'] }): EncounterEvent {
+    return {
+      encounterId: 1,
+      round: 1,
+      actor: null,
+      target: null,
+      actorId: null,
+      targetId: null,
+      detail: '',
+      createdAt: '2026-07-23T00:00:00.000Z',
+      ...over,
+    };
+  }
+
+  const traitor = { id: 10, name: 'The Traitor', npcId: 99 };
+  const aria = { id: 11, name: 'Aria', npcId: null };
+  const combatants = [traitor, aria];
+
+  it('masks actor/target by combatant id when the linked NPC is currently hidden', () => {
+    const events = [
+      ev({ id: 1, type: 'damage', actor: 'Aria', actorId: 11, target: 'The Traitor', targetId: 10, detail: 'took 8 damage' }),
+      ev({ id: 2, type: 'turn', actor: 'The Traitor', actorId: 10, target: 'The Traitor', targetId: 10, detail: '' }),
+      ev({ id: 3, type: 'condition', target: 'The Traitor', targetId: 10, detail: 'gained Poisoned' }),
+      ev({ id: 4, type: 'heal', target: 'The Traitor', targetId: 10, detail: 'healed 3 HP' }),
+      ev({ id: 5, type: 'death', target: 'The Traitor', targetId: 10, detail: 'dropped to 0 HP' }),
+      ev({ id: 6, type: 'roll', target: 'The Traitor', targetId: 10, detail: 'death save d20 1 — marked a death save' }),
+    ];
+    const redacted = redactEncounterEventsForViewer(events, combatants, new Set([99]));
+    for (const e of redacted) {
+      expect(JSON.stringify(e)).not.toMatch(/Traitor/);
+      if (e.targetId === 10) expect(e.target).toBe(UNKNOWN_COMBATANT_LABEL);
+      if (e.actorId === 10) expect(e.actor).toBe(UNKNOWN_COMBATANT_LABEL);
+    }
+    // Stable ids survive projection so clients can correlate with the roster token.
+    expect(redacted[0].targetId).toBe(10);
+    expect(redacted[0].actor).toBe('Aria');
+    expect(redacted[0].detail).toBe('took 8 damage');
+  });
+
+  it('scrubs name-bearing detail prose (legacy turn lines) when the NPC is hidden', () => {
+    const events = [
+      ev({
+        id: 1,
+        type: 'turn',
+        actor: 'The Traitor',
+        actorId: 10,
+        target: 'The Traitor',
+        targetId: 10,
+        detail: "Combat started — The Traitor's turn (round 1)",
+      }),
+    ];
+    const [redacted] = redactEncounterEventsForViewer(events, combatants, new Set([99]));
+    expect(redacted.detail).not.toMatch(/Traitor/);
+    expect(redacted.detail).toContain(UNKNOWN_COMBATANT_LABEL);
+    expect(redacted.actor).toBe(UNKNOWN_COMBATANT_LABEL);
+  });
+
+  it('reveals historical names after the NPC is no longer hidden (current projection)', () => {
+    const events = [
+      ev({ id: 1, type: 'damage', target: 'The Traitor', targetId: 10, detail: 'took 8 damage' }),
+    ];
+    const whileHidden = redactEncounterEventsForViewer(events, combatants, new Set([99]));
+    expect(whileHidden[0].target).toBe(UNKNOWN_COMBATANT_LABEL);
+
+    const afterReveal = redactEncounterEventsForViewer(events, combatants, new Set());
+    expect(afterReveal[0].target).toBe('The Traitor');
+    expect(afterReveal[0].targetId).toBe(10);
+  });
+
+  it('best-effort masks legacy rows that only have denormalized names (no combatant ids)', () => {
+    const events = [ev({ id: 1, type: 'damage', target: 'The Traitor', detail: 'took 4 damage' })];
+    const [redacted] = redactEncounterEventsForViewer(events, combatants, new Set([99]));
+    expect(redacted.target).toBe(UNKNOWN_COMBATANT_LABEL);
+    expect(redacted.detail).toBe('took 4 damage');
   });
 });

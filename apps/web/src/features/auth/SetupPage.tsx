@@ -4,11 +4,24 @@
  * If setup is not required, authenticated users return to the campaign hub and
  * signed-out users continue to /login.
  */
-import { useState, type FormEvent } from 'react';
+import { useLayoutEffect, useState, type FormEvent } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+import { PasswordInput } from '../../components/PasswordInput';
+import { BootstrapRecoveryScreen } from '../../app/BootstrapRecoveryScreen';
+import { setupBootstrapSurface, retryAuthBootstrap } from '../../app/authBootstrapState';
+import {
+  AUTH_ERROR_IDS,
+  AUTH_FIELD_IDS,
+  AUTH_GENERIC_ERROR,
+  AUTH_RATE_LIMIT_ERROR,
+  type AuthErrorState,
+  describedBy,
+  focusAuthError,
+  validateNewAccountFields,
+} from './authFormA11y';
 
 function FlameMark() {
   return (
@@ -30,7 +43,7 @@ function FlameMark() {
 }
 
 export function SetupPage() {
-  const { status, loading, refresh: refreshAuthStatus } = useAuthStatus();
+  const { status, phase: statusPhase, refresh: refreshAuthStatus } = useAuthStatus();
   const { me, ready, refresh: refreshAuth } = useAuth();
   const navigate = useNavigate();
 
@@ -38,12 +51,40 @@ export function SetupPage() {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AuthErrorState | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useLayoutEffect(() => {
+    if (error) focusAuthError(error);
+  }, [error]);
+
+  const bootstrap = setupBootstrapSurface({
+    statusPhase,
+    setupRequired: Boolean(status?.setupRequired),
+  });
+
+  // Unknown status must not flash the first-admin form on a configured server (#801).
+  if (!submitting && bootstrap === 'recovery') {
+    return (
+      <BootstrapRecoveryScreen
+        onRetry={() => {
+          void retryAuthBootstrap(refreshAuthStatus, refreshAuth);
+        }}
+      />
+    );
+  }
+
+  if (!submitting && bootstrap === 'loading') {
+    return (
+      <div className="min-h-screen grid place-items-center p-6" aria-live="polite">
+        <p className="text-muted">Checking server status…</p>
+      </div>
+    );
+  }
 
   // During a successful setup submit, onSubmit owns the single history-replacing
   // navigation after both auth contexts refresh. Do not race it with this guard.
-  if (!submitting && !loading && status && !status.setupRequired) {
+  if (!submitting && bootstrap === 'redirect') {
     if (!ready) {
       return (
         <div className="min-h-screen grid place-items-center p-6" aria-live="polite">
@@ -58,16 +99,9 @@ export function SetupPage() {
     e.preventDefault();
     setError(null);
 
-    if (!/^[a-z0-9_.-]+$/i.test(username)) {
-      setError('Username may only contain letters, numbers, and _ . -');
-      return;
-    }
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters.');
-      return;
-    }
-    if (password !== confirm) {
-      setError('Passwords do not match.');
+    const clientError = validateNewAccountFields({ username, password, confirm });
+    if (clientError) {
+      setError(clientError);
       return;
     }
 
@@ -84,17 +118,20 @@ export function SetupPage() {
         // this page still had setupRequired=true cached. Refresh that gate and
         // send this (cookie-less) loser to normal login instead of leaving a
         // bootstrap form on screen that can never succeed again.
-        try {
-          await refreshAuthStatus();
-          navigate('/login', { replace: true });
-        } catch {
+        const statusOk = await refreshAuthStatus();
+        if (!statusOk) {
           window.location.replace('/login');
+          return;
         }
+        navigate('/login', { replace: true });
         return;
       } else if (err instanceof ApiError && err.status === 429) {
-        setError('Too many attempts — wait a minute and try again.');
+        setError({ kind: 'form', message: AUTH_RATE_LIMIT_ERROR });
       } else {
-        setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+        setError({
+          kind: 'form',
+          message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+        });
       }
       setSubmitting(false);
       return;
@@ -106,7 +143,14 @@ export function SetupPage() {
       // admin through /login, then refresh /auth/status so AuthedLayout no
       // longer redirects the campaign hub back to this setup screen.
       await refreshAuth();
-      await refreshAuthStatus();
+      const statusOk = await refreshAuthStatus();
+      if (!statusOk) {
+        // refreshAuthStatus no longer throws (#801); a failed status leaves the
+        // stale setupRequired=true answer in place. Hard-reload so both
+        // providers rebuild from the server instead of bouncing back to /setup.
+        window.location.replace('/');
+        return;
+      }
       navigate('/', { replace: true });
     } catch {
       // The account already exists and the one-time setup endpoint is now
@@ -115,6 +159,9 @@ export function SetupPage() {
       window.location.replace('/');
     }
   }
+
+  const fieldErrors = error?.kind === 'fields' ? error.fields : {};
+  const formError = error?.kind === 'form' ? error.message : null;
 
   return (
     <div
@@ -134,25 +181,35 @@ export function SetupPage() {
             </p>
           </div>
 
-          <form onSubmit={onSubmit} className="w-full flex flex-col gap-3">
+          <form onSubmit={onSubmit} className="w-full flex flex-col gap-3" noValidate>
             <div className="field">
-              <label htmlFor="username">Username</label>
+              <label htmlFor={AUTH_FIELD_IDS.username}>Username</label>
               <input
-                id="username"
+                id={AUTH_FIELD_IDS.username}
                 className="input"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                onChange={(e) => {
+                  setUsername(e.target.value);
+                  if (fieldErrors.username) setError(null);
+                }}
                 autoComplete="username"
                 autoFocus
                 required
+                aria-invalid={fieldErrors.username ? true : undefined}
+                aria-describedby={describedBy(fieldErrors.username && AUTH_ERROR_IDS.username)}
               />
+              {fieldErrors.username && (
+                <p id={AUTH_ERROR_IDS.username} role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>
+                  {fieldErrors.username}
+                </p>
+              )}
             </div>
             <div className="field">
-              <label htmlFor="displayName">
+              <label htmlFor={AUTH_FIELD_IDS.displayName}>
                 Display name <span className="text-muted" style={{ textTransform: 'none', letterSpacing: 0 }}>· optional</span>
               </label>
               <input
-                id="displayName"
+                id={AUTH_FIELD_IDS.displayName}
                 className="input"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
@@ -160,31 +217,60 @@ export function SetupPage() {
               />
             </div>
             <div className="field">
-              <label htmlFor="password">Password</label>
-              <input
-                id="password"
-                type="password"
+              <label htmlFor={AUTH_FIELD_IDS.password}>Password</label>
+              <PasswordInput
+                id={AUTH_FIELD_IDS.password}
                 className="input"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (fieldErrors.password) setError(null);
+                }}
                 autoComplete="new-password"
                 required
+                aria-invalid={fieldErrors.password ? true : undefined}
+                aria-describedby={describedBy(fieldErrors.password && AUTH_ERROR_IDS.password)}
               />
+              {fieldErrors.password && (
+                <p id={AUTH_ERROR_IDS.password} role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>
+                  {fieldErrors.password}
+                </p>
+              )}
             </div>
             <div className="field">
-              <label htmlFor="confirm">Confirm password</label>
-              <input
-                id="confirm"
-                type="password"
+              <label htmlFor={AUTH_FIELD_IDS.confirm}>Confirm password</label>
+              <PasswordInput
+                id={AUTH_FIELD_IDS.confirm}
                 className="input"
                 value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
+                onChange={(e) => {
+                  setConfirm(e.target.value);
+                  if (fieldErrors.confirm) setError(null);
+                }}
                 autoComplete="new-password"
+                revealNoun="confirm password"
                 required
+                aria-invalid={fieldErrors.confirm ? true : undefined}
+                aria-describedby={describedBy(fieldErrors.confirm && AUTH_ERROR_IDS.confirm)}
               />
+              {fieldErrors.confirm && (
+                <p id={AUTH_ERROR_IDS.confirm} role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>
+                  {fieldErrors.confirm}
+                </p>
+              )}
             </div>
 
-            {error && <p className="text-sm text-rose-400">{error}</p>}
+            {formError && (
+              <p
+                id={AUTH_ERROR_IDS.form}
+                role="alert"
+                tabIndex={-1}
+                className="text-sm text-rose-400"
+                style={{ margin: 0 }}
+              >
+                {formError}
+              </p>
+            )}
 
             <button type="submit" className="btn btn-primary btn-block" style={{ minHeight: 44 }} disabled={submitting}>
               {submitting ? 'Lighting…' : 'Light the fire'}

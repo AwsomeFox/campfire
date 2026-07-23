@@ -11,7 +11,7 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   AoeShape,
@@ -26,17 +26,26 @@ import type {
   EncounterWithCombatants,
   FogState,
   GridType,
+  HpResyncDirection,
+  HpSyncConflict,
   MapPing,
   Npc,
   RuleEntry,
+  RulePack,
   TokenSize,
 } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
-import { queryKeys, invalidateEncounter } from '../../lib/query';
-import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { queryKeys, invalidateCampaignCharacters, invalidateEncounter } from '../../lib/query';
+import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
+import {
+  inlineCharacterSheetsInteractive,
+  inlineCharacterSheetsStatusLabel,
+  shouldInvalidateInlineCharacters,
+} from './inlineCharacterCards';
+import { endedSummaryTallies, isDown } from './encounterEndedSummary';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
@@ -44,7 +53,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
-import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
+import { ImageUpload, MapUploadButton, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -59,6 +68,30 @@ import {
   formatCombatLogEventSummary,
   type CombatLogAnnouncementCursor,
 } from './combatLogAccessibility';
+import { makeActionError, type ActionErrorState } from './encounterActionError';
+import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
+import {
+  cellSizePx,
+  computeContainedRect,
+  mapPercentDistanceCells,
+  mapPercentToLayerPx,
+  pointerToMapPercent,
+  snapMapPercent,
+} from './mapRenderedBounds';
+import {
+  deleteConfirmCopy,
+  dmLifecycleActions,
+  isLifecycleConfirmValid,
+} from './encounterLifecycleActions';
+import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
+import {
+  armMapPingTap,
+  decideMapPingTapRelease,
+  isMapPingKeyboardActivation,
+  mapPingTapExceededSlop,
+  MAP_PING_KEYBOARD_POINT,
+  type MapPingTapArm,
+} from './mapPingTap';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -101,14 +134,6 @@ function gridDefaultAttemptKey(encounterId: number, patch: EncounterGridPatch): 
   return `${encounterId}:${Object.keys(patch).sort().join(',')}`;
 }
 
-// 5e difficulty band badge (issue #58) — party XP thresholds vs adjusted monster XP.
-const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {
-  trivial: 'Trivial',
-  easy: 'Easy',
-  medium: 'Medium',
-  hard: 'Hard',
-  deadly: 'Deadly',
-};
 // Band colors live as --cf-difficulty-* tokens in index.css (issue #668) so a
 // theme or dark/light swap can reach them; difficulty wants a green→red ramp
 // distinct from the accent-colored status chips and from the destructive family.
@@ -119,24 +144,51 @@ const DIFFICULTY_STYLE: Record<DifficultyBand, { background: string; color: stri
   hard: { background: 'var(--cf-difficulty-hard-bg)', color: 'var(--cf-difficulty-hard-fg)' },
   deadly: { background: 'var(--cf-difficulty-deadly-bg)', color: 'var(--cf-difficulty-deadly-fg)' },
 };
+const DIFFICULTY_NEUTRAL_STYLE = {
+  background: 'var(--color-neutral-800)',
+  color: 'var(--color-neutral-200)',
+};
 
 /**
- * Difficulty badge shown in the encounter header (issue #58). Reads the computed
- * Easy/Medium/Hard/Deadly band from GET /encounters/:id/difficulty. Hidden when there
- * are no monsters to score (band trivial + no monster XP) so a prep-only party list
- * doesn't show a misleading "Trivial" chip. `title` surfaces the underlying XP math.
+ * Difficulty badge shown in the encounter header (issues #58 + #429). Reads
+ * GET /encounters/:id/difficulty. Hidden when there are no monsters. Zero-data
+ * fights show the adapter's "Unknown—add XP/CR" label (never a fake Trivial);
+ * unsupported rulesets explain the limitation. `title` surfaces XP math + warnings.
  */
 function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | null }) {
   if (!difficulty) return null;
   if (difficulty.monsterCount === 0) return null;
-  const title =
+
+  if (difficulty.status === 'unsupported') {
+    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
+    return (
+      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
+        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+        {difficulty.label}
+      </span>
+    );
+  }
+
+  if (difficulty.status === 'unknown' || difficulty.band === null) {
+    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
+    return (
+      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
+        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+        {difficulty.label}
+      </span>
+    );
+  }
+
+  const breakdown =
     `Adjusted monster XP ${difficulty.adjustedXp.toLocaleString()} ` +
     `(${difficulty.totalMonsterXp.toLocaleString()} × ${difficulty.multiplier}) vs party thresholds — ` +
     `easy ${difficulty.thresholds.easy.toLocaleString()}, medium ${difficulty.thresholds.medium.toLocaleString()}, ` +
     `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
+  const title = [breakdown, ...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' · ');
   return (
     <span className="tag" style={DIFFICULTY_STYLE[difficulty.band]} title={title}>
-      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />{DIFFICULTY_LABEL[difficulty.band]}
+      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+      {difficulty.label}
     </span>
   );
 }
@@ -334,11 +386,6 @@ function HpBandBar({ band }: { band: string | null }) {
   );
 }
 
-/** A combatant is "down" when at 0 HP, or (for a redacted monster) banded 'down'. */
-function isDown(c: Combatant): boolean {
-  return c.hpCurrent != null ? c.hpCurrent <= 0 : c.hpBand === 'down';
-}
-
 const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Stable', dead: 'Dead' };
 
 /**
@@ -368,7 +415,7 @@ function DeathSaveTracker({
 }) {
   function Pips({ kind, count, color }: { kind: 'deathSaveSuccesses' | 'deathSaveFailures'; count: number; color: string }) {
     return (
-      <span style={{ display: 'inline-flex', gap: 3 }}>
+      <span style={{ display: 'inline-flex', gap: 4 }} data-testid={`death-save-${kind === 'deathSaveSuccesses' ? 'success' : 'failure'}-pips`}>
         {[0, 1, 2].map((i) => {
           const filled = i < count;
           const next = count === i + 1 ? i : i + 1; // click the highest-lit pip to clear it
@@ -376,17 +423,15 @@ function DeathSaveTracker({
             <button
               key={i}
               type="button"
+              className="cf-death-save-pip"
               aria-label={`${kind === 'deathSaveSuccesses' ? 'Success' : 'Failure'} ${i + 1} of 3${filled ? ' (marked)' : ''}`}
               aria-pressed={filled}
               disabled={!canEdit || busy}
               onClick={() => onSet({ [kind]: next })}
               style={{
-                width: 13,
-                height: 13,
-                borderRadius: '50%',
-                padding: 0,
-                border: `1.5px solid ${color}`,
-                background: filled ? color : 'transparent',
+                // Visual pip color via CSS variables; hit area is the 44×44 class (issue #428).
+                ['--cf-death-save-pip-color' as string]: color,
+                ['--cf-death-save-pip-fill' as string]: filled ? color : 'transparent',
                 cursor: canEdit && !busy ? 'pointer' : 'default',
               }}
             />
@@ -396,24 +441,27 @@ function DeathSaveTracker({
     );
   }
   return (
-    <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 'var(--type-label)', flexWrap: 'wrap' }}>
-      <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
+    <div
+      style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 'var(--type-label)', flexWrap: 'wrap' }}
+      data-testid="death-save-tracker"
+    >
+      <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Saves</span>
         <Pips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" />
       </span>
-      <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
+      <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Fails</span>
         <Pips kind="deathSaveFailures" count={failures} color="#e5484d" />
       </span>
       {canEdit && (
         <button
           type="button"
-          className="btn btn-ghost"
+          className="btn btn-ghost cf-target-44"
           aria-label="Roll a death save"
           title="Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)"
           disabled={busy}
           onClick={onRoll}
-          style={{ fontSize: 'var(--type-label)', minHeight: 20, padding: '1px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+          style={{ fontSize: 'var(--type-label)', padding: '0 12px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
         >
           Roll
         </button>
@@ -497,7 +545,9 @@ export default function RunSessionPage() {
     return () => clearTimeout(timer);
   }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid]);
 
-  const [actionError, setActionError] = useState<string | null>(null);
+  // Issue #430: structured so Refresh/dismiss/navigation can clear stale banners
+  // without relying solely on the Retry path. Passive SSE/poll must not wipe it.
+  const [actionError, setActionError] = useState<ActionErrorState>(null);
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
@@ -526,6 +576,8 @@ export default function RunSessionPage() {
 
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [confirmReopen, setConfirmReopen] = useState(false);
+  /** Issue #466: per-conflict resync direction chosen in the Reopen dialog. */
+  const [hpResyncChoices, setHpResyncChoices] = useState<Record<number, HpResyncDirection>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
 
@@ -562,13 +614,30 @@ export default function RunSessionPage() {
   const events = eventsQuery.data ?? [];
 
   // Campaign characters — maps a combatant.characterId -> ownerUserId so a player is
-  // scoped to only their own character's combatant. Low-churn, so no poll.
+  // scoped to only their own character's combatant, and feeds inline CharacterStatCards.
+  // Issue #421: invalidate on character.updated SSE; poll is a dropped-stream backstop.
   const charactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(cid),
     queryFn: () => api.get<Character[]>(`${API}/campaigns/${cid}/characters`),
     enabled: Number.isFinite(cid),
+    refetchInterval: 10_000,
   });
   const characters = useMemo(() => charactersQuery.data ?? [], [charactersQuery.data]);
+  const [eventStatus, setEventStatus] = useState<CampaignEventsStatus | null>(null);
+  const sheetsInteractive = inlineCharacterSheetsInteractive(eventStatus);
+  const sheetsStatusLabel = inlineCharacterSheetsStatusLabel(
+    eventStatus,
+    charactersQuery.isFetching && !charactersQuery.isLoading,
+  );
+
+  // Issue #431: tailor preparing next-steps to whether a monster pack is installed.
+  const packsQuery = useQuery({
+    queryKey: ['rules', 'packs'],
+    queryFn: () => api.get<RulePack[]>(`${API}/rules/packs`),
+    enabled: Number.isFinite(cid) && isDm,
+    staleTime: 60_000,
+  });
+  const campaignHasCompendium = (packsQuery.data?.length ?? 0) > 0;
 
   const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
   const loadError =
@@ -578,19 +647,32 @@ export default function RunSessionPage() {
         : "Couldn't load this encounter."
       : null;
   const refetchEncounter = useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]);
+  // Ordinary Refresh clears a stale action banner (#430) — distinct from passive
+  // poll/SSE invalidation, which must leave an actionable failure visible.
+  const refreshEncounter = useCallback(() => {
+    setActionError(null);
+    refetchEncounter();
+  }, [refetchEncounter]);
+  // Drop action errors when navigating to a different encounter.
+  useEffect(() => {
+    setActionError(null);
+  }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
   // take a turn, adjust HP, …) see it pushed instantly. Rather than a manual reload, an
   // event just invalidates the encounter's reads and Query refetches. On a remote delete,
   // bounce back to the encounters list rather than surfacing a 404.
+  // Issue #421: character.updated (and membership.revoked) have no encounterId — handle
+  // them BEFORE the encounterId filter so inline sheet cards refresh on sheet edits.
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
-        // Only the encounter.* variants carry an encounterId; membership.revoked
-        // (and any future non-encounter variant) is irrelevant here and has no
-        // encounterId to compare against. The server already filters revoked
-        // frames out of the data path, but narrowing on type keeps this correct
-        // even if that ever changes.
+        // Sheet / membership frames have no encounterId — must not fall into the
+        // encounterId filter below (that was the #421 bug: character events ignored).
+        if (shouldInvalidateInlineCharacters(event)) {
+          invalidateCampaignCharacters(queryClient, cid);
+          return;
+        }
         if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping') return;
         if (event.encounterId !== eid) return;
         if (event.type === 'encounter.deleted') {
@@ -606,8 +688,17 @@ export default function RunSessionPage() {
       },
       [eid, cid, navigate, queryClient, addPing],
     ),
-    // The stream was down for a while — refetch to catch anything missed.
-    onReconnect: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
+    // The stream was down for a while — refetch encounter + character sheets.
+    onReconnect: useCallback(() => {
+      invalidateEncounter(queryClient, eid);
+      invalidateCampaignCharacters(queryClient, cid);
+    }, [queryClient, eid, cid]),
+    // Parser recovery (connection stayed up) — same catch-up refetch.
+    onStreamRecovery: useCallback(() => {
+      invalidateEncounter(queryClient, eid);
+      invalidateCampaignCharacters(queryClient, cid);
+    }, [queryClient, eid, cid]),
+    onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
   // The persisted event stream is the single announcement source for turn, HP,
@@ -627,7 +718,17 @@ export default function RunSessionPage() {
     combatLogAnnouncementRef.current = { encounterId: eid, cursor: advanced.cursor };
 
     const message = formatCombatLogAnnouncementBatch(advanced.appendedEvents);
-    if (message) announce(message);
+    if (message) {
+      // ID-based cursor already skips known events; dedupeKey is a belt-and-braces
+      // guard if the same append batch is announced twice after a reconnect race.
+      // Compact: count + first/last id (not a joined list of every event id).
+      const appended = advanced.appendedEvents;
+      const firstId = appended[0]!.id;
+      const lastId = appended[appended.length - 1]!.id;
+      announce(message, {
+        dedupeKey: `combat-log:${eid}:${appended.length}:${firstId}:${lastId}`,
+      });
+    }
   }, [eid, eventsQuery.data, announce]);
 
   // Ending an encounter does not currently append a combat-log row. Retain that
@@ -672,18 +773,27 @@ export default function RunSessionPage() {
     setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
-  const reportError = useCallback(
-    (err: unknown) => setActionError(err instanceof ApiError ? err.message : 'That action failed.'),
-    [],
-  );
+  const reportError = useCallback((err: unknown) => {
+    setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
+  }, []);
+  /** BattleMap / card rollers pass a plain string (or null to clear). */
+  const surfaceActionError = useCallback((message: string | null) => {
+    setActionError(message ? makeActionError(message) : null);
+  }, []);
 
   // Encounter-level run controls (roll-initiative / start / next-turn / end / reopen).
   // These are mutually exclusive DM header actions, so one shared pending flag gating
   // just the header group is correct — unlike the old global lock, it never touches the
   // combatant rows. Each settles by invalidating the encounter's reads.
+  // Issue #466: reopen may carry `hpResync` decisions when sheets diverged after End.
   const runControl = useMutation({
-    mutationFn: (action: 'roll-initiative' | 'start' | 'next-turn' | 'end' | 'reopen') =>
-      api.post(`${API}/encounters/${eid}/${action}`),
+    mutationFn: ({
+      action,
+      body,
+    }: {
+      action: 'roll-initiative' | 'start' | 'next-turn' | 'end' | 'reopen';
+      body?: { hpResync?: Array<{ combatantId: number; direction: HpResyncDirection }> };
+    }) => api.post(`${API}/encounters/${eid}/${action}`, body),
     onMutate: () => setActionError(null),
     onError: reportError,
     onSettled: () => invalidateEncounter(queryClient, eid),
@@ -775,12 +885,42 @@ export default function RunSessionPage() {
     [cid, patchCombatant],
   );
 
-  const rollInitiative = () => runControl.mutate('roll-initiative');
-  const startEncounter = () => runControl.mutate('start');
-  const nextTurn = () => runControl.mutate('next-turn');
-  const endEncounter = () => runControl.mutate('end', { onSuccess: () => setConfirmEnd(false) });
-  const reopenEncounter = () => runControl.mutate('reopen', { onSuccess: () => setConfirmReopen(false) });
+  const rollInitiative = () => runControl.mutate({ action: 'roll-initiative' });
+  const startEncounter = () => runControl.mutate({ action: 'start' });
+  const nextTurn = () => runControl.mutate({ action: 'next-turn' });
+  // Close the confirm on success *or* failure so a rejected End (e.g. stale
+  // preparing status) does not leave the modal parked over the error banner (#420).
+  const endEncounter = () =>
+    runControl.mutate(
+      { action: 'end' },
+      {
+        onSuccess: () => setConfirmEnd(false),
+        onError: () => setConfirmEnd(false),
+      },
+    );
+  const hpSyncConflicts: HpSyncConflict[] = encounter?.hpSyncConflicts ?? [];
+  const reopenEncounter = () => {
+    const hpResync =
+      hpSyncConflicts.length > 0
+        ? hpSyncConflicts.map((c) => ({
+            combatantId: c.combatantId,
+            direction: hpResyncChoices[c.combatantId] ?? ('pull_sheet' as HpResyncDirection),
+          }))
+        : undefined;
+    runControl.mutate(
+      { action: 'reopen', body: hpResync ? { hpResync } : undefined },
+      {
+        onSuccess: () => {
+          setConfirmReopen(false);
+          setHpResyncChoices({});
+        },
+        onError: () => setConfirmReopen(false),
+      },
+    );
+  };
   const deleteEncounter = () => deleteEncounterMut.mutate();
+  const reopenChoicesComplete =
+    hpSyncConflicts.length === 0 || hpSyncConflicts.every((c) => hpResyncChoices[c.combatantId] != null);
 
   // Issue #702: how many combatants still need an initiative roll. Used to keep the
   // Roll-initiative button honest — disabled (rather than a silent no-op server call)
@@ -794,6 +934,28 @@ export default function RunSessionPage() {
   // to 'running' with nobody in the turn order). Mirror that here so the DM sees a
   // disabled control with an explanation instead of a round-trip 400.
   const hasNoCombatants = encounter ? encounter.combatants.length === 0 : true;
+
+  // Issue #431: preparing banner tailored to auto-added party / enemies / map / packs.
+  const preparingSetupGuidance = useMemo(() => {
+    if (!encounter || encounter.status !== 'preparing') return null;
+    return preparingGuidance({
+      partyCombatantCount: encounter.combatants.filter((c) => c.kind === 'character').length,
+      enemyCombatantCount: encounter.combatants.filter((c) => c.kind === 'monster' || c.kind === 'npc').length,
+      hasMap: encounter.mapAttachmentId != null,
+      campaignHasActiveParty: characters.some((c) => c.status === 'active'),
+      campaignHasCompendium,
+    });
+  }, [encounter, characters, campaignHasCompendium]);
+
+  // Issue #420: drop confirm dialogs that the current status no longer allows
+  // (e.g. End left open after a peer/SSE transition out of running).
+  const encounterStatus = encounter?.status;
+  useEffect(() => {
+    if (!encounterStatus) return;
+    if (!isLifecycleConfirmValid('end', encounterStatus)) setConfirmEnd(false);
+    if (!isLifecycleConfirmValid('reopen', encounterStatus)) setConfirmReopen(false);
+    if (!isLifecycleConfirmValid('delete', encounterStatus)) setConfirmDelete(false);
+  }, [encounterStatus]);
 
   const removeCombatant = (combatantId: number) => {
     setActionError(null);
@@ -947,22 +1109,39 @@ export default function RunSessionPage() {
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
   const currentCombatantId = encounter.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
+  // Issue #420: DM header actions come from an explicit lifecycle matrix (not
+  // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
+  const lifecycle = dmLifecycleActions(encounter.status);
+  const deleteCopy = deleteConfirmCopy(encounter.status);
 
   return (
     <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
       <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/encounters`)}>
+        <Btn
+          ghost
+          className="!min-h-0 !py-1.5 text-xs"
+          onClick={() => {
+            setActionError(null);
+            navigate(`/c/${cid}/encounters`);
+          }}
+        >
           ← Back
         </Btn>
       </div>
 
       {(loadError || actionError) && (
         <ErrorNote
-          message={actionError ?? loadError ?? ''}
+          message={actionError?.message ?? loadError ?? ''}
+          context={
+            actionError
+              ? `at ${new Date(actionError.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+              : undefined
+          }
           onRetry={() => {
             setActionError(null);
             refetchEncounter();
           }}
+          onDismiss={actionError ? () => setActionError(null) : undefined}
         />
       )}
 
@@ -984,7 +1163,7 @@ export default function RunSessionPage() {
           type="button"
           className="btn btn-ghost"
           style={{ fontSize: 11.5 }}
-          onClick={refetchEncounter}
+          onClick={refreshEncounter}
           title="Refresh"
         >
           ↻ Refresh
@@ -1001,7 +1180,7 @@ export default function RunSessionPage() {
             >
               <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
             </Btn>
-            {encounter.status === 'preparing' && (
+            {lifecycle.rollInitiative && lifecycle.start && (
               <>
                 {/* Issue #702: the server treats a fully-rolled roster as a no-op (no
                     write, no audit), so the button must reflect that — disabled when
@@ -1032,7 +1211,7 @@ export default function RunSessionPage() {
                 </div>
               </>
             )}
-            {encounter.status === 'running' && (
+            {lifecycle.rollInitiative && lifecycle.nextTurn && (
               <>
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
                     keep Roll initiative reachable so the DM can fill them (issue #54).
@@ -1052,19 +1231,29 @@ export default function RunSessionPage() {
                 </Btn>
               </>
             )}
-            {encounter.status !== 'ended' && (
+            {lifecycle.end && (
               <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
-            {encounter.status === 'ended' && (
-              <Btn ghost disabled={headerBusy} onClick={() => setConfirmReopen(true)}>
+            {lifecycle.reopen && (
+              <Btn
+                ghost
+                disabled={headerBusy}
+                onClick={() => {
+                  // Default each conflict to pull_sheet (preserve intervening healing/rest).
+                  const initial: Record<number, HpResyncDirection> = {};
+                  for (const c of encounter?.hpSyncConflicts ?? []) initial[c.combatantId] = 'pull_sheet';
+                  setHpResyncChoices(initial);
+                  setConfirmReopen(true);
+                }}
+              >
                 Reopen
               </Btn>
             )}
-            {(encounter.status === 'ended' || encounter.status === 'preparing') && (
+            {lifecycle.delete && (
               <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmDelete(true)}>
-                Delete
+                {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
               </Btn>
             )}
           </div>
@@ -1098,10 +1287,38 @@ export default function RunSessionPage() {
         }
       />
 
-      {isDm && encounter.status === 'preparing' && (
-        <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-          Add the party &amp; monsters below, roll initiative, then hit Start.
-        </p>
+      {isDm && preparingSetupGuidance && (
+        <div
+          data-testid="encounter-preparing-guidance"
+          className="text-muted"
+          style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
+        >
+          <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
+          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {preparingSetupGuidance.nextSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+          <ol
+            aria-label="Encounter lifecycle"
+            data-testid="encounter-lifecycle-checklist"
+            style={{
+              margin: 0,
+              padding: 0,
+              listStyle: 'none',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 6,
+              alignItems: 'center',
+            }}
+          >
+            {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => (
+              <li key={step.id} className="tag tag-neutral" style={{ fontSize: 10 }} title={step.detail}>
+                {i + 1}. {step.label}
+              </li>
+            ))}
+          </ol>
+        </div>
       )}
 
       {/* Optional battle map (issue #39) — a DM-uploaded image with draggable combatant
@@ -1122,7 +1339,7 @@ export default function RunSessionPage() {
           onSetAoe={setEncounterAoe}
           onPing={sendPing}
           pings={pings}
-          onError={setActionError}
+          onError={surfaceActionError}
         />
       )}
 
@@ -1140,9 +1357,30 @@ export default function RunSessionPage() {
       )}
 
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
+        {sheetsStatusLabel && (
+          <p
+            className="text-muted"
+            data-testid="inline-character-sheets-status"
+            style={{ fontSize: 11, margin: 0, padding: '8px 14px 0' }}
+            role="status"
+            aria-live="polite"
+          >
+            {sheetsStatusLabel}
+          </p>
+        )}
         {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
-            <EmptyState icon="crossed-swords" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
+            <EmptyState
+              icon="crossed-swords"
+              title="No combatants yet"
+              hint={
+                isDm
+                  ? characters.some((c) => c.status === 'active')
+                    ? 'Add the party from the Party tab, then enemies.'
+                    : 'Add combatants below — this campaign has no active party to auto-add.'
+                  : 'Waiting on the DM.'
+              }
+            />
           </div>
         ) : (
           orderedCombatants.map((c) => (
@@ -1158,8 +1396,9 @@ export default function RunSessionPage() {
               running={encounter.status === 'running'}
               character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
               openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
-              campaignId={cid}
-              onRollError={setActionError}
+              // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
+              campaignId={sheetsInteractive ? cid : undefined}
+              onRollError={surfaceActionError}
               onApplyDamage={onApplyDamageRolled}
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
@@ -1199,8 +1438,9 @@ export default function RunSessionPage() {
       {confirmEnd && (
         <ConfirmDialog
           title="End this encounter?"
-          body="HP writes back to character sheets. This cannot be undone."
-          confirmLabel={runControl.isPending ? 'Ending…' : 'End encounter'}
+          body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets heal or rest after this End, Reopen will show the conflict and ask which HP to keep — it will not silently overwrite."
+          confirmLabel="End encounter"
+          pendingLabel="Ending encounter…"
           busy={runControl.isPending}
           onConfirm={endEncounter}
           onCancel={() => setConfirmEnd(false)}
@@ -1209,18 +1449,88 @@ export default function RunSessionPage() {
       {confirmReopen && (
         <ConfirmDialog
           title="Reopen this encounter?"
-          body="It returns to Running where combat left off. HP was written back to character sheets when it ended; it will write back again the next time you End."
-          confirmLabel={runControl.isPending ? 'Reopening…' : 'Reopen encounter'}
+          body={
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <p style={{ margin: 0 }}>
+                It returns to Running where combat left off. Character sheets were synced when it
+                ended — if a sheet has healed, rested, or otherwise changed since then, choose which
+                HP to keep before reopening.
+              </p>
+              {hpSyncConflicts.length === 0 ? (
+                <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                  No sheet HP conflicts — combatant snapshots still match the sheets.
+                </p>
+              ) : (
+                <div data-testid="hp-resync-conflicts" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {hpSyncConflicts.map((c) => (
+                    <fieldset
+                      key={c.combatantId}
+                      style={{
+                        margin: 0,
+                        padding: '10px 12px',
+                        border: '1px solid var(--color-divider)',
+                        borderRadius: 'var(--radius-md)',
+                      }}
+                    >
+                      <legend style={{ fontWeight: 600, padding: '0 4px' }}>{c.name}</legend>
+                      <p className="text-muted" style={{ margin: '0 0 8px', fontSize: 12.5 }}>
+                        Combat snapshot {c.combatant.hpCurrent} HP
+                        {c.combatant.hpTemp > 0 ? ` (+${c.combatant.hpTemp} temp)` : ''} · sheet{' '}
+                        {c.sheet.hpCurrent} HP
+                        {c.sheet.hpTemp > 0 ? ` (+${c.sheet.hpTemp} temp)` : ''}
+                      </p>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {(
+                          [
+                            ['pull_sheet', 'Keep sheet HP (pull into combat)'],
+                            ['keep_combatant', 'Keep combat snapshot (overwrite sheet on next End)'],
+                          ] as const
+                        ).map(([value, label]) => (
+                          <label
+                            key={value}
+                            style={{ display: 'flex', gap: 8, alignItems: 'center', minHeight: 44, cursor: 'pointer' }}
+                          >
+                            <input
+                              type="radio"
+                              name={`hp-resync-${c.combatantId}`}
+                              value={value}
+                              checked={hpResyncChoices[c.combatantId] === value}
+                              onChange={() =>
+                                setHpResyncChoices((prev) => ({ ...prev, [c.combatantId]: value }))
+                              }
+                            />
+                            <span style={{ fontSize: 13 }}>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  ))}
+                </div>
+              )}
+            </div>
+          }
+          confirmLabel="Reopen encounter"
+          pendingLabel="Reopening encounter…"
+
           busy={runControl.isPending}
+          confirmDisabled={!reopenChoicesComplete}
           onConfirm={reopenEncounter}
-          onCancel={() => setConfirmReopen(false)}
+          onCancel={() => {
+            setConfirmReopen(false);
+            setHpResyncChoices({});
+          }}
         />
       )}
       {confirmDelete && (
         <ConfirmDialog
-          title="Delete this encounter?"
-          body="This cannot be undone."
-          confirmLabel={deleteEncounterMut.isPending ? 'Deleting…' : 'Delete encounter'}
+          title={deleteCopy.title}
+          body={deleteCopy.body}
+          confirmLabel={
+            encounter.status === 'preparing' ? 'Cancel preparation' : 'Delete encounter'
+          }
+          pendingLabel={
+            encounter.status === 'preparing' ? 'Cancelling preparation…' : 'Deleting encounter…'
+          }
           busy={deleteEncounterMut.isPending}
           onConfirm={deleteEncounter}
           onCancel={() => setConfirmDelete(false)}
@@ -1229,7 +1539,8 @@ export default function RunSessionPage() {
       {confirmRemoveCombatantId != null && (
         <ConfirmDialog
           title="Remove this combatant from the encounter?"
-          confirmLabel={pendingCombatantIds.has(confirmRemoveCombatantId) ? 'Removing…' : 'Remove'}
+          confirmLabel="Remove"
+          pendingLabel="Removing…"
           busy={pendingCombatantIds.has(confirmRemoveCombatantId)}
           onConfirm={() => removeCombatant(confirmRemoveCombatantId)}
           onCancel={() => setConfirmRemoveCombatantId(null)}
@@ -1375,11 +1686,12 @@ function aoePolygonPoints(
  *    the server additionally withholds token positions in the dark (redaction-safe),
  *  - shared circle/cone/line AoE templates (issue #238) persisted on the encounter so every
  *    client sees the same shapes (the old circle was client-local),
- *  - transient click-to-ping markers broadcast to the whole table over SSE (issue #238).
+ *  - transient tap-to-ping markers broadcast to the whole table over SSE (issue #238 / #809).
  * Grid config, fog, and AoE are DM-only PATCHes to the encounter; every change rides the existing
  * SSE `encounter.updated` signal so other clients update live (the poll is the backstop). Pings
- * ride a dedicated one-shot `encounter.ping` signal. DM may move any token; a player only their
- * own character's (canMoveToken), but any member may ping.
+ * ride a dedicated one-shot `encounter.ping` signal and publish only after a completed tap
+ * (matching pointer-up inside slop + time), never on touch-down. DM may move any token; a player
+ * only their own character's (canMoveToken), but any member may ping.
  */
 function BattleMap({
   encounter,
@@ -1417,7 +1729,8 @@ function BattleMap({
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
     | { kind: 'fog'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
-    | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint };
+    | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
+    | { kind: 'ping'; pointerId: number; captureTarget: Element; arm: MapPingTapArm };
 
   const [uploading, setUploading] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
@@ -1449,6 +1762,8 @@ function BattleMap({
       setAoeDrag(null);
     } else if (kind === 'fog') {
       setRevealCorners(null);
+    } else if (kind === 'ping') {
+      // Armed ping has no live preview — publish is deferred until a completed tap.
     } else {
       setRuler(null);
     }
@@ -1498,47 +1813,42 @@ function BattleMap({
     };
   }, [cancelActiveGesture]);
 
-  const mapImageUrl = encounter.mapAttachmentId != null ? attachmentFileUrl(encounter.mapAttachmentId) : null;
-  const placed = encounter.combatants.filter((c) => c.tokenX != null && c.tokenY != null);
-  const unplaced = encounter.combatants.filter((c) => c.tokenX == null || c.tokenY == null);
+  // The encounter-scoped route is the VTT secrecy boundary (issue #463): DMs receive
+  // the source, while players receive a server-rendered image containing only revealed
+  // pixels. mapAttachmentId is used only as the presence bit, never as a player image URL.
+  const mapImageUrl = encounter.mapAttachmentId != null ? encounterMapUrl(encounter.id, encounter.updatedAt) : null;
+  // Issue #418: fog-redacted tokens keep null coords but set tokenHiddenByFog — do not
+  // treat them as Unplaced (that offered a no-op place-at-center for the owner).
+  const { placed, unplaced, hiddenByFog } = partitionMapTokens(encounter.combatants);
 
-  const gridSize = encounter.gridSize; // cell edge as % of width; null = no grid
+  const gridSize = encounter.gridSize; // cell edge as % of map width; null = no grid
   const gridScale = encounter.gridScale;
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
   const gridOn = gridSize != null && gridSize > 0;
-  // One cell in rendered pixels — cells are square in pixels regardless of the 16:9 surface.
-  const cellPx = gridOn && surfaceW > 0 ? (gridSize! / 100) * surfaceW : 0;
-  // Distance readout needs both a cell size (px) and a real-world scale.
-  const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
-  const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
 
   // A new map starts with unknown natural size until its <img> fires onLoad.
   useEffect(() => {
     setImgNatural(null);
   }, [mapImageUrl]);
 
-  // Rendered rect of the map image inside the 16:9 surface. `object-contain` letterboxes a
-  // non-16:9 image, leaving dark bands the grid must not draw over (issue #273b). Until the
-  // natural size is known we fall back to the full surface (no clipping regression).
-  const mapRect = useMemo(() => {
-    if (surfaceW <= 0 || surfaceH <= 0) return null;
-    if (!imgNatural || imgNatural.w <= 0 || imgNatural.h <= 0) {
-      return { left: 0, top: 0, width: surfaceW, height: surfaceH };
-    }
-    const scale = Math.min(surfaceW / imgNatural.w, surfaceH / imgNatural.h);
-    const width = imgNatural.w * scale;
-    const height = imgNatural.h * scale;
-    return { left: (surfaceW - width) / 2, top: (surfaceH - height) / 2, width, height };
-  }, [surfaceW, surfaceH, imgNatural]);
+  // Rendered rect of the map image inside the 16:9 surface (issue #464 / #273b).
+  // object-contain letterboxes non-16:9 images; every tool shares this transform.
+  const mapRect = useMemo(
+    () => computeContainedRect({ w: surfaceW, h: surfaceH }, imgNatural),
+    [surfaceW, surfaceH, imgNatural],
+  );
+  // One cell in rendered pixels — derived from the map width, never the surface (#464).
+  const cellPx = gridOn && mapRect ? cellSizePx(gridSize, mapRect.width) : 0;
+  // Distance readout needs both a cell size (px) and a real-world scale.
+  const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
+  const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
 
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
-  // A non-DM whose token would be hidden by fog simply never receives its position from the
-  // server (it lands in `unplaced`), so the client never has to trust itself to hide it.
-
-  const clampPct = (v: number) => Math.max(0, Math.min(100, v));
+  // A non-DM whose token sits outside revealed fog never receives its coordinates (issue #40).
+  // Those combatants land in `hiddenByFog` via tokenHiddenByFog (issue #418), not Unplaced.
 
   async function uploadMapFile(file: File) {
     setUploading(true);
@@ -1552,29 +1862,30 @@ function BattleMap({
     }
   }
 
-  function pointerToPercent(e: ReactPointerEvent): MapPoint | null {
+  /**
+   * Pointer → map-image percent (issue #464). Letterbox hits return null unless
+   * `clamp` is set (in-progress drags stay pinned to the map edge).
+   */
+  function pointerToPercent(e: ReactPointerEvent, clamp = false): MapPoint | null {
+    if (!mapRect) return null;
     const rect = surfaceRef.current?.getBoundingClientRect();
-    if (!rect || rect.width === 0 || rect.height === 0) return null;
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
-    return { x: clampPct(x), y: clampPct(y) };
+    if (!rect) return null;
+    return pointerToMapPercent(e.clientX, e.clientY, rect, mapRect, { clamp });
   }
 
   /** Snap a drop point to the nearest cell centre when the grid + snap are on (issue #40). */
   function snapPoint(pt: MapPoint): MapPoint {
-    if (!gridOn || !encounter.gridSnap || cellPx <= 0 || surfaceW === 0 || surfaceH === 0) return pt;
-    const px = (pt.x / 100) * surfaceW;
-    const py = (pt.y / 100) * surfaceH;
-    const sx = (Math.floor(px / cellPx) + 0.5) * cellPx;
-    const sy = (Math.floor(py / cellPx) + 0.5) * cellPx;
-    return { x: clampPct((sx / surfaceW) * 100), y: clampPct((sy / surfaceH) * 100) };
+    if (!mapRect) return pt;
+    return snapMapPercent(pt, cellPx, mapRect, gridOn && encounter.gridSnap);
   }
 
   function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
     if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
     e.preventDefault();
     e.stopPropagation();
-    const point = pointerToPercent(e);
+    // Token handles live on the map layer; clamp so a press on the token edge still binds.
+    const point = pointerToPercent(e, true);
+    if (!point) return;
     const captureTarget = e.currentTarget;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
@@ -1584,12 +1895,34 @@ function BattleMap({
   }
 
   function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
-    if (!e.isPrimary || activeGestureRef.current) return;
+    // A palm / secondary contact cannot arm a ping, and if a ping is already armed it cancels
+    // that gesture so the interrupted primary never publishes (issue #809).
+    if (!e.isPrimary) {
+      const armed = activeGestureRef.current;
+      if (armed?.kind === 'ping') cancelActiveGesture(armed.pointerId);
+      return;
+    }
+    if (activeGestureRef.current) return;
+    // Letterbox bands are inert — do not start ping/measure/reveal/deselect there (#464).
     const pct = pointerToPercent(e);
     if (!pct) return;
     if (tool === 'ping') {
-      // A ping is a one-shot gesture — broadcast immediately on press, no drag.
-      onPing(pct.x, pct.y);
+      // Arm on press; publish only from a matching completed tap (pointer-up inside slop/time).
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      activeGestureRef.current = {
+        kind: 'ping',
+        pointerId: e.pointerId,
+        captureTarget: e.currentTarget,
+        arm: armMapPingTap({
+          pointerId: e.pointerId,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          startedAt: performance.now(),
+          x: pct.x,
+          y: pct.y,
+        }),
+      };
       return;
     }
     if (tool === 'measure' && canMeasure) {
@@ -1611,7 +1944,15 @@ function BattleMap({
   function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
     const gesture = activeGestureRef.current;
     if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
-    const pct = pointerToPercent(e);
+    if (gesture.kind === 'ping') {
+      // Drag-away past tap slop cancels immediately — no publish on the eventual release.
+      if (mapPingTapExceededSlop(gesture.arm, e.clientX, e.clientY)) {
+        cancelActiveGesture(gesture.pointerId);
+      }
+      return;
+    }
+    // Keep an in-flight gesture alive across the letterbox by clamping to the map edge.
+    const pct = pointerToPercent(e, true);
     if (!pct) return;
 
     if (gesture.kind === 'token') {
@@ -1629,11 +1970,8 @@ function BattleMap({
 
   // Only the owning primary pointer's normal release may commit. Ownership is cleared before the
   // mutation callback, making duplicate pointerup/lostcapture delivery exactly-once by design.
-  function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
-    const gesture = activeGestureRef.current;
-    if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
-    const finalPoint = pointerToPercent(e);
-    successfulPointerUpRef.current = e.pointerId;
+  function releasePointerOwnership(gesture: ActiveMapGesture) {
+    successfulPointerUpRef.current = gesture.pointerId;
     activeGestureRef.current = null;
     // Pointer capture is normally released implicitly after pointerup, but doing it explicitly
     // makes the lifecycle deterministic across mouse, pen, and touch implementations. Ownership
@@ -1645,6 +1983,29 @@ function BattleMap({
     } catch {
       // The browser may already have released capture as part of pointerup dispatch.
     }
+  }
+
+  function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = activeGestureRef.current;
+    if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+
+    // Ping: decide publish/cancel first, then always clear ownership + release capture so a
+    // completed (or cancelled) tap never leaves `kind: 'ping'` armed for a later pointerup.
+    if (gesture.kind === 'ping') {
+      const decision = decideMapPingTapRelease(gesture.arm, {
+        pointerId: e.pointerId,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        nowMs: performance.now(),
+      });
+      releasePointerOwnership(gesture);
+      if (decision.action === 'publish') onPing(decision.x, decision.y);
+      return;
+    }
+
+    // Clamp so a release that ends in the letterbox still commits at the map edge (#464).
+    const finalPoint = pointerToPercent(e, true);
+    releasePointerOwnership(gesture);
     // Completed measurements intentionally remain visible for reading. The three persistent
     // gesture classes clear their transient overrides before invoking their mutation callbacks.
     if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
@@ -1676,6 +2037,14 @@ function BattleMap({
     setRuler({ start: gesture.start, end: finalPoint ?? gesture.end });
   }
 
+  function onPingKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    if (tool !== 'ping' || !isMapPingKeyboardActivation(e)) return;
+    e.preventDefault();
+    // Discrete keyboard activation never shares ownership with an armed pointer tap.
+    if (activeGestureRef.current) return;
+    onPing(MAP_PING_KEYBOARD_POINT.x, MAP_PING_KEYBOARD_POINT.y);
+  }
+
   function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
     cancelActiveGesture(e.pointerId);
   }
@@ -1692,7 +2061,7 @@ function BattleMap({
     if (!e.isPrimary || activeGestureRef.current || !isDm) return;
     e.preventDefault();
     e.stopPropagation();
-    const pct = pointerToPercent(e);
+    const pct = pointerToPercent(e, true);
     const point = pct ?? { x: t.x, y: t.y };
     const captureTarget = e.currentTarget;
     captureTarget.setPointerCapture?.(e.pointerId);
@@ -1720,10 +2089,8 @@ function BattleMap({
   // Measurement readout (5e: distance counts whole squares along the longer axis is common,
   // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
   const rulerReadout = (() => {
-    if (!ruler || !canMeasure) return null;
-    const dpxX = ((ruler.end.x - ruler.start.x) / 100) * surfaceW;
-    const dpxY = ((ruler.end.y - ruler.start.y) / 100) * surfaceH;
-    const cells = Math.hypot(dpxX, dpxY) / cellPx;
+    if (!ruler || !canMeasure || !mapRect) return null;
+    const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
     const feet = Math.round(cells) * (gridScale ?? 0);
     return { cells, feet };
   })();
@@ -1731,14 +2098,19 @@ function BattleMap({
   const revealPreview = revealCorners ? rectFromCorners(revealCorners.start, revealCorners.end) : null;
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
 
-  // Hex overlay polygons (issue #238). Memoized on the geometry inputs so a token/AoE drag —
-  // which changes none of them — never recomputes the (potentially hundreds of) hexes.
+  // Hex overlay polygons (issue #238). Tiled in map-layer space so letterboxing never
+  // stretches cells (#464). Memoized on geometry inputs so a token/AoE drag never recomputes.
   const hexCells = useMemo(
-    () => (gridOn && gridType === 'hex' ? hexPolygons(surfaceW, surfaceH, cellPx) : []),
-    [gridOn, gridType, surfaceW, surfaceH, cellPx],
+    () =>
+      gridOn && gridType === 'hex' && mapRect
+        ? hexPolygons(mapRect.width, mapRect.height, cellPx)
+        : [],
+    [gridOn, gridType, mapRect, cellPx],
   );
 
   function changeTool(next: MapTool) {
+    // Leaving a mode drops any armed/incomplete gesture (including an unfinished ping tap).
+    cancelActiveGesture();
     setTool(next);
     setRuler(null);
     setRevealCorners(null);
@@ -1747,15 +2119,15 @@ function BattleMap({
   const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
     <button
       type="button"
-      className="cf-chip"
+      className="cf-map-tool"
+      data-testid={`map-tool-${value}`}
       disabled={disabled}
       title={hint}
+      aria-pressed={tool === value}
       onClick={() => changeTool(value)}
       style={{
-        cursor: disabled ? 'default' : 'pointer',
         borderColor: tool === value ? 'var(--color-accent)' : 'var(--color-divider)',
         color: tool === value ? 'var(--color-accent)' : undefined,
-        opacity: disabled ? 0.5 : 1,
       }}
     >
       {label}
@@ -1797,27 +2169,27 @@ function BattleMap({
       {mapImageUrl && (
         <>
           {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
-          <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }}>
+          <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }} data-testid="map-toolbar">
             {modeBtn('move', 'Move')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
-            {modeBtn('ping', 'Ping', false, 'Click the map to ping a spot for everyone')}
+            {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
             {isDm && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
             {isDm && canAoe && (
               <>
                 <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
-                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
+                <button type="button" className="cf-map-tool" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-map-tool" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-map-tool" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
               </>
             )}
             <div style={{ flex: 1 }} />
             {isDm && (
               <button
                 type="button"
-                className="cf-chip"
+                className="cf-map-tool"
                 onClick={() => setGridPanelOpen((v) => !v)}
                 title="Grid & fog settings"
-                style={{ cursor: 'pointer', borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
+                style={{ borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
               >
                 Grid &amp; fog
               </button>
@@ -1852,7 +2224,7 @@ function BattleMap({
                   />
                 </label>
               )}
-              <button type="button" className="cf-chip" style={{ cursor: 'pointer', color: 'var(--color-danger, #ef4444)' }} onClick={() => removeAoe(selectedAoe.id)}>Remove</button>
+              <button type="button" className="cf-map-tool" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => removeAoe(selectedAoe.id)}>Remove</button>
             </div>
           )}
 
@@ -1961,6 +2333,9 @@ function BattleMap({
             ref={surfaceRef}
             data-testid="battle-map-surface"
             className="relative overflow-hidden"
+            role={tool === 'ping' ? 'button' : undefined}
+            tabIndex={tool === 'ping' ? 0 : undefined}
+            aria-label={tool === 'ping' ? 'Ping the map center for everyone' : undefined}
             style={{
               margin: '8px 14px',
               aspectRatio: '16 / 9',
@@ -1972,6 +2347,7 @@ function BattleMap({
             onPointerUp={onSurfacePointerUp}
             onPointerCancel={onSurfacePointerCancel}
             onLostPointerCapture={onSurfaceLostPointerCapture}
+            onKeyDown={tool === 'ping' ? onPingKeyDown : undefined}
           >
             <img
               src={mapImageUrl}
@@ -1981,297 +2357,318 @@ function BattleMap({
               onLoad={(e) => setImgNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
             />
 
-            {/* Grid overlay (issue #40 / #238) — a square CSS grid, or a pointy-top hex SVG.
-                Both are clipped to the map image's letterboxed rendered rect (issue #273b) so the
-                grid never bleeds onto the dark object-contain bands. The inner layer stays anchored
-                to the surface origin (offset by -mapRect) so grid lines keep aligning with token
-                snapping, which works in surface coordinates. */}
-            {gridOn && gridType === 'square' && cellPx > 1 && mapRect && (
+            {/* Map layer (issue #464): every interactive/visual tool is positioned in the
+                object-contain image rect. Percents are relative to this layer (matching the
+                server fog renderer), so letterbox bands never receive tokens or grid ink. */}
+            {mapRect && (
               <div
-                className="absolute"
-                style={{ pointerEvents: 'none', overflow: 'hidden', left: mapRect.left, top: mapRect.top, width: mapRect.width, height: mapRect.height }}
-              >
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: -mapRect.left,
-                    top: -mapRect.top,
-                    width: surfaceW,
-                    height: surfaceH,
-                    backgroundImage:
-                      `repeating-linear-gradient(to right, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px),` +
-                      `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
-                  }}
-                />
-              </div>
-            )}
-            {gridOn && gridType === 'hex' && hexCells.length > 0 && mapRect && (
-              <div
-                className="absolute"
-                style={{ pointerEvents: 'none', overflow: 'hidden', left: mapRect.left, top: mapRect.top, width: mapRect.width, height: mapRect.height }}
-              >
-                <svg style={{ position: 'absolute', left: -mapRect.left, top: -mapRect.top }} width={surfaceW} height={surfaceH}>
-                  {hexCells.map((pts, i) => (
-                    <polygon key={i} points={pts} fill="none" stroke="rgba(148,163,184,.35)" strokeWidth={1} />
-                  ))}
-                </svg>
-              </div>
-            )}
-
-            {placed.map((c) => {
-              const isDragging = draggingId === c.id && dragPos != null;
-              const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
-              const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
-              const movable = tool === 'move' && canMoveToken(c);
-              const isCharacter = c.kind === 'character';
-              const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
-              return (
-                <div
-                  key={c.id}
-                  data-testid={`map-token-${c.id}`}
-                  className="absolute -translate-x-1/2 -translate-y-1/2"
-                  style={{
-                    left: `${left}%`,
-                    top: `${top}%`,
-                    // In measure/reveal mode tokens must not eat the surface drag.
-                    pointerEvents: tool === 'move' ? 'auto' : 'none',
-                    touchAction: 'none',
-                    cursor: movable ? 'grab' : 'default',
-                    opacity: isDragging ? 0.85 : 1,
-                    zIndex: isDragging ? 10 : 2,
-                  }}
-                  onPointerDown={(e) => onTokenPointerDown(e, c)}
-                  title={`${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}`}
-                >
-                  <span
-                    style={{
-                      display: 'grid',
-                      placeItems: 'center',
-                      width: sizePx,
-                      height: sizePx,
-                      borderRadius: '50%',
-                      fontSize: Math.max(9, Math.round(sizePx * 0.34)),
-                      fontWeight: 700,
-                      color: '#fff',
-                      background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
-                      border: '2px solid rgba(15,23,42,.85)',
-                      boxShadow: '0 1px 3px rgba(0,0,0,.5)',
-                    }}
-                  >
-                    {tokenInitials(c.name)}
-                  </span>
-                  {/* Unplace control (issue #271): remove the token from the board without
-                      deleting the combatant. Only offered to whoever may move this token, and
-                      only in move mode. stopPropagation on pointer-down so tapping it never
-                      starts a token drag. */}
-                  {movable && (
-                    <button
-                      type="button"
-                      aria-label={`Remove ${c.name} from the map`}
-                      title="Remove from map"
-                      disabled={busy}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onUnplaceToken(c.id);
-                      }}
-                      style={{
-                        position: 'absolute',
-                        top: -6,
-                        right: -6,
-                        width: 16,
-                        height: 16,
-                        display: 'grid',
-                        placeItems: 'center',
-                        padding: 0,
-                        borderRadius: '50%',
-                        border: '1px solid rgba(15,23,42,.85)',
-                        background: 'var(--color-danger, #b91c1c)',
-                        color: '#fff',
-                        fontSize: 11,
-                        lineHeight: 1,
-                        cursor: busy ? 'default' : 'pointer',
-                        zIndex: 3,
-                      }}
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Shared AoE templates (issue #238) — circle/cone/line drawn in pixel space so every
-                client sees the same shapes. Drawn under an SVG (pointer-inert); the DM gets a
-                draggable origin handle per template (move mode only, so it never eats a drag). */}
-            {canAoe && aoeTemplates.length > 0 && (
-              <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none', zIndex: 6 }} width={surfaceW} height={surfaceH}>
-                {aoeTemplates.map((t) => {
-                  const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
-                  const ox = ((drag ? drag.x : t.x) / 100) * surfaceW;
-                  const oy = ((drag ? drag.y : t.y) / 100) * surfaceH;
-                  const lengthPx = (t.sizeFt / gridScale!) * cellPx;
-                  if (lengthPx <= 0) return null;
-                  const selected = t.id === selectedAoeId;
-                  const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
-                  const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
-                  if (t.shape === 'circle') {
-                    return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
-                  }
-                  const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
-                  return <polygon key={t.id} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
-                })}
-              </svg>
-            )}
-            {isDm && canAoe &&
-              aoeTemplates.map((t) => {
-                const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
-                const x = drag ? drag.x : t.x;
-                const y = drag ? drag.y : t.y;
-                return (
-                  <div
-                    key={t.id}
-                    data-testid={`map-aoe-${t.id}`}
-                    className="absolute -translate-x-1/2 -translate-y-1/2"
-                    style={{
-                      left: `${x}%`,
-                      top: `${y}%`,
-                      width: 14,
-                      height: 14,
-                      borderRadius: '50%',
-                      background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
-                      border: '2px solid rgba(15,23,42,.85)',
-                      // Only grab the pointer in move mode, so reveal/measure drags pass through.
-                      pointerEvents: tool === 'move' ? 'auto' : 'none',
-                      cursor: 'grab',
-                      touchAction: 'none',
-                      zIndex: 7,
-                    }}
-                    onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
-                    title={`${t.shape} · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''} — drag to move, click to edit`}
-                  />
-                );
-              })}
-
-            {/* Fog of war (issue #40). A dark overlay with the revealed rectangles punched out.
-                DM sees through it (semi-transparent) to prep; players see it solid. Coordinates
-                are 0–100, so a viewBox of 0 0 100 100 with no aspect preservation maps directly. */}
-            {fogOn && (
-              <svg
-                className="absolute inset-0 w-full h-full"
-                viewBox="0 0 100 100"
-                preserveAspectRatio="none"
-                style={{ pointerEvents: 'none', zIndex: 4 }}
-              >
-                <defs>
-                  <mask id={`fogmask-${encounter.id}`}>
-                    <rect x={0} y={0} width={100} height={100} fill="#fff" />
-                    {(fog?.revealed ?? []).map((r, i) => (
-                      <rect key={i} x={r.x} y={r.y} width={r.w} height={r.h} fill="#000" />
-                    ))}
-                  </mask>
-                </defs>
-                <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={isDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
-              </svg>
-            )}
-
-            {/* In-progress reveal rectangle (DM). */}
-            {revealPreview && (
-              <div
-                className="absolute"
-                data-testid="map-fog-preview"
+                data-testid="battle-map-layer"
+                className="absolute overflow-hidden"
                 style={{
-                  left: `${revealPreview.x}%`,
-                  top: `${revealPreview.y}%`,
-                  width: `${revealPreview.w}%`,
-                  height: `${revealPreview.h}%`,
-                  border: '2px dashed var(--color-accent)',
-                  background: 'rgba(56,189,248,.12)',
+                  left: mapRect.left,
+                  top: mapRect.top,
+                  width: mapRect.width,
+                  height: mapRect.height,
+                  // Surface owns pointer gestures; children opt in (tokens/AoE handles).
                   pointerEvents: 'none',
-                  zIndex: 8,
                 }}
-              />
-            )}
-
-            {/* Measurement ruler (issue #40). */}
-            {ruler && canMeasure && (
-              <>
-                <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none', zIndex: 7 }}>
-                  <line
-                    data-testid="map-ruler-line"
-                    x1={`${ruler.start.x}%`}
-                    y1={`${ruler.start.y}%`}
-                    x2={`${ruler.end.x}%`}
-                    y2={`${ruler.end.y}%`}
-                    stroke="var(--color-accent)"
-                    strokeWidth={2}
-                    strokeDasharray="5 4"
+              >
+                {/* Grid overlay (issue #40 / #238) — square CSS grid or pointy-top hex SVG. */}
+                {gridOn && gridType === 'square' && cellPx > 1 && (
+                  <div
+                    className="absolute inset-0"
+                    style={{
+                      backgroundImage:
+                        `repeating-linear-gradient(to right, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px),` +
+                        `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
+                    }}
                   />
-                </svg>
-                {rulerReadout && (
+                )}
+                {gridOn && gridType === 'hex' && hexCells.length > 0 && (
+                  <svg className="absolute inset-0" width={mapRect.width} height={mapRect.height}>
+                    {hexCells.map((pts, i) => (
+                      <polygon key={i} points={pts} fill="none" stroke="rgba(148,163,184,.35)" strokeWidth={1} />
+                    ))}
+                  </svg>
+                )}
+
+                {placed.map((c) => {
+                  const isDragging = draggingId === c.id && dragPos != null;
+                  const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
+                  const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
+                  const movable = tool === 'move' && canMoveToken(c);
+                  const isCharacter = c.kind === 'character';
+                  const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
+                  return (
+                    <div
+                      key={c.id}
+                      data-testid={`map-token-${c.id}`}
+                      className="absolute -translate-x-1/2 -translate-y-1/2"
+                      style={{
+                        left: `${left}%`,
+                        top: `${top}%`,
+                        // In measure/reveal mode tokens must not eat the surface drag.
+                        pointerEvents: tool === 'move' ? 'auto' : 'none',
+                        touchAction: 'none',
+                        cursor: movable ? 'grab' : 'default',
+                        opacity: isDragging ? 0.85 : 1,
+                        zIndex: isDragging ? 10 : 2,
+                      }}
+                      onPointerDown={(e) => onTokenPointerDown(e, c)}
+                      title={`${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}`}
+                    >
+                      <span
+                        style={{
+                          display: 'grid',
+                          placeItems: 'center',
+                          width: sizePx,
+                          height: sizePx,
+                          borderRadius: '50%',
+                          fontSize: Math.max(9, Math.round(sizePx * 0.34)),
+                          fontWeight: 700,
+                          color: '#fff',
+                          background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
+                          border: '2px solid rgba(15,23,42,.85)',
+                          boxShadow: '0 1px 3px rgba(0,0,0,.5)',
+                        }}
+                      >
+                        {tokenInitials(c.name)}
+                      </span>
+                      {/* Unplace control (issue #271): remove the token from the board without
+                          deleting the combatant. Only offered to whoever may move this token, and
+                          only in move mode. stopPropagation on pointer-down so tapping it never
+                          starts a token drag. */}
+                      {movable && (
+                        <button
+                          type="button"
+                          aria-label={`Remove ${c.name} from the map`}
+                          title="Remove from map"
+                          disabled={busy}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onUnplaceToken(c.id);
+                          }}
+                          style={{
+                            position: 'absolute',
+                            top: -6,
+                            right: -6,
+                            width: 16,
+                            height: 16,
+                            display: 'grid',
+                            placeItems: 'center',
+                            padding: 0,
+                            borderRadius: '50%',
+                            border: '1px solid rgba(15,23,42,.85)',
+                            background: 'var(--color-danger, #b91c1c)',
+                            color: '#fff',
+                            fontSize: 11,
+                            lineHeight: 1,
+                            cursor: busy ? 'default' : 'pointer',
+                            zIndex: 3,
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* Shared AoE templates (issue #238) — drawn in map-layer pixel space. */}
+                {canAoe && aoeTemplates.length > 0 && (
+                  <svg
+                    className="absolute inset-0"
+                    style={{ zIndex: 6 }}
+                    width={mapRect.width}
+                    height={mapRect.height}
+                  >
+                    {aoeTemplates.map((t) => {
+                      const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
+                      const { x: ox, y: oy } = mapPercentToLayerPx(
+                        { x: drag ? drag.x : t.x, y: drag ? drag.y : t.y },
+                        mapRect,
+                      );
+                      const lengthPx = (t.sizeFt / gridScale!) * cellPx;
+                      if (lengthPx <= 0) return null;
+                      const selected = t.id === selectedAoeId;
+                      const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
+                      const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
+                      if (t.shape === 'circle') {
+                        return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
+                      }
+                      const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
+                      return <polygon key={t.id} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
+                    })}
+                  </svg>
+                )}
+                {isDm && canAoe &&
+                  aoeTemplates.map((t) => {
+                    const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
+                    const x = drag ? drag.x : t.x;
+                    const y = drag ? drag.y : t.y;
+                    return (
+                      <div
+                        key={t.id}
+                        data-testid={`map-aoe-${t.id}`}
+                        className="absolute -translate-x-1/2 -translate-y-1/2"
+                        style={{
+                          left: `${x}%`,
+                          top: `${y}%`,
+                          width: 14,
+                          height: 14,
+                          borderRadius: '50%',
+                          background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
+                          border: '2px solid rgba(15,23,42,.85)',
+                          // Only grab the pointer in move mode, so reveal/measure drags pass through.
+                          pointerEvents: tool === 'move' ? 'auto' : 'none',
+                          cursor: 'grab',
+                          touchAction: 'none',
+                          zIndex: 7,
+                        }}
+                        onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
+                        title={`${t.shape} · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''} — drag to move, click to edit`}
+                      />
+                    );
+                  })}
+
+                {/* Fog of war (issue #40). Percents match the image / server fog renderer. */}
+                {fogOn && (
+                  <svg
+                    className="absolute inset-0 w-full h-full"
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                    style={{ zIndex: 4 }}
+                  >
+                    <defs>
+                      <mask id={`fogmask-${encounter.id}`}>
+                        <rect x={0} y={0} width={100} height={100} fill="#fff" />
+                        {(fog?.revealed ?? []).map((r, i) => (
+                          <rect key={i} x={r.x} y={r.y} width={r.w} height={r.h} fill="#000" />
+                        ))}
+                      </mask>
+                    </defs>
+                    <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={isDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
+                  </svg>
+                )}
+
+                {/* In-progress reveal rectangle (DM). */}
+                {revealPreview && (
                   <div
                     className="absolute"
+                    data-testid="map-fog-preview"
                     style={{
-                      left: `${ruler.end.x}%`,
-                      top: `${ruler.end.y}%`,
-                      transform: 'translate(8px, 8px)',
-                      background: 'rgba(15,23,42,.9)',
-                      color: '#fff',
-                      fontSize: 11,
-                      fontWeight: 600,
-                      padding: '2px 6px',
-                      borderRadius: 4,
-                      pointerEvents: 'none',
-                      whiteSpace: 'nowrap',
-                      zIndex: 9,
+                      left: `${revealPreview.x}%`,
+                      top: `${revealPreview.y}%`,
+                      width: `${revealPreview.w}%`,
+                      height: `${revealPreview.h}%`,
+                      border: '2px dashed var(--color-accent)',
+                      background: 'rgba(56,189,248,.12)',
+                      zIndex: 8,
                     }}
-                  >
-                    {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
-                  </div>
+                  />
                 )}
-              </>
-            )}
 
-            {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
-            {pings.map((p) => (
-              <div
-                key={p.key}
-                className="absolute -translate-x-1/2 -translate-y-1/2"
-                style={{
-                  left: `${p.x}%`,
-                  top: `${p.y}%`,
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  border: '3px solid var(--color-accent)',
-                  pointerEvents: 'none',
-                  zIndex: 10,
-                  animation: 'cfPing 2.4s ease-out forwards',
-                }}
-              />
-            ))}
+                {/* Measurement ruler (issue #40). */}
+                {ruler && canMeasure && (
+                  <>
+                    <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 7 }}>
+                      <line
+                        data-testid="map-ruler-line"
+                        x1={`${ruler.start.x}%`}
+                        y1={`${ruler.start.y}%`}
+                        x2={`${ruler.end.x}%`}
+                        y2={`${ruler.end.y}%`}
+                        stroke="var(--color-accent)"
+                        strokeWidth={2}
+                        strokeDasharray="5 4"
+                      />
+                    </svg>
+                    {rulerReadout && (
+                      <div
+                        className="absolute"
+                        style={{
+                          left: `${ruler.end.x}%`,
+                          top: `${ruler.end.y}%`,
+                          transform: 'translate(8px, 8px)',
+                          background: 'rgba(15,23,42,.9)',
+                          color: '#fff',
+                          fontSize: 11,
+                          fontWeight: 600,
+                          padding: '2px 6px',
+                          borderRadius: 4,
+                          whiteSpace: 'nowrap',
+                          zIndex: 9,
+                        }}
+                      >
+                        {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
+                {pings.map((p) => (
+                  <div
+                    key={p.key}
+                    className="absolute -translate-x-1/2 -translate-y-1/2"
+                    style={{
+                      left: `${p.x}%`,
+                      top: `${p.y}%`,
+                      width: 20,
+                      height: 20,
+                      borderRadius: '50%',
+                      border: '3px solid var(--color-accent)',
+                      zIndex: 10,
+                      animation: 'cfPing 2.4s ease-out forwards',
+                    }}
+                  />
+                ))}
+              </div>
+            )}
             <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
           </div>
 
-          {unplaced.length > 0 && (
-            <div className="flex flex-wrap gap-2 items-center" style={{ padding: '0 14px 10px' }}>
-              <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
-              {unplaced.map((c) => {
-                const movable = canMoveToken(c);
-                return (
-                  <button
-                    key={c.id}
-                    type="button"
-                    className="cf-chip"
-                    disabled={!movable || busy}
-                    onClick={() => onMoveToken(c.id, 50, 50)}
-                    title={movable ? 'Place token at center' : 'You can only move your own token'}
-                    style={{ cursor: movable && !busy ? 'pointer' : 'default', border: '1px dashed var(--color-divider)' }}
-                  >
-                    {tokenInitials(c.name)} · {c.name}
-                  </button>
-                );
-              })}
+          {(unplaced.length > 0 || hiddenByFog.length > 0) && (
+            <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">
+              {unplaced.length > 0 && (
+                <div className="flex flex-wrap gap-2 items-center">
+                  <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
+                  {unplaced.map((c) => {
+                    const movable = canMoveToken(c);
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        className="cf-chip"
+                        data-testid={`map-token-unplaced-${c.id}`}
+                        disabled={!movable || busy}
+                        onClick={() => onMoveToken(c.id, 50, 50)}
+                        title={movable ? 'Place token at center' : 'You can only move your own token'}
+                        style={{ cursor: movable && !busy ? 'pointer' : 'default', border: '1px dashed var(--color-divider)' }}
+                      >
+                        {tokenInitials(c.name)} · {c.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {hiddenByFog.length > 0 && (
+                <div className="flex flex-wrap gap-2 items-center" data-testid="map-token-fog-hidden">
+                  <span className="text-muted" style={{ fontSize: 11 }}>{FOG_HIDDEN_TOKEN_LABEL}:</span>
+                  {hiddenByFog.map((c) => (
+                    <span
+                      key={c.id}
+                      className="cf-chip"
+                      data-testid={`map-token-fog-hidden-${c.id}`}
+                      title="The DM placed this token outside the revealed fog. It will appear when that area is revealed."
+                      style={{ border: '1px solid var(--color-divider)', cursor: 'default', opacity: 0.85 }}
+                    >
+                      {tokenInitials(c.name)} · {c.name}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -2284,7 +2681,7 @@ function BattleMap({
               : tool === 'reveal'
                 ? 'Click-drag to reveal a region of the map to players.'
                 : tool === 'ping'
-                  ? 'Click anywhere on the map to ping that spot for everyone.'
+                  ? 'Tap a spot on the map to ping it for everyone. Keyboard: focus the map and press Enter or Space to ping the center.'
                   : isDm
                     ? 'Drag a token to move it. Drag an AoE handle to move a template, click it to edit.'
                     : 'Drag your own token to move it.'}
@@ -2331,22 +2728,22 @@ function ApplyDamageBar({
         <span style={{ fontWeight: 700, color: 'var(--color-text)' }}>{amount}</span>
         <span className="text-muted"> — {label}</span>
       </span>
-      <div className="seg inline-flex" role="group" aria-label="Apply as">
+      <div className="seg inline-flex" role="group" aria-label="Apply as" style={{ gap: 4 }}>
         {(['damage', 'heal'] as const).map((m) => (
           <button
             key={m}
             type="button"
+            className="cf-target-44"
             aria-pressed={mode === m}
             onClick={() => setMode(m)}
             style={{
-              padding: '4px 10px',
+              padding: '0 12px',
               fontSize: 12,
               border: 0,
               background: 'transparent',
               cursor: 'pointer',
               color: mode === m ? 'var(--color-accent)' : 'var(--color-neutral-500)',
               boxShadow: mode === m ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
-              minHeight: 30,
             }}
           >
             {m === 'damage' ? 'Damage' : 'Heal'}
@@ -2359,13 +2756,13 @@ function ApplyDamageBar({
       {targets.length === 0 ? (
         <span className="text-muted" style={{ fontSize: 11.5 }}>no editable targets</span>
       ) : (
-        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {targets.map((c) => (
             <button
               key={c.id}
               type="button"
-              className="btn btn-secondary"
-              style={{ minHeight: 30, fontSize: 11.5, padding: '3px 10px' }}
+              className="btn btn-secondary cf-target-44"
+              style={{ fontSize: 12, padding: '0 12px' }}
               title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}`}
               onClick={() => onApply(c.id, delta)}
             >
@@ -2378,8 +2775,9 @@ function ApplyDamageBar({
         type="button"
         aria-label="Dismiss"
         onClick={onDismiss}
-        className="text-slate-500 hover:text-slate-300"
-        style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 14, marginLeft: 'auto' }}
+        className="cf-dismiss-target"
+        style={{ marginLeft: 'auto' }}
+        data-testid="apply-damage-dismiss"
       >
         ✕
       </button>
@@ -2430,8 +2828,11 @@ function CombatantRow({
   character: Character | null;
   /** Start the character card expanded — used for the viewer's own character. */
   openCardByDefault: boolean;
-  /** Campaign id — enables click-to-roll on the card for combatants the viewer controls. */
-  campaignId: number;
+  /**
+   * Campaign id — enables click-to-roll on the card for combatants the viewer controls.
+   * Undefined while SSE is offline/reconnecting so obsolete modifiers cannot be rolled (#421).
+   */
+  campaignId: number | undefined;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string) => void;
@@ -2515,7 +2916,7 @@ function CombatantRow({
   const kindLabel = combatant.kind === 'npc' ? 'NPC' : combatant.kind;
   // Issue #107: a combatant at 0 HP got no visual treatment mid-fight — the row
   // looked identical bar an empty HP bar, so a "dead" creature was invisible in the
-  // order (the end-of-combat summary already counted it as Fallen). Dim + desaturate
+  // order (the end-of-combat summary counts dead/downed separately — issue #492). Dim + desaturate
   // the whole row and skull/strike-through the name. `isDown` works off the HP band
   // too, so a redacted monster (exact HP hidden, band 'down') gets the same treatment.
   const down = isDown(combatant);
@@ -2862,11 +3263,11 @@ function CombatantRow({
           so we never render steppers pointing at a null value. Mirrors the sheet's
           ±5 / ±1 controls, incl. shift-click ×5 (issue #68). */}
       {canEdit && combatant.hpCurrent != null && (
-        <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
+        <div style={{ display: 'flex', gap: 8, flex: 'none' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
             <button
               key={step}
-              className="btn btn-icon btn-secondary"
+              className="btn btn-icon btn-secondary cf-target-44"
               style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
               /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
                  lands instantly via setQueryData, so there's no round-trip to wait on. */
@@ -2880,11 +3281,12 @@ function CombatantRow({
       )}
       {canRemove && (
         <button
-          className="btn btn-icon btn-ghost"
-          style={{ width: 30, height: 30, fontSize: 12, flex: 'none' }}
+          className="btn btn-icon btn-ghost cf-target-44"
+          style={{ width: 44, height: 44, fontSize: 14, flex: 'none' }}
           disabled={busy}
           onClick={onRemove}
           title="Remove combatant"
+          aria-label={`Remove ${combatant.name}`}
         >
           ✕
         </button>
@@ -3038,8 +3440,8 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
 }
 
 function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
-  const fallen = encounter.combatants.filter(isDown);
-  const survivors = encounter.combatants.filter((c) => !isDown(c));
+  // Issue #492: split the old "Fallen" tally — dead/defeated vs downed (dying/stable PCs).
+  const { dead, downed, survivors } = endedSummaryTallies(encounter.combatants);
   return (
     <Card>
       <span className="card-kicker">Summary</span>
@@ -3048,8 +3450,12 @@ function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
           Rounds: <b>{encounter.round}</b>
         </span>
         <span>
-          Fallen: <b>{fallen.length}</b>
-          {fallen.length > 0 && <span className="text-muted"> ({fallen.map((c) => c.name).join(', ')})</span>}
+          Dead: <b>{dead.length}</b>
+          {dead.length > 0 && <span className="text-muted"> ({dead.map((c) => c.name).join(', ')})</span>}
+        </span>
+        <span>
+          Downed: <b>{downed.length}</b>
+          {downed.length > 0 && <span className="text-muted"> ({downed.map((c) => c.name).join(', ')})</span>}
         </span>
         <span>
           Survivors: <b>{survivors.length}</b>

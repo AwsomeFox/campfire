@@ -3,6 +3,7 @@ import {
   DND5E_ADAPTER_ID,
   ruleSystemAdapter,
   CONDITIONS,
+  isKnownCondition,
   Pf2eAdapter,
   OpenLegendAdapter,
   OPEN_LEGEND_ADAPTER_ID,
@@ -67,6 +68,25 @@ describe('RuleSystemAdapter — 5e condition vocabulary', () => {
   });
 });
 
+describe('isKnownCondition (issue #495)', () => {
+  it('matches adapter vocabulary case-insensitively and rejects arbitrary labels', () => {
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'Prone')).toBe(true);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'prone')).toBe(true);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, '  POISONED  ')).toBe(true);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'god_mode')).toBe(false);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'invulnerable')).toBe(false);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, '')).toBe(false);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, '   ')).toBe(false);
+  });
+
+  it('uses the active system vocabulary (PF2e Off-Guard is known; 5e Charmed is not)', () => {
+    expect(isKnownCondition(Pf2eAdapter.conditions, 'Off-Guard')).toBe(true);
+    expect(isKnownCondition(Pf2eAdapter.conditions, 'off-guard')).toBe(true);
+    expect(isKnownCondition(Pf2eAdapter.conditions, 'Charmed')).toBe(false);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'Off-Guard')).toBe(false);
+  });
+});
+
 describe('RuleSystemAdapter — 5e statblock mapping', () => {
   it('maps camelCase (stored/importer) statblock fields', () => {
     const mapped = Dnd5eAdapter.mapStatblock({
@@ -85,6 +105,7 @@ describe('RuleSystemAdapter — 5e statblock mapping', () => {
     expect(mapped.armorClass).toBe(17);
     expect(mapped.hitPoints).toBe(84);
     expect(mapped.abilityScores).toEqual({ dexterity: 14 });
+    expect(mapped.abilityRepresentation).toBe('score');
   });
 
   it('falls back to snake_case / short raw-Open5e keys', () => {
@@ -101,6 +122,7 @@ describe('RuleSystemAdapter — 5e statblock mapping', () => {
     expect(mapped.armorClass).toBe(13);
     expect(mapped.hitPoints).toBe(22);
     expect(mapped.abilityScores).toEqual({ dexterity: 12 });
+    expect(mapped.abilityRepresentation).toBe('score');
   });
 
   it('resolves a monster max HP (rounded), or null when unavailable/non-positive', () => {

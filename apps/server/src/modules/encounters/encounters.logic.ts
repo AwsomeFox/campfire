@@ -1,5 +1,91 @@
-import { Dnd5eAdapter } from '@campfire/schema';
-import type { Combatant, CombatantKind, DeathState, DifficultyBand, EncounterDifficulty, EncounterShape, EncounterStatus, HpBand } from '@campfire/schema';
+import {
+  Dnd5eAdapter,
+  computeDnd5eEncounterDifficulty,
+  crToXp,
+  encounterMultiplier,
+  parseCr,
+  xpThresholdsForLevel,
+} from '@campfire/schema';
+import type {
+  Combatant,
+  CombatantKind,
+  DeathState,
+  DifficultyBand,
+  EncounterDifficulty,
+  EncounterEvent,
+  EncounterShape,
+  EncounterStatus,
+  HpBand,
+} from '@campfire/schema';
+
+/** Re-export difficulty primitives so existing unit-test imports keep working. */
+export { parseCr, crToXp, xpThresholdsForLevel, encounterMultiplier };
+
+/** Display label for a combatant whose linked NPC is currently hidden from non-DMs (#374/#869). */
+export const UNKNOWN_COMBATANT_LABEL = 'Unknown combatant';
+
+/** Minimal combatant shape needed to project combat-log secrecy (issue #869). */
+export type EncounterEventRedactionCombatant = {
+  id: number;
+  name: string;
+  npcId: number | null;
+};
+
+/**
+ * Role-aware combat-log projection (issue #869).
+ *
+ * Policy: historical events reveal names after the entity is revealed — redaction
+ * uses the CURRENT hidden-NPC set, not the secrecy at write time. Stable
+ * `actorId`/`targetId` drive the mask when present; denormalized actor/target
+ * strings and any name-bearing `detail` prose are scrubbed as a backstop for
+ * legacy rows (and for turn lines written before detail was name-free).
+ *
+ * Combatant ids themselves stay on the event so clients can correlate with the
+ * initiative roster (which already shows the masked token under the same id).
+ */
+export function redactEncounterEventsForViewer(
+  events: EncounterEvent[],
+  combatants: EncounterEventRedactionCombatant[],
+  hiddenNpcIds: ReadonlySet<number>,
+): EncounterEvent[] {
+  if (events.length === 0 || hiddenNpcIds.size === 0) return events;
+
+  const hiddenCombatantIds = new Set<number>();
+  const hiddenNames = new Set<string>();
+  for (const c of combatants) {
+    if (c.npcId !== null && hiddenNpcIds.has(c.npcId)) {
+      hiddenCombatantIds.add(c.id);
+      if (c.name) hiddenNames.add(c.name);
+    }
+  }
+  if (hiddenCombatantIds.size === 0 && hiddenNames.size === 0) return events;
+
+  return events.map((ev) => {
+    const actorHidden =
+      (ev.actorId != null && hiddenCombatantIds.has(ev.actorId)) ||
+      (ev.actor != null && hiddenNames.has(ev.actor));
+    const targetHidden =
+      (ev.targetId != null && hiddenCombatantIds.has(ev.targetId)) ||
+      (ev.target != null && hiddenNames.has(ev.target));
+
+    let detail = ev.detail;
+    if (hiddenNames.size > 0 && detail) {
+      for (const name of hiddenNames) {
+        if (name && detail.includes(name)) {
+          detail = detail.split(name).join(UNKNOWN_COMBATANT_LABEL);
+        }
+      }
+    }
+
+    if (!actorHidden && !targetHidden && detail === ev.detail) return ev;
+    return {
+      ...ev,
+      actor: actorHidden ? UNKNOWN_COMBATANT_LABEL : ev.actor,
+      target: targetHidden ? UNKNOWN_COMBATANT_LABEL : ev.target,
+      detail,
+    };
+  });
+}
 
 /**
  * Pure combat-order / HP-band math for encounters, extracted from
@@ -18,175 +104,23 @@ export function abilityMod(score: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// 5e encounter difficulty / XP-budget estimation (issue #58).
+// 5e encounter difficulty / XP-budget estimation (issues #58 + #429).
 //
-// DMs used to build encounters blind — EncounterCreate was {name} only and the CR
-// carried on compendium monsters (rule_entries.dataJson.challengeRating) plus the PC
-// levels on character sheets were never combined. These pure functions do the standard
-// 5e DMG math: monster CR -> XP, PC level -> XP thresholds, an encounter multiplier for
-// the number of monsters, and a resulting Easy/Medium/Hard/Deadly band. No DB, no
-// `this` — unit-testable in isolation (encounters-logic.spec.ts).
+// Math, labels, assumptions, and support status live on the RuleSystemAdapter /
+// @campfire/schema encounter-difficulty module. This thin wrapper keeps the
+// generator + legacy unit-test call shape (`partyLevels, monsterCrs`).
 // ---------------------------------------------------------------------------
-
-/** Standard 5e DMG XP-by-CR table. Keys are CR as a number (fractional CRs use 0.125/0.25/0.5). */
-const XP_BY_CR: Record<string, number> = {
-  '0': 10,
-  '0.125': 25,
-  '0.25': 50,
-  '0.5': 100,
-  '1': 200,
-  '2': 450,
-  '3': 700,
-  '4': 1100,
-  '5': 1800,
-  '6': 2300,
-  '7': 2900,
-  '8': 3900,
-  '9': 5000,
-  '10': 5900,
-  '11': 7200,
-  '12': 8400,
-  '13': 10000,
-  '14': 11500,
-  '15': 13000,
-  '16': 15000,
-  '17': 18000,
-  '18': 20000,
-  '19': 22000,
-  '20': 25000,
-  '21': 33000,
-  '22': 41000,
-  '23': 50000,
-  '24': 62000,
-  '25': 75000,
-  '26': 90000,
-  '27': 105000,
-  '28': 120000,
-  '29': 135000,
-  '30': 155000,
-};
-
-/** Per-character-level XP thresholds (5e DMG "XP Thresholds by Character Level"). */
-const XP_THRESHOLDS_BY_LEVEL: Record<number, { easy: number; medium: number; hard: number; deadly: number }> = {
-  1: { easy: 25, medium: 50, hard: 75, deadly: 100 },
-  2: { easy: 50, medium: 100, hard: 150, deadly: 200 },
-  3: { easy: 75, medium: 150, hard: 225, deadly: 400 },
-  4: { easy: 125, medium: 250, hard: 375, deadly: 500 },
-  5: { easy: 250, medium: 500, hard: 750, deadly: 1100 },
-  6: { easy: 300, medium: 600, hard: 900, deadly: 1400 },
-  7: { easy: 350, medium: 750, hard: 1100, deadly: 1700 },
-  8: { easy: 450, medium: 900, hard: 1300, deadly: 2100 },
-  9: { easy: 550, medium: 1100, hard: 1600, deadly: 2400 },
-  10: { easy: 600, medium: 1200, hard: 1900, deadly: 2800 },
-  11: { easy: 800, medium: 1600, hard: 2400, deadly: 3600 },
-  12: { easy: 1000, medium: 2000, hard: 3000, deadly: 4500 },
-  13: { easy: 1100, medium: 2200, hard: 3400, deadly: 5100 },
-  14: { easy: 1250, medium: 2500, hard: 3800, deadly: 5700 },
-  15: { easy: 1400, medium: 2800, hard: 4300, deadly: 6400 },
-  16: { easy: 1600, medium: 3200, hard: 4800, deadly: 7200 },
-  17: { easy: 2000, medium: 3900, hard: 5900, deadly: 8800 },
-  18: { easy: 2100, medium: 4200, hard: 6300, deadly: 9500 },
-  19: { easy: 2400, medium: 4900, hard: 7300, deadly: 10900 },
-  20: { easy: 2800, medium: 5700, hard: 8500, deadly: 12700 },
-};
-
-/**
- * Parse a monster's challenge rating into a numeric CR. Handles the number form the
- * open5e importer stores (e.g. 0.25, 5) and the string forms it can also carry
- * ("1/4", "1/8", "5"). Returns null for an unparseable / missing CR so the caller
- * can simply skip that monster rather than mis-score it.
- */
-export function parseCr(cr: unknown): number | null {
-  if (typeof cr === 'number' && Number.isFinite(cr)) return cr;
-  if (typeof cr !== 'string') return null;
-  const s = cr.trim();
-  if (!s) return null;
-  if (s.includes('/')) {
-    const [num, den] = s.split('/');
-    const n = Number(num);
-    const d = Number(den);
-    if (Number.isFinite(n) && Number.isFinite(d) && d !== 0) return n / d;
-    return null;
-  }
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Monster CR -> XP via the 5e table. Snaps fractional CRs to the nearest table key; null CR -> 0 XP. */
-export function crToXp(cr: number | null): number {
-  if (cr === null) return 0;
-  // Exact table hit (covers 0, 0.125, 0.25, 0.5, and every integer 1..30).
-  const direct = XP_BY_CR[String(cr)];
-  if (direct !== undefined) return direct;
-  // Fractional CR that isn't a table key: clamp into range, then round to the nearest
-  // integer CR (fractional keys below 1 are handled by the direct hits above).
-  const clamped = Math.max(0, Math.min(30, cr));
-  const rounded = Math.round(clamped);
-  return XP_BY_CR[String(rounded)] ?? 0;
-}
-
-/** XP thresholds for one PC level (clamped to the 1..20 table). */
-export function xpThresholdsForLevel(level: number): { easy: number; medium: number; hard: number; deadly: number } {
-  const clamped = Math.max(1, Math.min(20, Math.floor(level)));
-  return XP_THRESHOLDS_BY_LEVEL[clamped];
-}
-
-/**
- * 5e "encounter multiplier" for the number of monsters — a larger group is more
- * dangerous than its raw XP sum (action economy). 1 -> ×1, 2 -> ×1.5, 3–6 -> ×2,
- * 7–10 -> ×2.5, 11–14 -> ×3, 15+ -> ×4.
- */
-export function encounterMultiplier(monsterCount: number): number {
-  if (monsterCount <= 0) return 0;
-  if (monsterCount === 1) return 1;
-  if (monsterCount === 2) return 1.5;
-  if (monsterCount <= 6) return 2;
-  if (monsterCount <= 10) return 2.5;
-  if (monsterCount <= 14) return 3;
-  return 4;
-}
 
 /**
  * Compute an encounter's 5e difficulty band from the party's PC levels and the
- * combatant monsters' CRs. Sums each PC's per-level XP thresholds into a party budget,
- * sums monster XP and applies the number-of-monsters multiplier, then buckets the
- * adjusted monster XP against the party thresholds. Below the Easy threshold is
- * `trivial`; an empty party (no PC levels) reports `trivial` with zeroed thresholds.
+ * combatant monsters' CRs. Delegates to the adapter-owned 5e estimator so
+ * zero-data fights surface as `unknown` rather than a misleading Trivial band.
  */
 export function computeEncounterDifficulty(partyLevels: number[], monsterCrs: (number | null)[]): EncounterDifficulty {
-  const thresholds = { easy: 0, medium: 0, hard: 0, deadly: 0 };
-  for (const level of partyLevels) {
-    const t = xpThresholdsForLevel(level);
-    thresholds.easy += t.easy;
-    thresholds.medium += t.medium;
-    thresholds.hard += t.hard;
-    thresholds.deadly += t.deadly;
-  }
-
-  const totalMonsterXp = monsterCrs.reduce<number>((sum, cr) => sum + crToXp(cr), 0);
-  const monsterCount = monsterCrs.length;
-  const multiplier = encounterMultiplier(monsterCount);
-  const adjustedXp = Math.round(totalMonsterXp * multiplier);
-
-  let band: DifficultyBand = 'trivial';
-  if (partyLevels.length > 0 && adjustedXp > 0) {
-    if (adjustedXp >= thresholds.deadly) band = 'deadly';
-    else if (adjustedXp >= thresholds.hard) band = 'hard';
-    else if (adjustedXp >= thresholds.medium) band = 'medium';
-    else if (adjustedXp >= thresholds.easy) band = 'easy';
-    else band = 'trivial';
-  }
-
-  return {
-    band,
-    thresholds,
-    partySize: partyLevels.length,
+  return computeDnd5eEncounterDifficulty({
     partyLevels,
-    monsterCount,
-    totalMonsterXp,
-    multiplier,
-    adjustedXp,
-  };
+    monsterChallengeRatings: monsterCrs,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +224,12 @@ function bandDistance(a: DifficultyBand, b: DifficultyBand): number {
   return Math.abs(BAND_ORDER.indexOf(a) - BAND_ORDER.indexOf(b));
 }
 
+/** Generator picks always produce a concrete band; treat a null band as maximally far. */
+function bandDistanceOrMax(a: DifficultyBand | null, b: DifficultyBand): number {
+  if (a === null) return BAND_ORDER.length;
+  return bandDistance(a, b);
+}
+
 /**
  * Assemble a monster group hitting `targetBand` for `partyLevels` from `candidates`
  * (issue #304). Deterministic given `seed`.
@@ -341,7 +281,7 @@ export function generateEncounterGroup(opts: GenerateGroupOptions): GenerateGrou
           matchedBand: true,
         };
       }
-      const score = bandDistance(difficulty.band, targetBand);
+      const score = bandDistanceOrMax(difficulty.band, targetBand);
       const xpGap = Math.abs(difficulty.adjustedXp - targetXp);
       if (best === null || score < best.score || (score === best.score && xpGap < best.xpGap)) {
         best = { pick: { ...m, count: n }, difficulty, score, xpGap };

@@ -252,6 +252,62 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     conn.close();
   });
 
+  it('issue #421: sheet edits emit character.updated (no encounterId) and mirror HP into a running fight', async () => {
+    const server = ctx.app.getHttpServer();
+    const conn = await openStream(campaignId, player);
+
+    const characterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Aria', hpCurrent: 20, hpMax: 20, stats: { STR: 10 }, ownerUserId: 'dev:p-1' })
+    ).body.id as number;
+
+    const createdTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId,
+    );
+    expect(createdTick.campaignId).toBe(campaignId);
+    expect(createdTick.userId).toBe('dev:dm-1');
+    expect(createdTick).not.toHaveProperty('encounterId');
+
+    const encRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Sheet sync fight' });
+    expect(encRes.status).toBe(201);
+    const encounterId = encRes.body.id as number;
+    const combatant = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+      (c) => c.characterId === characterId,
+    );
+    expect(combatant).toBeTruthy();
+
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm)).status).toBe(201);
+
+    const seen = conn.events.length;
+    const patch = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(dm)
+      .send({ stats: { STR: 18 }, hpCurrent: 12 });
+    expect(patch.status).toBe(200);
+    expect(patch.body.stats.STR).toBe(18);
+
+    const sheetTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId && conn.events.indexOf(e) >= seen,
+    );
+    expect(sheetTick.userId).toBe('dev:dm-1');
+    // Running encounter also gets an encounter.updated so tracker HP reconciles.
+    await conn.waitFor(
+      (e) => e.type === 'encounter.updated' && e.encounterId === encounterId && conn.events.indexOf(e) >= seen,
+    );
+
+    const encGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const row = (encGet.body.combatants as Array<{ id: number; hpCurrent: number }>).find((c) => c.id === combatant!.id);
+    expect(row?.hpCurrent).toBe(12);
+
+    conn.close();
+  });
+
   it('invalidates the authoritative next-session projection on create, reschedule, RSVP, and cancellation', async () => {
     const server = ctx.app.getHttpServer();
     const conn = await openStream(campaignId, player);
@@ -282,6 +338,7 @@ describe('campaign events SSE (e2e, dev auth)', () => {
 
     const afterCreate = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
     expect(afterCreate.status).toBe(200);
+    expect(afterCreate.body.inProgressSession).toBeNull();
     expect(afterCreate.body.nextSession).toMatchObject({
       id: scheduleId,
       scheduledAt: '2098-08-10T18:00:00.000Z',
@@ -328,6 +385,7 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     expect(cancelled.status).toBe(200);
     await expectScheduleUpdate(scheduleId);
     const afterCancel = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+    expect(afterCancel.body.inProgressSession).toBeNull();
     expect(afterCancel.body.nextSession).toBeNull();
 
     conn.close();
@@ -553,5 +611,139 @@ describe('campaign events SSE revocation teardown (e2e, real auth) — issue #52
       5000,
     );
     expect(stillFlowing.campaignId).toBe(campaignId);
+  });
+});
+
+/**
+ * Issue #437: role promotions/demotions must publish `membership.updated` on the
+ * SSE data path so two open clients (the affected member + a bystander) see the
+ * change without a reload. Unlike membership.revoked, the stream stays open.
+ */
+describe('campaign events SSE membership.updated (e2e, real auth) — issue #437', () => {
+  let ctx: TestAppContext;
+  let port: number;
+  let campaignId: number;
+  let dmCookie: string;
+  let playerCookie: string;
+  let bystanderCookie: string;
+  let playerMemberId: number;
+  let playerUserId: number;
+  const open: SseConnection[] = [];
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'dm-437', password: 'dm-password-437' });
+    dmCookie = (await dmAgent.post('/api/v1/auth/login').send({ username: 'dm-437', password: 'dm-password-437' }).then((r) => r.headers['set-cookie'][0].split(';')[0]));
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Role Change Campaign' });
+    expect(campRes.status).toBe(201);
+    campaignId = campRes.body.id;
+
+    const playerUser = await dmAgent.post('/api/v1/users').send({ username: 'player437', password: 'player-pass-437', serverRole: 'user' });
+    expect(playerUser.status).toBe(201);
+    playerUserId = playerUser.body.id as number;
+
+    const bystanderUser = await dmAgent.post('/api/v1/users').send({ username: 'bystander437', password: 'bystander-pass-437', serverRole: 'user' });
+    expect(bystanderUser.status).toBe(201);
+
+    const addPlayer = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerUserId, role: 'player' });
+    expect(addPlayer.status).toBe(201);
+    playerMemberId = addPlayer.body.id;
+
+    const addBystander = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/members`)
+      .send({ userId: bystanderUser.body.id, role: 'player' });
+    expect(addBystander.status).toBe(201);
+
+    playerCookie = (await request(server).post('/api/v1/auth/login').send({ username: 'player437', password: 'player-pass-437' }).then((r) => r.headers['set-cookie'][0].split(';')[0]));
+    bystanderCookie = (await request(server).post('/api/v1/auth/login').send({ username: 'bystander437', password: 'bystander-pass-437' }).then((r) => r.headers['set-cookie'][0].split(';')[0]));
+
+    port = await listen(server);
+  });
+
+  afterAll(async () => {
+    for (const conn of open) conn.close();
+    await closeTestApp(ctx);
+  });
+
+  it('promotion delivers membership.updated to both open clients with the new role', async () => {
+    const server = ctx.app.getHttpServer();
+    const playerConn = await connectSse(port, `/api/v1/campaigns/${campaignId}/events`, { cookie: playerCookie });
+    open.push(playerConn);
+    const bystanderConn = await connectSse(port, `/api/v1/campaigns/${campaignId}/events`, { cookie: bystanderCookie });
+    open.push(bystanderConn);
+    expect(playerConn.status).toBe(200);
+    expect(bystanderConn.status).toBe(200);
+
+    const promote = await request(server)
+      .patch(`/api/v1/campaigns/${campaignId}/members/${playerMemberId}`)
+      .set('Cookie', dmCookie)
+      .send({ role: 'dm' });
+    expect(promote.status).toBe(200);
+    expect(promote.body.role).toBe('dm');
+
+    const forPlayer = await playerConn.waitFor(
+      (e) => e.type === 'membership.updated' && e.memberId === playerMemberId && e.role === 'dm',
+      5000,
+    );
+    const forBystander = await bystanderConn.waitFor(
+      (e) => e.type === 'membership.updated' && e.memberId === playerMemberId && e.role === 'dm',
+      5000,
+    );
+    expect(forPlayer.userId).toBe(String(playerUserId));
+    expect(forPlayer.campaignId).toBe(campaignId);
+    expect(forBystander.userId).toBe(String(playerUserId));
+
+    // Affected member's /me must reflect the promotion without reconnecting.
+    const me = await request(server).get('/api/v1/me').set('Cookie', playerCookie);
+    expect(me.status).toBe(200);
+    const membership = (me.body.memberships as Array<{ campaignId: number; role: string }>).find(
+      (m) => m.campaignId === campaignId,
+    );
+    expect(membership?.role).toBe('dm');
+
+    // Streams stay open after a role change (unlike membership.revoked).
+    expect(playerConn.ended).toBe(false);
+    expect(bystanderConn.ended).toBe(false);
+    playerConn.close();
+    bystanderConn.close();
+  });
+
+  it('demotion delivers membership.updated and /me drops DM role while streams stay open', async () => {
+    const server = ctx.app.getHttpServer();
+    const playerConn = await connectSse(port, `/api/v1/campaigns/${campaignId}/events`, { cookie: playerCookie });
+    open.push(playerConn);
+    const bystanderConn = await connectSse(port, `/api/v1/campaigns/${campaignId}/events`, { cookie: bystanderCookie });
+    open.push(bystanderConn);
+
+    const demote = await request(server)
+      .patch(`/api/v1/campaigns/${campaignId}/members/${playerMemberId}`)
+      .set('Cookie', dmCookie)
+      .send({ role: 'player' });
+    expect(demote.status).toBe(200);
+    expect(demote.body.role).toBe('player');
+
+    const forPlayer = await playerConn.waitFor(
+      (e) => e.type === 'membership.updated' && e.memberId === playerMemberId && e.role === 'player',
+      5000,
+    );
+    await bystanderConn.waitFor(
+      (e) => e.type === 'membership.updated' && e.memberId === playerMemberId && e.role === 'player',
+      5000,
+    );
+    expect(forPlayer.userId).toBe(String(playerUserId));
+
+    const me = await request(server).get('/api/v1/me').set('Cookie', playerCookie);
+    expect(me.status).toBe(200);
+    const membership = (me.body.memberships as Array<{ campaignId: number; role: string }>).find(
+      (m) => m.campaignId === campaignId,
+    );
+    expect(membership?.role).toBe('player');
+
+    expect(playerConn.ended).toBe(false);
+    expect(bystanderConn.ended).toBe(false);
   });
 });

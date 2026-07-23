@@ -17,6 +17,7 @@ function notification(title: string, id: number): Notification {
     body: 'The road ahead has changed.',
     entityType: 'quest',
     entityId: navigation.questId,
+    commentId: null,
     actorName: 'Dungeon Master',
     readAt: null,
     createdAt: new Date().toISOString(),

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   danger_level TEXT NOT NULL DEFAULT 'low',
   dm_controls_progression INTEGER NOT NULL DEFAULT 0,
   public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1,
+  public_invites_enabled INTEGER NOT NULL DEFAULT 1,
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
@@ -333,6 +334,11 @@ CREATE TABLE IF NOT EXISTS comments (
   author_name TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL,
   in_character INTEGER NOT NULL DEFAULT 0,
+  -- Immutable in-character attribution snapshot (issue #787). character_id is a
+  -- soft reference by design; the historical name/avatar survive character removal.
+  character_id INTEGER,
+  character_name TEXT,
+  character_avatar_url TEXT,
   -- Soft delete / tombstone (issue #503). NULL = live; a timestamp tombstones the
   -- row (body redacted, replies preserved). deleted_by records the actor. See
   -- db/schema.ts for column docs. The parent_id ON DELETE CASCADE above only ever
@@ -368,7 +374,16 @@ CREATE TABLE IF NOT EXISTS entity_revisions (
   snapshot TEXT NOT NULL DEFAULT '{}',
   author_user_id TEXT NOT NULL DEFAULT '',
   author_name TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  author_source TEXT NOT NULL DEFAULT 'human',
+  author_source_detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT '',
+  replaced_by_user_id TEXT NOT NULL DEFAULT '',
+  replaced_by_name TEXT NOT NULL DEFAULT '',
+  replaced_by_source TEXT NOT NULL DEFAULT 'human',
+  replaced_by_source_detail TEXT NOT NULL DEFAULT '',
+  replaced_at TEXT,
+  restored_from_revision_id INTEGER,
+  authorship_known INTEGER NOT NULL DEFAULT 1
 );
 
 -- audit_log deliberately carries NO foreign key on campaign_id (issue #69). Audit
@@ -607,6 +622,7 @@ CREATE TABLE IF NOT EXISTS attachments (
   mime TEXT NOT NULL,
   size INTEGER NOT NULL,
   hidden INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'committed' CHECK (state IN ('reserved', 'committed')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -662,6 +678,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   body TEXT NOT NULL DEFAULT '',
   entity_type TEXT,
   entity_id INTEGER,
+  comment_id INTEGER,
   actor_name TEXT NOT NULL DEFAULT '',
   read_at TEXT,
   created_at TEXT NOT NULL
@@ -777,13 +794,16 @@ CREATE TABLE IF NOT EXISTS combatants (
   sort_order INTEGER NOT NULL DEFAULT 0,
   token_x REAL,
   token_y REAL,
-  token_size TEXT NOT NULL DEFAULT 'medium'
+  token_size TEXT NOT NULL DEFAULT 'medium',
+  -- Issue #466: CAS token for sheet↔combatant HP sync (character.updatedAt at last sync).
+  sheet_synced_updated_at TEXT
 );
 
 -- Persistent per-encounter combat log (issue #61). New table, so a plain
 -- CREATE TABLE IF NOT EXISTS in bootstrap (no migrate fn needed). See db/schema.ts
 -- for column docs; detail deliberately omits monster exact-HP totals (only deltas)
--- so listing it to a non-DM can't leak issue #43's redaction.
+-- so listing it to a non-DM can't leak issue #43's redaction. actor_id/target_id
+-- (issue #869) let listing re-project names from current hidden-NPC visibility.
 CREATE TABLE IF NOT EXISTS encounter_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
@@ -791,6 +811,8 @@ CREATE TABLE IF NOT EXISTS encounter_events (
   type TEXT NOT NULL,
   actor TEXT,
   target TEXT,
+  actor_id INTEGER,
+  target_id INTEGER,
   detail TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
@@ -839,6 +861,10 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
+-- Issue #819: exclusive character seat — at most one membership may link a given
+-- character. Partial so unlinked (NULL) seats do not collide. Matches migration 0067.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
+  ON campaign_members(character_id) WHERE character_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_participant_support_campaign ON participant_support_preferences(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_participant_support_ai_consent ON participant_support_preferences(campaign_id, ai_use_consent);
 CREATE INDEX IF NOT EXISTS idx_campaign_invites_campaign ON campaign_invites(campaign_id);
@@ -856,7 +882,11 @@ CREATE INDEX IF NOT EXISTS idx_rule_entries_slug ON rule_entries(slug);
 -- rather than a silently-duplicated compendium row (issue #143). Existing DBs are de-duped
 -- by migrateRuleEntriesTableForSource (runs before this) so the index can be created cleanly.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_entries_pack_type_slug ON rule_entries(pack_id, type, slug);
+-- Keep both: the single-column index matches other entity tables and covers
+-- campaign-only lookups; (campaign_id, state) covers reserved/committed filters
+-- used by publication recovery and public reads without relying on prefix quirks.
 CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_campaign_state ON attachments(campaign_id, state);
 CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);

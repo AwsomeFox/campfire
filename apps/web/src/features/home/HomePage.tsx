@@ -5,15 +5,26 @@
  * that launches the full NewCampaignWizard overlay (details -> rule system
  * -> POST + PATCH ruleSystem). Any user may create a campaign.
  */
-import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, ApiError, API } from '../../lib/api';
+import { noteUnauthorizedResponse } from '../../lib/sessionExpiry';
+import {
+  campaignDashboardPath,
+  filterChooserCampaigns,
+  getLastSafeCampaignRoute,
+  listRecentCampaignIds,
+  resolveCampaignSwitchTarget,
+  switchFromPath,
+  type CampaignChooserFilters,
+} from '../../lib/campaignSwitcherRoute';
+import { confirmDiscardUnsavedWork } from '../../lib/unsavedWork';
 import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
-import type { Campaign } from '@campfire/schema';
+import type { Campaign, Role } from '@campfire/schema';
 
 /** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
 const COVERS = [
@@ -75,6 +86,7 @@ async function importArchive(file: File): Promise<Campaign> {
     body: form,
   });
   if (!res.ok) {
+    noteUnauthorizedResponse(`${API}/campaigns/import/archive`, res.status);
     let message = res.statusText;
     try {
       const body = await res.json();
@@ -176,50 +188,72 @@ function CampaignTile({
   campaign,
   role,
   href,
+  dashboardHref,
   archived,
+  onNavigate,
 }: {
   campaign: Campaign;
   role: string | null;
+  /** Resume target — equivalent module or last safe route (issue #760). */
   href: string;
+  /** Explicit Dashboard affordance; always the campaign root. */
+  dashboardHref: string;
   archived?: boolean;
+  onNavigate?: (event: { preventDefault(): void }) => void;
 }) {
   return (
-    <Link
-      to={href}
-      className="card elev-sm text-left overflow-hidden"
-      style={{ padding: 0, gap: 0, color: 'inherit', textDecoration: 'none', ...(archived ? { opacity: 0.72 } : {}) }}
+    <div
+      className="card elev-sm text-left overflow-hidden flex flex-col"
+      style={{ padding: 0, gap: 0, ...(archived ? { opacity: 0.72 } : {}) }}
     >
-      <div
-        className="h-[88px] grid place-items-center"
-        style={{ background: coverFor(campaign.id), ...(archived ? { filter: 'saturate(0.45)' } : {}) }}
+      <Link
+        to={href}
+        onClick={onNavigate}
+        className="text-left overflow-hidden flex-1"
+        style={{ color: 'inherit', textDecoration: 'none' }}
       >
-        <span
-          style={{ fontFamily: 'var(--font-heading)', fontSize: 30, color: 'var(--color-accent-100)' }}
+        <div
+          className="h-[88px] grid place-items-center"
+          style={{ background: coverFor(campaign.id), ...(archived ? { filter: 'saturate(0.45)' } : {}) }}
         >
-          {campaign.name.charAt(0).toUpperCase()}
-        </span>
-      </div>
-      <div className="flex flex-col gap-2.5" style={{ padding: '14px 16px 16px' }}>
-        <div>
-          <div className="card-title" style={{ fontSize: 16 }}>{campaign.name}</div>
-          <div className="flex gap-1.5 flex-wrap" style={{ marginTop: 6 }}>
-            <Chip variant={statusVariant(campaign.status)}>{campaign.status}</Chip>
-            {archived && <Chip variant="private">read-only</Chip>}
-            {role && (
-              <Chip variant="dm">{role === 'dm' ? 'DM' : role === 'player' ? 'Player' : 'Viewer'}</Chip>
-            )}
+          <span
+            style={{ fontFamily: 'var(--font-heading)', fontSize: 30, color: 'var(--color-accent-100)' }}
+          >
+            {campaign.name.charAt(0).toUpperCase()}
+          </span>
+        </div>
+        <div className="flex flex-col gap-2.5" style={{ padding: '14px 16px 12px' }}>
+          <div>
+            <div className="card-title" style={{ fontSize: 16 }}>{campaign.name}</div>
+            <div className="flex gap-1.5 flex-wrap" style={{ marginTop: 6 }}>
+              <Chip variant={statusVariant(campaign.status)}>{campaign.status}</Chip>
+              {archived && <Chip variant="private">read-only</Chip>}
+              {role && (
+                <Chip variant="dm">{role === 'dm' ? 'DM' : role === 'player' ? 'Player' : 'Viewer'}</Chip>
+              )}
+            </div>
+          </div>
+          {campaign.description && (
+            <p className="text-muted line-clamp-2" style={{ fontSize: 11.5, margin: 0 }}>
+              {campaign.description}
+            </p>
+          )}
+          <div className="text-muted" style={{ fontSize: 11.5 }}>
+            {campaign.sessionCount > 0 ? `${campaign.sessionCount} session${campaign.sessionCount === 1 ? '' : 's'}` : 'No sessions yet'}
           </div>
         </div>
-        {campaign.description && (
-          <p className="text-muted line-clamp-2" style={{ fontSize: 11.5, margin: 0 }}>
-            {campaign.description}
-          </p>
-        )}
-        <div className="text-muted" style={{ fontSize: 11.5 }}>
-          {campaign.sessionCount > 0 ? `Session ${campaign.sessionCount}` : 'No sessions yet'}
-        </div>
+      </Link>
+      <div style={{ padding: '0 12px 12px' }}>
+        <Link
+          to={dashboardHref}
+          onClick={onNavigate}
+          className="btn btn-ghost"
+          style={{ fontSize: 12, minHeight: 36, width: '100%', justifyContent: 'center' }}
+        >
+          Dashboard
+        </Link>
       </div>
-    </Link>
+    </div>
   );
 }
 
@@ -350,13 +384,21 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
 }
 
 export function HomePage() {
-  const { roleIn, refresh: refreshAuth } = useAuth();
+  const { me, roleIn, refresh: refreshAuth } = useAuth();
   const { campaigns, loading, error, refresh } = useCampaigns();
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const [justCreated, setJustCreated] = useState<Campaign[]>([]);
   const [wizardOpen, setWizardOpen] = useState(() => searchParams.get('newCampaign') === '1');
   const [importError, setImportError] = useState<string | null>(null);
+  const [filters, setFilters] = useState<CampaignChooserFilters>({
+    query: '',
+    role: 'all',
+    status: 'all',
+  });
+
+  const sourcePath = switchFromPath(location.state);
 
   function closeWizard() {
     setWizardOpen(false);
@@ -367,11 +409,64 @@ export function HomePage() {
     }
   }
 
-  const allCampaigns = [...campaigns, ...justCreated.filter((c) => !campaigns.some((x) => x.id === c.id))];
-  // Archived (paused/completed) campaigns are read-only server-side — keep them
-  // out of the main hub grid so finished games stop cluttering the active list.
-  const activeCampaigns = allCampaigns.filter((c) => c.status === 'active');
-  const archivedCampaigns = allCampaigns.filter((c) => c.status !== 'active');
+  const allCampaigns = useMemo(
+    () => [...campaigns, ...justCreated.filter((c) => !campaigns.some((x) => x.id === c.id))],
+    [campaigns, justCreated],
+  );
+  const chooserItems = useMemo(
+    () =>
+      allCampaigns
+        .filter((c) => !c.deletedAt)
+        .map((campaign) => ({ campaign, role: roleIn(campaign.id) }))
+        // Expired / removed memberships: roleIn is null — hide from the chooser.
+        .filter((item) => item.role != null),
+    [allCampaigns, roleIn],
+  );
+
+  const accessibleIds = useMemo(() => new Set(chooserItems.map((item) => item.campaign.id)), [chooserItems]);
+
+  const recentIds = me ? listRecentCampaignIds(me.user.id, accessibleIds) : [];
+
+  const filtered = useMemo(
+    () => filterChooserCampaigns(chooserItems, filters),
+    [chooserItems, filters],
+  );
+
+  const recentItems = recentIds
+    .map((id) => chooserItems.find((item) => item.campaign.id === id))
+    .filter((item): item is NonNullable<typeof item> => item != null)
+    .filter((item) => filterChooserCampaigns([item], filters).length > 0)
+    .slice(0, 6);
+  const recentIdSet = new Set(recentItems.map((item) => item.campaign.id));
+
+  // When status filter is "all", keep the active/archive split. A specific
+  // status filter collapses into one list so paused/completed stay findable.
+  // Recent tiles are omitted from the main grids to avoid duplicate cards.
+  const showArchiveSplit = filters.status === 'all';
+  const activeCampaigns = (showArchiveSplit
+    ? filtered.filter((item) => item.campaign.status === 'active')
+    : filtered
+  ).filter((item) => !recentIdSet.has(item.campaign.id));
+  const archivedCampaigns = (showArchiveSplit
+    ? filtered.filter((item) => item.campaign.status !== 'active')
+    : []
+  ).filter((item) => !recentIdSet.has(item.campaign.id));
+
+  function hrefFor(campaign: Campaign, role: Role | null, preferDashboard = false): string {
+    if (!me || role == null) return campaignDashboardPath(campaign.id);
+    return resolveCampaignSwitchTarget({
+      targetCampaignId: campaign.id,
+      role,
+      campaignAccessible: !campaign.deletedAt,
+      sourcePath,
+      lastSafeRoute: getLastSafeCampaignRoute(me.user.id, campaign.id, role),
+      preferDashboard,
+    });
+  }
+
+  function onChooseCampaign(event: { preventDefault(): void }): void {
+    if (!confirmDiscardUnsavedWork()) event.preventDefault();
+  }
 
   async function onCampaignCreated(c: Campaign) {
     setJustCreated((prev) => [...prev, c]);
@@ -391,12 +486,15 @@ export function HomePage() {
     return <NewCampaignWizard onClose={closeWizard} onCreated={onCampaignCreated} />;
   }
 
+  const filtersActive = filters.query.trim() !== '' || filters.role !== 'all' || filters.status !== 'all';
+
   return (
     <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5">
       <div>
         <h3 style={{ margin: 0 }}>Your campaigns</h3>
         <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
-          Everything on this server, one sign-in. Roles are per campaign.
+          Everything on this server, one sign-in. Roles are per campaign. Opening a
+          campaign resumes the matching module or your last place there.
         </p>
       </div>
 
@@ -423,23 +521,115 @@ export function HomePage() {
       ) : (
         <>
           <div
+            className="flex flex-col gap-2.5 sm:flex-row sm:flex-wrap sm:items-end"
+            role="search"
+            aria-label="Filter campaigns"
+          >
+            <label className="flex flex-col gap-1 flex-1 min-w-[180px]" style={{ fontSize: 12.5 }}>
+              <span className="text-muted">Search</span>
+              <input
+                type="search"
+                value={filters.query}
+                onChange={(e) => setFilters((prev) => ({ ...prev, query: e.target.value }))}
+                placeholder="Name or description"
+                className="input"
+                style={{ minHeight: 40 }}
+              />
+            </label>
+            <label className="flex flex-col gap-1" style={{ fontSize: 12.5, minWidth: 140 }}>
+              <span className="text-muted">Role</span>
+              <select
+                value={filters.role}
+                onChange={(e) =>
+                  setFilters((prev) => ({
+                    ...prev,
+                    role: e.target.value as CampaignChooserFilters['role'],
+                  }))
+                }
+                className="input"
+                style={{ minHeight: 40 }}
+              >
+                <option value="all">All roles</option>
+                <option value="dm">DM</option>
+                <option value="player">Player</option>
+                <option value="viewer">Viewer</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1" style={{ fontSize: 12.5, minWidth: 140 }}>
+              <span className="text-muted">Status</span>
+              <select
+                value={filters.status}
+                onChange={(e) =>
+                  setFilters((prev) => ({
+                    ...prev,
+                    status: e.target.value as CampaignChooserFilters['status'],
+                  }))
+                }
+                className="input"
+                style={{ minHeight: 40 }}
+              >
+                <option value="all">All statuses</option>
+                <option value="active">Active</option>
+                <option value="paused">Paused</option>
+                <option value="completed">Completed</option>
+              </select>
+            </label>
+          </div>
+
+          {recentItems.length > 0 && (
+            <section aria-labelledby="recent-campaigns-heading">
+              <h4 id="recent-campaigns-heading" style={{ margin: '0 0 8px', color: 'var(--color-neutral-300)' }}>
+                Recent
+              </h4>
+              <div
+                className="grid gap-3.5"
+                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))' }}
+              >
+                {recentItems.map(({ campaign, role }) => (
+                  <CampaignTile
+                    key={`recent-${campaign.id}`}
+                    campaign={campaign}
+                    role={role}
+                    href={hrefFor(campaign, role)}
+                    dashboardHref={campaignDashboardPath(campaign.id)}
+                    archived={campaign.status !== 'active'}
+                    onNavigate={onChooseCampaign}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
+          <div
             className="grid gap-3.5"
             style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))' }}
           >
-            {activeCampaigns.map((campaign) => (
+            {activeCampaigns.map(({ campaign, role }) => (
               <CampaignTile
                 key={campaign.id}
                 campaign={campaign}
-                role={roleIn(campaign.id)}
-                href={`/c/${campaign.id}`}
+                role={role}
+                href={hrefFor(campaign, role)}
+                dashboardHref={campaignDashboardPath(campaign.id)}
+                archived={campaign.status !== 'active'}
+                onNavigate={onChooseCampaign}
               />
             ))}
-            <NewCampaignTile onClick={() => setWizardOpen(true)} />
-            <ImportCampaignTile
-              onImported={onCampaignCreated}
-              onError={(m) => setImportError(m)}
-            />
+            {!filtersActive && (
+              <>
+                <NewCampaignTile onClick={() => setWizardOpen(true)} />
+                <ImportCampaignTile
+                  onImported={onCampaignCreated}
+                  onError={(m) => setImportError(m)}
+                />
+              </>
+            )}
           </div>
+          {filtersActive && filtered.length === 0 && (
+            <p className="text-muted" style={{ fontSize: 13, margin: 0 }}>
+              No campaigns match these filters.
+            </p>
+          )}
           {importError && <ErrorNote message={importError} />}
 
           {archivedCampaigns.length > 0 && (
@@ -454,13 +644,15 @@ export function HomePage() {
                 className="grid gap-3.5"
                 style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))' }}
               >
-                {archivedCampaigns.map((campaign) => (
+                {archivedCampaigns.map(({ campaign, role }) => (
                   <CampaignTile
                     key={campaign.id}
                     campaign={campaign}
-                    role={roleIn(campaign.id)}
-                    href={`/c/${campaign.id}`}
+                    role={role}
+                    href={hrefFor(campaign, role)}
+                    dashboardHref={campaignDashboardPath(campaign.id)}
                     archived
+                    onNavigate={onChooseCampaign}
                   />
                 ))}
               </div>

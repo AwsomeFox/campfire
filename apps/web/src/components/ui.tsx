@@ -140,13 +140,54 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
   );
 }
 
-export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
+export function ErrorNote({
+  message,
+  onRetry,
+  onDismiss,
+  pending = false,
+  context,
+}: {
+  message: string;
+  onRetry?: () => void | Promise<void>;
+  /** Optional dismiss — used when the error is stale and no longer actionable (#430). */
+  onDismiss?: () => void;
+  /** Keeps Retry visible but disabled while the loader/mutation is in flight. */
+  pending?: boolean;
+  /** Light secondary context (e.g. relative time) shown after the message. */
+  context?: string;
+}) {
   return (
     <div role="alert" className="cf-inset p-3 text-sm text-[var(--color-neutral-400)]">
-      {message}{' '}
+      <span>{message}</span>
+      {context && (
+        <span className="text-[var(--color-neutral-500)]">
+          {' '}
+          · {context}
+        </span>
+      )}
+      {' '}
       {onRetry && (
-        <button onClick={onRetry} className="font-semibold text-[var(--cf-accent)] hover:underline">
-          Retry
+        <button
+          type="button"
+          onClick={() => {
+            // Support async retries without forcing callers to wrap in `void`.
+            // Rejections are owned by the loader's error UI — don't surface as unhandled.
+            void Promise.resolve(onRetry()).catch(() => {});
+          }}
+          disabled={pending}
+          aria-busy={pending || undefined}
+          className="font-semibold text-[var(--cf-accent)] hover:underline disabled:opacity-60 disabled:no-underline"
+        >
+          {pending ? 'Retrying…' : 'Retry'}
+        </button>
+      )}
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="ml-2 font-semibold text-[var(--color-neutral-500)] hover:underline"
+        >
+          Dismiss
         </button>
       )}
     </div>

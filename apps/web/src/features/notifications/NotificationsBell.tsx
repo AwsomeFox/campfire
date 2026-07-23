@@ -120,6 +120,8 @@ function typeIcon(type: Notification['type']): string {
       return 'top-hat';
     case 'added_to_campaign':
       return 'campfire';
+    case 'character_reassigned':
+      return 'meeple';
     case 'session_scheduled':
       return 'calendar';
     case 'session_rsvp':
@@ -489,6 +491,11 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const markRead = useCallback(async (notification: Notification) => {
     closePanel();
+    // Issue #446: navigate first so mark-read only follows a successful route
+    // change. Deleted/hidden targets still get a URL; EntityDeepLinkFocus times
+    // out gracefully when the DOM node never appears.
+    const href = notificationHref(notification);
+    navigate(href);
     if (!notification.readAt) {
       try {
         await api.post(`${API}/notifications/${notification.id}/read`);
@@ -498,13 +505,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         channelRef.current?.postMessage({ type: 'read', id: notification.id, readAt } satisfies NotificationSyncMessage);
         publishSnapshot({ count: Math.max(0, countRef.current - 1), refreshedAt: Date.now() });
       } catch {
-        /* navigation still proceeds */
+        /* best-effort — user already landed on the destination */
       }
-      // Reconcile even when the mutation failed, matching the old bell's
-      // best-effort mark-read behavior. A route refresh will join this request.
       void refreshCount(true);
     }
-    navigate(notificationHref(notification));
   }, [cancelCountRequest, closePanel, navigate, publishSnapshot, refreshCount, syncReadMessage]);
 
   const markAllRead = useCallback(async () => {
@@ -610,10 +614,13 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
   // Bottom sheet on phones (issue #664), top-right flyout everywhere else —
   // matches the MoreSheet pattern in Layout.tsx so a thumb reaches the close
   // button and the surface sits above the mobile tab bar.
+  // z-index from --cf-layer-notification so the sheet shares the dialog tier
+  // and stays under the undo snackbar (issue #794 layer scale).
   const rootClassName = narrow
-    ? 'fixed inset-0 z-50 flex items-end justify-center'
-    : 'fixed inset-0 z-50';
+    ? 'fixed inset-0 flex items-end justify-center'
+    : 'fixed inset-0';
   const rootStyle = {
+    zIndex: 'var(--cf-layer-notification)' as const,
     background: narrow
       ? 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)'
       : 'color-mix(in srgb, var(--color-neutral-900) 35%, transparent)',

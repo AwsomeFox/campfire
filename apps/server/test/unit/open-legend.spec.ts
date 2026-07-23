@@ -182,6 +182,7 @@ describe('OpenLegendAdapter — statblock mapping', () => {
     expect(mapped.challengeRating).toBe(1);
     expect(mapped.armorClass).toBe(13); // Guard is the AC analogue
     expect(mapped.hitPoints).toBe(10);
+    expect(mapped.abilityRepresentation).toBe('native');
     expect(mapped.abilityScores).toEqual({ agility: 3, might: 0 });
   });
 
@@ -194,7 +195,7 @@ describe('OpenLegendAdapter — statblock mapping', () => {
 
   it('initiative derives from the mapped agility attribute (encounters wiring path)', () => {
     const mapped = OpenLegendAdapter.mapStatblock({ level: 4, hp: 45, attributes: { agility: 1, might: 5 } });
-    expect(OpenLegendAdapter.initiativeModifier(mapped.abilityScores)).toBe(1);
+    expect(OpenLegendAdapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation)).toBe(1);
   });
 });
 

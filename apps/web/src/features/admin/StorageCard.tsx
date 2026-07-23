@@ -96,10 +96,11 @@ export function StorageCard() {
       {error && <p className="text-xs text-rose-400">{error}</p>}
 
       {/* Top-line usage */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <Stat label="Upload total" value={formatBytes(stats.totalBytes)} />
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        <Stat label="Committed" value={formatBytes(stats.committedBytes)} />
+        <Stat label="Reserved" value={formatBytes(stats.reservedBytes)} />
         <Stat label="On disk" value={formatBytes(stats.diskBytes)} />
-        <Stat label="Files" value={stats.fileCount.toLocaleString()} />
+        <Stat label="Committed files" value={stats.fileCount.toLocaleString()} />
         <Stat label="Orphans" value={orphanCount.toLocaleString()} />
       </div>
 
@@ -115,7 +116,8 @@ export function StorageCard() {
                 <tr className="text-[10px] uppercase text-slate-500 text-left">
                   <th className="py-2 pr-4 font-bold">Campaign</th>
                   <th className="pr-4 font-bold">Files</th>
-                  <th className="pr-4 font-bold">Used</th>
+                  <th className="pr-4 font-bold">Committed</th>
+                  <th className="pr-4 font-bold">Reserved</th>
                   <th className="pr-4 font-bold">Quota</th>
                   <th></th>
                 </tr>
@@ -205,8 +207,14 @@ function QuotaRow({
         {campaign.name}
         {campaign.overQuota && <span className="cf-chip cf-chip-failed ml-2 !py-0 !text-[9px]">over</span>}
       </td>
-      <td className="pr-4 text-slate-400">{campaign.fileCount}</td>
-      <td className="pr-4 text-slate-300">{formatBytes(campaign.totalBytes)}</td>
+      <td className="pr-4 text-slate-400">
+        {campaign.fileCount.toLocaleString()}
+        {campaign.reservedFileCount > 0 && (
+          <span className="text-amber-400"> +{campaign.reservedFileCount.toLocaleString()}</span>
+        )}
+      </td>
+      <td className="pr-4 text-slate-300">{formatBytes(campaign.committedBytes)}</td>
+      <td className="pr-4 text-amber-400">{formatBytes(campaign.reservedBytes)}</td>
       <td className="pr-4 text-slate-400">
         {editing ? (
           <div className="flex items-center gap-1">

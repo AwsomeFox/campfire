@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { MONSTERS } from '../global-setup';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 /**
  * Combat tracker cross-role checks (issue #81):
@@ -24,6 +24,7 @@ function endedEncounterUrl(): string {
 }
 
 async function openEncounter(page: Page) {
+  await restoreSeedEncounter(page);
   await page.goto(encounterUrl());
   await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
 }
@@ -126,4 +127,55 @@ test.describe('combat tracker — non-DM views', () => {
       });
     });
   }
+});
+
+test.describe('combat tracker — fog-safe map delivery (#463)', () => {
+  test.use({ storageState: stateFor('player') });
+
+  test('player canvas uses the encounter map endpoint and the raw attachment stays inaccessible', async ({ page }) => {
+    const { encounterId, mapAttachmentId } = seed();
+    const mapResponse = page.waitForResponse((response) =>
+      response.url().includes(`/api/v1/encounters/${encounterId}/map`),
+    );
+    await openEncounter(page);
+
+    const map = page.getByRole('img', { name: 'Battle map' });
+    await expect(map).toBeVisible();
+    await expect(map).toHaveAttribute('src', new RegExp(`/api/v1/encounters/${encounterId}/map\\?revision=`));
+    await expect(map).not.toHaveAttribute('src', new RegExp(`/attachments/${mapAttachmentId}/file`));
+
+    const response = await mapResponse;
+    expect(response.status()).toBe(200);
+    expect(response.headers()['cache-control']).toContain('no-store');
+    expect(response.headers()['x-campfire-map-view']).toBe('fog-protected');
+
+    const raw = await page.request.get(`/api/v1/attachments/${mapAttachmentId}/file`);
+    expect(raw.status()).toBe(404);
+    const rawThumb = await page.request.get(`/api/v1/attachments/${mapAttachmentId}/file?size=thumb`, {
+      headers: { Range: 'bytes=0-31' },
+    });
+    expect(rawThumb.status()).toBe(404);
+
+    // Once the production service worker controls the page, a reload must still
+    // fetch the role-safe view from the network and must not leave either source
+    // or rendered map bytes in Campfire's shared CacheStorage (#463 stale-cache case).
+    await page.evaluate(async () => {
+      if ('serviceWorker' in navigator) await navigator.serviceWorker.ready;
+    });
+    const reloadedMap = page.waitForResponse((res) =>
+      res.url().includes(`/api/v1/encounters/${encounterId}/map`),
+    );
+    await page.reload();
+    expect((await reloadedMap).status()).toBe(200);
+    const cachedUrls = await page.evaluate(async () => {
+      const urls: string[] = [];
+      for (const name of await caches.keys()) {
+        const cache = await caches.open(name);
+        urls.push(...(await cache.keys()).map((request) => request.url));
+      }
+      return urls;
+    });
+    expect(cachedUrls.some((url) => url.includes(`/api/v1/encounters/${encounterId}/map`))).toBe(false);
+    expect(cachedUrls.some((url) => url.includes(`/api/v1/attachments/${mapAttachmentId}/file`))).toBe(false);
+  });
 });

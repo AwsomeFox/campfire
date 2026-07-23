@@ -5,16 +5,21 @@
   "description": "Campfire web UI (placeholder until design lands)",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && node scripts/vite-build-strict.mjs",
     "preview": "vite preview",
-    "test:pwa": "vite build && node scripts/check-pwa-dist.mjs",
+    "test:css": "node scripts/vite-build-strict.mjs",
+    "test:pwa": "node scripts/vite-build-strict.mjs && node scripts/check-pwa-dist.mjs",
+    "test:pwa:dist": "node scripts/check-pwa-dist.mjs",
     "test:e2e": "playwright test --config playwright.first-run.config.ts && playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:report": "playwright show-report",
     "test:e2e:typecheck": "tsc -p e2e/tsconfig.json",
-    "e2e:install": "playwright install chromium"
+    "e2e:install": "playwright install chromium",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.3.0",
     "@tanstack/react-query": "^5.101.3",
     "dompurify": "^3.2.3",
     "i18next": "^26.3.6",

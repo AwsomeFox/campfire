@@ -20,6 +20,7 @@ describe('export (e2e, real cookie sessions)', () => {
   let mapAttachmentId: number;
   let portraitAttachmentId: number;
   let portraitCharacterId: number;
+  let playerCharacterId: number;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -83,6 +84,18 @@ describe('export (e2e, real cookie sessions)', () => {
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .send({ name: 'Portrait Hero', portraitUrl: `/api/v1/attachments/${portraitAttachmentId}/file` });
     portraitCharacterId = portraitCharRes.body.id;
+
+    const playerCharacter = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'Player Voice', portraitUrl: 'https://images.example.test/player-voice.png' });
+    playerCharacterId = playerCharacter.body.id;
+    await playerAgent.post(`/api/v1/campaigns/${campaignId}/comments`).send({
+      entityType: 'campaign',
+      entityId: campaignId,
+      body: 'A line worth keeping.',
+      inCharacter: true,
+      characterId: playerCharacterId,
+    });
   });
 
   afterAll(async () => {
@@ -94,6 +107,9 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/json/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-\d{4}-\d{2}-\d{2}\.json"/);
+    // Issue #730: campaign exports must never be storeable by HTTP / PWA caches.
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
 
     expect(res.body.campaign.name).toBe('Export Campaign!');
     expect(res.body.quests[0].dmSecret).toBe('the vault code is 1234');
@@ -116,6 +132,16 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(Array.isArray(res.body.members)).toBe(true);
     expect(Array.isArray(res.body.audit)).toBe(true);
     expect(Array.isArray(res.body.proposals)).toBe(true);
+    expect(res.body.comments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          body: 'A line worth keeping.',
+          characterId: playerCharacterId,
+          characterName: 'Player Voice',
+          characterAvatarUrl: 'https://images.example.test/player-voice.png',
+        }),
+      ]),
+    );
 
     // Round-2 finding #6: encounters (with their combatants) are present in the export.
     expect(Array.isArray(res.body.encounters)).toBe(true);
@@ -165,10 +191,13 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/json/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-member-.*\.json"/);
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
 
     // Their own character + note are present.
     expect(res.body.characters.some((c: { name: string }) => c.name === 'My Own Hero')).toBe(true);
     expect(res.body.notes.some((n: { body: string }) => n.body === 'my secret plan')).toBe(true);
+    expect(res.body.comments.some((c: { body: string }) => c.body === 'A line worth keeping.')).toBe(true);
 
     // The DM's dmSecret-bearing character ("Cursed Paladin") is NOT in the player's export.
     expect(res.body.characters.some((c: { name: string }) => c.name === 'Cursed Paladin')).toBe(false);
@@ -198,6 +227,8 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/zip/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-\d{4}-\d{2}-\d{2}\.zip"/);
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
     // zip file magic number
     const buf = res.body as Buffer;
     expect(buf.slice(0, 2).toString('hex')).toBe('504b');

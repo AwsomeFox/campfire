@@ -10,9 +10,25 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
-import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Card, Btn, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  ENCOUNTER_CREATE_PREFIX,
+  ENCOUNTER_FIELD,
+  ENCOUNTER_LOCATION_HELP,
+  ENCOUNTER_LOCATION_LABEL,
+  ENCOUNTER_QUEST_HELP,
+  ENCOUNTER_QUEST_LABEL,
+  ENCOUNTER_SESSION_HELP,
+  ENCOUNTER_SESSION_LABEL,
+} from '../../components/formFieldLabels';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { GameIcon } from '../../components/GameIcon';
+import {
+  ENCOUNTER_NAME_HELP,
+  ENCOUNTER_NAME_LABEL,
+  ENCOUNTER_NAME_PLACEHOLDER,
+} from './postCreateGuidance';
 
 const STATUS_LABEL: Record<EncounterStatus, string> = {
   preparing: 'Preparing',
@@ -165,12 +181,16 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!name.trim()) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError('Enter an encounter name.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
       const created = await api.post<Encounter>(`${API}/campaigns/${campaignId}/encounters`, {
-        name: name.trim(),
+        name: trimmed,
         locationId: locationId ? Number(locationId) : undefined,
         questId: questId ? Number(questId) : undefined,
         sessionId: sessionId ? Number(sessionId) : undefined,
@@ -182,52 +202,105 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
     }
   }
 
+  const nameInvalid = !!error && !name.trim();
+  const formError = nameInvalid ? error : null;
+
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-3" data-testid="encounter-create-form">
       <h2 className="font-bold text-white text-sm">New encounter</h2>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {error && !nameInvalid && (
+        <p className="text-sm text-rose-400" role="alert">
+          {error}
+        </p>
+      )}
       <form onSubmit={submit} className="space-y-3">
-        <TextInput
-          placeholder="Ambush at the ford"
+        <Field
+          idPrefix={ENCOUNTER_CREATE_PREFIX}
+          name={ENCOUNTER_FIELD.name}
+          label={ENCOUNTER_NAME_LABEL}
+          labelClassName="text-xs text-slate-400"
+          placeholder={ENCOUNTER_NAME_PLACEHOLDER}
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setName(e.target.value);
+            if (error) setError(null);
+          }}
           maxLength={120}
           autoFocus
+          required
+          help={ENCOUNTER_NAME_HELP}
+          error={formError}
         />
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-          <label className="text-xs text-slate-400 space-y-1">
-            <span className="inline-flex items-center gap-1"><GameIcon slug="treasure-map" size={12} /> Location</span>
-            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={locationId} onChange={(e) => setLocationId(e.target.value)}>
-              <option value="">— none —</option>
-              {locations.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.name ?? `#${l.id}`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs text-slate-400 space-y-1">
-            <span className="inline-flex items-center gap-1"><GameIcon slug="scroll-unfurled" size={12} /> Quest</span>
-            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={questId} onChange={(e) => setQuestId(e.target.value)}>
-              <option value="">— none —</option>
-              {quests.map((q) => (
-                <option key={q.id} value={q.id}>
-                  {q.title ?? `#${q.id}`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs text-slate-400 space-y-1">
-            <span className="inline-flex items-center gap-1"><GameIcon slug="book-cover" size={12} /> Session</span>
-            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
-              <option value="">— none —</option>
-              {sessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.title || `Session ${s.number ?? s.id}`}
-                </option>
-              ))}
-            </select>
-          </label>
+          <Field
+            idPrefix={ENCOUNTER_CREATE_PREFIX}
+            name={ENCOUNTER_FIELD.locationId}
+            as="select"
+            label={
+              <span className="inline-flex items-center gap-1">
+                <GameIcon slug="treasure-map" size={12} /> {ENCOUNTER_LOCATION_LABEL}
+              </span>
+            }
+            labelClassName="text-xs text-slate-400"
+            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            value={locationId}
+            onChange={(e) => setLocationId(e.target.value)}
+            help={ENCOUNTER_LOCATION_HELP}
+            optional
+          >
+            <option value="">— none —</option>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name ?? `#${l.id}`}
+              </option>
+            ))}
+          </Field>
+          <Field
+            idPrefix={ENCOUNTER_CREATE_PREFIX}
+            name={ENCOUNTER_FIELD.questId}
+            as="select"
+            label={
+              <span className="inline-flex items-center gap-1">
+                <GameIcon slug="scroll-unfurled" size={12} /> {ENCOUNTER_QUEST_LABEL}
+              </span>
+            }
+            labelClassName="text-xs text-slate-400"
+            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            value={questId}
+            onChange={(e) => setQuestId(e.target.value)}
+            help={ENCOUNTER_QUEST_HELP}
+            optional
+          >
+            <option value="">— none —</option>
+            {quests.map((q) => (
+              <option key={q.id} value={q.id}>
+                {q.title ?? `#${q.id}`}
+              </option>
+            ))}
+          </Field>
+          <Field
+            idPrefix={ENCOUNTER_CREATE_PREFIX}
+            name={ENCOUNTER_FIELD.sessionId}
+            as="select"
+            label={
+              <span className="inline-flex items-center gap-1">
+                <GameIcon slug="book-cover" size={12} /> {ENCOUNTER_SESSION_LABEL}
+              </span>
+            }
+            labelClassName="text-xs text-slate-400"
+            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            value={sessionId}
+            onChange={(e) => setSessionId(e.target.value)}
+            help={ENCOUNTER_SESSION_HELP}
+            optional
+          >
+            <option value="">— none —</option>
+            {sessions.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.title || `Session ${s.number ?? s.id}`}
+              </option>
+            ))}
+          </Field>
         </div>
         <div className="flex gap-2 justify-end">
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>

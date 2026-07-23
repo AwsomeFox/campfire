@@ -39,6 +39,14 @@ if (existsSync(join(dist, "manifest.webmanifest"))) {
   check(m.name === "Campfire", "manifest.name should be Campfire");
   check(!!m.short_name, "manifest.short_name missing");
   check(m.display === "standalone", "manifest.display should be standalone");
+  // Issue #797: orientation locks blocked free rotation for maps / AI table / player
+  // display. Allow omitting orientation or setting it exactly to "any"; reject every
+  // other value (including landscape* locks).
+  const orientation = m.orientation;
+  check(
+    orientation == null || orientation === "any",
+    `manifest.orientation must be omitted or "any" (got ${JSON.stringify(orientation)})`,
+  );
   check(/^#/.test(m.theme_color || ""), "manifest.theme_color missing");
   check(/^#/.test(m.background_color || ""), "manifest.background_color missing");
   check(Array.isArray(m.icons) && m.icons.length >= 2, "manifest needs >=2 icons");
@@ -60,6 +68,51 @@ if (existsSync(join(dist, "sw.js"))) {
   check(
     /precache/i.test(sw) || /workbox/i.test(sw),
     "sw.js should use workbox precaching",
+  );
+  // Issue #879: streams / exports / backups stay NetworkOnly; JSON and image
+  // thumbs use separate bounded buckets (never the legacy single campfire-api).
+  check(
+    /NetworkOnly/i.test(sw) || /networkOnly/i.test(sw),
+    "sw.js should register NetworkOnly for SSE/export/backup exclusions",
+  );
+  check(
+    sw.includes("campfire-api-json"),
+    "sw.js should use the bounded campfire-api-json cache",
+  );
+  check(
+    sw.includes("campfire-api-images"),
+    "sw.js should use the bounded campfire-api-images cache",
+  );
+  check(
+    sw.includes("text/event-stream"),
+    "sw.js should exclude text/event-stream from runtime caching",
+  );
+  // Prefer path-aware markers over bare "export"/"backup" substrings (bundlers
+  // often emit `exports` / unrelated backup text that would false-positive).
+  check(
+    sw.includes("/export"),
+    "sw.js should exclude /export path downloads from runtime caching",
+  );
+  check(
+    sw.includes("/api/v1/backup"),
+    "sw.js should exclude /api/v1/backup from runtime caching",
+  );
+  // Issue #730: activate purge script + no-store / allowlist markers.
+  check(
+    existsSync(join(dist, "sw-sensitive-purge.js")),
+    "missing sw-sensitive-purge.js (activate purge for sensitive caches)",
+  );
+  check(
+    sw.includes("sw-sensitive-purge.js") || /importScripts/i.test(sw),
+    "sw.js should importScripts sw-sensitive-purge.js for activate hygiene",
+  );
+  check(
+    sw.includes("no-store") || sw.includes("bno-store"),
+    "sw.js should reject Cache-Control: no-store in cacheWillUpdate",
+  );
+  check(
+    sw.includes("/api/v1/shared/") || sw.includes("shared/"),
+    "sw.js should NetworkOnly-exclude capability shared/ recap URLs",
   );
 }
 

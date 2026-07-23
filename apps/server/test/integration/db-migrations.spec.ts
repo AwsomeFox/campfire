@@ -76,11 +76,19 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'combatants')).toEqual(
         expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id']),
       );
-      expect(columnNames(sqlite, 'attachments')).toContain('hidden');
+      expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
       // 0045 (issue #503): comments gain the tombstone columns — soft delete without
       // destroying other members' replies (deleted_at) + who pulled the trigger (deleted_by).
-      expect(columnNames(sqlite, 'comments')).toEqual(expect.arrayContaining(['deleted_at', 'deleted_by']));
+      expect(columnNames(sqlite, 'comments')).toEqual(
+        expect.arrayContaining([
+          'deleted_at',
+          'deleted_by',
+          'character_id',
+          'character_name',
+          'character_avatar_url',
+        ]),
+      );
 
       // 0040 (issue #310): the ai_provider_configs table is created as a NEW table
       // by the migration, with the encrypted-key + scope columns present.
@@ -158,6 +166,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           .get(),
       ).toEqual({ family_id: 'legacy-1', refresh_consumed_at: null, revoked_at: null, family_revoked_at: null });
       expect((sqlite.prepare('SELECT snapshot FROM proposals WHERE id = 1').get() as { snapshot: unknown }).snapshot).toBeNull();
+      // 0061 (#728): all pre-reservation attachment rows remain publicly visible.
+      expect((sqlite.prepare('SELECT state FROM attachments WHERE id = 1').get() as { state: string }).state).toBe(
+        'committed',
+      );
 
       // Combatant HP-model backfill (issue #57): defaults applied to the pre-existing row.
       const combatant = sqlite.prepare('SELECT * FROM combatants WHERE id = 1').get() as Record<string, unknown>;
@@ -188,11 +200,22 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         sqlite.prepare('SELECT visibility, ai_use_consent FROM participant_support_preferences').get(),
       ).toEqual({ visibility: 'facilitator', ai_use_consent: 0 });
       const legacyRoot = sqlite
-        .prepare("SELECT body, parent_id, deleted_at, deleted_by FROM comments WHERE parent_id IS NULL")
-        .get() as { body: string; parent_id: number | null; deleted_at: string | null; deleted_by: string | null };
+        .prepare("SELECT body, parent_id, deleted_at, deleted_by, character_id, character_name, character_avatar_url FROM comments WHERE parent_id IS NULL")
+        .get() as {
+          body: string;
+          parent_id: number | null;
+          deleted_at: string | null;
+          deleted_by: string | null;
+          character_id: number | null;
+          character_name: string | null;
+          character_avatar_url: string | null;
+        };
       expect(legacyRoot.body).toBe('Legacy root comment');
       expect(legacyRoot.deleted_at).toBeNull();
       expect(legacyRoot.deleted_by).toBeNull();
+      expect(legacyRoot.character_id).toBeNull();
+      expect(legacyRoot.character_name).toBeNull();
+      expect(legacyRoot.character_avatar_url).toBeNull();
       const legacyReply = sqlite
         .prepare("SELECT body, parent_id FROM comments WHERE body = 'Legacy reply that must survive'")
         .get() as { body: string; parent_id: number };
@@ -279,6 +302,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // Fresh DB already has the modern columns (never touched a migration path).
       expect(columnNames(sqlite, 'characters')).toEqual(expect.arrayContaining(['xp', 'dm_secret', 'spell_slots']));
       expect(columnNames(sqlite, 'users')).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
+      expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
+      expect(
+        sqlite
+          .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attachments'")
+          .get(),
+      ).toEqual(expect.objectContaining({ sql: expect.stringContaining("state IN ('reserved', 'committed')") }));
       // Issue #744: campaigns carry the one-authoritative-live-fight pointer on fresh DBs.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
 
@@ -293,8 +322,37 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(MIGRATION_NAMES).toContain('0055_participant_support_preferences');
       expect(MIGRATION_NAMES).toContain('0057_campaigns_active_encounter');
+      expect(MIGRATION_NAMES).toContain('0058_campaigns_public_invites_enabled');
+      expect(MIGRATION_NAMES).toContain('0059_public_invites_disabled_inactive');
+      expect(MIGRATION_NAMES).toContain('0060_encounter_events_combatant_ids');
+      expect(MIGRATION_NAMES).toContain('0062_attachments_publication_state');
+      expect(MIGRATION_NAMES).toContain('0063_comments_character_attribution');
+      expect(MIGRATION_NAMES).toContain('0064_encounter_links_campaign_scope');
+      expect(MIGRATION_NAMES).toContain('0065_notifications_comment_id');
+      expect(MIGRATION_NAMES).toContain('0066_entity_revisions_version_authorship');
+      expect(MIGRATION_NAMES).toContain('0067_campaign_members_exclusive_character');
+      expect(columnNames(sqlite, 'entity_revisions')).toEqual(
+        expect.arrayContaining([
+          'author_source',
+          'author_source_detail',
+          'replaced_by_user_id',
+          'replaced_by_name',
+          'replaced_by_source',
+          'replaced_by_source_detail',
+          'replaced_at',
+          'restored_from_revision_id',
+          'authorship_known',
+        ]),
+      );
+      expect(
+        (sqlite.pragma('index_list(campaign_members)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_campaign_members_character');
       // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
+      expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['public_invites_enabled']));
+      expect(columnNames(sqlite, 'comments')).toEqual(
+        expect.arrayContaining(['character_id', 'character_name', 'character_avatar_url']),
+      );
 
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');
@@ -555,6 +613,62 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0059 nullifies cross-campaign encounter links and preserves valid ones (issue #864)', () => {
+    dataDir = makeTempDataDir();
+
+    // Seed a fully-migrated DB, plant a cross-campaign encounter link (SQLite FKs
+    // only check the target row exists — not campaign_id match), then re-run 0059.
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      const now = '2026-07-23T00:00:00.000Z';
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Camp A', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (2, 'Camp B', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO locations (id, campaign_id, name, created_at, updated_at) VALUES (10, 1, 'Home', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO locations (id, campaign_id, name, created_at, updated_at) VALUES (20, 2, 'Away', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO quests (id, campaign_id, title, created_at, updated_at) VALUES (11, 1, 'Local Quest', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO quests (id, campaign_id, title, created_at, updated_at) VALUES (21, 2, 'Foreign Quest', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO sessions (id, campaign_id, number, title, created_at, updated_at) VALUES (12, 1, 1, 'Local Session', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO sessions (id, campaign_id, number, title, created_at, updated_at) VALUES (22, 2, 1, 'Foreign Session', ?, ?)").run(now, now);
+      // Valid same-campaign links — must survive the repair.
+      legacy
+        .prepare(
+          "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (1, 1, 'Good', 10, 11, 12, ?, ?)",
+        )
+        .run(now, now);
+      // Cross-campaign links — must be nullified.
+      legacy
+        .prepare(
+          "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (2, 1, 'Bad', 20, 21, 22, ?, ?)",
+        )
+        .run(now, now);
+      // Mixed: valid location, foreign quest — only the bad field clears.
+      legacy
+        .prepare(
+          "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (3, 1, 'Mixed', 10, 21, 12, ?, ?)",
+        )
+        .run(now, now);
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0064_encounter_links_campaign_scope'").run();
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      const rows = upgraded.sqlite
+        .prepare('SELECT id, location_id, quest_id, session_id FROM encounters ORDER BY id')
+        .all() as Array<{ id: number; location_id: number | null; quest_id: number | null; session_id: number | null }>;
+      expect(rows).toEqual([
+        { id: 1, location_id: 10, quest_id: 11, session_id: 12 },
+        { id: 2, location_id: null, quest_id: null, session_id: null },
+        { id: 3, location_id: 10, quest_id: null, session_id: 12 },
+      ]);
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
   // ── app-version compatibility guard (issue #726) ──────────────────────────
   //
   // The running binary's APP_VERSION is read from apps/server/package.json
@@ -692,6 +806,76 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(getRecordedAppVersion(opened.sqlite)).toBe(BINARY_VERSION);
     } finally {
       opened.sqlite.close();
+    }
+  });
+
+  // ── public invites kill switch (#857) ───────────────────────────────────────
+
+  it('0058 clears public_invites_enabled for paused campaigns when upgrading an old-shaped DB', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.prepare("UPDATE campaigns SET status = 'paused' WHERE id = 1").run();
+    } finally {
+      legacy.close();
+    }
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const row = sqlite.prepare('SELECT status, public_invites_enabled FROM campaigns WHERE id = 1').get() as {
+        status: string;
+        public_invites_enabled: number;
+      };
+      expect(row.status).toBe('paused');
+      expect(row.public_invites_enabled).toBe(0);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('0059 clears public_invites_enabled left enabled on paused/completed/trashed campaigns', () => {
+    dataDir = makeTempDataDir();
+    const first = openDatabase(dataDir);
+    const now = '2026-07-23T00:00:00.000Z';
+    try {
+      // Simulate a DB that applied the original 0058 (DEFAULT 1 for every row)
+      // before the inactive-campaign clear landed.
+      first.sqlite
+        .prepare(
+          `INSERT INTO campaigns (name, status, public_invites_enabled, deleted_at, created_at, updated_at)
+           VALUES
+             ('Active Live', 'active', 1, NULL, ?, ?),
+             ('Paused Table', 'paused', 1, NULL, ?, ?),
+             ('Completed Saga', 'completed', 1, NULL, ?, ?),
+             ('Trashed Keep', 'active', 1, ?, ?, ?)`,
+        )
+        .run(now, now, now, now, now, now, now, now, now);
+      first.sqlite.prepare("DELETE FROM __migrations WHERE name = '0059_public_invites_disabled_inactive'").run();
+    } finally {
+      first.sqlite.close();
+    }
+
+    const second = openDatabase(dataDir);
+    try {
+      const rows = second.sqlite
+        .prepare(
+          `SELECT name, status, public_invites_enabled, deleted_at IS NOT NULL AS trashed
+           FROM campaigns
+           WHERE name IN ('Active Live', 'Paused Table', 'Completed Saga', 'Trashed Keep')
+           ORDER BY name`,
+        )
+        .all() as Array<{ name: string; status: string; public_invites_enabled: number; trashed: number }>;
+      expect(rows).toEqual([
+        { name: 'Active Live', status: 'active', public_invites_enabled: 1, trashed: 0 },
+        { name: 'Completed Saga', status: 'completed', public_invites_enabled: 0, trashed: 0 },
+        { name: 'Paused Table', status: 'paused', public_invites_enabled: 0, trashed: 0 },
+        { name: 'Trashed Keep', status: 'active', public_invites_enabled: 0, trashed: 1 },
+      ]);
+      expect(MIGRATION_NAMES).toContain('0059_public_invites_disabled_inactive');
+    } finally {
+      second.sqlite.close();
     }
   });
 });

@@ -6,7 +6,14 @@
  * Everyone: see what's coming, one-tap RSVP.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
+import {
+  endSessionDurationMinutes,
+  extendSessionDurationMinutes,
+  partitionSchedules,
+  scheduleEndsAtMs,
+} from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale } from '../../lib/format';
@@ -14,8 +21,10 @@ import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
+import { viewerRsvpIds } from '../../lib/dashboardRsvp';
 
 const RSVP_OPTIONS: Array<{ status: RsvpStatus; label: string; icon: string }> = [
   { status: 'yes', label: 'In', icon: '✓' },
@@ -32,11 +41,8 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   const [showAddForm, setShowAddForm] = useState(false);
 
   // RSVP rows store the server-side user id: String(users.id) for real users,
-  // `dev:<name>` on the DEV_AUTH header path. Match either.
-  const myIds = useMemo(() => {
-    if (!me) return new Set<string>();
-    return new Set([String(me.user.id), `dev:${me.user.username}`]);
-  }, [me]);
+  // `dev:<name>` on the DEV_AUTH header path. Match either (shared with #785).
+  const myIds = useMemo(() => viewerRsvpIds(me?.user ?? null), [me]);
 
   // Core content (the schedule list) loads on its own. The optional calendar-feed
   // panel loads independently below in <FeedCard> so a feed outage can never blank
@@ -59,10 +65,31 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
     void load();
   }, [load]);
 
-  const now = Date.now();
-  const upcoming = schedules.filter((s) => Date.parse(s.scheduledAt) >= now);
-  const past = schedules.filter((s) => Date.parse(s.scheduledAt) < now).reverse(); // most recent first
+  // Issue #818: keep a game night in the live lists until scheduledAt+duration ends.
+  // Wake at the next phase boundary (soonest upcoming start or in-progress end) so
+  // "Next session" ↔ "Happening now" flips without a reload.
+  const [scheduleNowMs, setScheduleNowMs] = useState(() => Date.now());
+  const { inProgress, upcoming, past } = useMemo(
+    () => partitionSchedules(schedules, scheduleNowMs),
+    [schedules, scheduleNowMs],
+  );
+  useEffect(() => {
+    const boundaries: number[] = [];
+    for (const s of inProgress) {
+      const endMs = scheduleEndsAtMs(s.scheduledAt, s.durationMinutes);
+      if (Number.isFinite(endMs) && endMs > scheduleNowMs) boundaries.push(endMs);
+    }
+    for (const s of upcoming) {
+      const startMs = Date.parse(s.scheduledAt);
+      if (Number.isFinite(startMs) && startMs > scheduleNowMs) boundaries.push(startMs);
+    }
+    if (boundaries.length === 0) return;
+    const delay = Math.min(...boundaries) - scheduleNowMs + 25;
+    const timer = window.setTimeout(() => setScheduleNowMs(Date.now()), Math.max(25, delay));
+    return () => window.clearTimeout(timer);
+  }, [inProgress, upcoming, scheduleNowMs]);
   const [next, ...later] = upcoming;
+  const hasLive = inProgress.length > 0 || Boolean(next);
 
   if (loading) {
     return (
@@ -77,7 +104,9 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
       {error && <ErrorNote message={error} onRetry={load} />}
 
       <div className="flex items-center gap-2.5">
-        <h2 className="text-sm font-bold text-white m-0">Next session</h2>
+        <h2 className="text-sm font-bold text-white m-0">
+          {inProgress.length > 0 ? 'Happening now' : 'Next session'}
+        </h2>
         <div className="flex-1" />
         {isDm && !showAddForm && (
           <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setShowAddForm(true)}>
@@ -97,7 +126,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         />
       )}
 
-      {!next && !showAddForm && (
+      {!hasLive && !showAddForm && (
         <Card>
           <EmptyState
             icon="calendar"
@@ -107,13 +136,39 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         </Card>
       )}
 
-      {next && <ScheduleItem schedule={next} hero isDm={isDm} myIds={myIds} onChange={load} />}
+      {inProgress.map((s) => (
+        <ScheduleItem
+          key={s.id}
+          campaignId={campaignId}
+          schedule={s}
+          hero
+          happeningNow
+          isDm={isDm}
+          myIds={myIds}
+          onChange={load}
+        />
+      ))}
+
+      {inProgress.length > 0 && next && (
+        <h2 className="text-sm font-bold text-white m-0">Next session</h2>
+      )}
+
+      {next && (
+        <ScheduleItem
+          campaignId={campaignId}
+          schedule={next}
+          hero={inProgress.length === 0}
+          isDm={isDm}
+          myIds={myIds}
+          onChange={load}
+        />
+      )}
 
       {later.length > 0 && (
         <>
           <h2 className="text-sm font-bold text-white m-0">Later</h2>
           {later.map((s) => (
-            <ScheduleItem key={s.id} schedule={s} isDm={isDm} myIds={myIds} onChange={load} />
+            <ScheduleItem key={s.id} campaignId={campaignId} schedule={s} isDm={isDm} myIds={myIds} onChange={load} />
           ))}
         </>
       )}
@@ -138,14 +193,18 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
 // ---------------------------------------------------------------------------
 
 function ScheduleItem({
+  campaignId,
   schedule,
   hero = false,
+  happeningNow = false,
   isDm,
   myIds,
   onChange,
 }: {
+  campaignId: number;
   schedule: ScheduledSessionWithRsvps;
   hero?: boolean;
+  happeningNow?: boolean;
   isDm: boolean;
   myIds: Set<string>;
   onChange: () => void;
@@ -182,6 +241,21 @@ function ScheduleItem({
     }
   }
 
+  async function patchDuration(durationMinutes: number) {
+    setBusy(true);
+    setError(null);
+    try {
+      // Mid-session duration edits redefine the end as scheduledAt + durationMinutes
+      // and emit schedule.updated so dashboard/SSE clients invalidate live (#818).
+      await api.patch<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}`, { durationMinutes });
+      onChange();
+    } catch {
+      setError("Couldn't update the session length.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (editing) {
     return (
       <ScheduleForm
@@ -197,11 +271,20 @@ function ScheduleItem({
   }
 
   return (
-    <Card className={hero ? '!border-[var(--color-accent-800)]' : ''}>
+    <Card className={hero || happeningNow ? '!border-[var(--color-accent)]' : ''}>
       <div className="space-y-3" {...entityTargetProps('scheduled_session', schedule.id)}>
         {error && <ErrorNote message={error} />}
+        {happeningNow && (
+          <p
+            className="text-xs font-extrabold uppercase tracking-wide m-0"
+            style={{ color: 'var(--color-accent-2-200, var(--color-accent))' }}
+            role="status"
+          >
+            Happening now
+          </p>
+        )}
         <div className="flex items-baseline gap-2.5 flex-wrap">
-          <span className={hero ? 'text-lg font-extrabold text-white' : 'text-sm font-bold text-white'}>
+          <span className={hero || happeningNow ? 'text-lg font-extrabold text-white' : 'text-sm font-bold text-white'}>
             {formatWhen(schedule.scheduledAt)}
           </span>
           {schedule.title && <span className="text-muted text-sm">{schedule.title}</span>}
@@ -227,8 +310,44 @@ function ScheduleItem({
 
         {schedule.rsvps.length > 0 && <RsvpList rsvps={schedule.rsvps} />}
 
+        {happeningNow && (
+          <div className="flex gap-2 flex-wrap">
+            {isDm && (
+              <Link to={`/c/${campaignId}/encounters`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+                Encounters
+              </Link>
+            )}
+            <Link to={`/c/${campaignId}/screen`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+              Player display
+            </Link>
+            <Link to={`/c/${campaignId}/notes`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+              Session notes
+            </Link>
+          </div>
+        )}
+
         {isDm && (
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
+            {happeningNow && (
+              <>
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1 text-xs"
+                  disabled={busy || schedule.durationMinutes >= 1440}
+                  onClick={() => void patchDuration(extendSessionDurationMinutes(schedule.durationMinutes, 30))}
+                >
+                  Extend +30 min
+                </Btn>
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1 text-xs"
+                  disabled={busy}
+                  onClick={() => void patchDuration(endSessionDurationMinutes(schedule.scheduledAt))}
+                >
+                  End session
+                </Btn>
+              </>
+            )}
             <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setEditing(true)}>
               Edit
             </Btn>
@@ -243,7 +362,7 @@ function ScheduleItem({
         <ConfirmDialog
           title="Cancel this session?"
           body="The scheduled session and everyone's RSVPs will be removed."
-          confirmLabel={busy ? 'Cancelling…' : 'Cancel session'}
+          confirmLabel="Cancel session"
           busy={busy}
           onConfirm={cancel}
           onCancel={() => setConfirmingCancel(false)}
@@ -308,7 +427,12 @@ function ScheduleForm({
     try {
       await onSubmit({
         scheduledAt: new Date(parsed).toISOString(),
-        durationMinutes: Number.isFinite(minutes) && minutes >= 15 ? Math.min(minutes, 1440) : 240,
+        durationMinutes: (() => {
+          if (!Number.isFinite(minutes)) return initial ? initial.durationMinutes : 240;
+          // Edits may keep end-session values in 0..14; create still requires >=15.
+          if (initial) return Math.min(1440, Math.max(0, minutes));
+          return minutes >= 15 ? Math.min(minutes, 1440) : 240;
+        })(),
         title: title.trim(),
         location: location.trim(),
         notes,
@@ -330,7 +454,7 @@ function ScheduleForm({
         </div>
         <div className="space-y-1">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Duration (minutes)</label>
-          <TextInput type="number" min={15} max={1440} step={15} value={duration} onChange={(e) => setDuration(e.target.value)} />
+          <TextInput type="number" min={initial ? 0 : 15} max={1440} step={15} value={duration} onChange={(e) => setDuration(e.target.value)} />
         </div>
       </div>
       <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder='Title (optional), e.g. "Session 12 — the heist"' />
@@ -366,8 +490,8 @@ function FeedCard({
   onChange: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [mutateError, setMutateError] = useState<string | null>(null);
+  const feedUrlId = `calendar-feed-url-${campaignId}`;
 
   // The calendar feed is an AUXILIARY panel (issue #697): it loads on its own so a
   // feed outage degrades only this card — never the schedule list above, and never a
@@ -417,17 +541,6 @@ function FeedCard({
     }
   }
 
-  async function copy() {
-    if (!absoluteUrl) return;
-    try {
-      await navigator.clipboard.writeText(absoluteUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard unavailable — the URL is still selectable */
-    }
-  }
-
   return (
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2">
@@ -463,14 +576,22 @@ function FeedCard({
           </p>
           <div className="flex items-center gap-2">
             <code
+              id={feedUrlId}
               className="text-[11px] px-2 py-1.5 rounded flex-1 min-w-0 overflow-x-auto whitespace-nowrap"
               style={{ background: 'var(--color-neutral-900)', color: 'var(--color-text)' }}
             >
               {absoluteUrl}
             </code>
-            <Btn ghost className="!min-h-0 !py-1 text-xs shrink-0" onClick={copy}>
-              {copied ? 'Copied!' : 'Copy'}
-            </Btn>
+            {absoluteUrl && (
+              <CopyControl
+                text={absoluteUrl}
+                selectTargetId={feedUrlId}
+                ghost
+                className="!min-h-0 !py-1 text-xs shrink-0"
+                successAnnouncement="Calendar feed URL copied to clipboard."
+                failureAnnouncement="Copy failed. Clipboard blocked — select the URL and copy it manually."
+              />
+            )}
           </div>
         </>
       ) : (

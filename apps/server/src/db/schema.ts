@@ -18,6 +18,11 @@ export const campaigns = sqliteTable('campaigns', {
   // older DBs via migrateCampaignsTableForDmControlsProgression() — see db/db.module.ts.
   dmControlsProgression: integer('dm_controls_progression', { mode: 'boolean' }).notNull().default(false),
   publicRecapSharingEnabled: integer('public_recap_sharing_enabled', { mode: 'boolean' }).notNull().default(true),
+  // Issue #857: when false, public invite preview/accept/join all 404 with the
+  // uniform inactive message. Archive/trash auto-clears this; restore/unarchive
+  // does NOT flip it back — deliberate reactivation via the invites policy
+  // endpoint is required. Nullable in older DBs pre-migration; see db.module.ts.
+  publicInvitesEnabled: integer('public_invites_enabled', { mode: 'boolean' }).notNull().default(true),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -411,6 +416,12 @@ export const comments = sqliteTable('comments', {
   authorName: text('author_name').notNull().default(''),
   body: text('body').notNull(),
   inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
+  // Immutable creation-time character attribution (issue #787). character_id is
+  // deliberately a soft reference: deleting/trashed characters must not erase or
+  // rewrite historical dialogue. The copied name/avatar remain display-authoritative.
+  characterId: integer('character_id'),
+  characterName: text('character_name'),
+  characterAvatarUrl: text('character_avatar_url'),
   // Soft delete / tombstone (issue #503). NULL = live; an ISO timestamp means the
   // comment is tombstoned (body redacted in API responses, replies preserved).
   // Nullable/absent in older DBs pre-migration; see db/db.module.ts migrateCommentsTableForSoftDelete().
@@ -443,12 +454,24 @@ export const comments = sqliteTable('comments', {
 export const entityRevisions = sqliteTable('entity_revisions', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
-  entityType: text('entity_type').notNull(), // 'session' | 'quest' | 'npc' | 'location'
+  entityType: text('entity_type').notNull(), // 'session' | 'quest' | 'npc' | 'location' | 'faction' | 'note'
   entityId: integer('entity_id').notNull(),
-  snapshot: text('snapshot').notNull().default('{}'), // JSON: { recap } | { body }
+  snapshot: text('snapshot').notNull().default('{}'), // JSON: { recap } | { body } — prose OF THIS VERSION
+  // Version author (issue #813). Empty when authorship_known=0 (legacy rows).
   authorUserId: text('author_user_id').notNull().default(''),
   authorName: text('author_name').notNull().default(''),
-  createdAt: text('created_at').notNull(),
+  authorSource: text('author_source').notNull().default('human'), // 'human' | 'ai' | 'tool'
+  authorSourceDetail: text('author_source_detail').notNull().default(''),
+  createdAt: text('created_at').notNull().default(''), // authored-at; '' when unknown (legacy)
+  // Replacing actor/time — null replaced_at marks the current tip (still live).
+  replacedByUserId: text('replaced_by_user_id').notNull().default(''),
+  replacedByName: text('replaced_by_name').notNull().default(''),
+  replacedBySource: text('replaced_by_source').notNull().default('human'),
+  replacedBySourceDetail: text('replaced_by_source_detail').notNull().default(''),
+  replacedAt: text('replaced_at'),
+  restoredFromRevisionId: integer('restored_from_revision_id'),
+  // 0 for pre-#813 rows: UI must label "Replaced by …" rather than invent authorship.
+  authorshipKnown: integer('authorship_known', { mode: 'boolean' }).notNull().default(true),
 });
 
 export const auditLog = sqliteTable('audit_log', {
@@ -775,6 +798,12 @@ export const attachments = sqliteTable('attachments', {
   // New map/image uploads default hidden; portraits default visible. Migrated via
   // migrateAttachmentsTableForHidden().
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Publication state for the filesystem/SQLite recovery protocol (issue #728).
+  // A reserved row counts against quota but is never returned by attachment reads.
+  // It becomes committed only after the final file has been renamed into place and
+  // both the staged bytes and containing directory have been fsynced. Existing rows
+  // are backfilled committed by migrateAttachmentsTableForPublicationState().
+  state: text('state').notNull().default('committed'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -853,6 +882,7 @@ export const notifications = sqliteTable('notifications', {
   body: text('body').notNull().default(''),
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
+  commentId: integer('comment_id'), // optional comment focus inside the entity thread (#446)
   actorName: text('actor_name').notNull().default(''),
   readAt: text('read_at'),
   createdAt: text('created_at').notNull(),
@@ -981,14 +1011,21 @@ export const combatants = sqliteTable('combatants', {
   // Token footprint size category (issue #40, phase 2). NOT NULL DEFAULT 'medium'; added by
   // migration on older DBs — see db/db.module.ts migrateCombatantsTableForTokenSize.
   tokenSize: text('token_size').notNull().default('medium'),
+  // Issue #466: character.updatedAt at the last acknowledged sheet↔combatant HP sync
+  // (create/add seed, live mirror, /end write-back, or reopen resync decision). Used as
+  // the compare-and-set token so a re-end cannot silently overwrite intervening sheet HP.
+  // Nullable for legacy rows; first sync after upgrade stamps it.
+  sheetSyncedUpdatedAt: text('sheet_synced_updated_at'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row
 // per meaningful combat mutation (damage/heal, condition add/remove, death, turn/round),
 // written by EncountersService so the run view can show a scrollable history that
 // survives reload. actor/target are denormalized combatant NAMES (nullable) so the log
-// renders even after a combatant is removed; `detail` never carries a monster's exact HP
-// total (only the delta), so listing the log to a non-DM can't leak issue #43's redaction.
+// renders even after a combatant is removed; actor_id/target_id are stable combatant
+// ids for role-aware projection (issue #869). `detail` never carries a monster's exact
+// HP total (only the delta) and must not embed combatant names that could bypass
+// actor/target redaction for hidden NPCs.
 export const encounterEvents = sqliteTable('encounter_events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),
@@ -996,6 +1033,8 @@ export const encounterEvents = sqliteTable('encounter_events', {
   type: text('type').notNull(), // EncounterEventType in @campfire/schema
   actor: text('actor'),
   target: text('target'),
+  actorId: integer('actor_id'),
+  targetId: integer('target_id'),
   detail: text('detail').notNull().default(''),
   createdAt: text('created_at').notNull(),
 });
