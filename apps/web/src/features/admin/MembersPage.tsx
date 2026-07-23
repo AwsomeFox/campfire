@@ -11,6 +11,7 @@
  * Audit log kept (existing functionality, not in this design block).
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useAnnounce } from '../../components/Announcer';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -20,6 +21,13 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
+import {
+  INVITE_COPY_FAILURE,
+  INVITE_COPY_SUCCESS,
+  inviteCopyButtonLabel,
+  inviteLinkFieldLabel,
+  inviteRoleOptions,
+} from './inviteRoleOptions';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -276,6 +284,8 @@ function isEventPreset(expiryPreset: ExpiryPreset, maxUsesPreset: MaxUsesPreset)
  * Issue #821: exposes expiry presets (end-of-today, 24h, 7d, 30d, custom) and
  * max-uses controls (unlimited, 1, 5, 10, custom) with a preview before generation.
  */
+const INVITE_ROLE_SELECT_ID = 'invite-join-role';
+
 function InviteCard({ campaignId }: { campaignId: number }) {
   const [invites, setInvites] = useState<CampaignInvite[]>([]);
   const [role, setRole] = useState<InviteRole>('player');
@@ -286,6 +296,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const announce = useAnnounce();
 
   const load = useCallback(async () => {
     try {
@@ -332,9 +343,17 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     try {
       await navigator.clipboard.writeText(inviteLinkFor(invite.code));
       setCopiedId(invite.id);
+      // `error` is shared across create/revoke/copy for this card, so only
+      // clear it here if it's the copy-failure message we set below —
+      // otherwise a successful copy could silently dismiss an unrelated
+      // create/revoke failure that's still unresolved.
+      setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
+      announce(INVITE_COPY_SUCCESS);
       setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
     } catch {
-      setError('Clipboard blocked — copy the link from the field instead.');
+      setCopiedId((current) => (current === invite.id ? null : current));
+      announce(INVITE_COPY_FAILURE);
+      setError(INVITE_COPY_FAILURE);
     }
   }
 
@@ -344,16 +363,24 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   const maxDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
   return (
-    <Card className="space-y-2.5">
+    <Card className="space-y-2.5" data-testid="invite-card">
       <p className="card-kicker mb-0">Invite</p>
 
       {/* Role */}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ minWidth: 110 }}>
-          <label htmlFor="invite-role">Joins as</label>
-          <select id="invite-role" className="input" value={role} onChange={(e) => setRole(e.target.value as InviteRole)}>
-            <option value="player">player</option>
-            <option value="viewer">viewer</option>
+          <label htmlFor={INVITE_ROLE_SELECT_ID}>Joins as</label>
+          <select
+            id={INVITE_ROLE_SELECT_ID}
+            className="input"
+            value={role}
+            onChange={(e) => setRole(e.target.value as InviteRole)}
+          >
+            {inviteRoleOptions().map((opt) => (
+              <option key={opt.role} value={opt.role}>
+                {opt.description}
+              </option>
+            ))}
           </select>
         </div>
       </div>
@@ -451,19 +478,39 @@ function InviteCard({ campaignId }: { campaignId: number }) {
         {creating ? 'Generating…' : 'Generate invite link'}
       </button>
 
-      {error && <p className="text-xs text-rose-400 m-0" role="alert">{error}</p>}
+      {/* Copy failures are already announced via the polite live region
+          (`announce(INVITE_COPY_FAILURE)` in `copy()`); giving this paragraph
+          role="alert" too would announce the same message a second time,
+          assertively. Create/revoke failures have no other announcement path,
+          so they keep role="alert" here. */}
+      {error && (
+        <p
+          className="text-xs text-rose-400 m-0"
+          role={error === INVITE_COPY_FAILURE ? undefined : 'alert'}
+        >
+          {error}
+        </p>
+      )}
 
       {/* Live invite links */}
-      {invites.map((invite) => (
+      {invites.map((invite) => {
+        const linkFieldId = `invite-link-${invite.id}`;
+        return (
         <div key={invite.id} className="flex gap-2 flex-wrap items-center" data-testid="invite-row">
-          <input
-            className="input"
-            style={{ flex: 1, minWidth: 190 }}
-            readOnly
-            value={inviteLinkFor(invite.code)}
-            aria-label={`Invite link for ${invite.role}`}
-            onFocus={(e) => e.currentTarget.select()}
-          />
+          <div className="field !mb-0" style={{ flex: 1, minWidth: 190 }}>
+            <label className="sr-only" htmlFor={linkFieldId}>
+              {inviteLinkFieldLabel(invite.role, invite.id)}
+            </label>
+            <input
+              id={linkFieldId}
+              className="input"
+              style={{ width: '100%' }}
+              readOnly
+              aria-readonly="true"
+              value={inviteLinkFor(invite.code)}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+          </div>
           <span className={`cf-chip ${ROLE_CHIP[invite.role]}`}>{ROLE_LABEL[invite.role]}</span>
           <span className="text-muted text-[11px] whitespace-nowrap" data-testid="invite-status">
             {expiresIn(invite.expiresAt)}
@@ -471,14 +518,21 @@ function InviteCard({ campaignId }: { campaignId: number }) {
               ? ` · ${invite.maxUses - invite.useCount} of ${invite.maxUses} remaining`
               : ` · used ${invite.useCount}×`}
           </span>
-          <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={() => copy(invite)}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            style={{ minHeight: 36 }}
+            aria-label={inviteCopyButtonLabel(invite.role, invite.id)}
+            onClick={() => copy(invite)}
+          >
             {copiedId === invite.id ? 'Copied!' : 'Copy link'}
           </button>
           <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
             Revoke
           </button>
         </div>
-      ))}
+        );
+      })}
 
       <p className="text-muted text-[11.5px] m-0">
         Anyone with a link creates their own account (or signs in) and joins as the chosen role — no server
