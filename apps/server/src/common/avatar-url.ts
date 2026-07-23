@@ -40,7 +40,7 @@ export function safeHistoricalAvatarUrl(value: unknown): string | null {
  * are ignored — callers validate the id against the current campaign.
  */
 export function historicalAvatarAttachmentId(value: string): number | null {
-  const relative = value.match(/^\/api\/v1\/attachments\/(\d+)\/file(?:\?[^#\s]*)?(?:#[^\s]*)?$/);
+  const relative = value.match(/^\/api\/v1\/attachments\/(\d+)\/file\/?(?:\?[^#\s]*)?(?:#[^\s]*)?$/);
   if (relative) {
     const id = Number(relative[1]);
     return Number.isSafeInteger(id) && id > 0 ? id : null;
@@ -48,7 +48,7 @@ export function historicalAvatarAttachmentId(value: string): number | null {
 
   try {
     const parsed = new URL(value);
-    const absolute = parsed.pathname.match(/^\/api\/v1\/attachments\/(\d+)\/file$/);
+    const absolute = parsed.pathname.match(/^\/api\/v1\/attachments\/(\d+)\/file\/?$/);
     if (!absolute) return null;
     const id = Number(absolute[1]);
     return Number.isSafeInteger(id) && id > 0 ? id : null;

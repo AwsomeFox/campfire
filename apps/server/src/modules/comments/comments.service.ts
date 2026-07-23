@@ -122,11 +122,19 @@ export class CommentsService {
    * leak a secret entity's discussion. Anchor visibility is resolved once per
    * distinct (entityType, entityId) to keep this a bounded number of checks.
    */
-  async listForCampaign(campaignId: number, role: Role): Promise<Comment[]> {
+  async listForCampaign(
+    campaignId: number,
+    role: Role,
+    opts: { authorUserId?: string } = {},
+  ): Promise<Comment[]> {
     const rows = await this.db
       .select()
       .from(comments)
-      .where(eq(comments.campaignId, campaignId))
+      .where(
+        opts.authorUserId
+          ? and(eq(comments.campaignId, campaignId), eq(comments.authorUserId, opts.authorUserId))
+          : eq(comments.campaignId, campaignId),
+      )
       .orderBy(asc(comments.id));
     const visibleAnchor = new Map<string, boolean>();
     const out: Comment[] = [];

@@ -168,7 +168,7 @@ export class ExportService {
       this.sessions.listRecapsForCampaign(campaignId, role),
       this.characters.listForCampaign(campaignId, role),
       this.notes.listForCampaign(campaignId, user, role, {}),
-      this.comments.listForCampaign(campaignId, role),
+      this.comments.listForCampaign(campaignId, role, { authorUserId: user.id }),
       this.members.listForCampaign(campaignId),
       this.audit.listForCampaign(campaignId, 500),
       this.proposals.listForCampaign(campaignId, undefined),
@@ -286,14 +286,14 @@ export class ExportService {
       this.campaigns.getOrThrow(campaignId),
       this.characters.listForCampaign(campaignId, role),
       this.notes.listForCampaign(campaignId, user, role, { mine: true }),
-      this.comments.listForCampaign(campaignId, role),
+      this.comments.listForCampaign(campaignId, role, { authorUserId: user.id }),
       this.proposals.listForCampaign(campaignId, undefined),
       this.supportPreferences.getOwn(campaignId, user.id),
     ]);
 
     const ownCharacters = characterList.filter((c) => c.ownerUserId === user.id);
     const ownProposals = proposalList.filter((p) => p.proposer === user.id);
-    const ownComments = commentList.filter((c) => c.authorUserId === user.id);
+    const ownComments = commentList;
 
     return {
       campaign: { id: campaign.id, name: campaign.name, description: campaign.description, status: campaign.status },
