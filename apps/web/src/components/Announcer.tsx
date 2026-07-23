@@ -25,6 +25,15 @@ const AnnounceContext = createContext<AnnounceFn>(() => {});
 // don't have to reach for a message string.
 const ClearContext = createContext<ClearFn>(() => {});
 
+// Module-level clear for callers outside AnnounceProvider's React tree
+// (AuthProvider.handleMultiTabSignOut sits ABOVE AnnounceProvider in App.tsx).
+let clearLiveRegionImpl: ClearFn = () => {};
+
+/** Wipe polite/assertive live-region text. Safe no-op before provider mount. */
+export function clearLiveAnnouncements(): void {
+  clearLiveRegionImpl();
+}
+
 export function AnnounceProvider({ children }: { children: ReactNode }) {
   const [polite, setPolite] = useState('');
   const [assertive, setAssertive] = useState('');
@@ -46,6 +55,9 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
     setPolite('');
     setAssertive('');
   }, []);
+
+  // Keep the module-level entrypoint pointed at the mounted provider's clear.
+  clearLiveRegionImpl = clear;
 
   return (
     <AnnounceContext.Provider value={announce}>

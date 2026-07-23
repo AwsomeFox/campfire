@@ -38,6 +38,7 @@ import {
   useAuthStorageListener,
 } from '../features/auth/useAuthStorageListener';
 import { applyReadingPreference } from './readingPreferences';
+import { clearLiveAnnouncements } from '../components/Announcer';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
 // e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
 // can be unit-tested without JSX and without React.
@@ -121,6 +122,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
+    // Issue #506: peer tabs must not keep assertive/polite combat/HP text after
+    // another tab signs out (AnnounceProvider sits below us, so use the module
+    // entrypoint rather than the React hook).
+    clearLiveAnnouncements();
     // Drop in-memory campaign data immediately; SW cache purge stays best-effort.
     queryClient.clear();
     // If the first /me was still in flight, refresh() will early-return — mark
