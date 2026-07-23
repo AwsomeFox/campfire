@@ -902,6 +902,187 @@ describe('encounters (e2e)', () => {
   });
 
   // ------------------------------------------------------------------
+  // Combat-log damage attribution (issue #620)
+  // ------------------------------------------------------------------
+  describe('combat-log damage attribution (issue #620)', () => {
+    let actorCampId: number;
+    let actorEncounterId: number;
+    let emberId: number;
+    let goblinId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      // A fresh campaign with NO party characters, so the only combatants are the two
+      // we add explicitly — Ember (the attacker) and Goblin (the target). With no
+      // party auto-add, the current-turn pointer after /start is deterministic: it
+      // points at whichever of the two sorts first by initiative. We set Ember's
+      // initiative high so the current turn is Ember's, exercising the
+      // current-combatant fallback path; the explicit-actorId path is covered in
+      // its own test below with a different shape.
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Actor Campaign' });
+      actorCampId = campRes.body.id;
+
+      const encRes = await request(server).post(`/api/v1/campaigns/${actorCampId}/encounters`).set(dm).send({ name: 'Attributed Fight' });
+      actorEncounterId = encRes.body.id;
+
+      const addEmber = await request(server)
+        .post(`/api/v1/encounters/${actorEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Ember', hpMax: 30, initMod: 5 });
+      expect(addEmber.status).toBe(201);
+      emberId = addEmber.body.id;
+
+      const addGoblin = await request(server)
+        .post(`/api/v1/encounters/${actorEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Goblin', hpMax: 7, initMod: -1 });
+      expect(addGoblin.status).toBe(201);
+      goblinId = addGoblin.body.id;
+
+      // Pin Ember's initiative above Goblin's so Ember is the current-turn combatant
+      // once combat starts (the default-actor fallback).
+      await request(server).patch(`/api/v1/encounters/${actorEncounterId}/combatants/${emberId}`).set(dm).send({ initiative: 18 });
+      await request(server).patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`).set(dm).send({ initiative: 6 });
+
+      const start = await request(server).post(`/api/v1/encounters/${actorEncounterId}/start`).set(dm);
+      expect(start.status).toBe(201);
+    });
+
+    it('records the current-turn combatant as the actor of a damage event', async () => {
+      const server = ctx.app.getHttpServer();
+      // Ember is the current-turn combatant; damaging Goblin attributes the hit to Ember.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: -4 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'damage',
+      );
+      expect(damage.length).toBeGreaterThanOrEqual(1);
+      const last = damage[damage.length - 1];
+      expect(last.actor).toBe('Ember');
+      expect(last.target).toBe('Goblin');
+      expect(last.detail).toContain('4');
+      // Issue #43 safety still holds: no exact resulting HP leaks into the log.
+      expect(last.detail).not.toContain('3');
+    });
+
+    it('accepts an explicit actorId that overrides the current-turn combatant', async () => {
+      const server = ctx.app.getHttpServer();
+      // Even though Ember is the current turn, the caller names Goblin as the attacker
+      // (e.g. friendly fire / a reaction). The log entry should attribute to Goblin.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${emberId}`)
+        .set(dm)
+        .send({ hpDelta: -2, actorId: goblinId });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Ember',
+      );
+      expect(damage).toHaveLength(1);
+      expect(damage[0].actor).toBe('Goblin');
+    });
+
+    it('records the actor on a heal event too', async () => {
+      const server = ctx.app.getHttpServer();
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: 3 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const heal = (res.body as Array<{ type: string; actor: string | null; target: string | null }>).filter((e) => e.type === 'heal');
+      expect(heal.length).toBeGreaterThanOrEqual(1);
+      expect(heal[heal.length - 1].actor).toBe('Ember');
+      expect(heal[heal.length - 1].target).toBe('Goblin');
+    });
+
+    it('drops the actor when the attacker is the target itself (no "Ember: took 4 damage")', async () => {
+      const server = ctx.app.getHttpServer();
+      // Self-damage: the current turn is Ember, and Ember is also the target. The actor
+      // must collapse to null so the log keeps its established "Ember took 4 damage"
+      // phrasing instead of the awkward "Ember: took 4 damage" the attributed form
+      // would produce when actor and target are the same name.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${emberId}`)
+        .set(dm)
+        .send({ hpDelta: -4 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const selfDamage = (res.body as Array<{ type: string; actor: string | null; target: string | null }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Ember' && e.actor !== 'Goblin',
+      );
+      expect(selfDamage.length).toBeGreaterThanOrEqual(1);
+      expect(selfDamage[selfDamage.length - 1].actor).toBeNull();
+      expect(selfDamage[selfDamage.length - 1].target).toBe('Ember');
+    });
+
+    it('honors actorId: null as an explicit opt-out of current-turn attribution', async () => {
+      const server = ctx.app.getHttpServer();
+      // Ember is the current-turn combatant, so an omitted actorId would attribute to
+      // Ember. Passing null must suppress attribution entirely (tri-state contract).
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: -1, actorId: null });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Goblin' && e.detail.includes('1'),
+      );
+      expect(damage.length).toBeGreaterThanOrEqual(1);
+      expect(damage[damage.length - 1].actor).toBeNull();
+    });
+
+    it('ignores an actorId that does not reference a combatant in this encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      // A stale client sends an actorId that doesn't belong to any combatant here. The
+      // server falls back to the current-turn combatant (Ember) rather than 400ing or
+      // polluting the log with a phantom name.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: -1, actorId: 999_999 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Goblin',
+      );
+      // Most recent Goblin-targeted damage should attribute to the current turn (Ember),
+      // proving the bogus actorId was dropped, not stored verbatim.
+      expect(damage[damage.length - 1].actor).toBe('Ember');
+    });
+
+    it('attributes a death event to the attacker when one is known', async () => {
+      const server = ctx.app.getHttpServer();
+      // Drop Goblin to 0 HP on Ember's turn — the death event should name Ember as actor.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpSet: 0 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const death = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'death',
+      );
+      expect(death).toHaveLength(1);
+      expect(death[0].actor).toBe('Ember');
+      expect(death[0].target).toBe('Goblin');
+      expect(death[0].detail).toContain('0 HP');
+    });
+  });
+
+  // ------------------------------------------------------------------
   // Combatant statblock exposure (issue #56)
   // ------------------------------------------------------------------
   describe('combatant statblock exposure (issue #56)', () => {
