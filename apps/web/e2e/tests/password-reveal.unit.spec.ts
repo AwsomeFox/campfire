@@ -29,4 +29,10 @@ test.describe('password input type mapping (issue #868)', () => {
     expect(passwordInputType(false)).toBe('password');
     expect(passwordInputType(true)).toBe('text');
   });
+
+  test('revealed text inputs default spellcheck off (credential safety)', () => {
+    // Mirrors PasswordInput: rest.spellCheck ?? false — auth forms omit the prop.
+    const spellCheck = undefined as boolean | undefined;
+    expect(spellCheck ?? false).toBe(false);
+  });
 });

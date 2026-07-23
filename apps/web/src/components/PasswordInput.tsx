@@ -97,7 +97,9 @@ export const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
           className={`password-input__control ${className}`.trim()}
           disabled={disabled}
           onChange={onChange}
-          spellCheck={revealed ? rest.spellCheck : false}
+          // Always disable spellcheck for credentials unless the caller opts in.
+          // When revealed, type="text" would otherwise let browsers enable it.
+          spellCheck={rest.spellCheck ?? false}
         />
         <button
           id={toggleId}
