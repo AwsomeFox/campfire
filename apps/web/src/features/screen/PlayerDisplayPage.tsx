@@ -37,6 +37,7 @@ import {
   safeQuests,
   type SafeCombatant,
 } from './playerSafe';
+import { useWakeLock } from './useWakeLock';
 
 const POLL_MS = 12_000;
 const CONTROLS_HIDE_MS = 3_500;
@@ -115,6 +116,9 @@ export default function PlayerDisplayPage() {
   const [fullscreenNotice, setFullscreenNotice] = useState<FullscreenNotice | null>(null);
   const fullscreenActiveRef = useRef(isFullscreen);
   const controlsRef = useRef<HTMLDivElement | null>(null);
+
+  // Wake lock: keep the screen awake while fullscreen/presentation is active (#826).
+  const wakeLock = useWakeLock(isFullscreen);
 
   const load = useCallback(async () => {
     if (!Number.isFinite(cid)) return;
@@ -415,6 +419,15 @@ export default function PlayerDisplayPage() {
           role={displayedFullscreenNotice.kind === 'error' ? 'alert' : 'status'}
         >
           {displayedFullscreenNotice.message}
+        </p>
+      )}
+      {(wakeLock.status === 'unavailable' || wakeLock.status === 'error') && wakeLock.message && (
+        <p
+          className="cf-screen-wakelock-notice"
+          role="status"
+          aria-live="polite"
+        >
+          {wakeLock.message}
         </p>
       )}
     </div>
@@ -731,6 +744,19 @@ const SCREEN_CSS = `
 .cf-screen-fullscreen-notice.error {
   border-color: color-mix(in srgb, var(--color-danger, #e5735b) 58%, transparent);
   color: #fff;
+}
+.cf-screen-wakelock-notice {
+  margin: 8px 0 0 auto;
+  width: fit-content;
+  max-width: 38ch;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 94%, transparent);
+  color: var(--color-neutral-200);
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 38%, transparent);
 }
 .cf-screen-head { margin-bottom: clamp(16px, 2.4vw, 32px); }
 .cf-screen-head h1 {
