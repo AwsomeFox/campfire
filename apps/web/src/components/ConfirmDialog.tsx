@@ -66,13 +66,12 @@ export function ConfirmDialog({
     cancelRef.current?.focus();
   }, []);
 
-  // Announce the pending label once when busy becomes true (not on every render).
+  // Announce when busy becomes true, and again if busyLabel changes while busy
+  // (locale switch / caller prop update). Clear when busy returns to false.
   const [liveStatus, setLiveStatus] = useState('');
   const wasBusy = useRef(false);
   useEffect(() => {
     if (busy) {
-      // Keep the live region in sync if busyLabel changes while pending
-      // (locale switch / caller prop update).
       setLiveStatus(busyLabel);
     } else if (wasBusy.current) {
       setLiveStatus('');
