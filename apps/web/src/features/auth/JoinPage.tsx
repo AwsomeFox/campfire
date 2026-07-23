@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { InvitePreview } from '@campfire/schema';
 import { api, ApiError, API, isTransientError } from '../../lib/api';
+import { loginHrefWithReturn } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
 
 function FlameMark() {
@@ -108,6 +109,9 @@ export function JoinPage() {
   }, [loadPreview]);
 
   const alreadyMember = Boolean(preview && me?.memberships.some((m) => m.campaignId === preview.campaignId));
+  // Carry `/join/:code` through local/OIDC login so existing users resume the
+  // invite preview instead of losing the link (issue #478).
+  const loginHref = loginHrefWithReturn(`/join/${code}`);
 
   async function joinAsCurrentUser() {
     if (!preview) return;
@@ -208,7 +212,7 @@ export function JoinPage() {
                     Retry
                   </button>
                   <Link
-                    to="/login"
+                    to={loginHref}
                     className="btn btn-secondary btn-block"
                     style={{ minHeight: 44 }}
                   >
@@ -216,7 +220,7 @@ export function JoinPage() {
                   </Link>
                 </div>
               ) : (
-                <Link to="/login" className="btn btn-secondary btn-block" style={{ minHeight: 44 }}>
+                <Link to={loginHref} className="btn btn-secondary btn-block" style={{ minHeight: 44 }}>
                   Go to sign in
                 </Link>
               )}
@@ -315,7 +319,7 @@ export function JoinPage() {
                     {submitting ? 'Pulling up a chair…' : 'Create account & join'}
                   </button>
                   <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-                    Already have an account? <Link to="/login">Sign in</Link> first, then open this link again.
+                    Already have an account? <Link to={loginHref}>Sign in</Link> — you&rsquo;ll return here to join.
                   </p>
                 </form>
               )}
